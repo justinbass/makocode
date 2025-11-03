@@ -36,6 +36,11 @@ extern "C" void  exit(int code);
 extern "C" int   close(int fd);
 extern "C" int   creat(const char* path, unsigned int mode);
 extern "C" int   unlink(const char* path);
+extern "C" int   open(const char* path, int flags, ...);
+
+#ifndef O_RDONLY
+#define O_RDONLY 0
+#endif
 
 static usize ascii_length(const char* text) {
     if (!text) {
@@ -712,14 +717,102 @@ struct DecoderContext {
 
 } // namespace makocode
 
+static const u32 DEFAULT_PAGE_WIDTH_MILS  = 8268u;  // 210mm ~= 8.2677in
+static const u32 DEFAULT_PAGE_HEIGHT_MILS = 11693u; // 297mm ~= 11.6929in
+static const u32 DEFAULT_PAGE_DPI         = 300u;
+
 struct ImageMappingConfig {
     u8  color_channels;
     bool color_set;
+    u32 dpi;
+    bool dpi_set;
+    u32 page_width_mils;
+    bool page_width_set;
+    u32 page_height_mils;
+    bool page_height_set;
 
     ImageMappingConfig()
         : color_channels(1u),
-          color_set(false) {}
+          color_set(false),
+          dpi(DEFAULT_PAGE_DPI),
+          dpi_set(false),
+          page_width_mils(DEFAULT_PAGE_WIDTH_MILS),
+          page_width_set(false),
+          page_height_mils(DEFAULT_PAGE_HEIGHT_MILS),
+          page_height_set(false) {}
 };
+
+static bool parse_inches_to_mils(const char* text, usize length, u32* out_value) {
+    if (!text || !out_value || length == 0u) {
+        return false;
+    }
+    u64 whole = 0u;
+    u64 fraction = 0u;
+    u32 fraction_digits = 0u;
+    bool seen_dot = false;
+    for (usize i = 0u; i < length; ++i) {
+        char c = text[i];
+        if (c == '.') {
+            if (seen_dot) {
+                return false;
+            }
+            seen_dot = true;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        u64 digit = (u64)(c - '0');
+        if (!seen_dot) {
+            whole = whole * 10u + digit;
+            if (whole > 100000000u) {
+                return false;
+            }
+        } else {
+            if (fraction_digits >= 3u) {
+                return false;
+            }
+            fraction = fraction * 10u + digit;
+            ++fraction_digits;
+        }
+    }
+    if (seen_dot) {
+        while (fraction_digits < 3u) {
+            fraction *= 10u;
+            ++fraction_digits;
+        }
+    }
+    u64 mils = whole * 1000u + fraction;
+    if (mils == 0u || mils > 0xFFFFFFFFu) {
+        return false;
+    }
+    *out_value = (u32)mils;
+    return true;
+}
+
+static bool compute_page_dimensions(const ImageMappingConfig& config,
+                                    u32& out_width_pixels,
+                                    u32& out_height_pixels) {
+    if (config.dpi == 0u) {
+        return false;
+    }
+    u64 width_numerator = (u64)config.page_width_mils * (u64)config.dpi;
+    u64 height_numerator = (u64)config.page_height_mils * (u64)config.dpi;
+    u64 width_pixels = (width_numerator + 500u) / 1000u;
+    u64 height_pixels = (height_numerator + 500u) / 1000u;
+    if (width_pixels == 0u) {
+        width_pixels = 1u;
+    }
+    if (height_pixels == 0u) {
+        height_pixels = 1u;
+    }
+    if (width_pixels > 0xFFFFFFFFu || height_pixels > 0xFFFFFFFFu) {
+        return false;
+    }
+    out_width_pixels = (u32)width_pixels;
+    out_height_pixels = (u32)height_pixels;
+    return true;
+}
 
 static u8 color_mode_samples_per_pixel(u8 mode) {
     if (mode >= 1u && mode <= 3u) {
@@ -900,6 +993,18 @@ struct PpmParserState {
     u64 bits_value;
     bool has_color_channels;
     u64 color_channels_value;
+    bool has_dpi;
+    u64 dpi_value;
+    bool has_page_width_mils;
+    u64 page_width_mils_value;
+    bool has_page_height_mils;
+    u64 page_height_mils_value;
+    bool has_page_index;
+    u64 page_index_value;
+    bool has_page_count;
+    u64 page_count_value;
+    bool has_page_bits;
+    u64 page_bits_value;
 
     PpmParserState()
         : data(0),
@@ -910,7 +1015,19 @@ struct PpmParserState {
           has_bits(false),
           bits_value(0u),
           has_color_channels(false),
-          color_channels_value(0u) {}
+          color_channels_value(0u),
+          has_dpi(false),
+          dpi_value(0u),
+          has_page_width_mils(false),
+          page_width_mils_value(0u),
+          has_page_height_mils(false),
+          page_height_mils_value(0u),
+          has_page_index(false),
+          page_index_value(0u),
+          has_page_count(false),
+          page_count_value(0u),
+          has_page_bits(false),
+          page_bits_value(0u) {}
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -1033,6 +1150,258 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             return;
         }
     }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char dpi_tag[] = "MAKOCODE_DPI";
+    const usize dpi_tag_len = (usize)sizeof(dpi_tag) - 1u;
+    if ((length - index) >= dpi_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < dpi_tag_len; ++i) {
+            if (comment[index + i] != dpi_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += dpi_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_dpi = true;
+                    state.dpi_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char width_tag[] = "MAKOCODE_PAGE_WIDTH_MILS";
+    const usize width_tag_len = (usize)sizeof(width_tag) - 1u;
+    if ((length - index) >= width_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < width_tag_len; ++i) {
+            if (comment[index + i] != width_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += width_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_page_width_mils = true;
+                    state.page_width_mils_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char height_tag[] = "MAKOCODE_PAGE_HEIGHT_MILS";
+    const usize height_tag_len = (usize)sizeof(height_tag) - 1u;
+    if ((length - index) >= height_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < height_tag_len; ++i) {
+            if (comment[index + i] != height_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += height_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_page_height_mils = true;
+                    state.page_height_mils_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char page_index_tag[] = "MAKOCODE_PAGE_INDEX";
+    const usize page_index_tag_len = (usize)sizeof(page_index_tag) - 1u;
+    if ((length - index) >= page_index_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < page_index_tag_len; ++i) {
+            if (comment[index + i] != page_index_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += page_index_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_page_index = true;
+                    state.page_index_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char page_count_tag[] = "MAKOCODE_PAGE_COUNT";
+    const usize page_count_tag_len = (usize)sizeof(page_count_tag) - 1u;
+    if ((length - index) >= page_count_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < page_count_tag_len; ++i) {
+            if (comment[index + i] != page_count_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += page_count_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_page_count = true;
+                    state.page_count_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char page_bits_tag[] = "MAKOCODE_PAGE_BITS";
+    const usize page_bits_tag_len = (usize)sizeof(page_bits_tag) - 1u;
+    if ((length - index) >= page_bits_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < page_bits_tag_len; ++i) {
+            if (comment[index + i] != page_bits_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += page_bits_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_page_bits = true;
+                    state.page_bits_value = value;
+                }
+            }
+            return;
+        }
+    }
 }
 
 static bool ppm_next_token(PpmParserState& state, const char** out_start, usize* out_length) {
@@ -1079,10 +1448,11 @@ static bool ppm_next_token(PpmParserState& state, const char** out_start, usize*
     return false;
 }
 
-static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
-                             const ImageMappingConfig& overrides,
-                             makocode::ByteBuffer& output,
-                             u64& out_bit_count) {
+static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
+                                   const ImageMappingConfig& overrides,
+                                   makocode::ByteBuffer& frame_bits,
+                                   u64& frame_bit_count,
+                                   PpmParserState& metadata_out) {
     if (!input.data || input.size == 0u) {
         return false;
     }
@@ -1202,52 +1572,142 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
             }
         }
     }
+    frame_bit_count = writer.bit_size();
+    usize frame_bytes = writer.byte_size();
+    frame_bits.release();
+    if (frame_bytes && !frame_bits.ensure(frame_bytes)) {
+        return false;
+    }
+    const u8* writer_data = writer.data();
+    for (usize i = 0u; i < frame_bytes; ++i) {
+        frame_bits.data[i] = writer_data ? writer_data[i] : 0u;
+    }
+    frame_bits.size = frame_bytes;
+    metadata_out = state;
+    metadata_out.data = 0;
+    metadata_out.size = 0u;
+    metadata_out.cursor = 0u;
+    return true;
+}
+
+static bool append_bits_from_buffer(makocode::BitWriter& writer,
+                                    const u8* data,
+                                    u64 bit_count) {
+    for (u64 bit_index = 0u; bit_index < bit_count; ++bit_index) {
+        u8 bit_value = 0u;
+        if (data) {
+            usize byte_index = (usize)(bit_index >> 3u);
+            u8 mask = (u8)(1u << (bit_index & 7u));
+            bit_value = (data[byte_index] & mask) ? 1u : 0u;
+        }
+        if (!writer.write_bit(bit_value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) {
+    if (src.has_bytes) {
+        if (dest.has_bytes && dest.bytes_value != src.bytes_value) {
+            return false;
+        }
+        dest.has_bytes = true;
+        dest.bytes_value = src.bytes_value;
+    }
+    if (src.has_bits) {
+        if (dest.has_bits && dest.bits_value != src.bits_value) {
+            return false;
+        }
+        dest.has_bits = true;
+        dest.bits_value = src.bits_value;
+    }
+    if (src.has_color_channels) {
+        if (dest.has_color_channels && dest.color_channels_value != src.color_channels_value) {
+            return false;
+        }
+        dest.has_color_channels = true;
+        dest.color_channels_value = src.color_channels_value;
+    }
+    if (src.has_dpi) {
+        if (dest.has_dpi && dest.dpi_value != src.dpi_value) {
+            return false;
+        }
+        dest.has_dpi = true;
+        dest.dpi_value = src.dpi_value;
+    }
+    if (src.has_page_width_mils) {
+        if (dest.has_page_width_mils && dest.page_width_mils_value != src.page_width_mils_value) {
+            return false;
+        }
+        dest.has_page_width_mils = true;
+        dest.page_width_mils_value = src.page_width_mils_value;
+    }
+    if (src.has_page_height_mils) {
+        if (dest.has_page_height_mils && dest.page_height_mils_value != src.page_height_mils_value) {
+            return false;
+        }
+        dest.has_page_height_mils = true;
+        dest.page_height_mils_value = src.page_height_mils_value;
+    }
+    if (src.has_page_count) {
+        if (dest.has_page_count && dest.page_count_value != src.page_count_value) {
+            return false;
+        }
+        dest.has_page_count = true;
+        dest.page_count_value = src.page_count_value;
+    }
+    if (src.has_page_bits) {
+        if (dest.has_page_bits && dest.page_bits_value != src.page_bits_value) {
+            return false;
+        }
+        dest.has_page_bits = true;
+        dest.page_bits_value = src.page_bits_value;
+    }
+    return true;
+}
+
+static bool frame_bits_to_payload(const u8* frame_data,
+                                  u64 frame_bit_count,
+                                  const PpmParserState& metadata,
+                                  makocode::ByteBuffer& output,
+                                  u64& out_bit_count) {
+    output.release();
+    out_bit_count = 0u;
+    if (!frame_data || frame_bit_count == 0u) {
+        return false;
+    }
     makocode::BitReader reader;
-    reader.reset(writer.data(), writer.bit_size());
+    reader.reset(frame_data, frame_bit_count);
+    if (frame_bit_count < 64u) {
+        return false;
+    }
+    u64 header_bits = reader.read_bits(64u);
+    if (reader.failed) {
+        return false;
+    }
+    u64 payload_bits = metadata.has_bits ? metadata.bits_value : header_bits;
+    if (metadata.has_bits && header_bits != metadata.bits_value) {
+        return false;
+    }
+    if (payload_bits > (frame_bit_count - 64u)) {
+        return false;
+    }
     makocode::BitWriter payload_writer;
-    u64 payload_bits = 0u;
-    if (state.has_bits) {
-        payload_bits = state.bits_value;
-        if (payload_bits > writer.bit_size()) {
-            return false;
-        }
-        for (u64 bit_index = 0u; bit_index < payload_bits; ++bit_index) {
-            u8 bit = reader.read_bit();
-            if (reader.failed) {
-                return false;
-            }
-            if (!payload_writer.write_bit(bit)) {
-                return false;
-            }
-        }
-    } else {
-        if (writer.bit_size() < 64u) {
-            return false;
-        }
-        payload_bits = reader.read_bits(64u);
+    for (u64 bit_index = 0u; bit_index < payload_bits; ++bit_index) {
+        u8 bit = reader.read_bit();
         if (reader.failed) {
             return false;
         }
-        u64 available_bits = writer.bit_size() - 64u;
-        if (payload_bits > available_bits) {
+        if (!payload_writer.write_bit(bit)) {
             return false;
-        }
-        for (u64 bit_index = 0u; bit_index < payload_bits; ++bit_index) {
-            u8 bit = reader.read_bit();
-            if (reader.failed) {
-                return false;
-            }
-            if (!payload_writer.write_bit(bit)) {
-                return false;
-            }
         }
     }
     if (payload_writer.failed) {
         return false;
     }
-    output.release();
     usize payload_bytes = payload_writer.byte_size();
-    if (!output.ensure(payload_bytes)) {
+    if (payload_bytes && !output.ensure(payload_bytes)) {
         return false;
     }
     const u8* payload_data = payload_writer.data();
@@ -1259,14 +1719,75 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
     return true;
 }
 
+static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
+                             const ImageMappingConfig& overrides,
+                             makocode::ByteBuffer& output,
+                             u64& out_bit_count) {
+    makocode::ByteBuffer frame_bits;
+    u64 frame_bit_count = 0u;
+    PpmParserState metadata;
+    if (!ppm_extract_frame_bits(input, overrides, frame_bits, frame_bit_count, metadata)) {
+        return false;
+    }
+    const u8* frame_data = frame_bits.size ? frame_bits.data : 0;
+    return frame_bits_to_payload(frame_data, frame_bit_count, metadata, output, out_bit_count);
+}
+
 static bool buffer_append_number(makocode::ByteBuffer& buffer, u64 value) {
     char digits[32];
-    u64_to_ascii(value, digits, sizeof(digits));
+   u64_to_ascii(value, digits, sizeof(digits));
     return buffer.append_ascii(digits);
 }
-static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
-                                 const ImageMappingConfig& mapping,
-                                 makocode::ByteBuffer& output) {
+
+static bool append_comment_number(makocode::ByteBuffer& buffer,
+                                  const char* tag,
+                                  u64 value) {
+    if (!tag) {
+        return false;
+    }
+    if (!buffer.append_char('#')) {
+        return false;
+    }
+    if (!buffer.append_char(' ')) {
+        return false;
+    }
+    if (!buffer.append_ascii(tag)) {
+        return false;
+    }
+    if (!buffer.append_char(' ')) {
+        return false;
+    }
+    if (!buffer_append_number(buffer, value)) {
+        return false;
+    }
+    return buffer.append_char('\n');
+}
+
+static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
+                                      u64 value,
+                                      u32 width) {
+    char digits[32];
+    u64_to_ascii(value, digits, sizeof(digits));
+    usize length = ascii_length(digits);
+    if (width > 16u) {
+        width = 16u;
+    }
+    if (width > length) {
+        u32 pad = width - (u32)length;
+        for (u32 i = 0u; i < pad; ++i) {
+            if (!buffer.append_char('0')) {
+                return false;
+            }
+        }
+    }
+    return buffer.append_ascii(digits);
+}
+
+static bool build_frame_bits(const makocode::EncoderContext& encoder,
+                             const ImageMappingConfig& mapping,
+                             makocode::ByteBuffer& frame_bits,
+                             u64& frame_bit_count,
+                             u64& payload_bit_count) {
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
         return false;
     }
@@ -1283,8 +1804,7 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
         return false;
     }
     (void)palette;
-    output.release();
-    u64 payload_bit_count = encoder.bit_writer.bit_size();
+    payload_bit_count = encoder.bit_writer.bit_size();
     usize payload_byte_count = encoder.bit_writer.byte_size();
     makocode::BitWriter frame_writer;
     if (!frame_writer.write_bits(payload_bit_count, 64u)) {
@@ -1303,64 +1823,101 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
             return false;
         }
     }
-    u64 bit_count = frame_writer.bit_size();
+    frame_bit_count = frame_writer.bit_size();
+    usize frame_bytes = frame_writer.byte_size();
+    frame_bits.release();
+    if (frame_bytes && !frame_bits.ensure(frame_bytes)) {
+        return false;
+    }
     const u8* raw = frame_writer.data();
-    makocode::ByteBuffer scrambled;
-    if (mapping.color_channels == 3u) {
-        usize raw_bytes = frame_writer.byte_size();
-        if (raw_bytes) {
-            if (!scrambled.ensure(raw_bytes)) {
-                return false;
-            }
-            scrambled.size = raw_bytes;
-            const u8* source = frame_writer.data();
-            for (usize i = 0u; i < raw_bytes; ++i) {
-                u8 original = source ? source[i] : 0u;
-                u8 rotate = (u8)((i % 3u) + 1u);
-                scrambled.data[i] = rotate_left_u8(original, rotate);
-            }
-            raw = scrambled.data;
+    for (usize i = 0u; i < frame_bytes; ++i) {
+        frame_bits.data[i] = raw ? raw[i] : 0u;
+    }
+    frame_bits.size = frame_bytes;
+    if (mapping.color_channels == 3u && frame_bytes) {
+        for (usize i = 0u; i < frame_bytes; ++i) {
+            u8 rotate = (u8)((i % 3u) + 1u);
+            frame_bits.data[i] = rotate_left_u8(frame_bits.data[i], rotate);
         }
     }
+    return true;
+}
+
+static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
+                               const makocode::ByteBuffer& frame_bits,
+                               u64 frame_bit_count,
+                               u64 bit_offset,
+                               u32 width_pixels,
+                               u32 height_pixels,
+                               u64 page_index,
+                               u64 page_count,
+                               u64 bits_per_page,
+                               u64 payload_bit_count,
+                               makocode::ByteBuffer& output) {
+    if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
+        return false;
+    }
+    const u8 sample_bits = bits_per_sample(mapping.color_channels);
+    if (sample_bits == 0u) {
+        return false;
+    }
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
-    u64 total_samples = (bit_count + (u64)sample_bits - 1u) / (u64)sample_bits;
-    if (total_samples == 0u) {
-        total_samples = 1u;
+    if (samples_per_pixel == 0u) {
+        return false;
     }
-    u64 pixel_count = (total_samples + (u64)samples_per_pixel - 1u) / (u64)samples_per_pixel;
-    if (pixel_count == 0u) {
-        pixel_count = 1u;
+    u64 total_pixels = (u64)width_pixels * (u64)height_pixels;
+    if (total_pixels == 0u) {
+        return false;
     }
-    u64 max_width = 64u;
-    u64 width = (pixel_count < max_width) ? pixel_count : max_width;
-    if (width == 0u) {
-        width = 1u;
-    }
-    u64 height = (pixel_count + width - 1u) / width;
-    u64 total_pixels = width * height;
+    output.release();
     if (!output.append_ascii("P3\n")) {
         return false;
     }
-    if (!buffer_append_number(output, width) || !output.append_char(' ')) {
+    if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
         return false;
     }
-    if (!buffer_append_number(output, height) || !output.append_char('\n')) {
+    if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
+        return false;
+    }
+    if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
+        return false;
+    }
+    if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
+        return false;
+    }
+    if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
+        return false;
+    }
+    if (!append_comment_number(output, "MAKOCODE_DPI", (u64)mapping.dpi)) {
+        return false;
+    }
+    if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_MILS", (u64)mapping.page_width_mils)) {
+        return false;
+    }
+    if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_MILS", (u64)mapping.page_height_mils)) {
+        return false;
+    }
+    if (!buffer_append_number(output, (u64)width_pixels) || !output.append_char(' ')) {
+        return false;
+    }
+    if (!buffer_append_number(output, (u64)height_pixels) || !output.append_char('\n')) {
         return false;
     }
     if (!output.append_ascii("255\n")) {
         return false;
     }
-    u64 bit_cursor = 0u;
+    const u8* frame_data = frame_bits.data;
+    u64 bit_cursor = bit_offset;
     for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
         u32 samples_raw[3] = {0u, 0u, 0u};
         for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
             u32 sample = 0u;
             for (u8 bit = 0u; bit < sample_bits; ++bit) {
                 u8 bit_value = 0u;
-                if (bit_cursor < bit_count && raw) {
+                if (bit_cursor < frame_bit_count && frame_data) {
                     usize byte_index = (usize)(bit_cursor >> 3u);
                     u8 mask = (u8)(1u << (bit_cursor & 7u));
-                    bit_value = (raw[byte_index] & mask) ? 1u : 0u;
+                    bit_value = (frame_data[byte_index] & mask) ? 1u : 0u;
                 }
                 sample |= ((u32)bit_value) << bit;
                 ++bit_cursor;
@@ -1387,7 +1944,6 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     }
     return true;
 }
-
 static bool process_image_mapping_option(const char* arg,
                                          ImageMappingConfig& config,
                                          const char* command_name,
@@ -1424,6 +1980,71 @@ static bool process_image_mapping_option(const char* arg,
         *handled = true;
         return true;
     }
+    const char dpi_prefix[] = "--dpi=";
+    if (ascii_starts_with(arg, dpi_prefix)) {
+        const char* value_text = arg + (sizeof(dpi_prefix) - 1u);
+        usize length = ascii_length(value_text);
+        if (length == 0u) {
+            console_write(2, command_name);
+            console_line(2, ": --dpi requires a value");
+            return false;
+        }
+        u64 value = 0u;
+        if (!ascii_to_u64(value_text, length, &value)) {
+            console_write(2, command_name);
+            console_line(2, ": --dpi value is not numeric");
+            return false;
+        }
+        if (value == 0u || value > 10000u) {
+            console_write(2, command_name);
+            console_line(2, ": --dpi must be between 1 and 10000");
+            return false;
+        }
+        config.dpi = (u32)value;
+        config.dpi_set = true;
+        *handled = true;
+        return true;
+    }
+    const char width_prefix[] = "--page-width=";
+    if (ascii_starts_with(arg, width_prefix)) {
+        const char* value_text = arg + (sizeof(width_prefix) - 1u);
+        usize length = ascii_length(value_text);
+        if (length == 0u) {
+            console_write(2, command_name);
+            console_line(2, ": --page-width requires a value (inches)");
+            return false;
+        }
+        u32 mils = 0u;
+        if (!parse_inches_to_mils(value_text, length, &mils)) {
+            console_write(2, command_name);
+            console_line(2, ": --page-width must be a positive number with up to three decimals");
+            return false;
+        }
+        config.page_width_mils = mils;
+        config.page_width_set = true;
+        *handled = true;
+        return true;
+    }
+    const char height_prefix[] = "--page-height=";
+    if (ascii_starts_with(arg, height_prefix)) {
+        const char* value_text = arg + (sizeof(height_prefix) - 1u);
+        usize length = ascii_length(value_text);
+        if (length == 0u) {
+            console_write(2, command_name);
+            console_line(2, ": --page-height requires a value (inches)");
+            return false;
+        }
+        u32 mils = 0u;
+        if (!parse_inches_to_mils(value_text, length, &mils)) {
+            console_write(2, command_name);
+            console_line(2, ": --page-height must be a positive number with up to three decimals");
+            return false;
+        }
+        config.page_height_mils = mils;
+        config.page_height_set = true;
+        *handled = true;
+        return true;
+    }
     return true;
 }
 
@@ -1448,14 +2069,48 @@ static bool read_entire_stdin(makocode::ByteBuffer& buffer) {
     return true;
 }
 
+static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
+    if (!path) {
+        return false;
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    buffer.release();
+    const usize chunk = 4096u;
+    usize total = 0u;
+    for (;;) {
+        if (!buffer.ensure(total + chunk)) {
+            close(fd);
+            return false;
+        }
+        int read_result = read(fd, buffer.data + total, chunk);
+        if (read_result < 0) {
+            close(fd);
+            return false;
+        }
+        if (read_result == 0) {
+            break;
+        }
+        total += (usize)read_result;
+    }
+    buffer.size = total;
+    close(fd);
+    return true;
+}
+
 static void write_usage() {
     console_line(1, "MakoCode CLI");
     console_line(1, "Usage:");
-    console_line(1, "  makocode encode   (reads raw bytes from stdin, emits bitstream to stdout)");
-    console_line(1, "  makocode decode   (reads bitstream from stdin, emits payload to stdout)");
-    console_line(1, "  makocode test    (runs an encode->decode loop with random payload)");
+    console_line(1, "  makocode encode [options]   (reads raw bytes from stdin; emits PPM pages)");
+    console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
+    console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
+    console_line(1, "  --page-width=IN    (page width in inches; default A4 width 8.268)");
+    console_line(1, "  --page-height=IN   (page height in inches; default A4 height 11.693)");
+    console_line(1, "  --dpi=N            (dots per inch; default 300)");
 }
 
 static int command_encode(int arg_count, char** args) {
@@ -1485,40 +2140,189 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: build failed");
         return 1;
     }
-    makocode::ByteBuffer ppm_output;
-    if (!encode_to_ppm_buffer(encoder, mapping, ppm_output)) {
-        console_line(2, "encode: failed to format ppm");
+    makocode::ByteBuffer frame_bits;
+    u64 frame_bit_count = 0u;
+    u64 payload_bit_count = 0u;
+    if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count, payload_bit_count)) {
+        console_line(2, "encode: failed to build frame");
         return 1;
     }
-    if (ppm_output.size) {
-        write(1, ppm_output.data, ppm_output.size);
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
+        console_line(2, "encode: invalid page dimensions");
+        return 1;
+    }
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        console_line(2, "encode: unsupported color configuration");
+        return 1;
+    }
+    u64 bits_per_page = (u64)width_pixels * (u64)height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+    if (bits_per_page == 0u) {
+        console_line(2, "encode: page capacity is zero");
+        return 1;
+    }
+    u64 page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
+    if (page_count == 0u) {
+        page_count = 1u;
+    }
+    if (page_count == 1u) {
+        makocode::ByteBuffer page_output;
+        if (!encode_page_to_ppm(mapping,
+                                frame_bits,
+                                frame_bit_count,
+                                0u,
+                                width_pixels,
+                                height_pixels,
+                                1u,
+                                1u,
+                                bits_per_page,
+                                payload_bit_count,
+                                page_output)) {
+            console_line(2, "encode: failed to format ppm");
+            return 1;
+        }
+        if (page_output.size) {
+            write(1, page_output.data, page_output.size);
+        }
+    } else {
+        makocode::ByteBuffer name_buffer;
+        for (u64 page = 0u; page < page_count; ++page) {
+            makocode::ByteBuffer page_output;
+            u64 bit_offset = page * bits_per_page;
+            if (!encode_page_to_ppm(mapping,
+                                    frame_bits,
+                                    frame_bit_count,
+                                    bit_offset,
+                                    width_pixels,
+                                    height_pixels,
+                                    page + 1u,
+                                    page_count,
+                                    bits_per_page,
+                                    payload_bit_count,
+                                    page_output)) {
+                console_line(2, "encode: failed to format ppm page");
+                return 1;
+            }
+            name_buffer.release();
+            if (!name_buffer.append_ascii("page_")) {
+                console_line(2, "encode: failed to build filename");
+                return 1;
+            }
+            if (!buffer_append_zero_padded(name_buffer, page + 1u, 4u)) {
+                console_line(2, "encode: failed to build filename");
+                return 1;
+            }
+            if (!name_buffer.append_ascii(".ppm") || !name_buffer.append_char('\0')) {
+                console_line(2, "encode: failed to finalize filename");
+                return 1;
+            }
+            if (!write_buffer_to_file((const char*)name_buffer.data, page_output)) {
+                console_line(2, "encode: failed to write ppm file");
+                return 1;
+            }
+        }
+        char digits[32];
+        u64_to_ascii(page_count, digits, sizeof(digits));
+        console_write(1, "encode: wrote ");
+        console_write(1, digits);
+        console_line(1, " pages (page_0001.ppm ...)");
     }
     return 0;
 }
 
 static int command_decode(int arg_count, char** args) {
     ImageMappingConfig mapping;
+    static const usize MAX_INPUT_FILES = 256u;
+    const char* input_files[MAX_INPUT_FILES];
+    usize file_count = 0u;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(args[i], mapping, "decode", &handled)) {
             return 1;
         }
         if (!handled) {
-            console_write(2, "decode: unknown option: ");
-            console_line(2, args[i]);
-            return 1;
+            if (file_count >= MAX_INPUT_FILES) {
+                console_line(2, "decode: too many input files");
+                return 1;
+            }
+            input_files[file_count++] = args[i];
         }
-    }
-    makocode::ByteBuffer ppm_stream;
-    if (!read_entire_stdin(ppm_stream)) {
-        console_line(2, "decode: failed to read stdin");
-        return 1;
     }
     makocode::ByteBuffer bitstream;
     u64 bit_count = 0u;
-    if (!ppm_to_bitstream(ppm_stream, mapping, bitstream, bit_count)) {
-        console_line(2, "decode: invalid ppm input");
-        return 1;
+    if (file_count == 0u) {
+        makocode::ByteBuffer ppm_stream;
+        if (!read_entire_stdin(ppm_stream)) {
+            console_line(2, "decode: failed to read stdin");
+            return 1;
+        }
+        if (!ppm_to_bitstream(ppm_stream, mapping, bitstream, bit_count)) {
+            console_line(2, "decode: invalid ppm input");
+            return 1;
+        }
+    } else {
+        makocode::BitWriter frame_aggregator;
+        frame_aggregator.reset();
+        PpmParserState aggregate_state;
+        bool aggregate_initialized = false;
+        bool enforce_page_index = true;
+        u64 expected_page_index = 1u;
+        for (usize file_index = 0u; file_index < file_count; ++file_index) {
+            makocode::ByteBuffer ppm_stream;
+            if (!read_entire_file(input_files[file_index], ppm_stream)) {
+                console_write(2, "decode: failed to read ");
+                console_line(2, input_files[file_index]);
+                return 1;
+            }
+            makocode::ByteBuffer page_bits;
+            u64 page_bit_count = 0u;
+            PpmParserState page_state;
+            if (!ppm_extract_frame_bits(ppm_stream, mapping, page_bits, page_bit_count, page_state)) {
+                console_write(2, "decode: invalid ppm in ");
+                console_line(2, input_files[file_index]);
+                return 1;
+            }
+            if (!aggregate_initialized) {
+                if (!merge_parser_state(aggregate_state, page_state)) {
+                    console_line(2, "decode: inconsistent metadata");
+                    return 1;
+                }
+                aggregate_initialized = true;
+            } else {
+                if (!merge_parser_state(aggregate_state, page_state)) {
+                    console_line(2, "decode: conflicting metadata between pages");
+                    return 1;
+                }
+            }
+            if (enforce_page_index) {
+                if (page_state.has_page_index) {
+                    if (page_state.page_index_value != expected_page_index) {
+                        console_line(2, "decode: unexpected page order");
+                        return 1;
+                    }
+                } else {
+                    enforce_page_index = false;
+                }
+            }
+            if (!append_bits_from_buffer(frame_aggregator, page_bits.data, page_bit_count)) {
+                console_line(2, "decode: failed to assemble bitstream");
+                return 1;
+            }
+            ++expected_page_index;
+        }
+        if (aggregate_state.has_page_count && aggregate_state.page_count_value != (u64)file_count) {
+            console_line(2, "decode: page count metadata mismatch");
+            return 1;
+        }
+        const u8* frame_data = frame_aggregator.data();
+        u64 frame_bit_total = frame_aggregator.bit_size();
+        if (!frame_bits_to_payload(frame_data, frame_bit_total, aggregate_state, bitstream, bit_count)) {
+            console_line(2, "decode: failed to extract payload bits");
+            return 1;
+        }
     }
     makocode::DecoderContext decoder;
     if (!decoder.parse(bitstream.data, bit_count)) {
@@ -1529,6 +2333,40 @@ static int command_decode(int arg_count, char** args) {
         write(1, decoder.payload.data, decoder.payload.size);
     }
     return 0;
+}
+
+static bool build_payload_frame(const ImageMappingConfig& mapping,
+                                usize payload_size,
+                                u64 seed,
+                                makocode::ByteBuffer& payload,
+                                makocode::EncoderContext& encoder,
+                                makocode::ByteBuffer& frame_bits,
+                                u64& frame_bit_count,
+                                u64& payload_bit_count) {
+    if (!makocode::generate_random_bytes(payload, payload_size, seed)) {
+        return false;
+    }
+    if (!encoder.set_payload(payload.data, payload.size)) {
+        return false;
+    }
+    if (!encoder.build()) {
+        return false;
+    }
+    return build_frame_bits(encoder, mapping, frame_bits, frame_bit_count, payload_bit_count);
+}
+
+static bool compute_frame_bit_count(const ImageMappingConfig& mapping,
+                                    usize payload_size,
+                                    u64 seed,
+                                    u64& frame_bit_count) {
+    makocode::ByteBuffer payload;
+    makocode::EncoderContext encoder;
+    makocode::ByteBuffer frame_bits;
+    u64 payload_bits = 0u;
+    if (!build_payload_frame(mapping, payload_size, seed, payload, encoder, frame_bits, frame_bit_count, payload_bits)) {
+        return false;
+    }
+    return true;
 }
 
 static int command_test(int arg_count, char** args) {
@@ -1548,19 +2386,17 @@ static int command_test(int arg_count, char** args) {
             return 1;
         }
     }
-    makocode::ByteBuffer payload;
-    if (!makocode::generate_random_bytes(payload, 1024u, 0u)) {
-        console_line(2, "test: failed to generate random payload");
-        return 1;
+    if (!mapping.page_width_set) {
+        mapping.page_width_mils = 1000u;
+        mapping.page_width_set = true;
     }
-    makocode::EncoderContext encoder;
-    if (!encoder.set_payload(payload.data, payload.size)) {
-        console_line(2, "test: failed to set payload");
-        return 1;
+    if (!mapping.page_height_set) {
+        mapping.page_height_mils = 1000u;
+        mapping.page_height_set = true;
     }
-    if (!encoder.build()) {
-        console_line(2, "test: encode failed");
-        return 1;
+    if (!mapping.dpi_set) {
+        mapping.dpi = 64u;
+        mapping.dpi_set = true;
     }
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
@@ -1573,60 +2409,219 @@ static int command_test(int arg_count, char** args) {
         } else {
             run_mapping.color_channels = color_options[color_index];
         }
-        makocode::ByteBuffer ppm_output;
-        if (!encode_to_ppm_buffer(encoder, run_mapping, ppm_output)) {
-            console_line(2, "test: failed to format ppm");
+        u32 width_pixels = 0u;
+        u32 height_pixels = 0u;
+        if (!compute_page_dimensions(run_mapping, width_pixels, height_pixels)) {
+            console_line(2, "test: invalid page dimensions");
             return 1;
         }
-        makocode::ByteBuffer bitstream;
-        u64 bit_count = 0u;
-        if (!ppm_to_bitstream(ppm_output, run_mapping, bitstream, bit_count)) {
-            console_line(2, "test: failed to reconstruct bitstream from ppm");
+        u8 sample_bits = bits_per_sample(run_mapping.color_channels);
+        u8 samples_per_pixel = color_mode_samples_per_pixel(run_mapping.color_channels);
+        if (sample_bits == 0u || samples_per_pixel == 0u) {
+            console_line(2, "test: unsupported color configuration");
+            return 1;
+        }
+        u64 bits_per_page = (u64)width_pixels * (u64)height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+        if (bits_per_page == 0u) {
+            console_line(2, "test: page capacity is zero");
+            return 1;
+        }
+        usize max_payload_size = (usize)((bits_per_page * 2u) / 8u) + 1024u;
+        if (max_payload_size < 32u) {
+            max_payload_size = 32u;
+        }
+        if (max_payload_size > (1u << 22u)) {
+            max_payload_size = (1u << 22u);
+        }
+        usize low_size = 0u;
+        usize high_size = 1u;
+        u64 high_bits = 0u;
+        while (true) {
+            u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)high_size;
+            if (!compute_frame_bit_count(run_mapping, high_size, seed, high_bits)) {
+                console_line(2, "test: failed to evaluate payload size");
+                return 1;
+            }
+            if (high_bits > bits_per_page) {
+                break;
+            }
+            low_size = high_size;
+            if (high_size >= max_payload_size) {
+                console_line(2, "test: unable to construct two-page payload");
+                return 1;
+            }
+            high_size *= 2u;
+            if (high_size > max_payload_size) {
+                high_size = max_payload_size;
+            }
+            if (high_size == low_size) {
+                ++high_size;
+            }
+        }
+        usize left = (low_size == 0u) ? 1u : (low_size + 1u);
+        usize right = high_size;
+        usize best_size = high_size;
+        u64 best_bits = high_bits;
+        while (left <= right) {
+            usize mid = left + (right - left) / 2u;
+            u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
+            u64 mid_bits = 0u;
+            if (!compute_frame_bit_count(run_mapping, mid, seed, mid_bits)) {
+                console_line(2, "test: failed to evaluate payload size");
+                return 1;
+            }
+            if (mid_bits > bits_per_page) {
+                best_size = mid;
+                best_bits = mid_bits;
+                if (mid == 0u) {
+                    break;
+                }
+                if (mid == left) {
+                    break;
+                }
+                right = mid - 1u;
+            } else {
+                left = mid + 1u;
+            }
+        }
+        if (best_bits <= bits_per_page || best_bits > bits_per_page * 2u) {
+            console_line(2, "test: could not find payload yielding exactly two pages");
+            return 1;
+        }
+        makocode::ByteBuffer payload;
+        makocode::EncoderContext encoder;
+        makocode::ByteBuffer frame_bits;
+        u64 frame_bit_count = 0u;
+        u64 payload_bit_count = 0u;
+        u64 final_seed = ((u64)run_mapping.color_channels << 32u) | (u64)best_size;
+        if (!build_payload_frame(run_mapping, best_size, final_seed, payload, encoder, frame_bits, frame_bit_count, payload_bit_count)) {
+            console_line(2, "test: failed to build payload frame");
+            return 1;
+        }
+        u64 page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
+        if (page_count != 2u) {
+            console_line(2, "test: unexpected page count");
+            return 1;
+        }
+        makocode::BitWriter aggregate_writer;
+        aggregate_writer.reset();
+        PpmParserState aggregate_state;
+        bool aggregate_initialized = false;
+        makocode::ByteBuffer name_buffer;
+        for (u64 page = 0u; page < page_count; ++page) {
+            makocode::ByteBuffer page_output;
+            u64 bit_offset = page * bits_per_page;
+            if (!encode_page_to_ppm(run_mapping,
+                                    frame_bits,
+                                    frame_bit_count,
+                                    bit_offset,
+                                    width_pixels,
+                                    height_pixels,
+                                    page + 1u,
+                                    page_count,
+                                    bits_per_page,
+                                    payload_bit_count,
+                                    page_output)) {
+                console_line(2, "test: failed to format ppm page");
+                return 1;
+            }
+            makocode::ByteBuffer page_bits_buffer;
+            u64 page_bit_count = 0u;
+            PpmParserState page_state;
+            if (!ppm_extract_frame_bits(page_output, run_mapping, page_bits_buffer, page_bit_count, page_state)) {
+                console_line(2, "test: failed to read back ppm page");
+                return 1;
+            }
+            if (!aggregate_initialized) {
+                if (!merge_parser_state(aggregate_state, page_state)) {
+                    console_line(2, "test: inconsistent metadata during aggregation");
+                    return 1;
+                }
+                aggregate_initialized = true;
+            } else {
+                if (!merge_parser_state(aggregate_state, page_state)) {
+                    console_line(2, "test: metadata mismatch between pages");
+                    return 1;
+                }
+            }
+            if (!append_bits_from_buffer(aggregate_writer, page_bits_buffer.data, page_bit_count)) {
+                console_line(2, "test: failed to combine page bits");
+                return 1;
+            }
+            name_buffer.release();
+            char digits_color[8];
+            u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
+            if (!name_buffer.append_ascii("encoded_c") ||
+                !name_buffer.append_ascii(digits_color) ||
+                !name_buffer.append_ascii("_p") ||
+                !buffer_append_zero_padded(name_buffer, page + 1u, 2u) ||
+                !name_buffer.append_ascii(".ppm") ||
+                !name_buffer.append_char('\0')) {
+                console_line(2, "test: failed to build encoded filename");
+                return 1;
+            }
+            if (!write_buffer_to_file((const char*)name_buffer.data, page_output)) {
+                console_line(2, "test: failed to write encoded page");
+                return 1;
+            }
+        }
+        if (aggregate_state.has_page_count && aggregate_state.page_count_value != page_count) {
+            console_line(2, "test: page count metadata mismatch");
+            return 1;
+        }
+        const u8* aggregate_data = aggregate_writer.data();
+        u64 aggregate_bits = aggregate_writer.bit_size();
+        if (aggregate_bits == 0u) {
+            console_line(2, "test: empty aggregate bitstream");
+            return 1;
+        }
+        makocode::ByteBuffer roundtrip_bits;
+        u64 roundtrip_count = 0u;
+        if (!frame_bits_to_payload(aggregate_data, aggregate_bits, aggregate_state, roundtrip_bits, roundtrip_count)) {
+            console_line(2, "test: failed to reconstruct payload bits");
             return 1;
         }
         makocode::DecoderContext decoder;
-        if (!decoder.parse(bitstream.data, bit_count)) {
+        if (!decoder.parse(roundtrip_bits.data, roundtrip_count)) {
             console_line(2, "test: decode failed");
             return 1;
         }
-        if (!decoder.has_payload) {
-            console_line(2, "test: payload missing");
+        if (!decoder.has_payload || decoder.payload.size != payload.size) {
+            console_line(2, "test: payload size mismatch");
             return 1;
         }
-        bool match = (decoder.payload.size == payload.size);
-        if (match) {
-            for (usize i = 0; i < payload.size; ++i) {
-                if (decoder.payload.data[i] != payload.data[i]) {
-                    match = false;
-                    break;
-                }
+        for (usize i = 0u; i < payload.size; ++i) {
+            if (decoder.payload.data[i] != payload.data[i]) {
+                console_line(2, "test: payload mismatch");
+                return 1;
             }
-        }
-        if (!match) {
-            console_line(2, "test: round-trip mismatch");
-            return 1;
         }
         char digits_color[8];
         u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
-        makocode::ByteBuffer name_buffer;
-        name_buffer.append_ascii("payload_c");
-        name_buffer.append_ascii(digits_color);
-        name_buffer.append_ascii(".bin");
-        name_buffer.append_char('\0');
-        write_buffer_to_file((const char*)name_buffer.data, payload);
         name_buffer.release();
-        name_buffer.append_ascii("encoded_c");
-        name_buffer.append_ascii(digits_color);
-        name_buffer.append_ascii(".ppm");
-        name_buffer.append_char('\0');
-        write_buffer_to_file((const char*)name_buffer.data, ppm_output);
+        if (!name_buffer.append_ascii("payload_c") ||
+            !name_buffer.append_ascii(digits_color) ||
+            !name_buffer.append_ascii(".bin") ||
+            !name_buffer.append_char('\0')) {
+            console_line(2, "test: failed to build payload filename");
+            return 1;
+        }
+        if (!write_buffer_to_file((const char*)name_buffer.data, payload)) {
+            console_line(2, "test: failed to write payload file");
+            return 1;
+        }
         name_buffer.release();
-        name_buffer.append_ascii("decoded_c");
-        name_buffer.append_ascii(digits_color);
-        name_buffer.append_ascii(".bin");
-        name_buffer.append_char('\0');
-        write_buffer_to_file((const char*)name_buffer.data, decoder.payload);
-        name_buffer.release();
+        if (!name_buffer.append_ascii("decoded_c") ||
+            !name_buffer.append_ascii(digits_color) ||
+            !name_buffer.append_ascii(".bin") ||
+            !name_buffer.append_char('\0')) {
+            console_line(2, "test: failed to build decoded filename");
+            return 1;
+        }
+        if (!write_buffer_to_file((const char*)name_buffer.data, decoder.payload)) {
+            console_line(2, "test: failed to write decoded payload");
+            return 1;
+        }
         ++total_runs;
         if (mapping.color_set) {
             break;
