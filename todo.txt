@@ -1,0 +1,14 @@
+TODO:
+- Limit to 3 shades
+- Optionally print user provided filename (default, given filename - for tar, it lists all), page count, other settings, date
+- ECC (Reed Solomon?)
+- Fiducial data (if needed), test should create distortions
+- Page width, height, density
+- Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8
+- Data shuffling (fisher yates with pcg-64 seed-0? Or standard random algorithm), position is shuffled globally.
+- Encryption (xchacha? aes/twofish/serpent?)
+- Multiple files, e.g. tar
+- Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
+- Script to create art in output that is actually readable. Possibly just apply matrix code steganographically to an input image.
+- Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
+- Minify source code when finished
