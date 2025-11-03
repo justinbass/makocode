@@ -1,20 +1,20 @@
 /*
     makocode.cpp
     ------------
-    Prototypical single-translation-unit implementation of the MakoCode encoder/decoder.
-    The code is intentionally free of #include directives so it does not depend on any
-    headers or external libraries. Every construct required to build the program lives
-    inside this one file.
+    Self-contained CLI implementation of the MakoCode encoder/decoder. The program
+    performs payload compression, bitstream framing, and image mapping without relying
+    on headers or external libraries; every construct required to build the binary
+    lives inside this translation unit.
 
-    This file is a starting point distilled from NOTES.md. It is not feature-complete,
-    but it establishes the overall architecture and core utilities that later stages
-    of the project can extend. The primary goals are:
-        * Define the bit-level plumbing that the format requires.
-        * Lay out the section model (address table, metadata, fiducials, payload).
-        * Provide a simple CLI that performs a round-trip self-test using stubbed
-          hash/ECC implementations so the infrastructure can be validated early.
-        * Document assumptions directly alongside the code so future contributors
-          keep the specification in view while implementing missing pieces.
+    Major capabilities include:
+        * Lossless payload handling via a shared 12-bit LZW codec used by encoder
+          and decoder contexts.
+        * Byte/bit utilities that assemble payload frames and translate them into
+          pixel samples.
+        * Portable PPM import/export that maps encoded payloads to RGB imagery with
+          configurable color and shade channels.
+        * Command-line entry points (`encode`, `decode`, `test`) that round-trip data,
+          validate the codec, and emit artifacts for inspection.
 
     License: GNU AGPLv3 (intent inherited from the project notes).
 */
@@ -1474,7 +1474,7 @@ static bool read_entire_stdin(makocode::ByteBuffer& buffer) {
 }
 
 static void write_usage() {
-    console_line(1, "MakoCode prototype");
+    console_line(1, "MakoCode CLI");
     console_line(1, "Usage:");
     console_line(1, "  makocode encode   (reads raw bytes from stdin, emits bitstream to stdout)");
     console_line(1, "  makocode decode   (reads bitstream from stdin, emits payload to stdout)");
