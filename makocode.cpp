@@ -891,39 +891,21 @@ static bool map_samples_to_rgb(u8 mode, u32 shade_levels, const u32* samples, u8
         return true;
     }
     if (mode == 2u) {
-        if (shade_levels <= 2u) {
-            u32 bit0 = samples[0] & 1u;
-            u32 bit1 = samples[1] & 1u;
-            u32 code = bit0 | (bit1 << 1u);
-            switch (code & 3u) {
-                case 0u:
-                    rgb[0] = 255u;
-                    rgb[1] = 255u;
-                    rgb[2] = 255u;
-                    break;
-                case 1u:
-                    rgb[0] = 0u;
-                    rgb[1] = 255u;
-                    rgb[2] = 255u;
-                    break;
-                case 2u:
-                    rgb[0] = 255u;
-                    rgb[1] = 0u;
-                    rgb[2] = 255u;
-                    break;
-                default:
-                    rgb[0] = 255u;
-                    rgb[1] = 255u;
-                    rgb[2] = 0u;
-                    break;
-            }
-        } else {
-            u8 intensity0 = shade_to_intensity(samples[0], shade_levels);
-            u8 intensity1 = shade_to_intensity(samples[1], shade_levels);
-            rgb[0] = intensity0;
-            rgb[1] = intensity1;
-            rgb[2] = 0u;
-        }
+        // Two-channel mode blends the white/cyan/magenta/yellow palette while supporting extra shades.
+        u32 intensity0 = (u32)shade_to_intensity(samples[0], shade_levels);
+        u32 intensity1 = (u32)shade_to_intensity(samples[1], shade_levels);
+        u32 term_r = (intensity0 * (255u - intensity1) + 127u) / 255u;
+        u32 term_g = (intensity1 * (255u - intensity0) + 127u) / 255u;
+        u32 term_b = (intensity0 * intensity1 + 127u) / 255u;
+        u32 r = 255u - term_r;
+        u32 g = 255u - term_g;
+        u32 b = 255u - term_b;
+        if (r > 255u) { r = 255u; }
+        if (g > 255u) { g = 255u; }
+        if (b > 255u) { b = 255u; }
+        rgb[0] = (u8)r;
+        rgb[1] = (u8)g;
+        rgb[2] = (u8)b;
         return true;
     }
     u8 intensities[3];
@@ -942,31 +924,19 @@ static bool map_rgb_to_samples(u8 mode, u32 shade_levels, const u8* rgb, u32* sa
         return true;
     }
     if (mode == 2u) {
-        if (shade_levels <= 2u) {
-            if (rgb[0] == 255u && rgb[1] == 255u && rgb[2] == 255u) {
-                samples[0] = 0u;
-                samples[1] = 0u;
-                return true;
-            }
-            if (rgb[0] == 0u && rgb[1] == 255u && rgb[2] == 255u) {
-                samples[0] = 1u;
-                samples[1] = 0u;
-                return true;
-            }
-            if (rgb[0] == 255u && rgb[1] == 0u && rgb[2] == 255u) {
-                samples[0] = 0u;
-                samples[1] = 1u;
-                return true;
-            }
-            if (rgb[0] == 255u && rgb[1] == 255u && rgb[2] == 0u) {
-                samples[0] = 1u;
-                samples[1] = 1u;
-                return true;
-            }
-            return false;
+        u32 inv_r = 255u - (u32)rgb[0];
+        u32 inv_g = 255u - (u32)rgb[1];
+        u32 inv_b = 255u - (u32)rgb[2];
+        u32 intensity0 = inv_r + inv_b;
+        u32 intensity1 = inv_g + inv_b;
+        if (intensity0 > 255u) {
+            intensity0 = 255u;
         }
-        samples[0] = intensity_to_shade(rgb[0], shade_levels);
-        samples[1] = intensity_to_shade(rgb[1], shade_levels);
+        if (intensity1 > 255u) {
+            intensity1 = 255u;
+        }
+        samples[0] = intensity_to_shade((u8)intensity0, shade_levels);
+        samples[1] = intensity_to_shade((u8)intensity1, shade_levels);
         return true;
     }
     samples[0] = intensity_to_shade(rgb[0], shade_levels);
