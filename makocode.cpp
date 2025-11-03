@@ -834,6 +834,22 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
     return false;
 }
 
+static u8 rotate_left_u8(u8 value, u8 amount) {
+    amount &= 7u;
+    if (!amount) {
+        return value;
+    }
+    return (u8)((u8)(value << amount) | (u8)(value >> (8u - amount)));
+}
+
+static u8 rotate_right_u8(u8 value, u8 amount) {
+    amount &= 7u;
+    if (!amount) {
+        return value;
+    }
+    return (u8)((u8)(value >> amount) | (u8)(value << (8u - amount)));
+}
+
 static bool write_all_fd(int fd, const u8* data, usize length) {
     if (length == 0u) {
         return true;
@@ -1173,6 +1189,19 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
     if (!writer.align_to_byte()) {
         return false;
     }
+    if (color_mode == 3u) {
+        usize total_bytes = writer.byte_size();
+        if (total_bytes) {
+            u8* data_bytes = writer.buffer.data;
+            if (!data_bytes && total_bytes) {
+                return false;
+            }
+            for (usize i = 0u; i < total_bytes; ++i) {
+                u8 rotate = (u8)((i % 3u) + 1u);
+                data_bytes[i] = rotate_right_u8(data_bytes[i], rotate);
+            }
+        }
+    }
     makocode::BitReader reader;
     reader.reset(writer.data(), writer.bit_size());
     makocode::BitWriter payload_writer;
@@ -1276,6 +1305,23 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     }
     u64 bit_count = frame_writer.bit_size();
     const u8* raw = frame_writer.data();
+    makocode::ByteBuffer scrambled;
+    if (mapping.color_channels == 3u) {
+        usize raw_bytes = frame_writer.byte_size();
+        if (raw_bytes) {
+            if (!scrambled.ensure(raw_bytes)) {
+                return false;
+            }
+            scrambled.size = raw_bytes;
+            const u8* source = frame_writer.data();
+            for (usize i = 0u; i < raw_bytes; ++i) {
+                u8 original = source ? source[i] : 0u;
+                u8 rotate = (u8)((i % 3u) + 1u);
+                scrambled.data[i] = rotate_left_u8(original, rotate);
+            }
+            raw = scrambled.data;
+        }
+    }
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
     u64 total_samples = (bit_count + (u64)sample_bits - 1u) / (u64)sample_bits;
     if (total_samples == 0u) {
