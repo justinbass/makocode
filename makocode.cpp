@@ -512,11 +512,9 @@ static bool lzw_emit_sequence(u16 code,
                               const u8* values,
                               u8* scratch,
                               usize scratch_capacity,
-                              u8* dest,
-                              usize dest_capacity,
-                              usize* dest_index,
+                              ByteBuffer& dest,
                               u8* out_first) {
-    if (!scratch || scratch_capacity == 0u || !dest || !dest_index) {
+    if (!scratch || scratch_capacity == 0u) {
         return false;
     }
     usize length = 0u;
@@ -546,28 +544,22 @@ static bool lzw_emit_sequence(u16 code,
         *out_first = first;
     }
     for (usize i = 0u; i < length; ++i) {
-        if (*dest_index >= dest_capacity) {
+        if (!dest.push(scratch[length - 1u - i])) {
             return false;
         }
-        dest[*dest_index] = scratch[length - 1u - i];
-        ++(*dest_index);
     }
     return true;
 }
 
 static bool lzw_decompress(const u8* input,
-                           usize length,
-                           ByteBuffer& output,
-                           usize expected_size) {
+                           usize bit_count,
+                           ByteBuffer& output) {
     output.release();
-    if (expected_size == 0u) {
+    if (!input) {
+        return (bit_count == 0u);
+    }
+    if (bit_count == 0u) {
         return true;
-    }
-    if (!input || length == 0u) {
-        return false;
-    }
-    if (!output.ensure(expected_size)) {
-        return false;
     }
     u16 prefixes[LZW_MAX_CODES];
     u8  values[LZW_MAX_CODES];
@@ -576,7 +568,7 @@ static bool lzw_decompress(const u8* input,
         values[i] = 0u;
     }
     BitReader reader;
-    reader.reset(input, length * 8u);
+    reader.reset(input, bit_count);
     if (reader.bit_count < 12u) {
         return false;
     }
@@ -585,34 +577,28 @@ static bool lzw_decompress(const u8* input,
     if (reader.failed) {
         return false;
     }
-    u8* dest = output.data;
-    usize dest_index = 0u;
     u8 scratch[LZW_MAX_CODES];
     u8 prev_first = 0u;
-    if (!lzw_emit_sequence(prev_code, prefixes, values, scratch, LZW_MAX_CODES, dest, expected_size, &dest_index, &prev_first)) {
+    if (!lzw_emit_sequence(prev_code, prefixes, values, scratch, LZW_MAX_CODES, output, &prev_first)) {
         return false;
     }
-    while (dest_index < expected_size) {
-        if ((reader.bit_count - reader.cursor) < 12u) {
-            break;
-        }
+    while ((reader.bit_count - reader.cursor) >= 12u) {
         u16 code = (u16)reader.read_bits(12u);
         if (reader.failed) {
             return false;
         }
         u8 current_first = 0u;
         if (code < dict_size) {
-            if (!lzw_emit_sequence(code, prefixes, values, scratch, LZW_MAX_CODES, dest, expected_size, &dest_index, &current_first)) {
+            if (!lzw_emit_sequence(code, prefixes, values, scratch, LZW_MAX_CODES, output, &current_first)) {
                 return false;
             }
         } else if (code == dict_size) {
-            if (!lzw_emit_sequence(prev_code, prefixes, values, scratch, LZW_MAX_CODES, dest, expected_size, &dest_index, &current_first)) {
+            if (!lzw_emit_sequence(prev_code, prefixes, values, scratch, LZW_MAX_CODES, output, &current_first)) {
                 return false;
             }
-            if (dest_index >= expected_size) {
+            if (!output.push(prev_first)) {
                 return false;
             }
-            dest[dest_index++] = prev_first;
             current_first = prev_first;
         } else {
             return false;
@@ -625,184 +611,9 @@ static bool lzw_decompress(const u8* input,
         prev_code = code;
         prev_first = current_first;
     }
-    if (dest_index != expected_size) {
-        return false;
-    }
-    output.size = expected_size;
     return true;
 }
 
-struct SectionAddresses {
-    u64 entries[8];
-
-    SectionAddresses() {
-        for (usize i = 0; i < 8u; ++i) {
-            entries[i] = 0u;
-        }
-    }
-};
-
-struct HashDigest {
-    u64 value;
-};
-
-struct HashBuilder {
-    u64 state;
-
-    HashBuilder() : state(0xcbf29ce484222325ull) {}
-
-    void absorb_byte(u8 byte) {
-        const u64 prime = 0x100000001b3ull;
-        state ^= (u64)byte;
-        state *= prime;
-    }
-
-    void absorb_bits(const u8* data, usize bit_count) {
-        if (!data) {
-            return;
-        }
-        usize full_bytes = bit_count >> 3u;
-        usize remaining_bits = bit_count & 7u;
-        for (usize i = 0; i < full_bytes; ++i) {
-            absorb_byte(data[i]);
-        }
-        if (remaining_bits) {
-            u8 last = 0u;
-            for (usize bit = 0; bit < remaining_bits; ++bit) {
-                u8 bit_value = (u8)((data[full_bytes] >> bit) & 1u);
-                last |= (bit_value << bit);
-            }
-            absorb_byte(last);
-        }
-    }
-
-    HashDigest finish() const {
-        HashDigest digest;
-        digest.value = state;
-        return digest;
-    }
-};
-
-struct AddressSizer {
-    u8 address_size_size;
-    u8 address_size_bits;
-    u64 max_addressable_bits;
-
-    AddressSizer() : address_size_size(0u), address_size_bits(0u), max_addressable_bits(0u) {}
-
-    void compute(u64 total_bits) {
-        u64 required = total_bits + 1u;
-        u8 logical_size = 0u;
-        u64 span = 64u;
-        while (span < required && logical_size < 63u) {
-            ++logical_size;
-            if (span >= (1ull << 63)) {
-                span = ~0ull;
-                break;
-            }
-            span <<= 1;
-        }
-        if (logical_size > 63u) {
-            logical_size = 63u;
-        }
-        address_size_bits = (u8)(6u + logical_size);
-        u8 bits_needed = 0u;
-        u64 max_representable = 0u;
-        while (max_representable < logical_size && bits_needed < 6u) {
-            ++bits_needed;
-            max_representable = (1ull << bits_needed) - 1ull;
-        }
-        if (bits_needed < 3u) {
-            bits_needed = 3u;
-        }
-        address_size_size = (u8)(bits_needed - 3u);
-        if (address_size_size > 3u) {
-            address_size_size = 3u;
-        }
-        if (address_size_bits >= 64u) {
-            max_addressable_bits = ~0ull;
-        } else {
-            max_addressable_bits = (1ull << address_size_bits);
-        }
-    }
-};
-
-struct SectionLayout {
-    AddressSizer address_sizer;
-    SectionAddresses addresses;
-    HashDigest address_hash;
-    HashDigest index_hash;
-
-    SectionLayout() : address_sizer(), addresses(), address_hash(), index_hash() {}
-
-    void plan(u64 metadata_bits, u64 fiducial_bits, u64 data_bits) {
-        u64 current = 0u;
-        addresses.entries[0] = current;
-        current += (u64)(2u);
-        current += (u64)(address_sizer.address_size_size + 3u);
-        addresses.entries[1] = current;
-        current += ((u64)8u * (u64)(address_sizer.address_size_bits));
-        addresses.entries[2] = current;
-        current += 64u;
-        addresses.entries[3] = current;
-        current += 64u;
-        u64 padding = (8u - (current & 7u)) & 7u;
-        current += padding;
-        addresses.entries[4] = current;
-        current += metadata_bits;
-        addresses.entries[5] = current;
-        current += fiducial_bits;
-        addresses.entries[6] = current;
-        current += data_bits;
-        addresses.entries[7] = current;
-    }
-
-    void bake_hashes(const BitWriter& writer) {
-        HashBuilder builder;
-        builder.absorb_bits(writer.data(), writer.bit_size());
-        address_hash = builder.finish();
-        HashBuilder index_builder;
-        for (usize i = 0; i < 8u; ++i) {
-            u64 value = addresses.entries[i];
-            for (usize byte = 0; byte < sizeof(u64); ++byte) {
-                u8 component = (u8)((value >> (byte * 8u)) & 0xFFu);
-                index_builder.absorb_byte(component);
-            }
-        }
-        index_hash = index_builder.finish();
-    }
-};
-
-struct MetadataEntry {
-    u32 key;
-    ByteBuffer value;
-
-    MetadataEntry() : key(0u), value() {}
-};
-
-struct MetadataBuilder {
-    MetadataEntry entries[16];
-    usize used;
-
-    MetadataBuilder() : entries(), used(0u) {}
-
-    MetadataEntry* push(u32 key) {
-        if (used >= (usize)16) {
-            return 0;
-        }
-        MetadataEntry* entry = &entries[used++];
-        entry->key = key;
-        entry->value.release();
-        return entry;
-    }
-
-    void reset() {
-        for (usize i = 0; i < used; ++i) {
-            entries[i].value.release();
-        }
-        used = 0u;
-    }
-};
 
 struct EncoderConfig {
     u32 metadata_key_count;
@@ -819,19 +630,15 @@ struct EncoderConfig {
 
 struct EncoderContext {
     EncoderConfig config;
-    MetadataBuilder metadata;
     ByteBuffer payload_bytes;
     BitWriter bit_writer;
-    SectionLayout layout;
     bool configured;
 
-    EncoderContext() : config(), metadata(), payload_bytes(), bit_writer(), layout(), configured(false) {}
+    EncoderContext() : config(), payload_bytes(), bit_writer(), configured(false) {}
 
     void reset() {
-        metadata.reset();
         payload_bytes.release();
         bit_writer.reset();
-        layout = SectionLayout();
         configured = false;
     }
 
@@ -847,93 +654,13 @@ struct EncoderContext {
         return true;
     }
 
-    bool append_metadata_u64(u32 key, u64 value) {
-        MetadataEntry* entry = metadata.push(key);
-        if (!entry) {
-            return false;
-        }
-        if (!entry->value.ensure(sizeof(u64))) {
-            return false;
-        }
-        for (usize byte = 0; byte < sizeof(u64); ++byte) {
-            entry->value.push((u8)((value >> (byte * 8u)) & 0xFFu));
-        }
-        return true;
-    }
-
-    bool append_metadata_text(u32 key, const char* text) {
-        MetadataEntry* entry = metadata.push(key);
-        if (!entry) {
-            return false;
-        }
-        usize len = ascii_length(text);
-        if (!entry->value.ensure(len)) {
-            return false;
-        }
-        for (usize i = 0; i < len; ++i) {
-            entry->value.push((u8)text[i]);
-        }
-        return true;
-    }
-
-    bool encode_metadata(BitWriter& writer) {
-        u8 key_size_size = 0u;
-        u8 key_size_bits = 0u;
-        if (metadata.used == 0u) {
-            key_size_size = 0u;
-            key_size_bits = 0u;
-        } else {
-            key_size_size = 1u;
-            key_size_bits = 7u;
-        }
-        if (!writer.write_bits((u64)key_size_size, 2u)) {
-            return false;
-        }
-        if (!writer.write_bits((u64)key_size_bits, (usize)(key_size_size + 1u))) {
-            return false;
-        }
-        if (!writer.write_bits((u64)metadata.used, 6u)) {
-            return false;
-        }
-        for (usize index = 0; index < metadata.used; ++index) {
-            MetadataEntry& entry = metadata.entries[index];
-            if (!writer.write_bits((u64)entry.key, 7u)) {
-                return false;
-            }
-            u64 bit_length = (u64)entry.value.size * 8u;
-            if (!writer.write_bits(bit_length, 16u)) {
-                return false;
-            }
-            for (usize i = 0; i < entry.value.size; ++i) {
-                if (!writer.write_bits((u64)entry.value.data[i], 8u)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
     bool encode_payload(BitWriter& writer) {
-        u64 original_size = (u64)payload_bytes.size;
         ByteBuffer compressed;
         if (!lzw_compress(payload_bytes.data, payload_bytes.size, compressed)) {
             return false;
         }
-        u8 compression_mode = 1u;
-        const u8* source_data = compressed.data;
-        usize source_size = compressed.size;
-        u64 stored_size = (u64)source_size;
-        if (!writer.write_bits((u64)compression_mode, 8u)) {
-            return false;
-        }
-        if (!writer.write_bits(original_size, 64u)) {
-            return false;
-        }
-        if (!writer.write_bits(stored_size, 64u)) {
-            return false;
-        }
-        for (usize i = 0u; i < source_size; ++i) {
-            u8 byte = source_data ? source_data[i] : 0u;
+        for (usize i = 0u; i < compressed.size; ++i) {
+            u8 byte = compressed.data ? compressed.data[i] : 0u;
             if (!writer.write_bits((u64)byte, 8u)) {
                 return false;
             }
@@ -941,175 +668,42 @@ struct EncoderContext {
         return true;
     }
 
-    bool encode_address_section(BitWriter& writer) {
-        u8 size_size = layout.address_sizer.address_size_size;
-        u8 size_bits = layout.address_sizer.address_size_bits;
-        if (!writer.write_bits((u64)size_size, 2u)) {
-            return false;
-        }
-        u64 size_value = (u64)(layout.address_sizer.address_size_bits - 6u);
-        if (!writer.write_bits(size_value, (usize)(size_size + 3u))) {
-            return false;
-        }
-        for (usize i = 0; i < 8u; ++i) {
-            if (!writer.write_bits(layout.addresses.entries[i], size_bits)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     bool build() {
-        if (!payload_bytes.data) {
-            return false;
-        }
         bit_writer.reset();
-        BitWriter metadata_writer;
-        if (!encode_metadata(metadata_writer)) {
-            return false;
-        }
-        metadata_writer.align_to_byte();
-        u64 metadata_bits = metadata_writer.bit_size();
-        BitWriter payload_writer;
-        if (!encode_payload(payload_writer)) {
-            return false;
-        }
-        payload_writer.align_to_byte();
-        u64 payload_bits = payload_writer.bit_size();
-        u64 fiducial_bits = 128u;
-        layout.address_sizer.compute(metadata_bits + payload_bits + fiducial_bits + 512u);
-        layout.plan(metadata_bits, fiducial_bits, payload_bits);
-        if (!encode_address_section(bit_writer)) {
-            return false;
-        }
-        if (!bit_writer.write_bits(0u, 64u)) {
-            return false;
-        }
-        if (!bit_writer.write_bits(0u, 64u)) {
+        if (!encode_payload(bit_writer)) {
             return false;
         }
         if (!bit_writer.align_to_byte()) {
             return false;
         }
-        for (usize i = 0; i < metadata_writer.byte_size(); ++i) {
-            if (!bit_writer.write_bits((u64)metadata_writer.data()[i], 8u)) {
-                return false;
-            }
-        }
-        for (usize i = 0; i < (fiducial_bits >> 3u); ++i) {
-            u8 pattern = (u8)(i & 1u ? 0xAAu : 0x55u);
-            if (!bit_writer.write_bits((u64)pattern, 8u)) {
-                return false;
-            }
-        }
-        for (usize i = 0; i < payload_writer.byte_size(); ++i) {
-            if (!bit_writer.write_bits((u64)payload_writer.data()[i], 8u)) {
-                return false;
-            }
-        }
-        layout.bake_hashes(bit_writer);
         configured = true;
         return true;
     }
 };
 
 struct DecoderContext {
-    BitReader reader;
-    SectionLayout layout;
     ByteBuffer payload;
     bool has_payload;
 
-    DecoderContext() : reader(), layout(), payload(), has_payload(false) {}
+    DecoderContext() : payload(), has_payload(false) {}
 
     void reset() {
-        reader = BitReader();
-        layout = SectionLayout();
         payload.release();
         has_payload = false;
     }
 
     bool parse(const u8* data, usize size_in_bits) {
-        reader.reset(data, size_in_bits);
-        u8 size_size = (u8)reader.read_bits(2u);
-        u8 size_bits = (u8)reader.read_bits((usize)(size_size + 3u));
-        size_bits = (u8)(size_bits + 6u);
-        layout.address_sizer.address_size_size = size_size;
-        layout.address_sizer.address_size_bits = size_bits;
-        for (usize i = 0; i < 8u; ++i) {
-            layout.addresses.entries[i] = reader.read_bits(size_bits);
+        payload.release();
+        has_payload = false;
+        if (size_in_bits == 0u) {
+            has_payload = true;
+            return true;
         }
-        layout.address_sizer.max_addressable_bits = layout.addresses.entries[7];
-        HashBuilder builder;
-        builder.absorb_bits(data, layout.addresses.entries[4]);
-        layout.address_hash = builder.finish();
-        reader.cursor = layout.addresses.entries[4];
-        MetadataBuilder metadata;
-        u8 key_size_size = (u8)reader.read_bits(2u);
-        u8 key_size_bits = (u8)reader.read_bits((usize)(key_size_size + 1u));
-        (void)key_size_bits;
-        u64 entry_count = reader.read_bits(6u);
-        for (u64 entry = 0; entry < entry_count; ++entry) {
-            u64 key = reader.read_bits(7u);
-            MetadataEntry* slot = metadata.push((u32)key);
-            if (!slot) {
-                return false;
-            }
-            u64 length_bits = reader.read_bits(16u);
-            u64 length_bytes = (length_bits + 7u) >> 3u;
-            if (!slot->value.ensure((usize)length_bytes)) {
-                return false;
-            }
-            for (u64 byte_index = 0u; byte_index < length_bytes; ++byte_index) {
-                u8 value = (u8)reader.read_bits(8u);
-                slot->value.push(value);
-            }
-        }
-        reader.cursor = layout.addresses.entries[6];
-        u8 compression_mode = (u8)reader.read_bits(8u);
-        u64 payload_size = reader.read_bits(64u);
-        u64 stored_size = reader.read_bits(64u);
-        if (reader.failed) {
+        if (!data) {
             return false;
         }
-        if (compression_mode > 1u) {
+        if (!lzw_decompress(data, size_in_bits, payload)) {
             return false;
-        }
-        if (payload_size > (u64)USIZE_MAX_VALUE || stored_size > (u64)USIZE_MAX_VALUE) {
-            return false;
-        }
-        usize stored_bytes = (usize)stored_size;
-        if (compression_mode == 0u) {
-            if (payload_size != stored_size) {
-                return false;
-            }
-            payload.release();
-            if (!payload.ensure((usize)payload_size)) {
-                return false;
-            }
-            payload.size = (usize)payload_size;
-            for (usize i = 0u; i < payload.size; ++i) {
-                payload.data[i] = (u8)reader.read_bits(8u);
-                if (reader.failed) {
-                    return false;
-                }
-            }
-        } else {
-            ByteBuffer compressed;
-            if (!compressed.ensure(stored_bytes)) {
-                return false;
-            }
-            for (usize i = 0u; i < stored_bytes; ++i) {
-                u8 byte = (u8)reader.read_bits(8u);
-                if (reader.failed) {
-                    return false;
-                }
-                if (!compressed.push(byte)) {
-                    return false;
-                }
-            }
-            if (!lzw_decompress(compressed.data, compressed.size, payload, (usize)payload_size)) {
-                return false;
-            }
         }
         has_payload = true;
         return true;
@@ -1881,10 +1475,6 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: failed to set payload");
         return 1;
     }
-    encoder.append_metadata_text(4u, "1");
-    encoder.append_metadata_text(5u, "0");
-    encoder.append_metadata_text(6u, "0");
-    encoder.append_metadata_u64(7u, 1u);
     if (!encoder.build()) {
         console_line(2, "encode: build failed");
         return 1;
@@ -1962,10 +1552,6 @@ static int command_test(int arg_count, char** args) {
         console_line(2, "test: failed to set payload");
         return 1;
     }
-    encoder.append_metadata_text(4u, "0");
-    encoder.append_metadata_text(5u, "1");
-    encoder.append_metadata_text(6u, "0");
-    encoder.append_metadata_u64(7u, 1u);
     if (!encoder.build()) {
         console_line(2, "test: encode failed");
         return 1;
