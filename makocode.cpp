@@ -851,9 +851,7 @@ static u8 color_mode_samples_per_pixel(u8 mode) {
 }
 
 static u8 resolve_shade_bits(u8 color_mode, u8 requested_bits) {
-    if (color_mode == 2u) {
-        return 1u;
-    }
+    (void)color_mode;
     return requested_bits;
 }
 
@@ -893,30 +891,38 @@ static bool map_samples_to_rgb(u8 mode, u32 shade_levels, const u32* samples, u8
         return true;
     }
     if (mode == 2u) {
-        u32 bit0 = samples[0] & 1u;
-        u32 bit1 = samples[1] & 1u;
-        u32 code = bit0 | (bit1 << 1u);
-        switch (code & 3u) {
-            case 0u:
-                rgb[0] = 255u;
-                rgb[1] = 255u;
-                rgb[2] = 255u;
-                break;
-            case 1u:
-                rgb[0] = 0u;
-                rgb[1] = 255u;
-                rgb[2] = 255u;
-                break;
-            case 2u:
-                rgb[0] = 255u;
-                rgb[1] = 0u;
-                rgb[2] = 255u;
-                break;
-            default:
-                rgb[0] = 255u;
-                rgb[1] = 255u;
-                rgb[2] = 0u;
-                break;
+        if (shade_levels <= 2u) {
+            u32 bit0 = samples[0] & 1u;
+            u32 bit1 = samples[1] & 1u;
+            u32 code = bit0 | (bit1 << 1u);
+            switch (code & 3u) {
+                case 0u:
+                    rgb[0] = 255u;
+                    rgb[1] = 255u;
+                    rgb[2] = 255u;
+                    break;
+                case 1u:
+                    rgb[0] = 0u;
+                    rgb[1] = 255u;
+                    rgb[2] = 255u;
+                    break;
+                case 2u:
+                    rgb[0] = 255u;
+                    rgb[1] = 0u;
+                    rgb[2] = 255u;
+                    break;
+                default:
+                    rgb[0] = 255u;
+                    rgb[1] = 255u;
+                    rgb[2] = 0u;
+                    break;
+            }
+        } else {
+            u8 intensity0 = shade_to_intensity(samples[0], shade_levels);
+            u8 intensity1 = shade_to_intensity(samples[1], shade_levels);
+            rgb[0] = intensity0;
+            rgb[1] = intensity1;
+            rgb[2] = 0u;
         }
         return true;
     }
@@ -936,27 +942,32 @@ static bool map_rgb_to_samples(u8 mode, u32 shade_levels, const u8* rgb, u32* sa
         return true;
     }
     if (mode == 2u) {
-        if (rgb[0] == 255u && rgb[1] == 255u && rgb[2] == 255u) {
-            samples[0] = 0u;
-            samples[1] = 0u;
-            return true;
+        if (shade_levels <= 2u) {
+            if (rgb[0] == 255u && rgb[1] == 255u && rgb[2] == 255u) {
+                samples[0] = 0u;
+                samples[1] = 0u;
+                return true;
+            }
+            if (rgb[0] == 0u && rgb[1] == 255u && rgb[2] == 255u) {
+                samples[0] = 1u;
+                samples[1] = 0u;
+                return true;
+            }
+            if (rgb[0] == 255u && rgb[1] == 0u && rgb[2] == 255u) {
+                samples[0] = 0u;
+                samples[1] = 1u;
+                return true;
+            }
+            if (rgb[0] == 255u && rgb[1] == 255u && rgb[2] == 0u) {
+                samples[0] = 1u;
+                samples[1] = 1u;
+                return true;
+            }
+            return false;
         }
-        if (rgb[0] == 0u && rgb[1] == 255u && rgb[2] == 255u) {
-            samples[0] = 1u;
-            samples[1] = 0u;
-            return true;
-        }
-        if (rgb[0] == 255u && rgb[1] == 0u && rgb[2] == 255u) {
-            samples[0] = 0u;
-            samples[1] = 1u;
-            return true;
-        }
-        if (rgb[0] == 255u && rgb[1] == 255u && rgb[2] == 0u) {
-            samples[0] = 1u;
-            samples[1] = 1u;
-            return true;
-        }
-        return false;
+        samples[0] = intensity_to_shade(rgb[0], shade_levels);
+        samples[1] = intensity_to_shade(rgb[1], shade_levels);
+        return true;
     }
     samples[0] = intensity_to_shade(rgb[0], shade_levels);
     samples[1] = intensity_to_shade(rgb[1], shade_levels);
