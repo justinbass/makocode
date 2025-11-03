@@ -1,6 +1,5 @@
 TODO:
-- Limit to 3 shades
-- Optionally print user provided filename (default, given filename - for tar, it lists all), page count, other settings, date
+- Optionally print user provided title, filename (default, given filename - for tar, it lists all), page count, other settings, date
 - ECC (Reed Solomon?)
 - Fiducial data (if needed), test should create distortions
 - Page width, height, density

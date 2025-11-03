@@ -12,7 +12,7 @@
         * Byte/bit utilities that assemble payload frames and translate them into
           pixel samples.
         * Portable PPM import/export that maps encoded payloads to RGB imagery with
-          configurable color and shade channels.
+          configurable color palettes.
         * Command-line entry points (`encode`, `decode`, `test`) that round-trip data,
           validate the codec, and emit artifacts for inspection.
 
@@ -714,120 +714,124 @@ struct DecoderContext {
 
 struct ImageMappingConfig {
     u8  color_channels;
-    u8  shade_channels;
     bool color_set;
-    bool shade_set;
 
     ImageMappingConfig()
         : color_channels(1u),
-          shade_channels(1u),
-          color_set(false),
-          shade_set(false) {}
+          color_set(false) {}
 };
 
 static u8 color_mode_samples_per_pixel(u8 mode) {
+    if (mode >= 1u && mode <= 3u) {
+        return 1u;
+    }
+    return 0u;
+}
+
+struct PaletteColor {
+    u8 r;
+    u8 g;
+    u8 b;
+};
+
+static const PaletteColor PALETTE_GRAY[2] = {
+    {0u, 0u, 0u},     // black
+    {255u, 255u, 255u} // white
+};
+
+static const PaletteColor PALETTE_CMYW[4] = {
+    {255u, 255u, 255u}, // white
+    {0u, 255u, 255u},   // cyan
+    {255u, 0u, 255u},   // magenta
+    {255u, 255u, 0u}    // yellow
+};
+
+static const PaletteColor PALETTE_RGB_CMY_WB[8] = {
+    {255u, 255u, 255u}, // white
+    {0u, 0u, 0u},       // black
+    {255u, 0u, 0u},     // red
+    {0u, 255u, 0u},     // green
+    {0u, 0u, 255u},     // blue
+    {0u, 255u, 255u},   // cyan
+    {255u, 0u, 255u},   // magenta
+    {255u, 255u, 0u}    // yellow
+};
+
+static bool palette_for_mode(u8 mode, const PaletteColor*& colors, u32& count) {
+    if (mode == 1u) {
+        colors = PALETTE_GRAY;
+        count = (u32)(sizeof(PALETTE_GRAY) / sizeof(PALETTE_GRAY[0]));
+        return true;
+    }
+    if (mode == 2u) {
+        colors = PALETTE_CMYW;
+        count = (u32)(sizeof(PALETTE_CMYW) / sizeof(PALETTE_CMYW[0]));
+        return true;
+    }
+    if (mode == 3u) {
+        colors = PALETTE_RGB_CMY_WB;
+        count = (u32)(sizeof(PALETTE_RGB_CMY_WB) / sizeof(PALETTE_RGB_CMY_WB[0]));
+        return true;
+    }
+    colors = 0;
+    count = 0u;
+    return false;
+}
+
+static u8 bits_per_sample(u8 mode) {
     if (mode == 1u) {
         return 1u;
     }
     if (mode == 2u) {
         return 2u;
     }
-    return 3u;
+    if (mode == 3u) {
+        return 3u;
+    }
+    return 0u;
 }
 
-static u8 resolve_shade_bits(u8 color_mode, u8 requested_bits) {
-    (void)color_mode;
-    return requested_bits;
-}
-
-static u8 shade_to_intensity(u32 shade_value, u32 shade_levels) {
-    if (shade_levels <= 1u) {
-        return 0u;
+static bool map_samples_to_rgb(u8 mode, const u32* samples, u8* rgb) {
+    const PaletteColor* palette = 0;
+    u32 palette_size = 0u;
+    if (!palette_for_mode(mode, palette, palette_size)) {
+        return false;
     }
-    if (shade_value >= (shade_levels - 1u)) {
-        return 255u;
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mode);
+    if (samples_per_pixel != 1u) {
+        return false;
     }
-    u32 step = 255u / (shade_levels - 1u);
-    u32 intensity = shade_value * step;
-    if (intensity > 255u) {
-        intensity = 255u;
+    u32 value = samples[0];
+    if (value >= palette_size) {
+        return false;
     }
-    return (u8)intensity;
-}
-
-static u32 intensity_to_shade(u8 intensity, u32 shade_levels) {
-    if (shade_levels <= 1u) {
-        return 0u;
-    }
-    u32 step = 255u / (shade_levels - 1u);
-    u32 shade = (u32)(intensity + (step / 2u)) / step;
-    if (shade >= shade_levels) {
-        shade = shade_levels - 1u;
-    }
-    return shade;
-}
-
-static bool map_samples_to_rgb(u8 mode, u32 shade_levels, const u32* samples, u8* rgb) {
-    if (mode == 1u) {
-        u8 intensity = shade_to_intensity(samples[0], shade_levels);
-        rgb[0] = intensity;
-        rgb[1] = intensity;
-        rgb[2] = intensity;
-        return true;
-    }
-    if (mode == 2u) {
-        // Two-channel mode blends the white/cyan/magenta/yellow palette while supporting extra shades.
-        u32 intensity0 = (u32)shade_to_intensity(samples[0], shade_levels);
-        u32 intensity1 = (u32)shade_to_intensity(samples[1], shade_levels);
-        u32 term_r = (intensity0 * (255u - intensity1) + 127u) / 255u;
-        u32 term_g = (intensity1 * (255u - intensity0) + 127u) / 255u;
-        u32 term_b = (intensity0 * intensity1 + 127u) / 255u;
-        u32 r = 255u - term_r;
-        u32 g = 255u - term_g;
-        u32 b = 255u - term_b;
-        if (r > 255u) { r = 255u; }
-        if (g > 255u) { g = 255u; }
-        if (b > 255u) { b = 255u; }
-        rgb[0] = (u8)r;
-        rgb[1] = (u8)g;
-        rgb[2] = (u8)b;
-        return true;
-    }
-    u8 intensities[3];
-    intensities[0] = shade_to_intensity(samples[0], shade_levels);
-    intensities[1] = shade_to_intensity(samples[1], shade_levels);
-    intensities[2] = shade_to_intensity(samples[2], shade_levels);
-    rgb[0] = intensities[0];
-    rgb[1] = intensities[1];
-    rgb[2] = intensities[2];
+    const PaletteColor& color = palette[value];
+    rgb[0] = color.r;
+    rgb[1] = color.g;
+    rgb[2] = color.b;
     return true;
 }
 
-static bool map_rgb_to_samples(u8 mode, u32 shade_levels, const u8* rgb, u32* samples) {
-    if (mode == 1u) {
-        samples[0] = intensity_to_shade(rgb[0], shade_levels);
-        return true;
+static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
+    const PaletteColor* palette = 0;
+    u32 palette_size = 0u;
+    if (!palette_for_mode(mode, palette, palette_size)) {
+        return false;
     }
-    if (mode == 2u) {
-        u32 inv_r = 255u - (u32)rgb[0];
-        u32 inv_g = 255u - (u32)rgb[1];
-        u32 inv_b = 255u - (u32)rgb[2];
-        u32 intensity0 = inv_r + inv_b;
-        u32 intensity1 = inv_g + inv_b;
-        if (intensity0 > 255u) {
-            intensity0 = 255u;
-        }
-        if (intensity1 > 255u) {
-            intensity1 = 255u;
-        }
-        samples[0] = intensity_to_shade((u8)intensity0, shade_levels);
-        samples[1] = intensity_to_shade((u8)intensity1, shade_levels);
-        return true;
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mode);
+    if (samples_per_pixel != 1u) {
+        return false;
     }
-    samples[0] = intensity_to_shade(rgb[0], shade_levels);
-    samples[1] = intensity_to_shade(rgb[1], shade_levels);
-    samples[2] = intensity_to_shade(rgb[2], shade_levels);
-    return true;
+    for (u32 palette_index = 0u; palette_index < palette_size; ++palette_index) {
+        const PaletteColor& candidate = palette[palette_index];
+        if (candidate.r == rgb[0] &&
+            candidate.g == rgb[1] &&
+            candidate.b == rgb[2]) {
+            samples[0] = palette_index;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool write_all_fd(int fd, const u8* data, usize length) {
@@ -880,8 +884,6 @@ struct PpmParserState {
     u64 bits_value;
     bool has_color_channels;
     u64 color_channels_value;
-    bool has_shade_channels;
-    u64 shade_channels_value;
 
     PpmParserState()
         : data(0),
@@ -892,9 +894,7 @@ struct PpmParserState {
           has_bits(false),
           bits_value(0u),
           has_color_channels(false),
-          color_channels_value(0u),
-          has_shade_channels(false),
-          shade_channels_value(0u) {}
+          color_channels_value(0u) {}
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -910,11 +910,9 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char bytes_tag[] = "MAKOCODE_BYTES";
     const char bits_tag[] = "MAKOCODE_BITS";
     const char color_tag[] = "MAKOCODE_COLOR_CHANNELS";
-    const char shade_tag[] = "MAKOCODE_SHADE_CHANNELS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
     const usize bits_tag_len = (usize)sizeof(bits_tag) - 1u;
     const usize color_tag_len = (usize)sizeof(color_tag) - 1u;
-    const usize shade_tag_len = (usize)sizeof(shade_tag) - 1u;
     if ((length - index) >= bytes_tag_len) {
         bool match = true;
         for (usize i = 0u; i < bytes_tag_len; ++i) {
@@ -1019,45 +1017,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             return;
         }
     }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
-    if ((length - index) >= shade_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < shade_tag_len; ++i) {
-            if (comment[index + i] != shade_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += shade_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_shade_channels = true;
-                    state.shade_channels_value = value;
-                }
-            }
-        }
-    }
 }
 
 static bool ppm_next_token(PpmParserState& state, const char** out_start, usize* out_length) {
@@ -1159,23 +1118,19 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
     if (color_mode == 0u || color_mode > 3u) {
         return false;
     }
-    u8 shade_channels = overrides.shade_channels;
-    if (overrides.shade_set) {
-        shade_channels = overrides.shade_channels;
-    } else if (state.has_shade_channels) {
-        if (state.shade_channels_value == 0u || state.shade_channels_value > 8u) {
-            return false;
-        }
-        shade_channels = (u8)state.shade_channels_value;
-    }
-    if (shade_channels == 0u || shade_channels > 8u) {
+    const u8 sample_bits = bits_per_sample(color_mode);
+    if (sample_bits == 0u) {
         return false;
     }
-    u8 shade_bits = resolve_shade_bits(color_mode, shade_channels);
-    u32 shade_levels = (u32)1u << shade_bits;
-    if (shade_levels == 0u) {
+    const PaletteColor* palette = 0;
+    u32 palette_size = 0u;
+    if (!palette_for_mode(color_mode, palette, palette_size)) {
         return false;
     }
+    if (palette_size != (1u << sample_bits)) {
+        return false;
+    }
+    (void)palette;
     u8 samples_per_pixel = color_mode_samples_per_pixel(color_mode);
     makocode::BitWriter writer;
     for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
@@ -1205,15 +1160,12 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
         rgb[1] = (u8)g_value;
         rgb[2] = (u8)b_value;
         u32 samples_raw[3] = {0u, 0u, 0u};
-        if (!map_rgb_to_samples(color_mode, shade_levels, rgb, samples_raw)) {
+        if (!map_rgb_to_samples(color_mode, rgb, samples_raw)) {
             return false;
         }
         for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
             u32 sample = samples_raw[sample_index];
-            if (sample >= shade_levels) {
-                sample = shade_levels - 1u;
-            }
-            if (!writer.write_bits(sample, shade_bits)) {
+            if (!writer.write_bits(sample, sample_bits)) {
                 return false;
             }
         }
@@ -1289,14 +1241,19 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
         return false;
     }
-    if (mapping.shade_channels == 0u || mapping.shade_channels > 8u) {
+    const u8 sample_bits = bits_per_sample(mapping.color_channels);
+    if (sample_bits == 0u) {
         return false;
     }
-    u8 shade_bits = resolve_shade_bits(mapping.color_channels, mapping.shade_channels);
-    u32 shade_levels = (u32)1u << shade_bits;
-    if (shade_levels == 0u) {
+    const PaletteColor* palette = 0;
+    u32 palette_size = 0u;
+    if (!palette_for_mode(mapping.color_channels, palette, palette_size)) {
         return false;
     }
+    if (palette_size != (1u << sample_bits)) {
+        return false;
+    }
+    (void)palette;
     output.release();
     u64 payload_bit_count = encoder.bit_writer.bit_size();
     usize payload_byte_count = encoder.bit_writer.byte_size();
@@ -1320,7 +1277,7 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     u64 bit_count = frame_writer.bit_size();
     const u8* raw = frame_writer.data();
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
-    u64 total_samples = (shade_bits == 0u) ? 0u : (bit_count + (u64)shade_bits - 1u) / (u64)shade_bits;
+    u64 total_samples = (bit_count + (u64)sample_bits - 1u) / (u64)sample_bits;
     if (total_samples == 0u) {
         total_samples = 1u;
     }
@@ -1352,7 +1309,7 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
         u32 samples_raw[3] = {0u, 0u, 0u};
         for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
             u32 sample = 0u;
-            for (u8 bit = 0u; bit < shade_bits; ++bit) {
+            for (u8 bit = 0u; bit < sample_bits; ++bit) {
                 u8 bit_value = 0u;
                 if (bit_cursor < bit_count && raw) {
                     usize byte_index = (usize)(bit_cursor >> 3u);
@@ -1362,13 +1319,10 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
                 sample |= ((u32)bit_value) << bit;
                 ++bit_cursor;
             }
-            if (sample >= shade_levels) {
-                sample = shade_levels - 1u;
-            }
             samples_raw[sample_index] = sample;
         }
         u8 rgb[3] = {0u, 0u, 0u};
-        if (!map_samples_to_rgb(mapping.color_channels, shade_levels, samples_raw, rgb)) {
+        if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
             return false;
         }
         for (u8 channel = 0u; channel < 3u; ++channel) {
@@ -1400,7 +1354,6 @@ static bool process_image_mapping_option(const char* arg,
         return true;
     }
     const char color_prefix[] = "--color-channels=";
-    const char shade_prefix[] = "--shade-channels=";
     if (ascii_starts_with(arg, color_prefix)) {
         const char* value_text = arg + (sizeof(color_prefix) - 1u);
         usize length = ascii_length(value_text);
@@ -1422,30 +1375,6 @@ static bool process_image_mapping_option(const char* arg,
         }
         config.color_channels = (u8)value;
         config.color_set = true;
-        *handled = true;
-        return true;
-    }
-    if (ascii_starts_with(arg, shade_prefix)) {
-        const char* value_text = arg + (sizeof(shade_prefix) - 1u);
-        usize length = ascii_length(value_text);
-        if (length == 0u) {
-            console_write(2, command_name);
-            console_line(2, ": --shade-channels requires a value");
-            return false;
-        }
-        u64 value = 0u;
-        if (!ascii_to_u64(value_text, length, &value)) {
-            console_write(2, command_name);
-            console_line(2, ": --shade-channels value is not numeric");
-            return false;
-        }
-        if (value == 0u || value > 8u) {
-            console_write(2, command_name);
-            console_line(2, ": --shade-channels must be between 1 and 8");
-            return false;
-        }
-        config.shade_channels = (u8)value;
-        config.shade_set = true;
         *handled = true;
         return true;
     }
@@ -1481,7 +1410,6 @@ static void write_usage() {
     console_line(1, "  makocode test    (runs an encode->decode loop with random payload)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
-    console_line(1, "  --shade-channels=N (1-8, default 1 bit per channel)");
 }
 
 static int command_encode(int arg_count, char** args) {
@@ -1589,81 +1517,73 @@ static int command_test(int arg_count, char** args) {
         return 1;
     }
     static const u8 color_options[3] = {1u, 2u, 3u};
-    static const u8 shade_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
     for (usize color_index = 0; color_index < 3u; ++color_index) {
-        for (usize shade_index = 0; shade_index < 3u; ++shade_index) {
-            ImageMappingConfig run_mapping = mapping;
-            if (!run_mapping.color_set) {
-                run_mapping.color_channels = color_options[color_index];
+        ImageMappingConfig run_mapping = mapping;
+        if (run_mapping.color_set) {
+            if (run_mapping.color_channels != color_options[color_index]) {
+                continue;
             }
-            if (!run_mapping.shade_set) {
-                run_mapping.shade_channels = shade_options[shade_index];
-            }
-            u8 effective_shade = resolve_shade_bits(run_mapping.color_channels, run_mapping.shade_channels);
-            makocode::ByteBuffer ppm_output;
-            if (!encode_to_ppm_buffer(encoder, run_mapping, ppm_output)) {
-                console_line(2, "test: failed to format ppm");
-                return 1;
-            }
-            makocode::ByteBuffer bitstream;
-            u64 bit_count = 0u;
-            if (!ppm_to_bitstream(ppm_output, run_mapping, bitstream, bit_count)) {
-                console_line(2, "test: failed to reconstruct bitstream from ppm");
-                return 1;
-            }
-            makocode::DecoderContext decoder;
-            if (!decoder.parse(bitstream.data, bit_count)) {
-                console_line(2, "test: decode failed");
-                return 1;
-            }
-            if (!decoder.has_payload) {
-                console_line(2, "test: payload missing");
-                return 1;
-            }
-            bool match = (decoder.payload.size == payload.size);
-            if (match) {
-                for (usize i = 0; i < payload.size; ++i) {
-                    if (decoder.payload.data[i] != payload.data[i]) {
-                        match = false;
-                        break;
-                    }
+        } else {
+            run_mapping.color_channels = color_options[color_index];
+        }
+        makocode::ByteBuffer ppm_output;
+        if (!encode_to_ppm_buffer(encoder, run_mapping, ppm_output)) {
+            console_line(2, "test: failed to format ppm");
+            return 1;
+        }
+        makocode::ByteBuffer bitstream;
+        u64 bit_count = 0u;
+        if (!ppm_to_bitstream(ppm_output, run_mapping, bitstream, bit_count)) {
+            console_line(2, "test: failed to reconstruct bitstream from ppm");
+            return 1;
+        }
+        makocode::DecoderContext decoder;
+        if (!decoder.parse(bitstream.data, bit_count)) {
+            console_line(2, "test: decode failed");
+            return 1;
+        }
+        if (!decoder.has_payload) {
+            console_line(2, "test: payload missing");
+            return 1;
+        }
+        bool match = (decoder.payload.size == payload.size);
+        if (match) {
+            for (usize i = 0; i < payload.size; ++i) {
+                if (decoder.payload.data[i] != payload.data[i]) {
+                    match = false;
+                    break;
                 }
             }
-            if (!match) {
-                console_line(2, "test: round-trip mismatch");
-                return 1;
-            }
-            char digits_color[8];
-            char digits_shade[8];
-            u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
-            u64_to_ascii((u64)effective_shade, digits_shade, sizeof(digits_shade));
-            makocode::ByteBuffer name_buffer;
-            name_buffer.append_ascii("payload_c");
-            name_buffer.append_ascii(digits_color);
-            name_buffer.append_ascii("_s");
-            name_buffer.append_ascii(digits_shade);
-            name_buffer.append_ascii(".bin");
-            name_buffer.append_char('\0');
-            write_buffer_to_file((const char*)name_buffer.data, payload);
-            name_buffer.release();
-            name_buffer.append_ascii("encoded_c");
-            name_buffer.append_ascii(digits_color);
-            name_buffer.append_ascii("_s");
-            name_buffer.append_ascii(digits_shade);
-            name_buffer.append_ascii(".ppm");
-            name_buffer.append_char('\0');
-            write_buffer_to_file((const char*)name_buffer.data, ppm_output);
-            name_buffer.release();
-            name_buffer.append_ascii("decoded_c");
-            name_buffer.append_ascii(digits_color);
-            name_buffer.append_ascii("_s");
-            name_buffer.append_ascii(digits_shade);
-            name_buffer.append_ascii(".bin");
-            name_buffer.append_char('\0');
-            write_buffer_to_file((const char*)name_buffer.data, decoder.payload);
-            name_buffer.release();
-            ++total_runs;
+        }
+        if (!match) {
+            console_line(2, "test: round-trip mismatch");
+            return 1;
+        }
+        char digits_color[8];
+        u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
+        makocode::ByteBuffer name_buffer;
+        name_buffer.append_ascii("payload_c");
+        name_buffer.append_ascii(digits_color);
+        name_buffer.append_ascii(".bin");
+        name_buffer.append_char('\0');
+        write_buffer_to_file((const char*)name_buffer.data, payload);
+        name_buffer.release();
+        name_buffer.append_ascii("encoded_c");
+        name_buffer.append_ascii(digits_color);
+        name_buffer.append_ascii(".ppm");
+        name_buffer.append_char('\0');
+        write_buffer_to_file((const char*)name_buffer.data, ppm_output);
+        name_buffer.release();
+        name_buffer.append_ascii("decoded_c");
+        name_buffer.append_ascii(digits_color);
+        name_buffer.append_ascii(".bin");
+        name_buffer.append_char('\0');
+        write_buffer_to_file((const char*)name_buffer.data, decoder.payload);
+        name_buffer.release();
+        ++total_runs;
+        if (mapping.color_set) {
+            break;
         }
     }
     char digits_runs[16];
