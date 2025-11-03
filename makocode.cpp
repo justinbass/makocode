@@ -33,6 +33,9 @@ extern "C" void  free(void* ptr);
 extern "C" int   write(int fd, const void* buf, unsigned long count);
 extern "C" int   read(int fd, void* buf, unsigned long count);
 extern "C" void  exit(int code);
+extern "C" int   close(int fd);
+extern "C" int   creat(const char* path, unsigned int mode);
+extern "C" int   unlink(const char* path);
 
 static usize ascii_length(const char* text) {
     if (!text) {
@@ -200,7 +203,46 @@ struct ByteBuffer {
         data[size++] = value;
         return true;
     }
+
+    bool append_bytes(const u8* source, usize length) {
+        if (!source || length == 0u) {
+            return true;
+        }
+        if (!ensure(size + length)) {
+            return false;
+        }
+        for (usize i = 0; i < length; ++i) {
+            data[size + i] = source[i];
+        }
+        size += length;
+        return true;
+    }
+
+    bool append_ascii(const char* text) {
+        if (!text) {
+            return true;
+        }
+        return append_bytes((const u8*)text, ascii_length(text));
+    }
+
+    bool append_char(char c) {
+        return append_bytes((const u8*)&c, 1u);
+    }
 };
+
+static bool generate_random_bytes(ByteBuffer& buffer, usize count, u64 seed) {
+    buffer.release();
+    if (!buffer.ensure(count)) {
+        return false;
+    }
+    u64 state = seed ? seed : 0x1234abcdf00dbeefull;
+    for (usize i = 0u; i < count; ++i) {
+        state = state * 6364136223846793005ull + 0x9e3779b97f4a7c15ull;
+        buffer.data[i] = (u8)((state >> 32u) & 0xFFu);
+    }
+    buffer.size = count;
+    return true;
+}
 
 struct BitWriter {
     ByteBuffer buffer;
@@ -771,6 +813,52 @@ struct DecoderContext {
 
 } // namespace makocode
 
+static bool write_all_fd(int fd, const u8* data, usize length) {
+    if (length == 0u) {
+        return true;
+    }
+    if (!data) {
+        return false;
+    }
+    usize written = 0u;
+    while (written < length) {
+        unsigned long slice = (unsigned long)(length - written);
+        int result = write(fd, data + written, slice);
+        if (result <= 0) {
+            return false;
+        }
+        written += (usize)result;
+    }
+    return true;
+}
+
+static bool write_bytes_to_file(const char* path, const u8* data, usize length) {
+    if (!path) {
+        return false;
+    }
+    int fd = creat(path, 0644);
+    if (fd < 0) {
+        return false;
+    }
+    bool ok = true;
+    if (length) {
+        ok = write_all_fd(fd, data, length);
+    }
+    close(fd);
+    return ok;
+}
+
+static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+    return write_bytes_to_file(path, buffer.data, buffer.size);
+}
+
+static void remove_file_if_exists(const char* path) {
+    if (!path) {
+        return;
+    }
+    unlink(path);
+}
+
 struct PpmParserState {
     const u8* data;
     usize size;
@@ -992,6 +1080,76 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
     return true;
 }
 
+static bool buffer_append_number(makocode::ByteBuffer& buffer, u64 value) {
+    char digits[32];
+    u64_to_ascii(value, digits, sizeof(digits));
+    return buffer.append_ascii(digits);
+}
+
+static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
+                                 makocode::ByteBuffer& output) {
+    output.release();
+    u64 bit_count = encoder.bit_writer.bit_size();
+    usize byte_count = encoder.bit_writer.byte_size();
+    u64 pixel_count = (byte_count + 2u) / 3u;
+    if (pixel_count == 0u) {
+        pixel_count = 1u;
+    }
+    u64 max_width = 64u;
+    u64 width = (pixel_count < max_width) ? pixel_count : max_width;
+    if (width == 0u) {
+        width = 1u;
+    }
+    u64 height = (pixel_count + width - 1u) / width;
+    u64 total_pixels = width * height;
+    if (!output.append_ascii("P3\n")) {
+        return false;
+    }
+    if (!output.append_ascii("# MAKOCODE_BYTES ")) {
+        return false;
+    }
+    if (!buffer_append_number(output, (u64)byte_count) || !output.append_char('\n')) {
+        return false;
+    }
+    if (!output.append_ascii("# MAKOCODE_BITS ")) {
+        return false;
+    }
+    if (!buffer_append_number(output, bit_count) || !output.append_char('\n')) {
+        return false;
+    }
+    if (!buffer_append_number(output, width) || !output.append_char(' ')) {
+        return false;
+    }
+    if (!buffer_append_number(output, height) || !output.append_char('\n')) {
+        return false;
+    }
+    if (!output.append_ascii("255\n")) {
+        return false;
+    }
+    const u8* raw = encoder.bit_writer.data();
+    usize byte_index = 0u;
+    for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
+        for (u64 channel = 0u; channel < 3u; ++channel) {
+            if (channel) {
+                if (!output.append_char(' ')) {
+                    return false;
+                }
+            }
+            u8 value = 0u;
+            if (byte_index < byte_count && raw) {
+                value = raw[byte_index++];
+            }
+            if (!buffer_append_number(output, (u64)value)) {
+                return false;
+            }
+        }
+        if (!output.append_char('\n')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool read_entire_stdin(makocode::ByteBuffer& buffer) {
     const usize chunk = 4096u;
     usize total = 0u;
@@ -1018,7 +1176,7 @@ static void write_usage() {
     console_line(1, "Usage:");
     console_line(1, "  makocode encode   (reads raw bytes from stdin, emits bitstream to stdout)");
     console_line(1, "  makocode decode   (reads bitstream from stdin, emits payload to stdout)");
-    console_line(1, "  makocode selftest (runs an encode->decode loop and reports status)");
+    console_line(1, "  makocode test [--keep] (runs an encode->decode loop with random payload)");
 }
 
 static int command_encode() {
@@ -1040,56 +1198,13 @@ static int command_encode() {
         console_line(2, "encode: build failed");
         return 1;
     }
-    u64 bit_count = encoder.bit_writer.bit_size();
-    usize byte_count = encoder.bit_writer.byte_size();
-    u64 pixel_count = (byte_count + 2u) / 3u;
-    if (pixel_count == 0u) {
-        pixel_count = 1u;
+    makocode::ByteBuffer ppm_output;
+    if (!encode_to_ppm_buffer(encoder, ppm_output)) {
+        console_line(2, "encode: failed to format ppm");
+        return 1;
     }
-    u64 max_width = 64u;
-    u64 width = (pixel_count < max_width) ? pixel_count : max_width;
-    if (width == 0u) {
-        width = 1u;
-    }
-    u64 height = (pixel_count + width - 1u) / width;
-    u64 total_pixels = width * height;
-    char digits_bytes[32];
-    char digits_bits[32];
-    char digits_width[32];
-    char digits_height[32];
-    u64_to_ascii((u64)byte_count, digits_bytes, sizeof(digits_bytes));
-    u64_to_ascii(bit_count, digits_bits, sizeof(digits_bits));
-    u64_to_ascii(width, digits_width, sizeof(digits_width));
-    u64_to_ascii(height, digits_height, sizeof(digits_height));
-    console_line(1, "P3");
-    console_write(1, "# MAKOCODE_BYTES ");
-    console_write(1, digits_bytes);
-    console_write(1, "\n");
-    console_write(1, "# MAKOCODE_BITS ");
-    console_write(1, digits_bits);
-    console_write(1, "\n");
-    console_write(1, digits_width);
-    console_write(1, " ");
-    console_write(1, digits_height);
-    console_write(1, "\n");
-    console_line(1, "255");
-    const u8* raw = encoder.bit_writer.data();
-    usize byte_index = 0u;
-    for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
-        for (u64 channel = 0u; channel < 3u; ++channel) {
-            if (channel > 0u) {
-                console_write(1, " ");
-            }
-            u8 value = 0u;
-            if (byte_index < byte_count && raw) {
-                value = raw[byte_index];
-                ++byte_index;
-            }
-            char digits_channel[4];
-            u64_to_ascii((u64)value, digits_channel, sizeof(digits_channel));
-            console_write(1, digits_channel);
-        }
-        console_write(1, "\n");
+    if (ppm_output.size) {
+        write(1, ppm_output.data, ppm_output.size);
     }
     return 0;
 }
@@ -1117,11 +1232,23 @@ static int command_decode() {
     return 0;
 }
 
-static int command_selftest() {
-    const char* sample = "MakoCode prototype self-test payload.";
+static int command_test(bool keep_files) {
+    const char* payload_path = "payload.bin";
+    const char* encoded_path = "encoded.ppm";
+    const char* decoded_path = "decoded.bin";
+    if (!keep_files) {
+        remove_file_if_exists(payload_path);
+        remove_file_if_exists(encoded_path);
+        remove_file_if_exists(decoded_path);
+    }
+    makocode::ByteBuffer payload;
+    if (!makocode::generate_random_bytes(payload, 1024u, 0u)) {
+        console_line(2, "test: failed to generate random payload");
+        return 1;
+    }
     makocode::EncoderContext encoder;
-    if (!encoder.set_payload((const u8*)sample, ascii_length(sample))) {
-        console_line(2, "selftest: failed to allocate payload");
+    if (!encoder.set_payload(payload.data, payload.size)) {
+        console_line(2, "test: failed to set payload");
         return 1;
     }
     encoder.append_metadata_text(4u, "0");
@@ -1129,38 +1256,71 @@ static int command_selftest() {
     encoder.append_metadata_text(6u, "0");
     encoder.append_metadata_u64(7u, 1u);
     if (!encoder.build()) {
-        console_line(2, "selftest: encode failed");
+        console_line(2, "test: encode failed");
         return 1;
     }
     makocode::DecoderContext decoder;
     if (!decoder.parse(encoder.bit_writer.data(), encoder.bit_writer.bit_size())) {
-        console_line(2, "selftest: decode failed");
+        console_line(2, "test: decode failed");
         return 1;
     }
     if (!decoder.has_payload) {
-        console_line(2, "selftest: payload missing");
+        console_line(2, "test: payload missing");
         return 1;
     }
-    bool match = true;
-    if ((usize)ascii_length(sample) != decoder.payload.size) {
-        match = false;
-    } else {
-        for (usize i = 0; i < decoder.payload.size; ++i) {
-            if (decoder.payload.data[i] != (u8)sample[i]) {
+    bool match = (decoder.payload.size == payload.size);
+    if (match) {
+        for (usize i = 0; i < payload.size; ++i) {
+            if (decoder.payload.data[i] != payload.data[i]) {
                 match = false;
                 break;
             }
         }
     }
     if (!match) {
-        console_line(2, "selftest: round-trip mismatch");
+        console_line(2, "test: round-trip mismatch");
         return 1;
     }
-    char digits[32];
-    u64_to_ascii(encoder.bit_writer.bit_size(), digits, sizeof(digits));
-    console_write(1, "selftest: ok (bitstream bits = ");
-    console_write(1, digits);
+    if (keep_files) {
+        makocode::ByteBuffer ppm_output;
+        if (!encode_to_ppm_buffer(encoder, ppm_output)) {
+            console_line(2, "test: failed to format ppm");
+            return 1;
+        }
+        if (!write_buffer_to_file(payload_path, payload)) {
+            console_line(2, "test: failed to write payload.bin");
+            return 1;
+        }
+        if (!write_buffer_to_file(encoded_path, ppm_output)) {
+            console_line(2, "test: failed to write encoded.ppm");
+            return 1;
+        }
+        if (!write_buffer_to_file(decoded_path, decoder.payload)) {
+            console_line(2, "test: failed to write decoded.bin");
+            return 1;
+        }
+    } else {
+        remove_file_if_exists(payload_path);
+        remove_file_if_exists(encoded_path);
+        remove_file_if_exists(decoded_path);
+    }
+    char digits_bits[32];
+    char digits_bytes[32];
+    char digits_first[32];
+    u64_to_ascii(encoder.bit_writer.bit_size(), digits_bits, sizeof(digits_bits));
+    u64_to_ascii((u64)payload.size, digits_bytes, sizeof(digits_bytes));
+    u8 first_byte = payload.size ? payload.data[0] : 0u;
+    u64_to_ascii((u64)first_byte, digits_first, sizeof(digits_first));
+    console_write(1, "test: ok (payload bytes=");
+    console_write(1, digits_bytes);
+    console_write(1, ", bitstream bits=");
+    console_write(1, digits_bits);
+    console_write(1, ", first_byte=");
+    console_write(1, digits_first);
     console_line(1, ")");
+    if (keep_files) {
+        console_line(1, "test: artifacts saved to payload.bin, encoded.ppm, decoded.bin");
+    }
     return 0;
 }
 
@@ -1175,8 +1335,14 @@ int main(int argc, char** argv) {
     if (ascii_compare(argv[1], "decode") == 0) {
         return command_decode();
     }
-    if (ascii_compare(argv[1], "selftest") == 0) {
-        return command_selftest();
+    if (ascii_compare(argv[1], "test") == 0) {
+        bool keep = false;
+        if (argc >= 3) {
+            if (ascii_compare(argv[2], "keep") == 0 || ascii_compare(argv[2], "--keep") == 0) {
+                keep = true;
+            }
+        }
+        return command_test(keep);
     }
     write_usage();
     return 0;

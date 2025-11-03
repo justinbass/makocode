@@ -1,18 +1,15 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 
-.PHONY: all clean check
+.PHONY: all clean test
 
 all: makocode
 
 makocode: makocode.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test: test.cpp makocode
-	$(CXX) $(CXXFLAGS) test.cpp -o $@
-
-check: makocode test
-	./test
+test: makocode
+	./makocode test
 
 clean:
-	rm -f makocode test payload.bin encoded.ppm decoded.bin
+	rm -f makocode payload.bin encoded.ppm decoded.bin
