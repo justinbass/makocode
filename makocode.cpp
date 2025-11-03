@@ -66,6 +66,20 @@ static int ascii_compare(const char* a, const char* b) {
            ((unsigned char)(*a) > (unsigned char)(*b)) ?  1 : 0;
 }
 
+static bool ascii_starts_with(const char* text, const char* prefix) {
+    if (!text || !prefix) {
+        return false;
+    }
+    while (*prefix) {
+        if (*text != *prefix) {
+            return false;
+        }
+        ++text;
+        ++prefix;
+    }
+    return true;
+}
+
 static bool ascii_equals_token(const char* text, usize length, const char* keyword) {
     if (!text || !keyword) {
         return false;
@@ -813,6 +827,19 @@ struct DecoderContext {
 
 } // namespace makocode
 
+struct ImageMappingConfig {
+    u8  color_channels;
+    u8  shade_channels;
+    bool color_set;
+    bool shade_set;
+
+    ImageMappingConfig()
+        : color_channels(1u),
+          shade_channels(1u),
+          color_set(false),
+          shade_set(false) {}
+};
+
 static bool write_all_fd(int fd, const u8* data, usize length) {
     if (length == 0u) {
         return true;
@@ -867,6 +894,10 @@ struct PpmParserState {
     u64 bytes_value;
     bool has_bits;
     u64 bits_value;
+    bool has_color_channels;
+    u64 color_channels_value;
+    bool has_shade_channels;
+    u64 shade_channels_value;
 
     PpmParserState()
         : data(0),
@@ -875,7 +906,11 @@ struct PpmParserState {
           has_bytes(false),
           bytes_value(0u),
           has_bits(false),
-          bits_value(0u) {}
+          bits_value(0u),
+          has_color_channels(false),
+          color_channels_value(0u),
+          has_shade_channels(false),
+          shade_channels_value(0u) {}
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -890,8 +925,12 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     }
     const char bytes_tag[] = "MAKOCODE_BYTES";
     const char bits_tag[] = "MAKOCODE_BITS";
+    const char color_tag[] = "MAKOCODE_COLOR_CHANNELS";
+    const char shade_tag[] = "MAKOCODE_SHADE_CHANNELS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
     const usize bits_tag_len = (usize)sizeof(bits_tag) - 1u;
+    const usize color_tag_len = (usize)sizeof(color_tag) - 1u;
+    const usize shade_tag_len = (usize)sizeof(shade_tag) - 1u;
     if ((length - index) >= bytes_tag_len) {
         bool match = true;
         for (usize i = 0u; i < bytes_tag_len; ++i) {
@@ -953,6 +992,86 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                     state.bits_value = value;
                 }
             }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= color_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < color_tag_len; ++i) {
+            if (comment[index + i] != color_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += color_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_color_channels = true;
+                    state.color_channels_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= shade_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < shade_tag_len; ++i) {
+            if (comment[index + i] != shade_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += shade_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_shade_channels = true;
+                    state.shade_channels_value = value;
+                }
+            }
         }
     }
 }
@@ -1002,6 +1121,7 @@ static bool ppm_next_token(PpmParserState& state, const char** out_start, usize*
 }
 
 static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
+                             const ImageMappingConfig& overrides,
                              makocode::ByteBuffer& output,
                              u64& out_bit_count) {
     if (!input.data || input.size == 0u) {
@@ -1043,14 +1163,38 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
     if (pixel_count == 0u) {
         return false;
     }
-    if (pixel_count > (USIZE_MAX_VALUE / 3u)) {
+    u8 color_channels = overrides.color_channels;
+    if (overrides.color_set) {
+        color_channels = overrides.color_channels;
+    } else if (state.has_color_channels) {
+        if (state.color_channels_value == 0u || state.color_channels_value > 3u) {
+            return false;
+        }
+        color_channels = (u8)state.color_channels_value;
+    }
+    if (color_channels == 0u || color_channels > 3u) {
         return false;
     }
-    u64 component_count = pixel_count * 3u;
-    if (!output.ensure((usize)component_count)) {
+    u8 shade_channels = overrides.shade_channels;
+    if (overrides.shade_set) {
+        shade_channels = overrides.shade_channels;
+    } else if (state.has_shade_channels) {
+        if (state.shade_channels_value == 0u || state.shade_channels_value > 8u) {
+            return false;
+        }
+        shade_channels = (u8)state.shade_channels_value;
+    }
+    if (shade_channels == 0u || shade_channels > 8u) {
         return false;
     }
-    for (u64 component = 0u; component < component_count; ++component) {
+    u32 shade_levels = (u32)1u << shade_channels;
+    if ((256u % shade_levels) != 0u) {
+        return false;
+    }
+    u32 shade_step = 256u / shade_levels;
+    makocode::BitWriter writer;
+    u64 total_components = pixel_count * 3u;
+    for (u64 component = 0u; component < total_components; ++component) {
         if (!ppm_next_token(state, &token, &token_length)) {
             return false;
         }
@@ -1058,24 +1202,40 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
         if (!ascii_to_u64(token, token_length, &value) || value > 255u) {
             return false;
         }
-        output.data[component] = (u8)value;
-    }
-    output.size = (usize)component_count;
-    u64 byte_count = component_count;
-    if (state.has_bytes) {
-        byte_count = state.bytes_value;
-        if (byte_count > component_count) {
-            return false;
+        u8 channel_index = (u8)(component % 3u);
+        if (channel_index < color_channels) {
+            u32 sample = 0u;
+            if (value >= 255u) {
+                sample = shade_levels - 1u;
+            } else {
+                sample = (u32)(value / shade_step);
+                if (sample >= shade_levels) {
+                    sample = shade_levels - 1u;
+                }
+            }
+            if (!writer.write_bits(sample, shade_channels)) {
+                return false;
+            }
         }
     }
-    output.size = (usize)byte_count;
+    if (!writer.align_to_byte()) {
+        return false;
+    }
+    output.release();
+    if (!output.ensure(writer.byte_size())) {
+        return false;
+    }
+    for (usize i = 0; i < writer.byte_size(); ++i) {
+        output.data[i] = writer.data()[i];
+    }
+    output.size = writer.byte_size();
     if (state.has_bits) {
-        if (state.bits_value > (byte_count * 8u)) {
+        if (state.bits_value > (writer.bit_size())) {
             return false;
         }
         out_bit_count = state.bits_value;
     } else {
-        out_bit_count = byte_count * 8u;
+        out_bit_count = writer.bit_size();
     }
     return true;
 }
@@ -1085,13 +1245,28 @@ static bool buffer_append_number(makocode::ByteBuffer& buffer, u64 value) {
     u64_to_ascii(value, digits, sizeof(digits));
     return buffer.append_ascii(digits);
 }
-
 static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
+                                 const ImageMappingConfig& mapping,
                                  makocode::ByteBuffer& output) {
+    if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
+        return false;
+    }
+    if (mapping.shade_channels == 0u || mapping.shade_channels > 8u) {
+        return false;
+    }
+    u32 shade_levels = (u32)1u << mapping.shade_channels;
+    if ((256u % shade_levels) != 0u) {
+        return false;
+    }
+    u32 shade_step = 256u / shade_levels;
     output.release();
     u64 bit_count = encoder.bit_writer.bit_size();
     usize byte_count = encoder.bit_writer.byte_size();
-    u64 pixel_count = (byte_count + 2u) / 3u;
+    u64 total_samples = (mapping.shade_channels == 0u) ? 0u : (bit_count + (u64)mapping.shade_channels - 1u) / (u64)mapping.shade_channels;
+    if (total_samples == 0u) {
+        total_samples = 1u;
+    }
+    u64 pixel_count = (total_samples + (u64)mapping.color_channels - 1u) / (u64)mapping.color_channels;
     if (pixel_count == 0u) {
         pixel_count = 1u;
     }
@@ -1117,6 +1292,18 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     if (!buffer_append_number(output, bit_count) || !output.append_char('\n')) {
         return false;
     }
+    if (!output.append_ascii("# MAKOCODE_COLOR_CHANNELS ")) {
+        return false;
+    }
+    if (!buffer_append_number(output, (u64)mapping.color_channels) || !output.append_char('\n')) {
+        return false;
+    }
+    if (!output.append_ascii("# MAKOCODE_SHADE_CHANNELS ")) {
+        return false;
+    }
+    if (!buffer_append_number(output, (u64)mapping.shade_channels) || !output.append_char('\n')) {
+        return false;
+    }
     if (!buffer_append_number(output, width) || !output.append_char(' ')) {
         return false;
     }
@@ -1127,25 +1314,109 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
         return false;
     }
     const u8* raw = encoder.bit_writer.data();
-    usize byte_index = 0u;
+    u64 bit_cursor = 0u;
     for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
-        for (u64 channel = 0u; channel < 3u; ++channel) {
+        u8 channel_values[3] = {0u, 0u, 0u};
+        u8 replicate_value = 0u;
+        for (u8 channel = 0u; channel < mapping.color_channels; ++channel) {
+            u32 sample = 0u;
+            for (u8 bit = 0u; bit < mapping.shade_channels; ++bit) {
+                u8 bit_value = 0u;
+                if (bit_cursor < bit_count && raw) {
+                    usize byte_index = (usize)(bit_cursor >> 3u);
+                    u8 mask = (u8)(1u << (bit_cursor & 7u));
+                    bit_value = (raw[byte_index] & mask) ? 1u : 0u;
+                }
+                sample |= ((u32)bit_value) << bit;
+                ++bit_cursor;
+            }
+            if (sample >= shade_levels) {
+                sample = shade_levels - 1u;
+            }
+            u8 mapped_value = (sample == (shade_levels - 1u)) ? 255u : (u8)(sample * shade_step);
+            channel_values[channel] = mapped_value;
+            replicate_value = mapped_value;
+        }
+        for (u8 channel = mapping.color_channels; channel < 3u; ++channel) {
+            channel_values[channel] = replicate_value;
+        }
+        for (u8 channel = 0u; channel < 3u; ++channel) {
             if (channel) {
                 if (!output.append_char(' ')) {
                     return false;
                 }
             }
-            u8 value = 0u;
-            if (byte_index < byte_count && raw) {
-                value = raw[byte_index++];
-            }
-            if (!buffer_append_number(output, (u64)value)) {
+            if (!buffer_append_number(output, (u64)channel_values[channel])) {
                 return false;
             }
         }
         if (!output.append_char('\n')) {
             return false;
         }
+    }
+    return true;
+}
+
+static bool process_image_mapping_option(const char* arg,
+                                         ImageMappingConfig& config,
+                                         const char* command_name,
+                                         bool* handled) {
+    if (!handled) {
+        return false;
+    }
+    *handled = false;
+    if (!arg) {
+        return true;
+    }
+    const char color_prefix[] = "--color-channels=";
+    const char shade_prefix[] = "--shade-channels=";
+    if (ascii_starts_with(arg, color_prefix)) {
+        const char* value_text = arg + (sizeof(color_prefix) - 1u);
+        usize length = ascii_length(value_text);
+        if (length == 0u) {
+            console_write(2, command_name);
+            console_line(2, ": --color-channels requires a value");
+            return false;
+        }
+        u64 value = 0u;
+        if (!ascii_to_u64(value_text, length, &value)) {
+            console_write(2, command_name);
+            console_line(2, ": --color-channels value is not numeric");
+            return false;
+        }
+        if (value == 0u || value > 3u) {
+            console_write(2, command_name);
+            console_line(2, ": --color-channels must be between 1 and 3");
+            return false;
+        }
+        config.color_channels = (u8)value;
+        config.color_set = true;
+        *handled = true;
+        return true;
+    }
+    if (ascii_starts_with(arg, shade_prefix)) {
+        const char* value_text = arg + (sizeof(shade_prefix) - 1u);
+        usize length = ascii_length(value_text);
+        if (length == 0u) {
+            console_write(2, command_name);
+            console_line(2, ": --shade-channels requires a value");
+            return false;
+        }
+        u64 value = 0u;
+        if (!ascii_to_u64(value_text, length, &value)) {
+            console_write(2, command_name);
+            console_line(2, ": --shade-channels value is not numeric");
+            return false;
+        }
+        if (value == 0u || value > 8u) {
+            console_write(2, command_name);
+            console_line(2, ": --shade-channels must be between 1 and 8");
+            return false;
+        }
+        config.shade_channels = (u8)value;
+        config.shade_set = true;
+        *handled = true;
+        return true;
     }
     return true;
 }
@@ -1177,9 +1448,25 @@ static void write_usage() {
     console_line(1, "  makocode encode   (reads raw bytes from stdin, emits bitstream to stdout)");
     console_line(1, "  makocode decode   (reads bitstream from stdin, emits payload to stdout)");
     console_line(1, "  makocode test [--keep] (runs an encode->decode loop with random payload)");
+    console_line(1, "Options:");
+    console_line(1, "  --color-channels=N (1-3, default 1)");
+    console_line(1, "  --shade-channels=N (1-8, default 1 bit per channel)");
+    console_line(1, "  --keep (test only) preserve generated files");
 }
 
-static int command_encode() {
+static int command_encode(int arg_count, char** args) {
+    ImageMappingConfig mapping;
+    for (int i = 0; i < arg_count; ++i) {
+        bool handled = false;
+        if (!process_image_mapping_option(args[i], mapping, "encode", &handled)) {
+            return 1;
+        }
+        if (!handled) {
+            console_write(2, "encode: unknown option: ");
+            console_line(2, args[i]);
+            return 1;
+        }
+    }
     makocode::ByteBuffer input;
     if (!read_entire_stdin(input)) {
         console_line(2, "encode: failed to read stdin");
@@ -1199,7 +1486,7 @@ static int command_encode() {
         return 1;
     }
     makocode::ByteBuffer ppm_output;
-    if (!encode_to_ppm_buffer(encoder, ppm_output)) {
+    if (!encode_to_ppm_buffer(encoder, mapping, ppm_output)) {
         console_line(2, "encode: failed to format ppm");
         return 1;
     }
@@ -1209,7 +1496,19 @@ static int command_encode() {
     return 0;
 }
 
-static int command_decode() {
+static int command_decode(int arg_count, char** args) {
+    ImageMappingConfig mapping;
+    for (int i = 0; i < arg_count; ++i) {
+        bool handled = false;
+        if (!process_image_mapping_option(args[i], mapping, "decode", &handled)) {
+            return 1;
+        }
+        if (!handled) {
+            console_write(2, "decode: unknown option: ");
+            console_line(2, args[i]);
+            return 1;
+        }
+    }
     makocode::ByteBuffer ppm_stream;
     if (!read_entire_stdin(ppm_stream)) {
         console_line(2, "decode: failed to read stdin");
@@ -1217,7 +1516,7 @@ static int command_decode() {
     }
     makocode::ByteBuffer bitstream;
     u64 bit_count = 0u;
-    if (!ppm_to_bitstream(ppm_stream, bitstream, bit_count)) {
+    if (!ppm_to_bitstream(ppm_stream, mapping, bitstream, bit_count)) {
         console_line(2, "decode: invalid ppm input");
         return 1;
     }
@@ -1232,7 +1531,28 @@ static int command_decode() {
     return 0;
 }
 
-static int command_test(bool keep_files) {
+static int command_test(int arg_count, char** args) {
+    ImageMappingConfig mapping;
+    bool keep_files = false;
+    for (int i = 0; i < arg_count; ++i) {
+        const char* arg = args[i];
+        if (!arg) {
+            continue;
+        }
+        if (ascii_compare(arg, "--keep") == 0 || ascii_compare(arg, "keep") == 0) {
+            keep_files = true;
+            continue;
+        }
+        bool handled = false;
+        if (!process_image_mapping_option(arg, mapping, "test", &handled)) {
+            return 1;
+        }
+        if (!handled) {
+            console_write(2, "test: unknown option: ");
+            console_line(2, arg);
+            return 1;
+        }
+    }
     const char* payload_path = "payload.bin";
     const char* encoded_path = "encoded.ppm";
     const char* decoded_path = "decoded.bin";
@@ -1259,8 +1579,19 @@ static int command_test(bool keep_files) {
         console_line(2, "test: encode failed");
         return 1;
     }
+    makocode::ByteBuffer ppm_output;
+    if (!encode_to_ppm_buffer(encoder, mapping, ppm_output)) {
+        console_line(2, "test: failed to format ppm");
+        return 1;
+    }
+    makocode::ByteBuffer bitstream;
+    u64 bit_count = 0u;
+    if (!ppm_to_bitstream(ppm_output, mapping, bitstream, bit_count)) {
+        console_line(2, "test: failed to reconstruct bitstream from ppm");
+        return 1;
+    }
     makocode::DecoderContext decoder;
-    if (!decoder.parse(encoder.bit_writer.data(), encoder.bit_writer.bit_size())) {
+    if (!decoder.parse(bitstream.data, bit_count)) {
         console_line(2, "test: decode failed");
         return 1;
     }
@@ -1282,11 +1613,6 @@ static int command_test(bool keep_files) {
         return 1;
     }
     if (keep_files) {
-        makocode::ByteBuffer ppm_output;
-        if (!encode_to_ppm_buffer(encoder, ppm_output)) {
-            console_line(2, "test: failed to format ppm");
-            return 1;
-        }
         if (!write_buffer_to_file(payload_path, payload)) {
             console_line(2, "test: failed to write payload.bin");
             return 1;
@@ -1299,15 +1625,11 @@ static int command_test(bool keep_files) {
             console_line(2, "test: failed to write decoded.bin");
             return 1;
         }
-    } else {
-        remove_file_if_exists(payload_path);
-        remove_file_if_exists(encoded_path);
-        remove_file_if_exists(decoded_path);
     }
     char digits_bits[32];
     char digits_bytes[32];
     char digits_first[32];
-    u64_to_ascii(encoder.bit_writer.bit_size(), digits_bits, sizeof(digits_bits));
+    u64_to_ascii(bit_count, digits_bits, sizeof(digits_bits));
     u64_to_ascii((u64)payload.size, digits_bytes, sizeof(digits_bytes));
     u8 first_byte = payload.size ? payload.data[0] : 0u;
     u64_to_ascii((u64)first_byte, digits_first, sizeof(digits_first));
@@ -1330,19 +1652,13 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (ascii_compare(argv[1], "encode") == 0) {
-        return command_encode();
+        return command_encode(argc - 2, argv + 2);
     }
     if (ascii_compare(argv[1], "decode") == 0) {
-        return command_decode();
+        return command_decode(argc - 2, argv + 2);
     }
     if (ascii_compare(argv[1], "test") == 0) {
-        bool keep = false;
-        if (argc >= 3) {
-            if (ascii_compare(argv[2], "keep") == 0 || ascii_compare(argv[2], "--keep") == 0) {
-                keep = true;
-            }
-        }
-        return command_test(keep);
+        return command_test(argc - 2, argv + 2);
     }
     write_usage();
     return 0;
