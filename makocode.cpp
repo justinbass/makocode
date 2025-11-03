@@ -879,12 +879,6 @@ static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& b
     return write_bytes_to_file(path, buffer.data, buffer.size);
 }
 
-static void remove_file_if_exists(const char* path) {
-    if (!path) {
-        return;
-    }
-    unlink(path);
-}
 
 struct PpmParserState {
     const u8* data;
@@ -1553,14 +1547,6 @@ static int command_test(int arg_count, char** args) {
             return 1;
         }
     }
-    const char* payload_path = "payload.bin";
-    const char* encoded_path = "encoded.ppm";
-    const char* decoded_path = "decoded.bin";
-    if (!keep_files) {
-        remove_file_if_exists(payload_path);
-        remove_file_if_exists(encoded_path);
-        remove_file_if_exists(decoded_path);
-    }
     makocode::ByteBuffer payload;
     if (!makocode::generate_random_bytes(payload, 1024u, 0u)) {
         console_line(2, "test: failed to generate random payload");
@@ -1579,69 +1565,89 @@ static int command_test(int arg_count, char** args) {
         console_line(2, "test: encode failed");
         return 1;
     }
-    makocode::ByteBuffer ppm_output;
-    if (!encode_to_ppm_buffer(encoder, mapping, ppm_output)) {
-        console_line(2, "test: failed to format ppm");
-        return 1;
-    }
-    makocode::ByteBuffer bitstream;
-    u64 bit_count = 0u;
-    if (!ppm_to_bitstream(ppm_output, mapping, bitstream, bit_count)) {
-        console_line(2, "test: failed to reconstruct bitstream from ppm");
-        return 1;
-    }
-    makocode::DecoderContext decoder;
-    if (!decoder.parse(bitstream.data, bit_count)) {
-        console_line(2, "test: decode failed");
-        return 1;
-    }
-    if (!decoder.has_payload) {
-        console_line(2, "test: payload missing");
-        return 1;
-    }
-    bool match = (decoder.payload.size == payload.size);
-    if (match) {
-        for (usize i = 0; i < payload.size; ++i) {
-            if (decoder.payload.data[i] != payload.data[i]) {
-                match = false;
-                break;
+    static const u8 color_options[3] = {1u, 2u, 3u};
+    static const u8 shade_options[3] = {1u, 2u, 3u};
+    int total_runs = 0;
+    for (usize color_index = 0; color_index < 3u; ++color_index) {
+        for (usize shade_index = 0; shade_index < 3u; ++shade_index) {
+            ImageMappingConfig run_mapping = mapping;
+            if (!run_mapping.color_set) {
+                run_mapping.color_channels = color_options[color_index];
             }
+            if (!run_mapping.shade_set) {
+                run_mapping.shade_channels = shade_options[shade_index];
+            }
+            makocode::ByteBuffer ppm_output;
+            if (!encode_to_ppm_buffer(encoder, run_mapping, ppm_output)) {
+                console_line(2, "test: failed to format ppm");
+                return 1;
+            }
+            makocode::ByteBuffer bitstream;
+            u64 bit_count = 0u;
+            if (!ppm_to_bitstream(ppm_output, run_mapping, bitstream, bit_count)) {
+                console_line(2, "test: failed to reconstruct bitstream from ppm");
+                return 1;
+            }
+            makocode::DecoderContext decoder;
+            if (!decoder.parse(bitstream.data, bit_count)) {
+                console_line(2, "test: decode failed");
+                return 1;
+            }
+            if (!decoder.has_payload) {
+                console_line(2, "test: payload missing");
+                return 1;
+            }
+            bool match = (decoder.payload.size == payload.size);
+            if (match) {
+                for (usize i = 0; i < payload.size; ++i) {
+                    if (decoder.payload.data[i] != payload.data[i]) {
+                        match = false;
+                        break;
+                    }
+                }
+            }
+            if (!match) {
+                console_line(2, "test: round-trip mismatch");
+                return 1;
+            }
+            if (keep_files) {
+                char digits_color[8];
+                char digits_shade[8];
+                u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
+                u64_to_ascii((u64)run_mapping.shade_channels, digits_shade, sizeof(digits_shade));
+                makocode::ByteBuffer name_buffer;
+                name_buffer.append_ascii("payload_c");
+                name_buffer.append_ascii(digits_color);
+                name_buffer.append_ascii("_s");
+                name_buffer.append_ascii(digits_shade);
+                name_buffer.append_ascii(".bin");
+                write_buffer_to_file((const char*)name_buffer.data, payload);
+                name_buffer.release();
+                name_buffer.append_ascii("encoded_c");
+                name_buffer.append_ascii(digits_color);
+                name_buffer.append_ascii("_s");
+                name_buffer.append_ascii(digits_shade);
+                name_buffer.append_ascii(".ppm");
+                write_buffer_to_file((const char*)name_buffer.data, ppm_output);
+                name_buffer.release();
+                name_buffer.append_ascii("decoded_c");
+                name_buffer.append_ascii(digits_color);
+                name_buffer.append_ascii("_s");
+                name_buffer.append_ascii(digits_shade);
+                name_buffer.append_ascii(".bin");
+                write_buffer_to_file((const char*)name_buffer.data, decoder.payload);
+                name_buffer.release();
+            }
+            ++total_runs;
         }
     }
-    if (!match) {
-        console_line(2, "test: round-trip mismatch");
-        return 1;
-    }
+    char digits_runs[16];
+    u64_to_ascii((u64)total_runs, digits_runs, sizeof(digits_runs));
+    console_write(1, "test: completed runs=");
+    console_write(1, digits_runs);
+    console_line(1, "");
     if (keep_files) {
-        if (!write_buffer_to_file(payload_path, payload)) {
-            console_line(2, "test: failed to write payload.bin");
-            return 1;
-        }
-        if (!write_buffer_to_file(encoded_path, ppm_output)) {
-            console_line(2, "test: failed to write encoded.ppm");
-            return 1;
-        }
-        if (!write_buffer_to_file(decoded_path, decoder.payload)) {
-            console_line(2, "test: failed to write decoded.bin");
-            return 1;
-        }
-    }
-    char digits_bits[32];
-    char digits_bytes[32];
-    char digits_first[32];
-    u64_to_ascii(bit_count, digits_bits, sizeof(digits_bits));
-    u64_to_ascii((u64)payload.size, digits_bytes, sizeof(digits_bytes));
-    u8 first_byte = payload.size ? payload.data[0] : 0u;
-    u64_to_ascii((u64)first_byte, digits_first, sizeof(digits_first));
-    console_write(1, "test: ok (payload bytes=");
-    console_write(1, digits_bytes);
-    console_write(1, ", bitstream bits=");
-    console_write(1, digits_bits);
-    console_write(1, ", first_byte=");
-    console_write(1, digits_first);
-    console_line(1, ")");
-    if (keep_files) {
-        console_line(1, "test: artifacts saved to payload.bin, encoded.ppm, decoded.bin");
+        console_line(1, "test: artifacts saved for all combinations");
     }
     return 0;
 }
