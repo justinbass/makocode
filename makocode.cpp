@@ -1221,22 +1221,60 @@ static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
     if (!writer.align_to_byte()) {
         return false;
     }
-    output.release();
-    if (!output.ensure(writer.byte_size())) {
-        return false;
-    }
-    for (usize i = 0; i < writer.byte_size(); ++i) {
-        output.data[i] = writer.data()[i];
-    }
-    output.size = writer.byte_size();
+    makocode::BitReader reader;
+    reader.reset(writer.data(), writer.bit_size());
+    makocode::BitWriter payload_writer;
+    u64 payload_bits = 0u;
     if (state.has_bits) {
-        if (state.bits_value > (writer.bit_size())) {
+        payload_bits = state.bits_value;
+        if (payload_bits > writer.bit_size()) {
             return false;
         }
-        out_bit_count = state.bits_value;
+        for (u64 bit_index = 0u; bit_index < payload_bits; ++bit_index) {
+            u8 bit = reader.read_bit();
+            if (reader.failed) {
+                return false;
+            }
+            if (!payload_writer.write_bit(bit)) {
+                return false;
+            }
+        }
     } else {
-        out_bit_count = writer.bit_size();
+        if (writer.bit_size() < 64u) {
+            return false;
+        }
+        payload_bits = reader.read_bits(64u);
+        if (reader.failed) {
+            return false;
+        }
+        u64 available_bits = writer.bit_size() - 64u;
+        if (payload_bits > available_bits) {
+            return false;
+        }
+        for (u64 bit_index = 0u; bit_index < payload_bits; ++bit_index) {
+            u8 bit = reader.read_bit();
+            if (reader.failed) {
+                return false;
+            }
+            if (!payload_writer.write_bit(bit)) {
+                return false;
+            }
+        }
     }
+    if (payload_writer.failed) {
+        return false;
+    }
+    output.release();
+    usize payload_bytes = payload_writer.byte_size();
+    if (!output.ensure(payload_bytes)) {
+        return false;
+    }
+    const u8* payload_data = payload_writer.data();
+    for (usize i = 0u; i < payload_bytes; ++i) {
+        output.data[i] = payload_data ? payload_data[i] : 0u;
+    }
+    output.size = payload_bytes;
+    out_bit_count = payload_bits;
     return true;
 }
 
@@ -1260,8 +1298,27 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
         return false;
     }
     output.release();
-    u64 bit_count = encoder.bit_writer.bit_size();
-    usize byte_count = encoder.bit_writer.byte_size();
+    u64 payload_bit_count = encoder.bit_writer.bit_size();
+    usize payload_byte_count = encoder.bit_writer.byte_size();
+    makocode::BitWriter frame_writer;
+    if (!frame_writer.write_bits(payload_bit_count, 64u)) {
+        return false;
+    }
+    const u8* payload_raw = encoder.bit_writer.data();
+    for (usize byte_index = 0u; byte_index < payload_byte_count; ++byte_index) {
+        u8 byte = payload_raw ? payload_raw[byte_index] : 0u;
+        u64 bits_written = (u64)byte_index * 8u;
+        u64 bits_remaining = (payload_bit_count > bits_written) ? (payload_bit_count - bits_written) : 0u;
+        if (!bits_remaining) {
+            break;
+        }
+        usize chunk = (bits_remaining >= 8u) ? 8u : (usize)bits_remaining;
+        if (!frame_writer.write_bits((u64)byte, chunk)) {
+            return false;
+        }
+    }
+    u64 bit_count = frame_writer.bit_size();
+    const u8* raw = frame_writer.data();
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
     u64 total_samples = (shade_bits == 0u) ? 0u : (bit_count + (u64)shade_bits - 1u) / (u64)shade_bits;
     if (total_samples == 0u) {
@@ -1281,30 +1338,6 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     if (!output.append_ascii("P3\n")) {
         return false;
     }
-    if (!output.append_ascii("# MAKOCODE_BYTES ")) {
-        return false;
-    }
-    if (!buffer_append_number(output, (u64)byte_count) || !output.append_char('\n')) {
-        return false;
-    }
-    if (!output.append_ascii("# MAKOCODE_BITS ")) {
-        return false;
-    }
-    if (!buffer_append_number(output, bit_count) || !output.append_char('\n')) {
-        return false;
-    }
-    if (!output.append_ascii("# MAKOCODE_COLOR_CHANNELS ")) {
-        return false;
-    }
-    if (!buffer_append_number(output, (u64)mapping.color_channels) || !output.append_char('\n')) {
-        return false;
-    }
-    if (!output.append_ascii("# MAKOCODE_SHADE_CHANNELS ")) {
-        return false;
-    }
-    if (!buffer_append_number(output, (u64)shade_bits) || !output.append_char('\n')) {
-        return false;
-    }
     if (!buffer_append_number(output, width) || !output.append_char(' ')) {
         return false;
     }
@@ -1314,7 +1347,6 @@ static bool encode_to_ppm_buffer(const makocode::EncoderContext& encoder,
     if (!output.append_ascii("255\n")) {
         return false;
     }
-    const u8* raw = encoder.bit_writer.data();
     u64 bit_cursor = 0u;
     for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
         u32 samples_raw[3] = {0u, 0u, 0u};
