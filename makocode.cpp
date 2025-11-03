@@ -394,6 +394,244 @@ struct BitReader {
     }
 };
 
+static const u16 LZW_MAX_CODES = 4096u;
+static const u32 LZW_HASH_SIZE = 8192u;
+static const u16 LZW_INVALID_CODE = 0xFFFFu;
+
+static void lzw_hash_reset(u16* table) {
+    if (!table) {
+        return;
+    }
+    for (u32 i = 0u; i < LZW_HASH_SIZE; ++i) {
+        table[i] = LZW_INVALID_CODE;
+    }
+}
+
+static u16 lzw_hash_lookup(const u16* prefixes,
+                           const u8* values,
+                           const u16* table,
+                           u16 prefix_code,
+                           u8 value) {
+    if (!prefixes || !values || !table) {
+        return LZW_INVALID_CODE;
+    }
+    u32 mask = LZW_HASH_SIZE - 1u;
+    u32 hash = (((u32)prefix_code) << 8u) ^ (u32)value;
+    u32 slot = hash & mask;
+    for (u32 attempt = 0u; attempt < LZW_HASH_SIZE; ++attempt) {
+        u16 code = table[slot];
+        if (code == LZW_INVALID_CODE) {
+            return LZW_INVALID_CODE;
+        }
+        if (prefixes[code] == prefix_code && values[code] == value) {
+            return code;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return LZW_INVALID_CODE;
+}
+
+static bool lzw_hash_insert(u16* prefixes,
+                            u8* values,
+                            u16* table,
+                            u16 code,
+                            u16 prefix_code,
+                            u8 value) {
+    if (!prefixes || !values || !table) {
+        return false;
+    }
+    u32 mask = LZW_HASH_SIZE - 1u;
+    u32 hash = (((u32)prefix_code) << 8u) ^ (u32)value;
+    u32 slot = hash & mask;
+    for (u32 attempt = 0u; attempt < LZW_HASH_SIZE; ++attempt) {
+        if (table[slot] == LZW_INVALID_CODE) {
+            table[slot] = code;
+            prefixes[code] = prefix_code;
+            values[code] = value;
+            return true;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return false;
+}
+
+static bool lzw_compress(const u8* input, usize length, ByteBuffer& output) {
+    output.release();
+    if (!input || length == 0u) {
+        return true;
+    }
+    u16 prefixes[LZW_MAX_CODES];
+    u8  values[LZW_MAX_CODES];
+    for (u16 i = 0u; i < LZW_MAX_CODES; ++i) {
+        prefixes[i] = 0u;
+        values[i] = 0u;
+    }
+    u16 hash_table[LZW_HASH_SIZE];
+    lzw_hash_reset(hash_table);
+    BitWriter writer;
+    u16 dict_size = 256u;
+    u16 current = (u16)input[0];
+    for (usize index = 1u; index < length; ++index) {
+        u8 symbol = input[index];
+        u16 found = lzw_hash_lookup(prefixes, values, hash_table, current, symbol);
+        if (found != LZW_INVALID_CODE) {
+            current = found;
+        } else {
+            if (!writer.write_bits((u64)current, 12u)) {
+                return false;
+            }
+            if (dict_size < LZW_MAX_CODES) {
+                if (!lzw_hash_insert(prefixes, values, hash_table, dict_size, current, symbol)) {
+                    return false;
+                }
+                ++dict_size;
+            }
+            current = (u16)symbol;
+        }
+    }
+    if (!writer.write_bits((u64)current, 12u)) {
+        return false;
+    }
+    if (!writer.align_to_byte()) {
+        return false;
+    }
+    usize compressed_size = writer.byte_size();
+    if (!output.ensure(compressed_size)) {
+        return false;
+    }
+    const u8* data = writer.data();
+    for (usize i = 0u; i < compressed_size; ++i) {
+        output.data[i] = data ? data[i] : 0u;
+    }
+    output.size = compressed_size;
+    return true;
+}
+
+static bool lzw_emit_sequence(u16 code,
+                              const u16* prefixes,
+                              const u8* values,
+                              u8* scratch,
+                              usize scratch_capacity,
+                              u8* dest,
+                              usize dest_capacity,
+                              usize* dest_index,
+                              u8* out_first) {
+    if (!scratch || scratch_capacity == 0u || !dest || !dest_index) {
+        return false;
+    }
+    usize length = 0u;
+    u16 current = code;
+    while (true) {
+        if (current < 256u) {
+            if (length >= scratch_capacity) {
+                return false;
+            }
+            scratch[length++] = (u8)current;
+            break;
+        }
+        if (current >= LZW_MAX_CODES) {
+            return false;
+        }
+        if (length >= scratch_capacity) {
+            return false;
+        }
+        scratch[length++] = values[current];
+        current = prefixes[current];
+    }
+    if (length == 0u) {
+        return false;
+    }
+    u8 first = scratch[length - 1u];
+    if (out_first) {
+        *out_first = first;
+    }
+    for (usize i = 0u; i < length; ++i) {
+        if (*dest_index >= dest_capacity) {
+            return false;
+        }
+        dest[*dest_index] = scratch[length - 1u - i];
+        ++(*dest_index);
+    }
+    return true;
+}
+
+static bool lzw_decompress(const u8* input,
+                           usize length,
+                           ByteBuffer& output,
+                           usize expected_size) {
+    output.release();
+    if (expected_size == 0u) {
+        return true;
+    }
+    if (!input || length == 0u) {
+        return false;
+    }
+    if (!output.ensure(expected_size)) {
+        return false;
+    }
+    u16 prefixes[LZW_MAX_CODES];
+    u8  values[LZW_MAX_CODES];
+    for (u16 i = 0u; i < LZW_MAX_CODES; ++i) {
+        prefixes[i] = 0u;
+        values[i] = 0u;
+    }
+    BitReader reader;
+    reader.reset(input, length * 8u);
+    if (reader.bit_count < 12u) {
+        return false;
+    }
+    u16 dict_size = 256u;
+    u16 prev_code = (u16)reader.read_bits(12u);
+    if (reader.failed) {
+        return false;
+    }
+    u8* dest = output.data;
+    usize dest_index = 0u;
+    u8 scratch[LZW_MAX_CODES];
+    u8 prev_first = 0u;
+    if (!lzw_emit_sequence(prev_code, prefixes, values, scratch, LZW_MAX_CODES, dest, expected_size, &dest_index, &prev_first)) {
+        return false;
+    }
+    while (dest_index < expected_size) {
+        if ((reader.bit_count - reader.cursor) < 12u) {
+            break;
+        }
+        u16 code = (u16)reader.read_bits(12u);
+        if (reader.failed) {
+            return false;
+        }
+        u8 current_first = 0u;
+        if (code < dict_size) {
+            if (!lzw_emit_sequence(code, prefixes, values, scratch, LZW_MAX_CODES, dest, expected_size, &dest_index, &current_first)) {
+                return false;
+            }
+        } else if (code == dict_size) {
+            if (!lzw_emit_sequence(prev_code, prefixes, values, scratch, LZW_MAX_CODES, dest, expected_size, &dest_index, &current_first)) {
+                return false;
+            }
+            if (dest_index >= expected_size) {
+                return false;
+            }
+            dest[dest_index++] = prev_first;
+            current_first = prev_first;
+        } else {
+            return false;
+        }
+        if (dict_size < LZW_MAX_CODES) {
+            prefixes[dict_size] = prev_code;
+            values[dict_size] = current_first;
+            ++dict_size;
+        }
+        prev_code = code;
+        prev_first = current_first;
+    }
+    if (dest_index != expected_size) {
+        return false;
+    }
+    output.size = expected_size;
+    return true;
+}
+
 struct SectionAddresses {
     u64 entries[8];
 
@@ -676,12 +914,27 @@ struct EncoderContext {
     }
 
     bool encode_payload(BitWriter& writer) {
-        u64 byte_count = (u64)payload_bytes.size;
-        if (!writer.write_bits(byte_count, 64u)) {
+        u64 original_size = (u64)payload_bytes.size;
+        ByteBuffer compressed;
+        if (!lzw_compress(payload_bytes.data, payload_bytes.size, compressed)) {
             return false;
         }
-        for (usize i = 0; i < payload_bytes.size; ++i) {
-            if (!writer.write_bits((u64)payload_bytes.data[i], 8u)) {
+        u8 compression_mode = 1u;
+        const u8* source_data = compressed.data;
+        usize source_size = compressed.size;
+        u64 stored_size = (u64)source_size;
+        if (!writer.write_bits((u64)compression_mode, 8u)) {
+            return false;
+        }
+        if (!writer.write_bits(original_size, 64u)) {
+            return false;
+        }
+        if (!writer.write_bits(stored_size, 64u)) {
+            return false;
+        }
+        for (usize i = 0u; i < source_size; ++i) {
+            u8 byte = source_data ? source_data[i] : 0u;
+            if (!writer.write_bits((u64)byte, 8u)) {
                 return false;
             }
         }
@@ -812,13 +1065,51 @@ struct DecoderContext {
             }
         }
         reader.cursor = layout.addresses.entries[6];
+        u8 compression_mode = (u8)reader.read_bits(8u);
         u64 payload_size = reader.read_bits(64u);
-        if (!payload.ensure((usize)payload_size)) {
+        u64 stored_size = reader.read_bits(64u);
+        if (reader.failed) {
             return false;
         }
-        payload.size = (usize)payload_size;
-        for (usize i = 0; i < payload.size; ++i) {
-            payload.data[i] = (u8)reader.read_bits(8u);
+        if (compression_mode > 1u) {
+            return false;
+        }
+        if (payload_size > (u64)USIZE_MAX_VALUE || stored_size > (u64)USIZE_MAX_VALUE) {
+            return false;
+        }
+        usize stored_bytes = (usize)stored_size;
+        if (compression_mode == 0u) {
+            if (payload_size != stored_size) {
+                return false;
+            }
+            payload.release();
+            if (!payload.ensure((usize)payload_size)) {
+                return false;
+            }
+            payload.size = (usize)payload_size;
+            for (usize i = 0u; i < payload.size; ++i) {
+                payload.data[i] = (u8)reader.read_bits(8u);
+                if (reader.failed) {
+                    return false;
+                }
+            }
+        } else {
+            ByteBuffer compressed;
+            if (!compressed.ensure(stored_bytes)) {
+                return false;
+            }
+            for (usize i = 0u; i < stored_bytes; ++i) {
+                u8 byte = (u8)reader.read_bits(8u);
+                if (reader.failed) {
+                    return false;
+                }
+                if (!compressed.push(byte)) {
+                    return false;
+                }
+            }
+            if (!lzw_decompress(compressed.data, compressed.size, payload, (usize)payload_size)) {
+                return false;
+            }
         }
         has_payload = true;
         return true;
