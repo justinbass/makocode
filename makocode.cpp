@@ -790,7 +790,7 @@ struct PageFooterConfig {
     usize max_text_length;
     bool has_title;
     bool has_filename;
-    bool show_page_info;
+    bool display_page_info;
     bool display_filename;
 
     PageFooterConfig()
@@ -802,7 +802,7 @@ struct PageFooterConfig {
           max_text_length(0u),
           has_title(false),
           has_filename(false),
-          show_page_info(false),
+          display_page_info(true),
           display_filename(true) {}
 };
 
@@ -2543,6 +2543,7 @@ static void write_usage() {
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
     console_line(1, "  --input=FILE       (payload input path; required for encode)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
+    console_line(1, "  --no-page-count    (omit page index/total from footer text)");
     console_line(1, "  --title=TEXT       (optional footer title; letters, digits, common symbols)");
     console_line(1, "  --font-size=PX     (footer font scale in pixels; default 1)");
 }
@@ -2626,7 +2627,13 @@ static usize footer_compute_page_text_length(const PageFooterConfig& footer,
         length += footer.filename_length;
         need_separator = true;
     }
-    if (footer.show_page_info && page_count > 1u) {
+    if (footer.display_page_info) {
+        if (page_index == 0u) {
+            page_index = 1u;
+        }
+        if (page_count == 0u) {
+            page_count = 1u;
+        }
         if (need_separator) {
             length += 3u; // " | "
         }
@@ -2657,6 +2664,12 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
                                    u64 page_index,
                                    u64 page_count,
                                    makocode::ByteBuffer& buffer) {
+    if (page_index == 0u) {
+        page_index = 1u;
+    }
+    if (page_count == 0u) {
+        page_count = 1u;
+    }
     usize length = footer_compute_page_text_length(footer, page_index, page_count);
     if (!buffer.ensure(length + 1u)) {
         return false;
@@ -2685,7 +2698,7 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
         }
         need_separator = true;
     }
-    if (footer.show_page_info && page_count > 1u) {
+    if (footer.display_page_info) {
         if (need_separator) {
             buffer.data[cursor++] = ' ';
             buffer.data[cursor++] = '|';
@@ -2734,6 +2747,10 @@ static int command_encode(int arg_count, char** args) {
         if (!handled) {
             if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
                 footer_config.display_filename = false;
+                continue;
+            }
+            if (ascii_equals_token(arg, ascii_length(arg), "--no-page-count")) {
+                footer_config.display_page_info = false;
                 continue;
             }
             const char input_prefix[] = "--input=";
@@ -2866,86 +2883,43 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: unsupported color configuration");
         return 1;
     }
-    footer_config.show_page_info = false;
-    footer_config.max_text_length = footer_compute_max_text_length(footer_config, 1u);
     FooterLayout footer_layout;
-    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-        console_line(2, "encode: footer text does not fit within the page layout");
-        return 1;
-    }
-    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-        console_line(2, "encode: invalid footer configuration");
-        return 1;
-    }
-    u64 bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
-    if (bits_per_page == 0u) {
-        console_line(2, "encode: page capacity is zero");
-        return 1;
-    }
-    u64 page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
-    if (page_count == 0u) {
-        page_count = 1u;
-    }
-    if (page_count > 1u) {
-        footer_config.show_page_info = true;
-        u64 previous_page_count = 0u;
-        while (page_count > 1u && page_count != previous_page_count) {
-            footer_config.max_text_length = footer_compute_max_text_length(footer_config, page_count);
-            if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-                console_line(2, "encode: footer text does not fit within the page layout");
-                return 1;
-            }
-            data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-            if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-                console_line(2, "encode: invalid footer configuration");
-                return 1;
-            }
-            bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
-            if (bits_per_page == 0u) {
-                console_line(2, "encode: page capacity is zero");
-                return 1;
-            }
-            previous_page_count = page_count;
-            page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
-            if (page_count == 0u) {
-                page_count = 1u;
-            }
+    u32 data_height_pixels = height_pixels;
+    u64 bits_per_page = 0u;
+    u64 page_count = 1u;
+    const u32 MAX_FOOTER_LAYOUT_PASSES = 16u;
+    bool layout_converged = false;
+    for (u32 pass = 0u; pass < MAX_FOOTER_LAYOUT_PASSES; ++pass) {
+        u64 text_page_count = footer_config.display_page_info ? page_count : 1u;
+        footer_config.max_text_length = footer_compute_max_text_length(footer_config, text_page_count);
+        if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+            console_line(2, "encode: footer text does not fit within the page layout");
+            return 1;
         }
-        if (page_count <= 1u) {
-            footer_config.show_page_info = false;
-            footer_config.max_text_length = footer_compute_max_text_length(footer_config, 1u);
-            if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-                console_line(2, "encode: footer text does not fit within the page layout");
-                return 1;
-            }
-            data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-            if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-                console_line(2, "encode: invalid footer configuration");
-                return 1;
-            }
-            bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
-            if (bits_per_page == 0u) {
-                console_line(2, "encode: page capacity is zero");
-                return 1;
-            }
-        } else {
-            footer_config.max_text_length = footer_compute_max_text_length(footer_config, page_count);
-            if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-                console_line(2, "encode: footer text does not fit within the page layout");
-                return 1;
-            }
-            data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-            if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-                console_line(2, "encode: invalid footer configuration");
-                return 1;
-            }
-            bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
-            if (bits_per_page == 0u) {
-                console_line(2, "encode: page capacity is zero");
-                return 1;
-            }
+        data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+        if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+            console_line(2, "encode: invalid footer configuration");
+            return 1;
         }
+        bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+        if (bits_per_page == 0u) {
+            console_line(2, "encode: page capacity is zero");
+            return 1;
+        }
+        u64 new_page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
+        if (new_page_count == 0u) {
+            new_page_count = 1u;
+        }
+        if (!footer_config.display_page_info || new_page_count == page_count) {
+            page_count = new_page_count;
+            layout_converged = true;
+            break;
+        }
+        page_count = new_page_count;
+    }
+    if (!layout_converged) {
+        console_line(2, "encode: footer layout did not converge");
+        return 1;
     }
     char timestamp_name[32];
     if (!utc_timestamp_string(timestamp_name, sizeof(timestamp_name))) {

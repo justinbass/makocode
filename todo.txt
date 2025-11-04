@@ -1,5 +1,4 @@
 TODO:
-- Optionally print filename, page count, other settings, date
 - ECC (Reed Solomon?)
 - Fiducial data (if needed), test should create distortions
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8
