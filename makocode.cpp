@@ -37,6 +37,10 @@ extern "C" int   close(int fd);
 extern "C" int   creat(const char* path, unsigned int mode);
 extern "C" int   unlink(const char* path);
 extern "C" int   open(const char* path, int flags, ...);
+struct tm;
+extern "C" long  time(long* tloc);
+extern "C" struct tm* gmtime(const long* timep);
+extern "C" unsigned long strftime(char* s, unsigned long max, const char* format, const struct tm* tm);
 
 #ifndef O_RDONLY
 #define O_RDONLY 0
@@ -155,6 +159,27 @@ static void u64_to_ascii(u64 value, char* buffer, usize capacity) {
         buffer[i] = temp[count - 1u - i];
     }
     buffer[count] = '\0';
+}
+
+static bool utc_timestamp_string(char* buffer, usize capacity) {
+    if (!buffer || capacity == 0u) {
+        return false;
+    }
+    long seconds = time((long*)0);
+    if (seconds < 0L) {
+        return false;
+    }
+    struct tm* utc = gmtime(&seconds);
+    if (!utc) {
+        return false;
+    }
+    static const char format[] = "%Y%m%dT%H%M%SZ";
+    unsigned long written = strftime(buffer, (unsigned long)capacity, format, utc);
+    if (!written || written >= capacity) {
+        return false;
+    }
+    buffer[written] = '\0';
+    return true;
 }
 
 namespace makocode {
@@ -2040,6 +2065,41 @@ static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
     return buffer.append_ascii(digits);
 }
 
+static bool build_page_filename(makocode::ByteBuffer& buffer,
+                                const char* timestamp,
+                                u64 page_index,
+                                u64 page_count) {
+    if (!timestamp || page_index == 0u) {
+        return false;
+    }
+    buffer.release();
+    if (!buffer.append_ascii(timestamp)) {
+        return false;
+    }
+    if (page_count > 1u) {
+        if (!buffer.append_ascii("_page_")) {
+            return false;
+        }
+        u32 width = 4u;
+        u64 count = page_count;
+        u32 digits = 1u;
+        while (count >= 10u) {
+            count /= 10u;
+            ++digits;
+        }
+        if (digits > width) {
+            width = digits;
+        }
+        if (!buffer_append_zero_padded(buffer, page_index, width)) {
+            return false;
+        }
+    }
+    if (!buffer.append_ascii(".ppm") || !buffer.append_char('\0')) {
+        return false;
+    }
+    return true;
+}
+
 static bool build_frame_bits(const makocode::EncoderContext& encoder,
                              const ImageMappingConfig& mapping,
                              makocode::ByteBuffer& frame_bits,
@@ -2514,6 +2574,11 @@ static int command_encode(int arg_count, char** args) {
     if (page_count == 0u) {
         page_count = 1u;
     }
+    char timestamp_name[32];
+    if (!utc_timestamp_string(timestamp_name, sizeof(timestamp_name))) {
+        console_line(2, "encode: failed to construct timestamped filename");
+        return 1;
+    }
     if (page_count == 1u) {
         makocode::ByteBuffer page_output;
         if (!encode_page_to_ppm(mapping,
@@ -2532,9 +2597,18 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to format ppm");
             return 1;
         }
-        if (page_output.size) {
-            write(1, page_output.data, page_output.size);
+        makocode::ByteBuffer output_name;
+        if (!build_page_filename(output_name, timestamp_name, 1u, 1u)) {
+            console_line(2, "encode: failed to build output filename");
+            return 1;
         }
+        if (!write_buffer_to_file((const char*)output_name.data, page_output)) {
+            console_line(2, "encode: failed to write ppm file");
+            return 1;
+        }
+        console_write(1, "encode: wrote 1 page (");
+        console_write(1, (const char*)output_name.data);
+        console_line(1, ")");
     } else {
         makocode::ByteBuffer name_buffer;
         for (u64 page = 0u; page < page_count; ++page) {
@@ -2556,17 +2630,8 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
             }
-            name_buffer.release();
-            if (!name_buffer.append_ascii("page_")) {
+            if (!build_page_filename(name_buffer, timestamp_name, page + 1u, page_count)) {
                 console_line(2, "encode: failed to build filename");
-                return 1;
-            }
-            if (!buffer_append_zero_padded(name_buffer, page + 1u, 4u)) {
-                console_line(2, "encode: failed to build filename");
-                return 1;
-            }
-            if (!name_buffer.append_ascii(".ppm") || !name_buffer.append_char('\0')) {
-                console_line(2, "encode: failed to finalize filename");
                 return 1;
             }
             if (!write_buffer_to_file((const char*)name_buffer.data, page_output)) {
@@ -2574,11 +2639,18 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
         }
+        makocode::ByteBuffer sample_name;
+        if (!build_page_filename(sample_name, timestamp_name, 1u, page_count)) {
+            console_line(2, "encode: failed to summarize filenames");
+            return 1;
+        }
         char digits[32];
         u64_to_ascii(page_count, digits, sizeof(digits));
         console_write(1, "encode: wrote ");
         console_write(1, digits);
-        console_line(1, " pages (page_0001.ppm ...)");
+        console_write(1, " pages (");
+        console_write(1, (const char*)sample_name.data);
+        console_line(1, " ...)");
     }
     return 0;
 }
