@@ -784,19 +784,29 @@ static const u32 FOOTER_BASE_GLYPH_HEIGHT = 7u;
 struct PageFooterConfig {
     const char* title_text;
     usize title_length;
-    u32 font_scale;
+    const char* filename_text;
+    usize filename_length;
+    u32 font_size;
+    usize max_text_length;
     bool has_title;
+    bool has_filename;
+    bool show_page_info;
 
     PageFooterConfig()
         : title_text(0),
           title_length(0u),
-          font_scale(1u),
-          has_title(false) {}
+          filename_text(0),
+          filename_length(0u),
+          font_size(1u),
+          max_text_length(0u),
+          has_title(false),
+          has_filename(false),
+          show_page_info(false) {}
 };
 
 struct FooterLayout {
-    bool has_title;
-    u32 font_scale;
+    bool has_text;
+    u32 font_size;
     u32 glyph_width_pixels;
     u32 glyph_height_pixels;
     u32 char_spacing_pixels;
@@ -804,11 +814,11 @@ struct FooterLayout {
     u32 data_height_pixels;
     u32 text_top_row;
     u32 text_left_column;
-    u32 title_pixel_width;
+    u32 text_pixel_width;
 
     FooterLayout()
-        : has_title(false),
-          font_scale(0u),
+        : has_text(false),
+          font_size(0u),
           glyph_width_pixels(0u),
           glyph_height_pixels(0u),
           char_spacing_pixels(0u),
@@ -816,7 +826,7 @@ struct FooterLayout {
           data_height_pixels(0u),
           text_top_row(0u),
           text_left_column(0u),
-          title_pixel_width(0u) {}
+          text_pixel_width(0u) {}
 };
 
 struct GlyphPattern {
@@ -946,34 +956,34 @@ static bool compute_footer_layout(u32 page_width_pixels,
                                   const PageFooterConfig& footer,
                                   FooterLayout& layout) {
     layout = FooterLayout();
-    layout.font_scale = footer.font_scale;
+    layout.font_size = footer.font_size;
     layout.data_height_pixels = page_height_pixels;
-    if (!footer.has_title || footer.title_length == 0u) {
+    if (footer.max_text_length == 0u) {
         return true;
     }
-    if (footer.font_scale == 0u) {
+    if (footer.font_size == 0u) {
         return false;
     }
     if (page_width_pixels == 0u || page_height_pixels == 0u) {
         return false;
     }
-    if (footer.title_length > (USIZE_MAX_VALUE / FOOTER_BASE_GLYPH_WIDTH)) {
+    if (footer.max_text_length > (USIZE_MAX_VALUE / FOOTER_BASE_GLYPH_WIDTH)) {
         return false;
     }
-    if (footer.font_scale > 2048u) {
+    if (footer.font_size > 2048u) {
         return false;
     }
-    u32 scale = footer.font_scale;
+    u32 scale = footer.font_size;
     u64 glyph_width_pixels = (u64)FOOTER_BASE_GLYPH_WIDTH * (u64)scale;
     u64 glyph_height_pixels = (u64)FOOTER_BASE_GLYPH_HEIGHT * (u64)scale;
     u64 char_spacing_pixels = (u64)scale;
     u64 top_margin_pixels = (u64)scale;
     u64 bottom_margin_pixels = (u64)scale;
-    u64 title_pixel_width = (u64)footer.title_length * glyph_width_pixels;
-    if (footer.title_length > 1u) {
-        title_pixel_width += (u64)(footer.title_length - 1u) * char_spacing_pixels;
+    u64 text_pixel_width = (u64)footer.max_text_length * glyph_width_pixels;
+    if (footer.max_text_length > 1u) {
+        text_pixel_width += (u64)(footer.max_text_length - 1u) * char_spacing_pixels;
     }
-    if (title_pixel_width > (u64)page_width_pixels) {
+    if (text_pixel_width > (u64)page_width_pixels) {
         return false;
     }
     u64 footer_height_pixels = glyph_height_pixels + top_margin_pixels + bottom_margin_pixels;
@@ -985,14 +995,14 @@ static bool compute_footer_layout(u32 page_width_pixels,
     if (data_height == 0u) {
         return false;
     }
-    u32 title_width_u32 = (u32)title_pixel_width;
+    u32 text_width_u32 = (u32)text_pixel_width;
     u32 text_left = 0u;
-    if (page_width_pixels > title_width_u32) {
-        text_left = (page_width_pixels - title_width_u32) / 2u;
+    if (page_width_pixels > text_width_u32) {
+        text_left = (page_width_pixels - text_width_u32) / 2u;
     }
     u32 text_top = data_height + (u32)top_margin_pixels;
-    layout.has_title = true;
-    layout.font_scale = scale;
+    layout.has_text = true;
+    layout.font_size = scale;
     layout.glyph_width_pixels = (u32)glyph_width_pixels;
     layout.glyph_height_pixels = (u32)glyph_height_pixels;
     layout.char_spacing_pixels = (u32)char_spacing_pixels;
@@ -1000,27 +1010,25 @@ static bool compute_footer_layout(u32 page_width_pixels,
     layout.data_height_pixels = data_height;
     layout.text_top_row = text_top;
     layout.text_left_column = text_left;
-    layout.title_pixel_width = title_width_u32;
+    layout.text_pixel_width = text_width_u32;
     return true;
 }
 
-static bool footer_is_text_pixel(const PageFooterConfig& footer,
+static bool footer_is_text_pixel(const char* text,
+                                 usize text_length,
                                  const FooterLayout& layout,
                                  u32 column,
                                  u32 row) {
-    if (!footer.has_title || !layout.has_title) {
+    if (!text || text_length == 0u || !layout.has_text) {
         return false;
     }
-    if (!footer.title_text) {
-        return false;
-    }
-    if (layout.font_scale == 0u) {
+    if (layout.font_size == 0u) {
         return false;
     }
     if (row < layout.text_top_row || row >= (layout.text_top_row + layout.glyph_height_pixels)) {
         return false;
     }
-    if (column < layout.text_left_column || column >= (layout.text_left_column + layout.title_pixel_width)) {
+    if (column < layout.text_left_column || column >= (layout.text_left_column + layout.text_pixel_width)) {
         return false;
     }
     u32 char_span = layout.glyph_width_pixels + layout.char_spacing_pixels;
@@ -1029,7 +1037,7 @@ static bool footer_is_text_pixel(const PageFooterConfig& footer,
     }
     u32 local_x = column - layout.text_left_column;
     u32 glyph_index = local_x / char_span;
-    if (glyph_index >= footer.title_length) {
+    if (glyph_index >= text_length) {
         return false;
     }
     u32 within_char = local_x - glyph_index * char_span;
@@ -1037,12 +1045,12 @@ static bool footer_is_text_pixel(const PageFooterConfig& footer,
         return false;
     }
     u32 local_y = row - layout.text_top_row;
-    u32 glyph_x = within_char / layout.font_scale;
-    u32 glyph_y = local_y / layout.font_scale;
+    u32 glyph_x = within_char / layout.font_size;
+    u32 glyph_y = local_y / layout.font_size;
     if (glyph_x >= FOOTER_BASE_GLYPH_WIDTH || glyph_y >= FOOTER_BASE_GLYPH_HEIGHT) {
         return false;
     }
-    const GlyphPattern* glyph = footer_lookup_glyph(footer.title_text[glyph_index]);
+    const GlyphPattern* glyph = footer_lookup_glyph(text[glyph_index]);
     if (!glyph) {
         return false;
     }
@@ -1284,8 +1292,8 @@ struct PpmParserState {
     u64 page_bits_value;
     bool has_footer_rows;
     u64 footer_rows_value;
-    bool has_title_font;
-    u64 title_font_value;
+    bool has_font_size;
+    u64 font_size_value;
 
     PpmParserState()
         : data(0),
@@ -1309,8 +1317,8 @@ struct PpmParserState {
           page_bits_value(0u),
           has_footer_rows(false),
           footer_rows_value(0u),
-          has_title_font(false),
-          title_font_value(0u) {}
+          has_font_size(false),
+          font_size_value(0u) {}
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -1693,38 +1701,54 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char title_font_tag[] = "MAKOCODE_TITLE_FONT";
-    const usize title_font_tag_len = (usize)sizeof(title_font_tag) - 1u;
-    if ((length - index) >= title_font_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < title_font_tag_len; ++i) {
-            if (comment[index + i] != title_font_tag[i]) {
-                match = false;
+    const char font_size_tag[] = "MAKOCODE_FONT_SIZE";
+    const usize font_size_tag_len = (usize)sizeof(font_size_tag) - 1u;
+    const char legacy_font_tag[] = "MAKOCODE_TITLE_FONT";
+    const usize legacy_font_tag_len = (usize)sizeof(legacy_font_tag) - 1u;
+    bool matched_font_tag = false;
+    if ((length - index) >= font_size_tag_len) {
+        matched_font_tag = true;
+        for (usize i = 0u; i < font_size_tag_len; ++i) {
+            if (comment[index + i] != font_size_tag[i]) {
+                matched_font_tag = false;
                 break;
             }
         }
-        if (match) {
-            index += title_font_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
+        if (matched_font_tag) {
+            index += font_size_tag_len;
+        }
+    }
+    if (!matched_font_tag && (length - index) >= legacy_font_tag_len) {
+        matched_font_tag = true;
+        for (usize i = 0u; i < legacy_font_tag_len; ++i) {
+            if (comment[index + i] != legacy_font_tag[i]) {
+                matched_font_tag = false;
+                break;
             }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
+        }
+        if (matched_font_tag) {
+            index += legacy_font_tag_len;
+        }
+    }
+    if (matched_font_tag) {
+        while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+            ++index;
+        }
+        usize number_start = index;
+        while (index < length) {
+            char c = comment[index];
+            if (c < '0' || c > '9') {
+                break;
             }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_title_font = true;
-                    state.title_font_value = value;
-                }
+            ++index;
+        }
+        usize number_length = index - number_start;
+        if (number_length) {
+            u64 value = 0u;
+            if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                state.has_font_size = true;
+                state.font_size_value = value;
             }
-            return;
         }
     }
 }
@@ -2003,12 +2027,12 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_footer_rows = true;
         dest.footer_rows_value = src.footer_rows_value;
     }
-    if (src.has_title_font) {
-        if (dest.has_title_font && dest.title_font_value != src.title_font_value) {
+    if (src.has_font_size) {
+        if (dest.has_font_size && dest.font_size_value != src.font_size_value) {
             return false;
         }
-        dest.has_title_font = true;
-        dest.title_font_value = src.title_font_value;
+        dest.has_font_size = true;
+        dest.font_size_value = src.font_size_value;
     }
     return true;
 }
@@ -2234,7 +2258,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u64 page_count,
                                u64 bits_per_page,
                                u64 payload_bit_count,
-                               const PageFooterConfig& footer_config,
+                               const char* footer_text,
+                               usize footer_length,
                                const FooterLayout& footer_layout,
                                makocode::ByteBuffer& output) {
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
@@ -2252,11 +2277,12 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (total_pixels == 0u) {
         return false;
     }
-    if (footer_config.has_title && !footer_layout.has_title) {
+    bool has_footer_text = (footer_text && footer_length > 0u);
+    if (has_footer_text && !footer_layout.has_text) {
         return false;
     }
     u32 data_height_pixels = height_pixels;
-    if (footer_layout.has_title) {
+    if (footer_layout.has_text) {
         if (footer_layout.data_height_pixels == 0u || footer_layout.data_height_pixels > height_pixels) {
             return false;
         }
@@ -2305,8 +2331,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
             return false;
         }
-        if (footer_config.has_title) {
-            if (!append_comment_number(output, "MAKOCODE_TITLE_FONT", (u64)footer_layout.font_scale)) {
+        if (footer_layout.has_text) {
+            if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", (u64)footer_layout.font_size)) {
                 return false;
             }
         }
@@ -2349,7 +2375,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 rgb[0] = footer_background_rgb[0];
                 rgb[1] = footer_background_rgb[1];
                 rgb[2] = footer_background_rgb[2];
-                if (footer_is_text_pixel(footer_config, footer_layout, column, row)) {
+                if (has_footer_text && footer_is_text_pixel(footer_text, footer_length, footer_layout, column, row)) {
                     rgb[0] = footer_text_rgb[0];
                     rgb[1] = footer_text_rgb[1];
                     rgb[2] = footer_text_rgb[2];
@@ -2506,15 +2532,16 @@ static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
 static void write_usage() {
     console_line(1, "MakoCode CLI");
     console_line(1, "Usage:");
-    console_line(1, "  makocode encode [options]   (reads raw bytes from stdin; emits PPM pages)");
+    console_line(1, "  makocode encode [options]   (reads payload from file; emits PPM pages)");
     console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
+    console_line(1, "  --input=FILE       (payload input path; required for encode)");
     console_line(1, "  --title=TEXT       (optional footer title; letters, digits, common symbols)");
-    console_line(1, "  --title-font=PX    (footer font scale in pixels; default 1)");
+    console_line(1, "  --font-size=PX     (footer font scale in pixels; default 1)");
 }
 
 static bool title_char_is_allowed(char c) {
@@ -2565,10 +2592,128 @@ static bool title_char_is_allowed(char c) {
     return false;
 }
 
+static usize decimal_digit_count(u64 value) {
+    if (value == 0u) {
+        return 1u;
+    }
+    usize digits = 0u;
+    while (value) {
+        value /= 10u;
+        ++digits;
+    }
+    return digits ? digits : 1u;
+}
+
+static usize footer_compute_page_text_length(const PageFooterConfig& footer,
+                                             u64 page_index,
+                                             u64 page_count) {
+    usize length = 0u;
+    bool need_separator = false;
+    if (footer.has_filename && footer.filename_text && footer.filename_length) {
+        length += footer.filename_length;
+        need_separator = true;
+    }
+    if (footer.has_title && footer.title_text && footer.title_length) {
+        if (need_separator) {
+            length += 3u; // " | "
+        }
+        length += footer.title_length;
+        need_separator = true;
+    }
+    if (footer.show_page_info && page_count > 1u) {
+        if (need_separator) {
+            length += 3u; // " | "
+        }
+        length += 5u; // "Page "
+        length += decimal_digit_count(page_index);
+        length += 1u; // '/'
+        length += decimal_digit_count(page_count);
+    }
+    return length;
+}
+
+static usize footer_compute_max_text_length(const PageFooterConfig& footer,
+                                            u64 page_count) {
+    if (page_count == 0u) {
+        page_count = 1u;
+    }
+    usize max_length = 0u;
+    for (u64 index = 1u; index <= page_count; ++index) {
+        usize length = footer_compute_page_text_length(footer, index, page_count);
+        if (length > max_length) {
+            max_length = length;
+        }
+    }
+    return max_length;
+}
+
+static bool footer_build_page_text(const PageFooterConfig& footer,
+                                   u64 page_index,
+                                   u64 page_count,
+                                   makocode::ByteBuffer& buffer) {
+    usize length = footer_compute_page_text_length(footer, page_index, page_count);
+    if (!buffer.ensure(length + 1u)) {
+        return false;
+    }
+    usize cursor = 0u;
+    bool need_separator = false;
+    if (footer.has_filename && footer.filename_text && footer.filename_length) {
+        for (usize i = 0u; i < footer.filename_length; ++i) {
+            buffer.data[cursor++] = (u8)footer.filename_text[i];
+        }
+        need_separator = true;
+    }
+    if (footer.has_title && footer.title_text && footer.title_length) {
+        if (need_separator) {
+            buffer.data[cursor++] = ' ';
+            buffer.data[cursor++] = '|';
+            buffer.data[cursor++] = ' ';
+        }
+        for (usize i = 0u; i < footer.title_length; ++i) {
+            buffer.data[cursor++] = (u8)footer.title_text[i];
+        }
+        need_separator = true;
+    }
+    if (footer.show_page_info && page_count > 1u) {
+        if (need_separator) {
+            buffer.data[cursor++] = ' ';
+            buffer.data[cursor++] = '|';
+            buffer.data[cursor++] = ' ';
+        }
+        buffer.data[cursor++] = 'P';
+        buffer.data[cursor++] = 'a';
+        buffer.data[cursor++] = 'g';
+        buffer.data[cursor++] = 'e';
+        buffer.data[cursor++] = ' ';
+        char number[32];
+        u64_to_ascii(page_index, number, sizeof(number));
+        usize digits = 0u;
+        while (number[digits]) {
+            buffer.data[cursor++] = (u8)number[digits++];
+        }
+        buffer.data[cursor++] = '/';
+        u64_to_ascii(page_count, number, sizeof(number));
+        digits = 0u;
+        while (number[digits]) {
+            buffer.data[cursor++] = (u8)number[digits++];
+        }
+    }
+    if (cursor != length) {
+        buffer.size = cursor;
+        buffer.data[cursor] = 0u;
+        return false;
+    }
+    buffer.data[length] = 0u;
+    buffer.size = length;
+    return true;
+}
+
 static int command_encode(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
+    const char* input_path = 0;
     makocode::ByteBuffer title_buffer;
+    makocode::ByteBuffer filename_buffer;
     for (int i = 0; i < arg_count; ++i) {
         const char* arg = args[i];
         bool handled = false;
@@ -2576,6 +2721,16 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
         if (!handled) {
+            const char input_prefix[] = "--input=";
+            if (ascii_starts_with(arg, input_prefix)) {
+                const char* value_text = arg + (sizeof(input_prefix) - 1u);
+                if (!value_text || value_text[0] == '\0') {
+                    console_line(2, "encode: --input requires a file path");
+                    return 1;
+                }
+                input_path = value_text;
+                continue;
+            }
             const char title_prefix[] = "--title=";
             if (ascii_starts_with(arg, title_prefix)) {
                 const char* value_text = arg + (sizeof(title_prefix) - 1u);
@@ -2603,20 +2758,20 @@ static int command_encode(int arg_count, char** args) {
                 footer_config.title_text = (const char*)title_buffer.data;
                 continue;
             }
-            const char font_prefix[] = "--title-font=";
+            const char font_prefix[] = "--font-size=";
             if (ascii_starts_with(arg, font_prefix)) {
                 const char* value_text = arg + (sizeof(font_prefix) - 1u);
                 usize length = ascii_length(value_text);
                 if (length == 0u) {
-                    console_line(2, "encode: --title-font requires a positive integer value");
+                    console_line(2, "encode: --font-size requires a positive integer value");
                     return 1;
                 }
                 u64 value = 0u;
                 if (!ascii_to_u64(value_text, length, &value) || value == 0u || value > 2048u) {
-                    console_line(2, "encode: --title-font must be between 1 and 2048");
+                    console_line(2, "encode: --font-size must be between 1 and 2048");
                     return 1;
                 }
-                footer_config.font_scale = (u32)value;
+                footer_config.font_size = (u32)value;
                 continue;
             }
             console_write(2, "encode: unknown option: ");
@@ -2624,13 +2779,52 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
     }
-    makocode::ByteBuffer input;
-    if (!read_entire_stdin(input)) {
-        console_line(2, "encode: failed to read stdin");
+    if (!input_path) {
+        console_line(2, "encode: --input=FILE is required");
+        return 1;
+    }
+    makocode::ByteBuffer payload;
+    if (!read_entire_file(input_path, payload)) {
+        console_write(2, "encode: failed to read ");
+        console_line(2, input_path);
+        return 1;
+    }
+    const char* base_name = input_path;
+    const char* scan = input_path;
+    while (scan && *scan) {
+        if (*scan == '/' || *scan == '\\') {
+            base_name = scan + 1;
+        }
+        ++scan;
+    }
+    usize base_length = ascii_length(base_name);
+    if (base_length == 0u) {
+        console_line(2, "encode: input filename is empty");
+        return 1;
+    }
+    if (!filename_buffer.ensure(base_length + 1u)) {
+        console_line(2, "encode: failed to allocate filename buffer");
+        return 1;
+    }
+    for (usize j = 0u; j < base_length; ++j) {
+        char c = base_name[j];
+        if (!title_char_is_allowed(c)) {
+            console_line(2, "encode: filename contains unsupported characters for footer text");
+            return 1;
+        }
+        filename_buffer.data[j] = (u8)c;
+    }
+    filename_buffer.data[base_length] = 0u;
+    filename_buffer.size = base_length;
+    footer_config.filename_text = (const char*)filename_buffer.data;
+    footer_config.filename_length = base_length;
+    footer_config.has_filename = (base_length > 0u);
+    if (footer_config.has_title && (!footer_config.title_text || footer_config.title_length == 0u)) {
+        console_line(2, "encode: title configuration is invalid");
         return 1;
     }
     makocode::EncoderContext encoder;
-    if (!encoder.set_payload(input.data, input.size)) {
+    if (!encoder.set_payload(payload.data, payload.size)) {
         console_line(2, "encode: failed to set payload");
         return 1;
     }
@@ -2657,16 +2851,14 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: unsupported color configuration");
         return 1;
     }
-    if (footer_config.has_title && (!footer_config.title_text || footer_config.title_length == 0u)) {
-        console_line(2, "encode: title configuration is invalid");
-        return 1;
-    }
+    footer_config.show_page_info = false;
+    footer_config.max_text_length = footer_compute_max_text_length(footer_config, 1u);
     FooterLayout footer_layout;
     if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-        console_line(2, "encode: title does not fit within the page layout");
+        console_line(2, "encode: footer text does not fit within the page layout");
         return 1;
     }
-    u32 data_height_pixels = footer_layout.data_height_pixels ? footer_layout.data_height_pixels : height_pixels;
+    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
     if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
         console_line(2, "encode: invalid footer configuration");
         return 1;
@@ -2680,13 +2872,80 @@ static int command_encode(int arg_count, char** args) {
     if (page_count == 0u) {
         page_count = 1u;
     }
+    if (page_count > 1u) {
+        footer_config.show_page_info = true;
+        u64 previous_page_count = 0u;
+        while (page_count > 1u && page_count != previous_page_count) {
+            footer_config.max_text_length = footer_compute_max_text_length(footer_config, page_count);
+            if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+                console_line(2, "encode: footer text does not fit within the page layout");
+                return 1;
+            }
+            data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+            if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+                console_line(2, "encode: invalid footer configuration");
+                return 1;
+            }
+            bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+            if (bits_per_page == 0u) {
+                console_line(2, "encode: page capacity is zero");
+                return 1;
+            }
+            previous_page_count = page_count;
+            page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
+            if (page_count == 0u) {
+                page_count = 1u;
+            }
+        }
+        if (page_count <= 1u) {
+            footer_config.show_page_info = false;
+            footer_config.max_text_length = footer_compute_max_text_length(footer_config, 1u);
+            if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+                console_line(2, "encode: footer text does not fit within the page layout");
+                return 1;
+            }
+            data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+            if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+                console_line(2, "encode: invalid footer configuration");
+                return 1;
+            }
+            bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+            if (bits_per_page == 0u) {
+                console_line(2, "encode: page capacity is zero");
+                return 1;
+            }
+        } else {
+            footer_config.max_text_length = footer_compute_max_text_length(footer_config, page_count);
+            if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+                console_line(2, "encode: footer text does not fit within the page layout");
+                return 1;
+            }
+            data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+            if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+                console_line(2, "encode: invalid footer configuration");
+                return 1;
+            }
+            bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+            if (bits_per_page == 0u) {
+                console_line(2, "encode: page capacity is zero");
+                return 1;
+            }
+        }
+    }
     char timestamp_name[32];
     if (!utc_timestamp_string(timestamp_name, sizeof(timestamp_name))) {
         console_line(2, "encode: failed to construct timestamped filename");
         return 1;
     }
+    makocode::ByteBuffer footer_text_buffer;
     if (page_count == 1u) {
         makocode::ByteBuffer page_output;
+        if (!footer_build_page_text(footer_config, 1u, page_count, footer_text_buffer)) {
+            console_line(2, "encode: failed to build footer text");
+            return 1;
+        }
+        const char* footer_text = footer_layout.has_text ? (const char*)footer_text_buffer.data : 0;
+        usize footer_length = footer_layout.has_text ? footer_text_buffer.size : 0u;
         if (!encode_page_to_ppm(mapping,
                                 frame_bits,
                                 frame_bit_count,
@@ -2697,7 +2956,8 @@ static int command_encode(int arg_count, char** args) {
                                 1u,
                                 bits_per_page,
                                 payload_bit_count,
-                                footer_config,
+                                footer_text,
+                                footer_length,
                                 footer_layout,
                                 page_output)) {
             console_line(2, "encode: failed to format ppm");
@@ -2720,6 +2980,12 @@ static int command_encode(int arg_count, char** args) {
         for (u64 page = 0u; page < page_count; ++page) {
             makocode::ByteBuffer page_output;
             u64 bit_offset = page * bits_per_page;
+            if (!footer_build_page_text(footer_config, page + 1u, page_count, footer_text_buffer)) {
+                console_line(2, "encode: failed to build footer text");
+                return 1;
+            }
+            const char* footer_text = footer_layout.has_text ? (const char*)footer_text_buffer.data : 0;
+            usize footer_length = footer_layout.has_text ? footer_text_buffer.size : 0u;
             if (!encode_page_to_ppm(mapping,
                                     frame_bits,
                                     frame_bit_count,
@@ -2730,7 +2996,8 @@ static int command_encode(int arg_count, char** args) {
                                     page_count,
                                     bits_per_page,
                                     payload_bit_count,
-                                    footer_config,
+                                    footer_text,
+                                    footer_length,
                                     footer_layout,
                                     page_output)) {
                 console_line(2, "encode: failed to format ppm page");
@@ -3056,7 +3323,8 @@ static int command_test(int arg_count, char** args) {
                                     page_count,
                                     bits_per_page,
                                     payload_bit_count,
-                                    footer_config,
+                                    0,
+                                    0u,
                                     footer_layout,
                                     page_output)) {
                 console_line(2, "test: failed to format ppm page");
