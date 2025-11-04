@@ -765,7 +765,7 @@ struct PageFooterConfig {
     PageFooterConfig()
         : title_text(0),
           title_length(0u),
-          font_scale(16u),
+          font_scale(1u),
           has_title(false) {}
 };
 
@@ -2390,7 +2390,7 @@ static void write_usage() {
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
     console_line(1, "  --title=TEXT       (optional alphanumeric footer title)");
-    console_line(1, "  --title-font=PX    (footer font scale in pixels; default 16)");
+    console_line(1, "  --title-font=PX    (footer font scale in pixels; default 1)");
 }
 
 static int command_encode(int arg_count, char** args) {
