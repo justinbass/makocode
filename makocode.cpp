@@ -791,6 +791,7 @@ struct PageFooterConfig {
     bool has_title;
     bool has_filename;
     bool show_page_info;
+    bool display_filename;
 
     PageFooterConfig()
         : title_text(0),
@@ -801,7 +802,8 @@ struct PageFooterConfig {
           max_text_length(0u),
           has_title(false),
           has_filename(false),
-          show_page_info(false) {}
+          show_page_info(false),
+          display_filename(true) {}
 };
 
 struct FooterLayout {
@@ -2540,6 +2542,7 @@ static void write_usage() {
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
     console_line(1, "  --input=FILE       (payload input path; required for encode)");
+    console_line(1, "  --no-filename      (omit payload filename from footer text)");
     console_line(1, "  --title=TEXT       (optional footer title; letters, digits, common symbols)");
     console_line(1, "  --font-size=PX     (footer font scale in pixels; default 1)");
 }
@@ -2609,15 +2612,18 @@ static usize footer_compute_page_text_length(const PageFooterConfig& footer,
                                              u64 page_count) {
     usize length = 0u;
     bool need_separator = false;
-    if (footer.has_filename && footer.filename_text && footer.filename_length) {
-        length += footer.filename_length;
-        need_separator = true;
-    }
     if (footer.has_title && footer.title_text && footer.title_length) {
         if (need_separator) {
             length += 3u; // " | "
         }
         length += footer.title_length;
+        need_separator = true;
+    }
+    if (footer.display_filename && footer.has_filename && footer.filename_text && footer.filename_length) {
+        if (need_separator) {
+            length += 3u; // " | "
+        }
+        length += footer.filename_length;
         need_separator = true;
     }
     if (footer.show_page_info && page_count > 1u) {
@@ -2657,12 +2663,6 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
     }
     usize cursor = 0u;
     bool need_separator = false;
-    if (footer.has_filename && footer.filename_text && footer.filename_length) {
-        for (usize i = 0u; i < footer.filename_length; ++i) {
-            buffer.data[cursor++] = (u8)footer.filename_text[i];
-        }
-        need_separator = true;
-    }
     if (footer.has_title && footer.title_text && footer.title_length) {
         if (need_separator) {
             buffer.data[cursor++] = ' ';
@@ -2671,6 +2671,17 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
         }
         for (usize i = 0u; i < footer.title_length; ++i) {
             buffer.data[cursor++] = (u8)footer.title_text[i];
+        }
+        need_separator = true;
+    }
+    if (footer.display_filename && footer.has_filename && footer.filename_text && footer.filename_length) {
+        if (need_separator) {
+            buffer.data[cursor++] = ' ';
+            buffer.data[cursor++] = '|';
+            buffer.data[cursor++] = ' ';
+        }
+        for (usize i = 0u; i < footer.filename_length; ++i) {
+            buffer.data[cursor++] = (u8)footer.filename_text[i];
         }
         need_separator = true;
     }
@@ -2721,6 +2732,10 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
         if (!handled) {
+            if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
+                footer_config.display_filename = false;
+                continue;
+            }
             const char input_prefix[] = "--input=";
             if (ascii_starts_with(arg, input_prefix)) {
                 const char* value_text = arg + (sizeof(input_prefix) - 1u);

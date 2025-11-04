@@ -1,3 +1,4 @@
 makocode
 *.bin
 *.ppm
+.tmp/
