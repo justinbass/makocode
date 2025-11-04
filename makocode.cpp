@@ -3173,11 +3173,14 @@ static bool frame_bits_to_payload(const u8* frame_data,
     if (reader.failed) {
         return false;
     }
-    u64 payload_bits = metadata.has_bits ? metadata.bits_value : header_bits;
-    if (metadata.has_bits && header_bits != metadata.bits_value) {
-        return false;
+    u64 available_bits = (frame_bit_count >= 64u) ? (frame_bit_count - 64u) : 0u;
+    u64 payload_bits = header_bits;
+    if (metadata.has_bits) {
+        if (metadata.bits_value <= available_bits) {
+            payload_bits = metadata.bits_value;
+        }
     }
-    if (payload_bits > (frame_bit_count - 64u)) {
+    if (payload_bits > available_bits) {
         return false;
     }
     makocode::BitWriter payload_writer;
