@@ -2,7 +2,6 @@ TODO:
 - Optionally print user provided title, filename (default, given filename - for tar, it lists all), page count, other settings, date
 - ECC (Reed Solomon?)
 - Fiducial data (if needed), test should create distortions
-- Page width, height, density
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8
 - Data shuffling (fisher yates with pcg-64 seed-0? Or standard random algorithm), position is shuffled globally.
 - Encryption (xchacha? aes/twofish/serpent?)

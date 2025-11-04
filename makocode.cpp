@@ -717,100 +717,39 @@ struct DecoderContext {
 
 } // namespace makocode
 
-static const u32 DEFAULT_PAGE_WIDTH_MILS  = 8268u;  // 210mm ~= 8.2677in
-static const u32 DEFAULT_PAGE_HEIGHT_MILS = 11693u; // 297mm ~= 11.6929in
-static const u32 DEFAULT_PAGE_DPI         = 300u;
+static const u32 DEFAULT_PAGE_WIDTH_PIXELS  = 2480u; // matches prior A4 default
+static const u32 DEFAULT_PAGE_HEIGHT_PIXELS = 3508u; // matches prior A4 default
 
 struct ImageMappingConfig {
     u8  color_channels;
     bool color_set;
-    u32 dpi;
-    bool dpi_set;
-    u32 page_width_mils;
+    u32 page_width_pixels;
     bool page_width_set;
-    u32 page_height_mils;
+    u32 page_height_pixels;
     bool page_height_set;
 
     ImageMappingConfig()
         : color_channels(1u),
           color_set(false),
-          dpi(DEFAULT_PAGE_DPI),
-          dpi_set(false),
-          page_width_mils(DEFAULT_PAGE_WIDTH_MILS),
+          page_width_pixels(DEFAULT_PAGE_WIDTH_PIXELS),
           page_width_set(false),
-          page_height_mils(DEFAULT_PAGE_HEIGHT_MILS),
+          page_height_pixels(DEFAULT_PAGE_HEIGHT_PIXELS),
           page_height_set(false) {}
 };
-
-static bool parse_inches_to_mils(const char* text, usize length, u32* out_value) {
-    if (!text || !out_value || length == 0u) {
-        return false;
-    }
-    u64 whole = 0u;
-    u64 fraction = 0u;
-    u32 fraction_digits = 0u;
-    bool seen_dot = false;
-    for (usize i = 0u; i < length; ++i) {
-        char c = text[i];
-        if (c == '.') {
-            if (seen_dot) {
-                return false;
-            }
-            seen_dot = true;
-            continue;
-        }
-        if (c < '0' || c > '9') {
-            return false;
-        }
-        u64 digit = (u64)(c - '0');
-        if (!seen_dot) {
-            whole = whole * 10u + digit;
-            if (whole > 100000000u) {
-                return false;
-            }
-        } else {
-            if (fraction_digits >= 3u) {
-                return false;
-            }
-            fraction = fraction * 10u + digit;
-            ++fraction_digits;
-        }
-    }
-    if (seen_dot) {
-        while (fraction_digits < 3u) {
-            fraction *= 10u;
-            ++fraction_digits;
-        }
-    }
-    u64 mils = whole * 1000u + fraction;
-    if (mils == 0u || mils > 0xFFFFFFFFu) {
-        return false;
-    }
-    *out_value = (u32)mils;
-    return true;
-}
 
 static bool compute_page_dimensions(const ImageMappingConfig& config,
                                     u32& out_width_pixels,
                                     u32& out_height_pixels) {
-    if (config.dpi == 0u) {
+    u64 width_pixels = (u64)config.page_width_pixels;
+    u64 height_pixels = (u64)config.page_height_pixels;
+    if (width_pixels == 0u || height_pixels == 0u) {
         return false;
-    }
-    u64 width_numerator = (u64)config.page_width_mils * (u64)config.dpi;
-    u64 height_numerator = (u64)config.page_height_mils * (u64)config.dpi;
-    u64 width_pixels = (width_numerator + 500u) / 1000u;
-    u64 height_pixels = (height_numerator + 500u) / 1000u;
-    if (width_pixels == 0u) {
-        width_pixels = 1u;
-    }
-    if (height_pixels == 0u) {
-        height_pixels = 1u;
     }
     if (width_pixels > 0xFFFFFFFFu || height_pixels > 0xFFFFFFFFu) {
         return false;
     }
-    out_width_pixels = (u32)width_pixels;
-    out_height_pixels = (u32)height_pixels;
+    out_width_pixels = config.page_width_pixels;
+    out_height_pixels = config.page_height_pixels;
     return true;
 }
 
@@ -993,12 +932,10 @@ struct PpmParserState {
     u64 bits_value;
     bool has_color_channels;
     u64 color_channels_value;
-    bool has_dpi;
-    u64 dpi_value;
-    bool has_page_width_mils;
-    u64 page_width_mils_value;
-    bool has_page_height_mils;
-    u64 page_height_mils_value;
+    bool has_page_width_pixels;
+    u64 page_width_pixels_value;
+    bool has_page_height_pixels;
+    u64 page_height_pixels_value;
     bool has_page_index;
     u64 page_index_value;
     bool has_page_count;
@@ -1016,12 +953,10 @@ struct PpmParserState {
           bits_value(0u),
           has_color_channels(false),
           color_channels_value(0u),
-          has_dpi(false),
-          dpi_value(0u),
-          has_page_width_mils(false),
-          page_width_mils_value(0u),
-          has_page_height_mils(false),
-          page_height_mils_value(0u),
+          has_page_width_pixels(false),
+          page_width_pixels_value(0u),
+          has_page_height_pixels(false),
+          page_height_pixels_value(0u),
           has_page_index(false),
           page_index_value(0u),
           has_page_count(false),
@@ -1158,49 +1093,7 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char dpi_tag[] = "MAKOCODE_DPI";
-    const usize dpi_tag_len = (usize)sizeof(dpi_tag) - 1u;
-    if ((length - index) >= dpi_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < dpi_tag_len; ++i) {
-            if (comment[index + i] != dpi_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += dpi_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_dpi = true;
-                    state.dpi_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
-    const char width_tag[] = "MAKOCODE_PAGE_WIDTH_MILS";
+    const char width_tag[] = "MAKOCODE_PAGE_WIDTH_PX";
     const usize width_tag_len = (usize)sizeof(width_tag) - 1u;
     if ((length - index) >= width_tag_len) {
         bool match = true;
@@ -1227,8 +1120,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             if (number_length) {
                 u64 value = 0u;
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_width_mils = true;
-                    state.page_width_mils_value = value;
+                    state.has_page_width_pixels = true;
+                    state.page_width_pixels_value = value;
                 }
             }
             return;
@@ -1242,7 +1135,7 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char height_tag[] = "MAKOCODE_PAGE_HEIGHT_MILS";
+    const char height_tag[] = "MAKOCODE_PAGE_HEIGHT_PX";
     const usize height_tag_len = (usize)sizeof(height_tag) - 1u;
     if ((length - index) >= height_tag_len) {
         bool match = true;
@@ -1269,8 +1162,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             if (number_length) {
                 u64 value = 0u;
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_height_mils = true;
-                    state.page_height_mils_value = value;
+                    state.has_page_height_pixels = true;
+                    state.page_height_pixels_value = value;
                 }
             }
             return;
@@ -1629,26 +1522,19 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_color_channels = true;
         dest.color_channels_value = src.color_channels_value;
     }
-    if (src.has_dpi) {
-        if (dest.has_dpi && dest.dpi_value != src.dpi_value) {
+    if (src.has_page_width_pixels) {
+        if (dest.has_page_width_pixels && dest.page_width_pixels_value != src.page_width_pixels_value) {
             return false;
         }
-        dest.has_dpi = true;
-        dest.dpi_value = src.dpi_value;
+        dest.has_page_width_pixels = true;
+        dest.page_width_pixels_value = src.page_width_pixels_value;
     }
-    if (src.has_page_width_mils) {
-        if (dest.has_page_width_mils && dest.page_width_mils_value != src.page_width_mils_value) {
+    if (src.has_page_height_pixels) {
+        if (dest.has_page_height_pixels && dest.page_height_pixels_value != src.page_height_pixels_value) {
             return false;
         }
-        dest.has_page_width_mils = true;
-        dest.page_width_mils_value = src.page_width_mils_value;
-    }
-    if (src.has_page_height_mils) {
-        if (dest.has_page_height_mils && dest.page_height_mils_value != src.page_height_mils_value) {
-            return false;
-        }
-        dest.has_page_height_mils = true;
-        dest.page_height_mils_value = src.page_height_mils_value;
+        dest.has_page_height_pixels = true;
+        dest.page_height_pixels_value = src.page_height_pixels_value;
     }
     if (src.has_page_count) {
         if (dest.has_page_count && dest.page_count_value != src.page_count_value) {
@@ -1888,13 +1774,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
         return false;
     }
-    if (!append_comment_number(output, "MAKOCODE_DPI", (u64)mapping.dpi)) {
+    if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels)) {
         return false;
     }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_MILS", (u64)mapping.page_width_mils)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_MILS", (u64)mapping.page_height_mils)) {
+    if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
         return false;
     }
     if (!buffer_append_number(output, (u64)width_pixels) || !output.append_char(' ')) {
@@ -1980,47 +1863,22 @@ static bool process_image_mapping_option(const char* arg,
         *handled = true;
         return true;
     }
-    const char dpi_prefix[] = "--dpi=";
-    if (ascii_starts_with(arg, dpi_prefix)) {
-        const char* value_text = arg + (sizeof(dpi_prefix) - 1u);
-        usize length = ascii_length(value_text);
-        if (length == 0u) {
-            console_write(2, command_name);
-            console_line(2, ": --dpi requires a value");
-            return false;
-        }
-        u64 value = 0u;
-        if (!ascii_to_u64(value_text, length, &value)) {
-            console_write(2, command_name);
-            console_line(2, ": --dpi value is not numeric");
-            return false;
-        }
-        if (value == 0u || value > 10000u) {
-            console_write(2, command_name);
-            console_line(2, ": --dpi must be between 1 and 10000");
-            return false;
-        }
-        config.dpi = (u32)value;
-        config.dpi_set = true;
-        *handled = true;
-        return true;
-    }
     const char width_prefix[] = "--page-width=";
     if (ascii_starts_with(arg, width_prefix)) {
         const char* value_text = arg + (sizeof(width_prefix) - 1u);
         usize length = ascii_length(value_text);
         if (length == 0u) {
             console_write(2, command_name);
-            console_line(2, ": --page-width requires a value (inches)");
+            console_line(2, ": --page-width requires a value (pixels)");
             return false;
         }
-        u32 mils = 0u;
-        if (!parse_inches_to_mils(value_text, length, &mils)) {
+        u64 value = 0u;
+        if (!ascii_to_u64(value_text, length, &value) || value == 0u || value > 0xFFFFFFFFu) {
             console_write(2, command_name);
-            console_line(2, ": --page-width must be a positive number with up to three decimals");
+            console_line(2, ": --page-width must be a positive integer number of pixels");
             return false;
         }
-        config.page_width_mils = mils;
+        config.page_width_pixels = (u32)value;
         config.page_width_set = true;
         *handled = true;
         return true;
@@ -2031,16 +1889,16 @@ static bool process_image_mapping_option(const char* arg,
         usize length = ascii_length(value_text);
         if (length == 0u) {
             console_write(2, command_name);
-            console_line(2, ": --page-height requires a value (inches)");
+            console_line(2, ": --page-height requires a value (pixels)");
             return false;
         }
-        u32 mils = 0u;
-        if (!parse_inches_to_mils(value_text, length, &mils)) {
+        u64 value = 0u;
+        if (!ascii_to_u64(value_text, length, &value) || value == 0u || value > 0xFFFFFFFFu) {
             console_write(2, command_name);
-            console_line(2, ": --page-height must be a positive number with up to three decimals");
+            console_line(2, ": --page-height must be a positive integer number of pixels");
             return false;
         }
-        config.page_height_mils = mils;
+        config.page_height_pixels = (u32)value;
         config.page_height_set = true;
         *handled = true;
         return true;
@@ -2108,9 +1966,8 @@ static void write_usage() {
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
-    console_line(1, "  --page-width=IN    (page width in inches; default A4 width 8.268)");
-    console_line(1, "  --page-height=IN   (page height in inches; default A4 height 11.693)");
-    console_line(1, "  --dpi=N            (dots per inch; default 300)");
+    console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
+    console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
 }
 
 static int command_encode(int arg_count, char** args) {
@@ -2387,16 +2244,12 @@ static int command_test(int arg_count, char** args) {
         }
     }
     if (!mapping.page_width_set) {
-        mapping.page_width_mils = 1000u;
+        mapping.page_width_pixels = 64u;
         mapping.page_width_set = true;
     }
     if (!mapping.page_height_set) {
-        mapping.page_height_mils = 1000u;
+        mapping.page_height_pixels = 64u;
         mapping.page_height_set = true;
-    }
-    if (!mapping.dpi_set) {
-        mapping.dpi = 64u;
-        mapping.dpi_set = true;
     }
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
