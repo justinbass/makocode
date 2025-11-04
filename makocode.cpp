@@ -1987,6 +1987,12 @@ static bool map_samples_to_rgb(u8 mode, const u32* samples, u8* rgb) {
         return false;
     }
     u32 value = samples[0];
+    if (mode == 1u) {
+        if (value > 1u) {
+            return false;
+        }
+        value ^= 1u;
+    }
     if (value >= palette_size) {
         return false;
     }
@@ -2012,7 +2018,14 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
         if (candidate.r == rgb[0] &&
             candidate.g == rgb[1] &&
             candidate.b == rgb[2]) {
-            samples[0] = palette_index;
+            if (mode == 1u) {
+                if (palette_index > 1u) {
+                    return false;
+                }
+                samples[0] = palette_index ^ 1u;
+            } else {
+                samples[0] = palette_index;
+            }
             return true;
         }
     }

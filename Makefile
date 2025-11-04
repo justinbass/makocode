@@ -12,7 +12,4 @@ test: makocode
 	./makocode test
 
 clean:
-	rm -f makocode \
-		payload.bin encoded.ppm decoded.bin \
-		payload_c*_s*.bin encoded_c*_s*.ppm decoded_c*_s*.bin \
-		payload_c*.bin *.ppm decoded_c*.bin
+	rm -f makocode *.ppm *.bin
