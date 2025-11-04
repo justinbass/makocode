@@ -124,6 +124,45 @@ static bool ascii_to_u64(const char* text, usize length, u64* out_value) {
     return true;
 }
 
+static bool ascii_to_double(const char* text, usize length, double* out_value) {
+    if (!text || !out_value || length == 0u) {
+        return false;
+    }
+    u64 integer_part = 0u;
+    u64 fraction_part = 0u;
+    u64 fraction_scale = 1u;
+    bool seen_decimal = false;
+    for (usize i = 0u; i < length; ++i) {
+        char c = text[i];
+        if (c == '.') {
+            if (seen_decimal) {
+                return false;
+            }
+            seen_decimal = true;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        u64 digit = (u64)(c - '0');
+        if (!seen_decimal) {
+            integer_part = integer_part * 10u + digit;
+        } else {
+            if (fraction_scale > 1000000000u) {
+                continue;
+            }
+            fraction_part = fraction_part * 10u + digit;
+            fraction_scale *= 10u;
+        }
+    }
+    double value = (double)integer_part;
+    if (seen_decimal && fraction_scale > 1u) {
+        value += ((double)fraction_part) / (double)fraction_scale;
+    }
+    *out_value = value;
+    return true;
+}
+
 static void console_write(int fd, const char* text) {
     if (!text) {
         return;
@@ -648,15 +687,37 @@ static bool lzw_decompress(const u8* input,
 struct EncoderConfig {
     u32 metadata_key_count;
     u32 fiducial_density;
-    u32 ecc_rate;
+    double ecc_redundancy;
     u32 max_parallelism;
 
     EncoderConfig()
         : metadata_key_count(0u),
           fiducial_density(0u),
-          ecc_rate(0u),
+          ecc_redundancy(0.0),
           max_parallelism(1u) {}
 };
+
+struct EccSummary {
+    bool enabled;
+    u16 block_data_symbols;
+    u16 parity_symbols;
+    double redundancy;
+    u64 original_bytes;
+    u64 block_count;
+
+    EccSummary()
+        : enabled(false),
+          block_data_symbols(0u),
+          parity_symbols(0u),
+          redundancy(0.0),
+          original_bytes(0u),
+          block_count(0u) {}
+};
+
+static bool encode_payload_with_ecc(const ByteBuffer& compressed,
+                                    double redundancy,
+                                    BitWriter& writer,
+                                    EccSummary& summary);
 
 struct EncoderContext {
     EncoderConfig config;
@@ -664,12 +725,15 @@ struct EncoderContext {
     BitWriter bit_writer;
     bool configured;
 
-    EncoderContext() : config(), payload_bytes(), bit_writer(), configured(false) {}
+    EccSummary ecc_summary;
+
+    EncoderContext() : config(), payload_bytes(), bit_writer(), configured(false), ecc_summary() {}
 
     void reset() {
         payload_bytes.release();
         bit_writer.reset();
         configured = false;
+        ecc_summary = EccSummary();
     }
 
     bool set_payload(const u8* data, usize size) {
@@ -684,24 +748,43 @@ struct EncoderContext {
         return true;
     }
 
-    bool encode_payload(BitWriter& writer) {
-        ByteBuffer compressed;
-        if (!lzw_compress(payload_bytes.data, payload_bytes.size, compressed)) {
-            return false;
-        }
-        for (usize i = 0u; i < compressed.size; ++i) {
-            u8 byte = compressed.data ? compressed.data[i] : 0u;
-            if (!writer.write_bits((u64)byte, 8u)) {
-                return false;
-            }
-        }
-        return true;
+    bool encode_payload(ByteBuffer& output) {
+        output.release();
+        return lzw_compress(payload_bytes.data, payload_bytes.size, output);
     }
 
     bool build() {
         bit_writer.reset();
-        if (!encode_payload(bit_writer)) {
+        ecc_summary = EccSummary();
+        ByteBuffer compressed;
+        if (!encode_payload(compressed)) {
             return false;
+        }
+        if (compressed.size == 0u) {
+            if (!bit_writer.align_to_byte()) {
+                return false;
+            }
+            configured = true;
+            return true;
+        }
+        double redundancy = (config.ecc_redundancy > 0.0) ? config.ecc_redundancy : 0.0;
+        if (redundancy > 0.0) {
+            if (!encode_payload_with_ecc(compressed, redundancy, bit_writer, ecc_summary)) {
+                return false;
+            }
+        } else {
+            for (usize i = 0u; i < compressed.size; ++i) {
+                u8 byte = compressed.data ? compressed.data[i] : 0u;
+                if (!bit_writer.write_bits((u64)byte, 8u)) {
+                    return false;
+                }
+            }
+            ecc_summary.original_bytes = compressed.size;
+            ecc_summary.redundancy = 0.0;
+            ecc_summary.block_count = 0u;
+            ecc_summary.block_data_symbols = 0u;
+            ecc_summary.parity_symbols = 0u;
+            ecc_summary.enabled = false;
         }
         if (!bit_writer.align_to_byte()) {
             return false;
@@ -709,7 +792,695 @@ struct EncoderContext {
         configured = true;
         return true;
     }
+
+    const EccSummary& ecc_info() const {
+        return ecc_summary;
+    }
 };
+
+static const u16 RS_FIELD_PRIMITIVE = 0x11d;
+static const u16 RS_FIELD_SIZE = 255u;
+static const usize RS_POLY_CAPACITY = 256u;
+
+static const u16 ECC_HEADER_MAGIC = 0x4543u;
+static const u8  ECC_HEADER_VERSION = 1u;
+static const usize ECC_HEADER_BITS = 208u;
+static const usize ECC_HEADER_BYTES = ECC_HEADER_BITS / 8u;
+
+struct ReedSolomonTables {
+    bool initialized;
+    u8 exp_table[512];
+    u8 log_table[256];
+
+    ReedSolomonTables() : initialized(false), exp_table(), log_table() {}
+};
+
+static ReedSolomonTables g_rs_tables;
+
+static void rs_ensure_tables() {
+    if (g_rs_tables.initialized) {
+        return;
+    }
+    u16 value = 1u;
+    for (u16 i = 0u; i < RS_FIELD_SIZE; ++i) {
+        u8 element = (u8)(value & 0xFFu);
+        g_rs_tables.exp_table[i] = element;
+        g_rs_tables.log_table[element] = (u8)i;
+        value <<= 1u;
+        if (value & 0x100u) {
+            value ^= (u16)RS_FIELD_PRIMITIVE;
+        }
+    }
+    for (u16 i = RS_FIELD_SIZE; i < 512u; ++i) {
+        g_rs_tables.exp_table[i] = g_rs_tables.exp_table[i - RS_FIELD_SIZE];
+    }
+    g_rs_tables.log_table[0] = 0u;
+    g_rs_tables.initialized = true;
+}
+
+static inline u8 gf_mul(u8 a, u8 b) {
+    if (!a || !b) {
+        return 0u;
+    }
+    rs_ensure_tables();
+    u16 log_sum = (u16)g_rs_tables.log_table[a] + (u16)g_rs_tables.log_table[b];
+    return g_rs_tables.exp_table[log_sum % RS_FIELD_SIZE];
+}
+
+static inline u8 gf_div(u8 a, u8 b) {
+    if (!b) {
+        return 0u;
+    }
+    if (!a) {
+        return 0u;
+    }
+    rs_ensure_tables();
+    u16 log_a = g_rs_tables.log_table[a];
+    u16 log_b = g_rs_tables.log_table[b];
+    u16 diff = (u16)((log_a + RS_FIELD_SIZE - log_b) % RS_FIELD_SIZE);
+    return g_rs_tables.exp_table[diff];
+}
+
+static inline u8 gf_inverse(u8 value) {
+    if (!value) {
+        return 0u;
+    }
+    rs_ensure_tables();
+    u16 log_v = g_rs_tables.log_table[value];
+    u16 inverse_index = (u16)((RS_FIELD_SIZE - log_v) % RS_FIELD_SIZE);
+    return g_rs_tables.exp_table[inverse_index];
+}
+
+static inline u8 gf_pow_alpha(u32 power) {
+    rs_ensure_tables();
+    power %= RS_FIELD_SIZE;
+    return g_rs_tables.exp_table[power];
+}
+
+static u16 poly_trim(u8* poly, u16 length) {
+    while (length > 0u && poly[length - 1u] == 0u) {
+        --length;
+    }
+    return length;
+}
+
+static u16 poly_scale_shift_add(u8* target,
+                                u16 target_size,
+                                const u8* source,
+                                u16 source_size,
+                                u8 scale,
+                                u16 shift) {
+    if (!scale || !source || source_size == 0u) {
+        return target_size;
+    }
+    u16 required = (u16)(source_size + shift);
+    if (required > RS_POLY_CAPACITY) {
+        required = (u16)RS_POLY_CAPACITY;
+    }
+    if (target_size < required) {
+        for (u16 i = target_size; i < required; ++i) {
+            target[i] = 0u;
+        }
+        target_size = required;
+    }
+    for (u16 i = 0u; i < source_size; ++i) {
+        u16 index = (u16)(i + shift);
+        if (index >= RS_POLY_CAPACITY) {
+            break;
+        }
+        target[index] ^= gf_mul(source[i], scale);
+    }
+    return target_size;
+}
+
+static bool rs_build_generator(u16 parity_symbols, u8* generator, u16& out_length) {
+    if (!generator || parity_symbols == 0u || parity_symbols >= RS_FIELD_SIZE) {
+        return false;
+    }
+    rs_ensure_tables();
+    for (usize i = 0u; i < RS_POLY_CAPACITY; ++i) {
+        generator[i] = 0u;
+    }
+    generator[0] = 1u;
+    u16 length = 1u;
+    for (u16 i = 0u; i < parity_symbols; ++i) {
+        u8 root = gf_pow_alpha((u32)(i + 1u));
+        u8 temp[RS_POLY_CAPACITY];
+        for (u16 j = 0u; j < RS_POLY_CAPACITY; ++j) {
+            temp[j] = 0u;
+        }
+        for (u16 j = 0u; j < length; ++j) {
+            u8 coeff = generator[j];
+            temp[j] ^= coeff;
+            u16 index = (u16)(j + 1u);
+            if (index < RS_POLY_CAPACITY) {
+                temp[index] ^= gf_mul(coeff, root);
+            }
+        }
+        ++length;
+        if (length > RS_POLY_CAPACITY) {
+            return false;
+        }
+        for (u16 j = 0u; j < length; ++j) {
+            generator[j] = temp[j];
+        }
+    }
+    out_length = length;
+    return true;
+}
+
+static void rs_compute_parity(const u8* generator,
+                              u16 parity_symbols,
+                              const u8* data_symbols,
+                              u16 data_length,
+                              u8* parity_out) {
+    if (!generator || !parity_out || parity_symbols == 0u) {
+        return;
+    }
+    for (u16 i = 0u; i < parity_symbols; ++i) {
+        parity_out[i] = 0u;
+    }
+    for (u16 i = 0u; i < data_length; ++i) {
+        u8 feedback = data_symbols ? data_symbols[i] : 0u;
+        feedback ^= parity_out[0];
+        if (parity_symbols > 1u) {
+            for (u16 j = 0u; j < (parity_symbols - 1u); ++j) {
+                parity_out[j] = parity_out[j + 1u];
+            }
+        }
+        parity_out[parity_symbols - 1u] = 0u;
+        if (!feedback) {
+            continue;
+        }
+        for (u16 j = 0u; j < parity_symbols; ++j) {
+            u8 coeff = generator[j + 1u];
+            if (coeff) {
+                parity_out[j] ^= gf_mul(coeff, feedback);
+            }
+        }
+    }
+}
+
+static bool rs_compute_syndromes(const u8* codeword,
+                                 u16 codeword_length,
+                                 u16 parity_symbols,
+                                 u8* syndromes,
+                                 bool& all_zero) {
+    if (!codeword || !syndromes || parity_symbols == 0u || codeword_length == 0u) {
+        return false;
+    }
+    all_zero = true;
+    for (u16 i = 0u; i < parity_symbols; ++i) {
+        u8 evaluation = 0u;
+        u8 root = gf_pow_alpha(i + 1u);
+        for (u16 j = 0u; j < codeword_length; ++j) {
+            evaluation = gf_mul(evaluation, root) ^ codeword[j];
+        }
+        syndromes[i] = evaluation;
+        if (evaluation) {
+            all_zero = false;
+        }
+    }
+    return true;
+}
+
+static bool rs_berlekamp_massey(const u8* syndromes,
+                                u16 parity_symbols,
+                                u8* locator,
+                                u16& locator_size) {
+    if (!syndromes || !locator) {
+        return false;
+    }
+    u8 C[RS_POLY_CAPACITY];
+    u8 B[RS_POLY_CAPACITY];
+    for (u16 i = 0u; i < RS_POLY_CAPACITY; ++i) {
+        C[i] = 0u;
+        B[i] = 0u;
+    }
+    C[0] = 1u;
+    B[0] = 1u;
+    u16 C_size = 1u;
+    u16 B_size = 1u;
+    u16 L = 0u;
+    u16 m = 1u;
+    u8 b = 1u;
+    for (u16 n = 0u; n < parity_symbols; ++n) {
+        u8 delta = syndromes[n];
+        for (u16 i = 1u; i <= L; ++i) {
+            if (i >= C_size) {
+                break;
+            }
+            u8 c = C[i];
+            u8 s = syndromes[n - i];
+            if (c && s) {
+                delta ^= gf_mul(c, s);
+            }
+        }
+        if (delta) {
+            u8 T[RS_POLY_CAPACITY];
+            u16 T_size = C_size;
+            for (u16 i = 0u; i < RS_POLY_CAPACITY; ++i) {
+                T[i] = C[i];
+            }
+            u8 factor = gf_div(delta, b);
+            C_size = poly_scale_shift_add(C, C_size, B, B_size, factor, m);
+            if ((2u * L) <= n) {
+                L = (u16)(n + 1u - L);
+                for (u16 i = 0u; i < RS_POLY_CAPACITY; ++i) {
+                    B[i] = T[i];
+                }
+                B_size = T_size;
+                b = delta;
+                m = 1u;
+            } else {
+                ++m;
+            }
+        } else {
+            ++m;
+        }
+    }
+    for (u16 i = 0u; i < C_size; ++i) {
+        locator[i] = C[i];
+    }
+    locator_size = poly_trim(locator, C_size);
+    return (locator_size > 0u);
+}
+
+static u8 poly_eval(const u8* poly, u16 length, u8 x) {
+    if (!poly || length == 0u) {
+        return 0u;
+    }
+    u8 result = 0u;
+    for (u16 i = length; i > 0u; --i) {
+        result = gf_mul(result, x) ^ poly[i - 1u];
+    }
+    return result;
+}
+
+static bool rs_find_error_locations(const u8* locator,
+                                    u16 locator_size,
+                                    u16 codeword_length,
+                                    u16* positions,
+                                    u16& position_count) {
+    if (!locator || !positions || locator_size <= 1u) {
+        return false;
+    }
+    position_count = 0u;
+    for (u16 i = 0u; i < codeword_length; ++i) {
+        u8 x = gf_pow_alpha(i);
+        if (poly_eval(locator, locator_size, x) == 0u) {
+            if (position_count >= (locator_size - 1u)) {
+                return false;
+            }
+            positions[position_count++] = (u16)(codeword_length - 1u - i);
+        }
+    }
+    return (position_count == (locator_size - 1u));
+}
+
+static u16 rs_compute_error_evaluator(const u8* locator,
+                                      u16 locator_size,
+                                      const u8* syndromes,
+                                      u16 parity_symbols,
+                                      u8* evaluator) {
+    for (u16 i = 0u; i < parity_symbols; ++i) {
+        evaluator[i] = 0u;
+    }
+    for (u16 i = 0u; i < locator_size; ++i) {
+        u8 coeff = locator[i];
+        if (!coeff) {
+            continue;
+        }
+        for (u16 j = 0u; j < parity_symbols; ++j) {
+            u16 index = (u16)(i + j);
+            if (index >= parity_symbols) {
+                break;
+            }
+            evaluator[index] ^= gf_mul(coeff, syndromes[j]);
+        }
+    }
+    return poly_trim(evaluator, parity_symbols);
+}
+
+static u16 rs_compute_locator_derivative(const u8* locator,
+                                         u16 locator_size,
+                                         u8* derivative) {
+    if (!locator || !derivative || locator_size <= 1u) {
+        return 0u;
+    }
+    u16 size = locator_size - 1u;
+    for (u16 i = 0u; i < size; ++i) {
+        derivative[i] = 0u;
+    }
+    for (u16 i = 1u; i < locator_size; ++i) {
+        if (i & 1u) {
+            derivative[i - 1u] = locator[i];
+        }
+    }
+    return poly_trim(derivative, size);
+}
+
+static bool rs_correct_errors(u8* codeword,
+                              u16 codeword_length,
+                              const u8* omega,
+                              u16 omega_size,
+                              const u8* locator_derivative,
+                              u16 derivative_size,
+                              const u16* positions,
+                              u16 position_count) {
+    if (!codeword || !omega || !locator_derivative || !positions) {
+        return false;
+    }
+    for (u16 i = 0u; i < position_count; ++i) {
+        u16 pos = positions[i];
+        if (pos >= codeword_length) {
+            return false;
+        }
+        u16 exponent = (u16)((codeword_length - 1u - pos) % RS_FIELD_SIZE);
+        u8 X = gf_pow_alpha(exponent);
+        u8 X_inv = gf_inverse(X);
+        u8 numerator = poly_eval(omega, omega_size, X_inv);
+        u8 denominator = poly_eval(locator_derivative, derivative_size, X_inv);
+        if (!denominator) {
+            return false;
+        }
+        u8 magnitude = gf_mul(numerator, X_inv);
+        magnitude = gf_div(magnitude, denominator);
+        codeword[pos] ^= magnitude;
+    }
+    return true;
+}
+
+static bool rs_decode_block(u8* block,
+                            u16 data_symbols,
+                            u16 parity_symbols) {
+    if (!block || parity_symbols == 0u || data_symbols == 0u) {
+        return false;
+    }
+    u16 codeword_length = (u16)(data_symbols + parity_symbols);
+    if (codeword_length > RS_FIELD_SIZE) {
+        return false;
+    }
+    u8 syndromes[RS_POLY_CAPACITY];
+    bool all_zero = false;
+    if (!rs_compute_syndromes(block, codeword_length, parity_symbols, syndromes, all_zero)) {
+        return false;
+    }
+    if (all_zero) {
+        return true;
+    }
+    u8 locator[RS_POLY_CAPACITY];
+    for (u16 i = 0u; i < RS_POLY_CAPACITY; ++i) {
+        locator[i] = 0u;
+    }
+    u16 locator_size = 0u;
+    if (!rs_berlekamp_massey(syndromes, parity_symbols, locator, locator_size)) {
+        return false;
+    }
+    if (locator_size <= 1u) {
+        return false;
+    }
+    u16 error_positions[RS_POLY_CAPACITY];
+    u16 error_count = 0u;
+    if (!rs_find_error_locations(locator, locator_size, codeword_length, error_positions, error_count)) {
+        return false;
+    }
+    if ((error_count * 2u) > parity_symbols) {
+        return false;
+    }
+    u8 evaluator[RS_POLY_CAPACITY];
+    u16 evaluator_size = rs_compute_error_evaluator(locator, locator_size, syndromes, parity_symbols, evaluator);
+    u8 locator_derivative[RS_POLY_CAPACITY];
+    u16 derivative_size = rs_compute_locator_derivative(locator, locator_size, locator_derivative);
+    if (derivative_size == 0u) {
+        return false;
+    }
+    return rs_correct_errors(block, codeword_length, evaluator, evaluator_size, locator_derivative, derivative_size, error_positions, error_count);
+}
+
+static bool compute_ecc_layout(usize data_bytes,
+                               double requested_redundancy,
+                               u16& block_data,
+                               u16& parity_symbols,
+                               u64& block_count) {
+    block_data = 0u;
+    parity_symbols = 0u;
+    block_count = 0u;
+    if (data_bytes == 0u || requested_redundancy <= 0.0) {
+        return true;
+    }
+    double ratio = requested_redundancy;
+    if (ratio < 0.000001) {
+        ratio = 0.000001;
+    }
+    double max_data = (double)RS_FIELD_SIZE / (1.0 + ratio);
+    if (max_data < 1.0) {
+        max_data = 1.0;
+    }
+    u16 candidate = (u16)max_data;
+    if (candidate == 0u) {
+        candidate = 1u;
+    }
+    for (; candidate >= 1u; --candidate) {
+        double predicted = ratio * (double)candidate;
+        u16 parity = (u16)(predicted + 0.999999);
+        if (parity < 2u) {
+            parity = 2u;
+        }
+        while ((u32)candidate + parity > RS_FIELD_SIZE) {
+            if (parity <= 2u) {
+                break;
+            }
+            --parity;
+        }
+        if ((u32)candidate + parity <= RS_FIELD_SIZE) {
+            block_data = candidate;
+            parity_symbols = parity;
+            break;
+        }
+    }
+    if (block_data == 0u || parity_symbols == 0u) {
+        return false;
+    }
+    block_count = (u64)((data_bytes + (usize)block_data - 1u) / (usize)block_data);
+    if (block_count == 0u) {
+        block_count = 1u;
+    }
+    u64 total_symbols = (u64)(block_data + parity_symbols) * block_count;
+    if (total_symbols > (u64)USIZE_MAX_VALUE) {
+        return false;
+    }
+    return true;
+}
+
+static bool encode_payload_with_ecc(const ByteBuffer& compressed,
+                                    double redundancy,
+                                    BitWriter& writer,
+                                    EccSummary& summary) {
+    if (!compressed.data || compressed.size == 0u) {
+        return false;
+    }
+    u16 block_data = 0u;
+    u16 parity_symbols = 0u;
+    u64 block_count = 0u;
+    if (!compute_ecc_layout(compressed.size, redundancy, block_data, parity_symbols, block_count)) {
+        return false;
+    }
+    u64 total_symbols = (u64)(block_data + parity_symbols) * block_count;
+    if (total_symbols == 0u || total_symbols > (u64)USIZE_MAX_VALUE) {
+        return false;
+    }
+    ByteBuffer encoded;
+    if (!encoded.ensure((usize)total_symbols)) {
+        return false;
+    }
+    encoded.size = (usize)total_symbols;
+    u8 generator[RS_POLY_CAPACITY];
+    u16 generator_size = 0u;
+    if (!rs_build_generator(parity_symbols, generator, generator_size)) {
+        return false;
+    }
+    (void)generator_size;
+    u8 parity_buffer[RS_POLY_CAPACITY];
+    u8 data_buffer[RS_POLY_CAPACITY];
+    usize payload_offset = 0u;
+    u16 block_symbols = (u16)(block_data + parity_symbols);
+    for (u64 block_index = 0u; block_index < block_count; ++block_index) {
+        for (u16 i = 0u; i < block_data; ++i) {
+            usize src_index = payload_offset + (usize)i;
+            data_buffer[i] = (src_index < compressed.size) ? compressed.data[src_index] : 0u;
+        }
+        rs_compute_parity(generator, parity_symbols, data_buffer, block_data, parity_buffer);
+        usize base = (usize)block_index * (usize)block_symbols;
+        for (u16 i = 0u; i < block_data; ++i) {
+            encoded.data[base + i] = data_buffer[i];
+        }
+        for (u16 j = 0u; j < parity_symbols; ++j) {
+            encoded.data[base + block_data + j] = parity_buffer[j];
+        }
+        payload_offset += (usize)block_data;
+    }
+    if (!writer.write_bits((u64)ECC_HEADER_MAGIC, 16u)) {
+        return false;
+    }
+    if (!writer.write_bits((u64)ECC_HEADER_VERSION, 8u)) {
+        return false;
+    }
+    u8 flags = 0x01u;
+    if (!writer.write_bits((u64)flags, 8u)) {
+        return false;
+    }
+    if (!writer.write_bits((u64)block_data, 16u)) {
+        return false;
+    }
+    if (!writer.write_bits((u64)parity_symbols, 16u)) {
+        return false;
+    }
+    if (!writer.write_bits(0u, 16u)) {
+        return false;
+    }
+    if (!writer.write_bits(block_count, 64u)) {
+        return false;
+    }
+    if (!writer.write_bits((u64)compressed.size, 64u)) {
+        return false;
+    }
+    for (usize i = 0u; i < encoded.size; ++i) {
+        if (!writer.write_bits((u64)encoded.data[i], 8u)) {
+            return false;
+        }
+    }
+    summary.enabled = true;
+    summary.block_data_symbols = block_data;
+    summary.parity_symbols = parity_symbols;
+    summary.block_count = block_count;
+    summary.original_bytes = compressed.size;
+    summary.redundancy = (block_data ? ((double)parity_symbols) / (double)block_data : 0.0);
+    return true;
+}
+
+struct EccHeaderInfo {
+    bool detected;
+    bool valid;
+    bool enabled;
+    u16 block_data;
+    u16 parity;
+    u64 block_count;
+    u64 original_bytes;
+
+    EccHeaderInfo()
+        : detected(false),
+          valid(false),
+          enabled(false),
+          block_data(0u),
+          parity(0u),
+          block_count(0u),
+          original_bytes(0u) {}
+};
+
+static u16 read_le_u16(const u8* ptr) {
+    return (u16)ptr[0] | ((u16)ptr[1] << 8);
+}
+
+static u32 read_le_u32(const u8* ptr) {
+    return (u32)ptr[0] | ((u32)ptr[1] << 8) | ((u32)ptr[2] << 16) | ((u32)ptr[3] << 24);
+}
+
+static u64 read_le_u64(const u8* ptr) {
+    u64 low = (u64)read_le_u32(ptr);
+    u64 high = (u64)read_le_u32(ptr + 4u);
+    return low | (high << 32u);
+}
+
+static bool parse_ecc_header(const u8* bytes,
+                             usize byte_count,
+                             EccHeaderInfo& header) {
+    header = EccHeaderInfo();
+    if (!bytes || byte_count < 2u) {
+        return false;
+    }
+    u16 magic = read_le_u16(bytes);
+    if (magic != ECC_HEADER_MAGIC) {
+        return false;
+    }
+    header.detected = true;
+    if (byte_count < ECC_HEADER_BYTES) {
+        return false;
+    }
+    u8 version = bytes[2];
+    u8 flags = bytes[3];
+    u16 block_data = read_le_u16(bytes + 4u);
+    u16 parity = read_le_u16(bytes + 6u);
+    u16 reserved = read_le_u16(bytes + 8u);
+    u64 block_count = read_le_u64(bytes + 10u);
+    u64 original_bytes = read_le_u64(bytes + 18u);
+    (void)reserved;
+    if (version != ECC_HEADER_VERSION) {
+        return false;
+    }
+    if (!(flags & 0x01u)) {
+        return false;
+    }
+    if (block_data == 0u || parity == 0u || block_data >= RS_FIELD_SIZE || parity >= RS_FIELD_SIZE) {
+        return false;
+    }
+    if ((u32)block_data + parity > RS_FIELD_SIZE) {
+        return false;
+    }
+    if (block_count == 0u) {
+        return false;
+    }
+    if (original_bytes > (u64)USIZE_MAX_VALUE) {
+        return false;
+    }
+    header.valid = true;
+    header.enabled = true;
+    header.block_data = block_data;
+    header.parity = parity;
+    header.block_count = block_count;
+    header.original_bytes = original_bytes;
+    return true;
+}
+
+static bool decode_ecc_payload(const u8* bytes,
+                               const EccHeaderInfo& header,
+                               ByteBuffer& output) {
+    if (!bytes || !header.valid || !header.enabled) {
+        return false;
+    }
+    u16 block_total = (u16)(header.block_data + header.parity);
+    u64 expected_bytes = (u64)block_total * header.block_count;
+    if (expected_bytes > (u64)USIZE_MAX_VALUE) {
+        return false;
+    }
+    if (!output.ensure((usize)header.original_bytes)) {
+        return false;
+    }
+    output.size = (usize)header.original_bytes;
+    u64 written = 0u;
+    u8 block_buffer[RS_POLY_CAPACITY];
+    for (u64 block_index = 0u; block_index < header.block_count; ++block_index) {
+        usize offset = (usize)block_index * (usize)block_total;
+        for (u16 i = 0u; i < block_total; ++i) {
+            block_buffer[i] = bytes[offset + i];
+        }
+        if (!rs_decode_block(block_buffer, header.block_data, header.parity)) {
+            return false;
+        }
+        u16 copy = header.block_data;
+        if (written + copy > header.original_bytes) {
+            copy = (u16)(header.original_bytes - written);
+        }
+        for (u16 i = 0u; i < copy; ++i) {
+            output.data[(usize)written + i] = block_buffer[i];
+        }
+        written += copy;
+        if (written >= header.original_bytes) {
+            break;
+        }
+    }
+    return (written == header.original_bytes);
+}
 
 struct DecoderContext {
     ByteBuffer payload;
@@ -730,6 +1501,38 @@ struct DecoderContext {
             return true;
         }
         if (!data) {
+            return false;
+        }
+        usize byte_count = (size_in_bits + 7u) >> 3u;
+        EccHeaderInfo header;
+        bool header_ok = parse_ecc_header(data, byte_count, header);
+        if (header_ok && header.valid && header.enabled) {
+            u16 block_total = (u16)(header.block_data + header.parity);
+            u64 expected_bytes = (u64)block_total * header.block_count;
+            u64 available_bytes = (u64)byte_count;
+            if (available_bytes < (u64)ECC_HEADER_BYTES + expected_bytes) {
+                return false;
+            }
+            const u8* encoded = data + ECC_HEADER_BYTES;
+            ByteBuffer compressed;
+            if (!decode_ecc_payload(encoded, header, compressed)) {
+                return false;
+            }
+            if (header.original_bytes == 0u) {
+                has_payload = true;
+                return true;
+            }
+            u64 bit_total = header.original_bytes * 8u;
+            if (bit_total > (u64)USIZE_MAX_VALUE) {
+                return false;
+            }
+            if (!lzw_decompress(compressed.data, (usize)bit_total, payload)) {
+                return false;
+            }
+            has_payload = true;
+            return true;
+        }
+        if (header.detected && !header.valid) {
             return false;
         }
         if (!lzw_decompress(data, size_in_bits, payload)) {
@@ -1280,6 +2083,16 @@ struct PpmParserState {
     u64 bytes_value;
     bool has_bits;
     u64 bits_value;
+    bool has_ecc_flag;
+    u64 ecc_flag_value;
+    bool has_ecc_block_data;
+    u64 ecc_block_data_value;
+    bool has_ecc_parity;
+    u64 ecc_parity_value;
+    bool has_ecc_block_count;
+    u64 ecc_block_count_value;
+    bool has_ecc_original_bytes;
+    u64 ecc_original_bytes_value;
     bool has_color_channels;
     u64 color_channels_value;
     bool has_page_width_pixels;
@@ -1305,6 +2118,16 @@ struct PpmParserState {
           bytes_value(0u),
           has_bits(false),
           bits_value(0u),
+          has_ecc_flag(false),
+          ecc_flag_value(0u),
+          has_ecc_block_data(false),
+          ecc_block_data_value(0u),
+          has_ecc_parity(false),
+          ecc_parity_value(0u),
+          has_ecc_block_count(false),
+          ecc_block_count_value(0u),
+          has_ecc_original_bytes(false),
+          ecc_original_bytes_value(0u),
           has_color_channels(false),
           color_channels_value(0u),
           has_page_width_pixels(false),
@@ -1335,9 +2158,19 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     }
     const char bytes_tag[] = "MAKOCODE_BYTES";
     const char bits_tag[] = "MAKOCODE_BITS";
+    const char ecc_tag[] = "MAKOCODE_ECC";
+    const char ecc_block_tag[] = "MAKOCODE_ECC_BLOCK_DATA";
+    const char ecc_parity_tag[] = "MAKOCODE_ECC_PARITY";
+    const char ecc_block_count_tag[] = "MAKOCODE_ECC_BLOCK_COUNT";
+    const char ecc_original_tag[] = "MAKOCODE_ECC_ORIGINAL_BYTES";
     const char color_tag[] = "MAKOCODE_COLOR_CHANNELS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
     const usize bits_tag_len = (usize)sizeof(bits_tag) - 1u;
+    const usize ecc_tag_len = (usize)sizeof(ecc_tag) - 1u;
+    const usize ecc_block_tag_len = (usize)sizeof(ecc_block_tag) - 1u;
+    const usize ecc_parity_tag_len = (usize)sizeof(ecc_parity_tag) - 1u;
+    const usize ecc_block_count_tag_len = (usize)sizeof(ecc_block_count_tag) - 1u;
+    const usize ecc_original_tag_len = (usize)sizeof(ecc_original_tag) - 1u;
     const usize color_tag_len = (usize)sizeof(color_tag) - 1u;
     if ((length - index) >= bytes_tag_len) {
         bool match = true;
@@ -1398,6 +2231,206 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_bits = true;
                     state.bits_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= ecc_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < ecc_tag_len; ++i) {
+            if (comment[index + i] != ecc_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += ecc_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_ecc_flag = true;
+                    state.ecc_flag_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= ecc_block_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < ecc_block_tag_len; ++i) {
+            if (comment[index + i] != ecc_block_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += ecc_block_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_ecc_block_data = true;
+                    state.ecc_block_data_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= ecc_parity_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < ecc_parity_tag_len; ++i) {
+            if (comment[index + i] != ecc_parity_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += ecc_parity_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_ecc_parity = true;
+                    state.ecc_parity_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= ecc_block_count_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < ecc_block_count_tag_len; ++i) {
+            if (comment[index + i] != ecc_block_count_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += ecc_block_count_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_ecc_block_count = true;
+                    state.ecc_block_count_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= ecc_original_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < ecc_original_tag_len; ++i) {
+            if (comment[index + i] != ecc_original_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += ecc_original_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_ecc_original_bytes = true;
+                    state.ecc_original_bytes_value = value;
                 }
             }
             return;
@@ -1810,33 +2843,72 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     PpmParserState state;
     state.data = input.data;
     state.size = input.size;
+    char cursor_buffer[32];
+    u64_to_ascii((u64)state.cursor, cursor_buffer, sizeof(cursor_buffer));
+    console_write(2, "debug initial cursor: ");
+    console_line(2, cursor_buffer);
+    console_write(2, "debug first bytes: ");
+    for (int i = 0; i < 8 && i < (int)state.size; ++i) {
+        char value_buffer[32];
+        u64_to_ascii((u64)(unsigned char)state.data[i], value_buffer, sizeof(value_buffer));
+        console_write(2, value_buffer);
+        if (i < 7 && (i + 1) < (int)state.size) {
+            console_write(2, " ");
+        }
+    }
+    console_line(2, "");
     const char* token = 0;
     usize token_length = 0u;
     if (!ppm_next_token(state, &token, &token_length)) {
+        console_line(2, "debug: missing magic token");
         return false;
     }
     if (!ascii_equals_token(token, token_length, "P3")) {
+        char debug_token[32];
+        usize debug_count = (token_length < (usize)(sizeof(debug_token) - 1u)) ? token_length : (sizeof(debug_token) - 1u);
+        for (usize i = 0u; i < debug_count; ++i) {
+            debug_token[i] = token[i];
+        }
+        debug_token[debug_count] = '\0';
+        console_line(2, "debug: magic token not P3");
+        console_write(2, "debug token: ");
+        console_line(2, debug_token);
+        char length_buffer[32];
+        u64_to_ascii((u64)token_length, length_buffer, sizeof(length_buffer));
+        console_write(2, "debug length: ");
+        console_line(2, length_buffer);
+        usize offset = (usize)(token - (const char*)state.data);
+        char offset_buffer[32];
+        u64_to_ascii((u64)offset, offset_buffer, sizeof(offset_buffer));
+        console_write(2, "debug offset: ");
+        console_line(2, offset_buffer);
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
+        console_line(2, "debug: missing width token");
         return false;
     }
     u64 width = 0u;
     if (!ascii_to_u64(token, token_length, &width) || width == 0u) {
+        console_line(2, "debug: invalid width token");
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
+        console_line(2, "debug: missing height token");
         return false;
     }
     u64 height = 0u;
     if (!ascii_to_u64(token, token_length, &height) || height == 0u) {
+        console_line(2, "debug: invalid height token");
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
+        console_line(2, "debug: missing max value token");
         return false;
     }
     u64 max_value = 0u;
     if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u) {
+        console_line(2, "debug: invalid max value token");
         return false;
     }
     u64 pixel_count = width * height;
@@ -1986,6 +3058,41 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_bits = true;
         dest.bits_value = src.bits_value;
+    }
+    if (src.has_ecc_flag) {
+        if (dest.has_ecc_flag && dest.ecc_flag_value != src.ecc_flag_value) {
+            return false;
+        }
+        dest.has_ecc_flag = true;
+        dest.ecc_flag_value = src.ecc_flag_value;
+    }
+    if (src.has_ecc_block_data) {
+        if (dest.has_ecc_block_data && dest.ecc_block_data_value != src.ecc_block_data_value) {
+            return false;
+        }
+        dest.has_ecc_block_data = true;
+        dest.ecc_block_data_value = src.ecc_block_data_value;
+    }
+    if (src.has_ecc_parity) {
+        if (dest.has_ecc_parity && dest.ecc_parity_value != src.ecc_parity_value) {
+            return false;
+        }
+        dest.has_ecc_parity = true;
+        dest.ecc_parity_value = src.ecc_parity_value;
+    }
+    if (src.has_ecc_block_count) {
+        if (dest.has_ecc_block_count && dest.ecc_block_count_value != src.ecc_block_count_value) {
+            return false;
+        }
+        dest.has_ecc_block_count = true;
+        dest.ecc_block_count_value = src.ecc_block_count_value;
+    }
+    if (src.has_ecc_original_bytes) {
+        if (dest.has_ecc_original_bytes && dest.ecc_original_bytes_value != src.ecc_original_bytes_value) {
+            return false;
+        }
+        dest.has_ecc_original_bytes = true;
+        dest.ecc_original_bytes_value = src.ecc_original_bytes_value;
     }
     if (src.has_color_channels) {
         if (dest.has_color_channels && dest.color_channels_value != src.color_channels_value) {
@@ -2260,6 +3367,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u64 page_count,
                                u64 bits_per_page,
                                u64 payload_bit_count,
+                               const makocode::EccSummary* ecc_summary,
                                const char* footer_text,
                                usize footer_length,
                                const FooterLayout& footer_layout,
@@ -2313,6 +3421,27 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
         return false;
+    }
+    if (ecc_summary && ecc_summary->enabled) {
+        if (!append_comment_number(output, "MAKOCODE_ECC", 1u)) {
+            return false;
+        }
+        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", (u64)ecc_summary->block_data_symbols)) {
+            return false;
+        }
+        if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
+            return false;
+        }
+        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_COUNT", ecc_summary->block_count)) {
+            return false;
+        }
+        if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", ecc_summary->original_bytes)) {
+            return false;
+        }
+    } else {
+        if (!append_comment_number(output, "MAKOCODE_ECC", 0u)) {
+            return false;
+        }
     }
     if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
         return false;
@@ -2521,13 +3650,32 @@ static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
             close(fd);
             return false;
         }
+        if (read_result > 0 && total == 0u) {
+            char debug_msg[64];
+            u64_to_ascii((u64)read_result, debug_msg, sizeof(debug_msg));
+            console_write(2, "debug read chunk size: ");
+            console_line(2, debug_msg);
+        }
         if (read_result == 0) {
             break;
         }
         total += (usize)read_result;
+        buffer.size = total;
     }
     buffer.size = total;
     close(fd);
+    if (buffer.size >= 8u && buffer.data) {
+        console_write(2, "debug file first bytes: ");
+        for (usize debug_i = 0u; debug_i < 8u && debug_i < buffer.size; ++debug_i) {
+            char value_buffer[32];
+            u64_to_ascii((u64)(unsigned char)buffer.data[debug_i], value_buffer, sizeof(value_buffer));
+            console_write(2, value_buffer);
+            if ((debug_i + 1u) < buffer.size && debug_i < 7u) {
+                console_write(2, " ");
+            }
+        }
+        console_line(2, "");
+    }
     return true;
 }
 
@@ -2542,6 +3690,7 @@ static void write_usage() {
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
     console_line(1, "  --input=FILE       (payload input path; required for encode)");
+    console_line(1, "  --ecc=RATIO        (Reed-Solomon redundancy; 0 disables, e.g., 0.10)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
     console_line(1, "  --title=TEXT       (optional footer title; letters, digits, common symbols)");
@@ -2735,6 +3884,7 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
 static int command_encode(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
+    double ecc_redundancy = 0.0;
     const char* input_path = 0;
     makocode::ByteBuffer title_buffer;
     makocode::ByteBuffer filename_buffer;
@@ -2751,6 +3901,26 @@ static int command_encode(int arg_count, char** args) {
             }
             if (ascii_equals_token(arg, ascii_length(arg), "--no-page-count")) {
                 footer_config.display_page_info = false;
+                continue;
+            }
+            const char ecc_prefix[] = "--ecc=";
+            if (ascii_starts_with(arg, ecc_prefix)) {
+                const char* value_text = arg + (sizeof(ecc_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "encode: --ecc requires a numeric value");
+                    return 1;
+                }
+                double redundancy_value = 0.0;
+                if (!ascii_to_double(value_text, length, &redundancy_value)) {
+                    console_line(2, "encode: --ecc value is not a valid decimal number");
+                    return 1;
+                }
+                if (redundancy_value < 0.0 || redundancy_value > 8.0) {
+                    console_line(2, "encode: --ecc must be between 0.0 and 8.0");
+                    return 1;
+                }
+                ecc_redundancy = redundancy_value;
                 continue;
             }
             const char input_prefix[] = "--input=";
@@ -2856,6 +4026,7 @@ static int command_encode(int arg_count, char** args) {
         return 1;
     }
     makocode::EncoderContext encoder;
+    encoder.config.ecc_redundancy = ecc_redundancy;
     if (!encoder.set_payload(payload.data, payload.size)) {
         console_line(2, "encode: failed to set payload");
         return 1;
@@ -2927,6 +4098,7 @@ static int command_encode(int arg_count, char** args) {
         return 1;
     }
     makocode::ByteBuffer footer_text_buffer;
+    const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
     if (page_count == 1u) {
         makocode::ByteBuffer page_output;
         if (!footer_build_page_text(footer_config, 1u, page_count, footer_text_buffer)) {
@@ -2945,6 +4117,7 @@ static int command_encode(int arg_count, char** args) {
                                 1u,
                                 bits_per_page,
                                 payload_bit_count,
+                                ecc_summary,
                                 footer_text,
                                 footer_length,
                                 footer_layout,
@@ -2985,6 +4158,7 @@ static int command_encode(int arg_count, char** args) {
                                     page_count,
                                     bits_per_page,
                                     payload_bit_count,
+                                    ecc_summary,
                                     footer_text,
                                     footer_length,
                                     footer_layout,
@@ -3056,10 +4230,24 @@ static int command_decode(int arg_count, char** args) {
         u64 expected_page_index = 1u;
         for (usize file_index = 0u; file_index < file_count; ++file_index) {
             makocode::ByteBuffer ppm_stream;
+            console_write(2, "debug reading file: ");
+            console_line(2, input_files[file_index]);
             if (!read_entire_file(input_files[file_index], ppm_stream)) {
                 console_write(2, "decode: failed to read ");
                 console_line(2, input_files[file_index]);
                 return 1;
+            }
+            if (ppm_stream.size >= 8u && ppm_stream.data) {
+                console_write(2, "debug read bytes: ");
+                for (usize debug_i = 0u; debug_i < 8u && debug_i < ppm_stream.size; ++debug_i) {
+                    char value_buffer[32];
+                    u64_to_ascii((u64)(unsigned char)ppm_stream.data[debug_i], value_buffer, sizeof(value_buffer));
+                    console_write(2, value_buffer);
+                    if ((debug_i + 1u) < ppm_stream.size && debug_i < 7u) {
+                        console_write(2, " ");
+                    }
+                }
+                console_line(2, "");
             }
             makocode::ByteBuffer page_bits;
             u64 page_bit_count = 0u;
@@ -3142,9 +4330,11 @@ static bool build_payload_frame(const ImageMappingConfig& mapping,
 static bool compute_frame_bit_count(const ImageMappingConfig& mapping,
                                     usize payload_size,
                                     u64 seed,
+                                    double ecc_redundancy,
                                     u64& frame_bit_count) {
     makocode::ByteBuffer payload;
     makocode::EncoderContext encoder;
+    encoder.config.ecc_redundancy = ecc_redundancy;
     makocode::ByteBuffer frame_bits;
     u64 payload_bits = 0u;
     if (!build_payload_frame(mapping, payload_size, seed, payload, encoder, frame_bits, frame_bit_count, payload_bits)) {
@@ -3156,6 +4346,7 @@ static bool compute_frame_bit_count(const ImageMappingConfig& mapping,
 static int command_test(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
+    double ecc_redundancy = 0.0;
     for (int i = 0; i < arg_count; ++i) {
         const char* arg = args[i];
         if (!arg) {
@@ -3166,6 +4357,26 @@ static int command_test(int arg_count, char** args) {
             return 1;
         }
         if (!handled) {
+            const char ecc_prefix[] = "--ecc=";
+            if (ascii_starts_with(arg, ecc_prefix)) {
+                const char* value_text = arg + (sizeof(ecc_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "test: --ecc requires a numeric value");
+                    return 1;
+                }
+                double redundancy_value = 0.0;
+                if (!ascii_to_double(value_text, length, &redundancy_value)) {
+                    console_line(2, "test: --ecc value is not a valid decimal number");
+                    return 1;
+                }
+                if (redundancy_value < 0.0 || redundancy_value > 8.0) {
+                    console_line(2, "test: --ecc must be between 0.0 and 8.0");
+                    return 1;
+                }
+                ecc_redundancy = redundancy_value;
+                continue;
+            }
             console_write(2, "test: unknown option: ");
             console_line(2, arg);
             return 1;
@@ -3229,7 +4440,7 @@ static int command_test(int arg_count, char** args) {
         u64 high_bits = 0u;
         while (true) {
             u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)high_size;
-            if (!compute_frame_bit_count(run_mapping, high_size, seed, high_bits)) {
+            if (!compute_frame_bit_count(run_mapping, high_size, seed, ecc_redundancy, high_bits)) {
                 console_line(2, "test: failed to evaluate payload size");
                 return 1;
             }
@@ -3257,7 +4468,7 @@ static int command_test(int arg_count, char** args) {
             usize mid = left + (right - left) / 2u;
             u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
             u64 mid_bits = 0u;
-            if (!compute_frame_bit_count(run_mapping, mid, seed, mid_bits)) {
+            if (!compute_frame_bit_count(run_mapping, mid, seed, ecc_redundancy, mid_bits)) {
                 console_line(2, "test: failed to evaluate payload size");
                 return 1;
             }
@@ -3281,6 +4492,7 @@ static int command_test(int arg_count, char** args) {
         }
         makocode::ByteBuffer payload;
         makocode::EncoderContext encoder;
+        encoder.config.ecc_redundancy = ecc_redundancy;
         makocode::ByteBuffer frame_bits;
         u64 frame_bit_count = 0u;
         u64 payload_bit_count = 0u;
@@ -3299,6 +4511,7 @@ static int command_test(int arg_count, char** args) {
         PpmParserState aggregate_state;
         bool aggregate_initialized = false;
         makocode::ByteBuffer name_buffer;
+        const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
         for (u64 page = 0u; page < page_count; ++page) {
             makocode::ByteBuffer page_output;
             u64 bit_offset = page * bits_per_page;
@@ -3312,6 +4525,7 @@ static int command_test(int arg_count, char** args) {
                                     page_count,
                                     bits_per_page,
                                     payload_bit_count,
+                                    ecc_summary,
                                     0,
                                     0u,
                                     footer_layout,
