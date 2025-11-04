@@ -327,6 +327,84 @@ static bool generate_random_bytes(ByteBuffer& buffer, usize count, u64 seed) {
     return true;
 }
 
+static const unsigned __int128 PCG64_MULTIPLIER =
+    (((unsigned __int128)0x2360ED051FC65DA4ull) << 64u) | (unsigned __int128)0x4385DF649FCCF645ull;
+static const unsigned __int128 PCG64_INCREMENT =
+    (((unsigned __int128)0x5851F42D4C957F2Dull) << 64u) | (unsigned __int128)0x14057B7EF767814Full;
+
+struct Pcg64Generator {
+    unsigned __int128 state;
+
+    Pcg64Generator() : state(0u) {}
+
+    void seed(u64 seed_value) {
+        state = 0u;
+        (void)next();
+        state += (unsigned __int128)seed_value;
+        (void)next();
+    }
+
+    u64 next() {
+        unsigned __int128 oldstate = state;
+        state = oldstate * PCG64_MULTIPLIER + PCG64_INCREMENT;
+        u64 xorshifted = (u64)(((oldstate >> 64u) ^ oldstate) >> 64u);
+        u32 rot = (u32)(oldstate >> 122u);
+        u32 rotate = rot & 63u;
+        u32 inverse = (64u - rotate) & 63u;
+        return (xorshifted >> rotate) | (xorshifted << inverse);
+    }
+};
+
+static bool fisher_yates_shuffle(u8* data, usize count) {
+    if (!data || count <= 1u) {
+        return true;
+    }
+    Pcg64Generator rng;
+    rng.seed(0u);
+    for (usize i = count - 1u; i > 0u; --i) {
+        u64 value = rng.next();
+        usize j = (usize)(value % (u64)(i + 1u));
+        u8 temp = data[i];
+        data[i] = data[j];
+        data[j] = temp;
+    }
+    return true;
+}
+
+static bool fisher_yates_unshuffle(u8* data, usize count) {
+    if (!data || count <= 1u) {
+        return true;
+    }
+    if (count > 0u && count > (USIZE_MAX_VALUE / (usize)sizeof(usize))) {
+        return false;
+    }
+    usize* history = (usize*)malloc(sizeof(usize) * (count ? count : 1u));
+    if (!history) {
+        return false;
+    }
+    if (count > 0u) {
+        history[0] = 0u;
+    }
+    Pcg64Generator rng;
+    rng.seed(0u);
+    for (usize i = count - 1u; i > 0u; --i) {
+        u64 value = rng.next();
+        usize j = (usize)(value % (u64)(i + 1u));
+        history[i] = j;
+    }
+    for (usize i = 1u; i < count; ++i) {
+        usize j = history[i];
+        u8 temp = data[i];
+        data[i] = data[j];
+        data[j] = temp;
+    }
+    free(history);
+    return true;
+}
+
+static bool shuffle_encoded_stream(u8* data, usize byte_count, bool ecc_enabled);
+static bool unshuffle_encoded_stream(u8* data, usize byte_count);
+
 struct BitWriter {
     ByteBuffer buffer;
     usize bit_position;
@@ -788,6 +866,16 @@ struct EncoderContext {
         }
         if (!bit_writer.align_to_byte()) {
             return false;
+        }
+        usize total_bytes = bit_writer.byte_size();
+        if (total_bytes > 0u) {
+            u8* stream = bit_writer.buffer.data;
+            if (!stream) {
+                return false;
+            }
+            if (!shuffle_encoded_stream(stream, total_bytes, ecc_summary.enabled)) {
+                return false;
+            }
         }
         configured = true;
         return true;
@@ -1524,6 +1612,43 @@ static bool decode_ecc_payload(const u8* bytes,
     return (written == header.original_bytes);
 }
 
+static bool shuffle_encoded_stream(u8* data, usize byte_count, bool ecc_enabled) {
+    if (!data || byte_count <= 1u) {
+        return true;
+    }
+    if (!ecc_enabled) {
+        return fisher_yates_shuffle(data, byte_count);
+    }
+    if (byte_count <= ECC_HEADER_BYTES) {
+        return true;
+    }
+    return fisher_yates_shuffle(data + ECC_HEADER_BYTES, byte_count - ECC_HEADER_BYTES);
+}
+
+static bool unshuffle_encoded_stream(u8* data, usize byte_count) {
+    if (!data || byte_count <= 1u) {
+        return true;
+    }
+    bool treat_as_ecc = false;
+    if (byte_count >= ECC_HEADER_BYTES) {
+        u16 magic = read_le_u16(data);
+        if (magic == ECC_HEADER_MAGIC) {
+            treat_as_ecc = true;
+        }
+    }
+    EccHeaderInfo header_probe;
+    if (parse_ecc_header(data, byte_count, header_probe) && header_probe.valid && header_probe.enabled) {
+        treat_as_ecc = true;
+    }
+    if (!treat_as_ecc) {
+        return fisher_yates_unshuffle(data, byte_count);
+    }
+    if (byte_count <= ECC_HEADER_BYTES) {
+        return true;
+    }
+    return fisher_yates_unshuffle(data + ECC_HEADER_BYTES, byte_count - ECC_HEADER_BYTES);
+}
+
 struct DecoderContext {
     ByteBuffer payload;
     bool has_payload;
@@ -1537,7 +1662,7 @@ struct DecoderContext {
         ecc_failed = false;
     }
 
-    bool parse(const u8* data, usize size_in_bits) {
+    bool parse(u8* data, usize size_in_bits) {
         payload.release();
         has_payload = false;
         ecc_failed = false;
@@ -1549,6 +1674,9 @@ struct DecoderContext {
             return false;
         }
         usize byte_count = (size_in_bits + 7u) >> 3u;
+        if (byte_count > 0u && !unshuffle_encoded_stream(data, byte_count)) {
+            return false;
+        }
         EccHeaderInfo header;
         bool header_ok = parse_ecc_header(data, byte_count, header);
         if (header_ok && header.valid && header.enabled) {

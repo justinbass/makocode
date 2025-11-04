@@ -1,10 +1,10 @@
 TODO:
-- Data shuffling (fisher yates with pcg-64 seed-0? Or standard random algorithm), position is shuffled globally.
 - Encryption (xchacha? aes/twofish/serpent?)
 - Multiple files, e.g. tar. Filename print applies to all, possibly concats...
 - Fiducial data (if needed), test should create distortions
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 - Script to create art in output that is actually readable. Possibly just apply matrix code steganographically to an input image.
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel.
+- Print version in footer
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
 - Minify source code when finished
