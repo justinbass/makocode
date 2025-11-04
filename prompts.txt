@@ -45,3 +45,8 @@ Previously you had written some ECC code, parts of the calculation might be righ
 Can you invert white and black in the color channel 1 image? Black should be 1, and White should be 0 - essentially.
 Write me a new test case that encodes, then randomly flips some bits, then decodes, to check the ECC works as expected.
 Continue working to fix the fact that ./makocode test --ecc=0.2 doesn't work yet.
+The error correction algorithm is still wrong. If I encode and then change the ppm file to modify the very first 255 255 255 to be 0 0 0, it does not decode correctly. I would expect ECC to fix that, then decompress, and return the original input.
+It's still not quite there. I modified the first few hundred bits from 255 to 0, and it's giving decode: parse failure again
+How do I get it to decode multiple pages?
+I've been running multiple tests and it's not looking good for error correction. I tried encoding, changing 255 to 0 for single random pixels, then decoding, and the output is not the same as the input. I'd also like a warning printed if the error detection could not return the original, reed-solomon should be able to not just correct  but also to detect.
+Still not working. Look at my out.txt, after modifying 5 pixels from 255 to 0 the line 4346 modified le_ to slot =, that's totally wrong.

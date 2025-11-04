@@ -1387,6 +1387,53 @@ static u64 read_le_u64(const u8* ptr) {
     return low | (high << 32u);
 }
 
+static void write_le_u16(u8* ptr, u16 value) {
+    ptr[0] = (u8)(value & 0xFFu);
+    ptr[1] = (u8)((value >> 8u) & 0xFFu);
+}
+
+static void write_le_u32(u8* ptr, u32 value) {
+    ptr[0] = (u8)(value & 0xFFu);
+    ptr[1] = (u8)((value >> 8u) & 0xFFu);
+    ptr[2] = (u8)((value >> 16u) & 0xFFu);
+    ptr[3] = (u8)((value >> 24u) & 0xFFu);
+}
+
+static void write_le_u64(u8* ptr, u64 value) {
+    write_le_u32(ptr, (u32)(value & 0xFFFFFFFFull));
+    write_le_u32(ptr + 4u, (u32)((value >> 32u) & 0xFFFFFFFFull));
+}
+
+static bool build_ecc_header_bytes(u8* dest,
+                                   usize dest_capacity,
+                                   u16 block_data,
+                                   u16 parity,
+                                   u64 block_count,
+                                   u64 original_bytes) {
+    if (!dest || dest_capacity < ECC_HEADER_BYTES) {
+        return false;
+    }
+    if (block_data == 0u || parity == 0u || block_count == 0u) {
+        return false;
+    }
+    if (block_data >= RS_FIELD_SIZE || parity >= RS_FIELD_SIZE) {
+        return false;
+    }
+    if ((u32)block_data + parity > RS_FIELD_SIZE) {
+        return false;
+    }
+    dest[0] = (u8)(ECC_HEADER_MAGIC & 0xFFu);
+    dest[1] = (u8)((ECC_HEADER_MAGIC >> 8u) & 0xFFu);
+    dest[2] = ECC_HEADER_VERSION;
+    dest[3] = 0x01u;
+    write_le_u16(dest + 4u, block_data);
+    write_le_u16(dest + 6u, parity);
+    write_le_u16(dest + 8u, 0u);
+    write_le_u64(dest + 10u, block_count);
+    write_le_u64(dest + 18u, original_bytes);
+    return true;
+}
+
 static bool parse_ecc_header(const u8* bytes,
                              usize byte_count,
                              EccHeaderInfo& header) {
@@ -1480,17 +1527,20 @@ static bool decode_ecc_payload(const u8* bytes,
 struct DecoderContext {
     ByteBuffer payload;
     bool has_payload;
+    bool ecc_failed;
 
-    DecoderContext() : payload(), has_payload(false) {}
+    DecoderContext() : payload(), has_payload(false), ecc_failed(false) {}
 
     void reset() {
         payload.release();
         has_payload = false;
+        ecc_failed = false;
     }
 
     bool parse(const u8* data, usize size_in_bits) {
         payload.release();
         has_payload = false;
+        ecc_failed = false;
         if (size_in_bits == 0u) {
             has_payload = true;
             return true;
@@ -1506,11 +1556,13 @@ struct DecoderContext {
             u64 expected_bytes = (u64)block_total * header.block_count;
             u64 available_bytes = (u64)byte_count;
             if (available_bytes < (u64)ECC_HEADER_BYTES + expected_bytes) {
+                ecc_failed = true;
                 return false;
             }
             const u8* encoded = data + ECC_HEADER_BYTES;
             ByteBuffer compressed;
             if (!decode_ecc_payload(encoded, header, compressed)) {
+                ecc_failed = true;
                 return false;
             }
             if (header.original_bytes == 0u) {
@@ -1519,15 +1571,18 @@ struct DecoderContext {
             }
             u64 bit_total = header.original_bytes * 8u;
             if (bit_total > (u64)USIZE_MAX_VALUE) {
+                ecc_failed = true;
                 return false;
             }
             if (!lzw_decompress(compressed.data, (usize)bit_total, payload)) {
+                ecc_failed = true;
                 return false;
             }
             has_payload = true;
             return true;
         }
         if (header.detected && !header.valid) {
+            ecc_failed = true;
             return false;
         }
         if (!lzw_decompress(data, size_in_bits, payload)) {
@@ -1535,6 +1590,10 @@ struct DecoderContext {
         }
         has_payload = true;
         return true;
+    }
+
+    bool ecc_correction_failed() const {
+        return ecc_failed;
     }
 };
 
@@ -2261,6 +2320,15 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             }
         }
         if (match) {
+            usize next = index + ecc_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
+            }
+        }
+        if (match) {
             index += ecc_tag_len;
             while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
                 ++index;
@@ -2298,6 +2366,15 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             if (comment[index + i] != ecc_block_tag[i]) {
                 match = false;
                 break;
+            }
+        }
+        if (match) {
+            usize next = index + ecc_block_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
             }
         }
         if (match) {
@@ -2341,6 +2418,15 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             }
         }
         if (match) {
+            usize next = index + ecc_parity_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
+            }
+        }
+        if (match) {
             index += ecc_parity_tag_len;
             while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
                 ++index;
@@ -2381,6 +2467,15 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             }
         }
         if (match) {
+            usize next = index + ecc_block_count_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
+            }
+        }
+        if (match) {
             index += ecc_block_count_tag_len;
             while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
                 ++index;
@@ -2418,6 +2513,15 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             if (comment[index + i] != ecc_original_tag[i]) {
                 match = false;
                 break;
+            }
+        }
+        if (match) {
+            usize next = index + ecc_original_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
             }
         }
         if (match) {
@@ -3207,20 +3311,6 @@ static bool frame_bits_to_payload(const u8* frame_data,
     output.size = payload_bytes;
     out_bit_count = payload_bits;
     return true;
-}
-
-static bool ppm_to_bitstream(const makocode::ByteBuffer& input,
-                             const ImageMappingConfig& overrides,
-                             makocode::ByteBuffer& output,
-                             u64& out_bit_count) {
-    makocode::ByteBuffer frame_bits;
-    u64 frame_bit_count = 0u;
-    PpmParserState metadata;
-    if (!ppm_extract_frame_bits(input, overrides, frame_bits, frame_bit_count, metadata)) {
-        return false;
-    }
-    const u8* frame_data = frame_bits.size ? frame_bits.data : 0;
-    return frame_bits_to_payload(frame_data, frame_bit_count, metadata, output, out_bit_count);
 }
 
 static bool buffer_append_number(makocode::ByteBuffer& buffer, u64 value) {
@@ -4222,20 +4312,30 @@ static int command_decode(int arg_count, char** args) {
     }
     makocode::ByteBuffer bitstream;
     u64 bit_count = 0u;
+    PpmParserState aggregate_state;
+    bool have_metadata = false;
     if (file_count == 0u) {
         makocode::ByteBuffer ppm_stream;
         if (!read_entire_stdin(ppm_stream)) {
             console_line(2, "decode: failed to read stdin");
             return 1;
         }
-        if (!ppm_to_bitstream(ppm_stream, mapping, bitstream, bit_count)) {
+        makocode::ByteBuffer frame_bits;
+        u64 frame_bit_count = 0u;
+        PpmParserState single_state;
+        if (!ppm_extract_frame_bits(ppm_stream, mapping, frame_bits, frame_bit_count, single_state)) {
             console_line(2, "decode: invalid ppm input");
             return 1;
         }
+        if (!frame_bits_to_payload(frame_bits.data, frame_bit_count, single_state, bitstream, bit_count)) {
+            console_line(2, "decode: failed to extract payload bits");
+            return 1;
+        }
+        aggregate_state = single_state;
+        have_metadata = true;
     } else {
         makocode::BitWriter frame_aggregator;
         frame_aggregator.reset();
-        PpmParserState aggregate_state;
         bool aggregate_initialized = false;
         bool enforce_page_index = true;
         u64 expected_page_index = 1u;
@@ -4306,11 +4406,69 @@ static int command_decode(int arg_count, char** args) {
             console_line(2, "decode: failed to extract payload bits");
             return 1;
         }
+        have_metadata = true;
+    }
+    bool ecc_header_repaired = false;
+    bool ecc_metadata_available = have_metadata &&
+                                   aggregate_state.has_ecc_flag &&
+                                   aggregate_state.ecc_flag_value;
+    if (have_metadata &&
+        aggregate_state.has_ecc_flag &&
+        !aggregate_state.ecc_flag_value) {
+        console_line(2, "decode: warning: payload was encoded without ECC protection");
+    }
+    if (ecc_metadata_available &&
+        aggregate_state.has_ecc_block_data &&
+        aggregate_state.has_ecc_parity &&
+        aggregate_state.has_ecc_block_count &&
+        aggregate_state.has_ecc_original_bytes &&
+        bitstream.data &&
+        bitstream.size >= makocode::ECC_HEADER_BYTES &&
+        bit_count >= (u64)makocode::ECC_HEADER_BITS) {
+        u64 block_data_value = aggregate_state.ecc_block_data_value;
+        u64 parity_value = aggregate_state.ecc_parity_value;
+        if (block_data_value <= 0xFFFFu && parity_value <= 0xFFFFu) {
+            u8 header_bytes[makocode::ECC_HEADER_BYTES];
+            if (makocode::build_ecc_header_bytes(header_bytes,
+                                                 makocode::ECC_HEADER_BYTES,
+                                                 (u16)block_data_value,
+                                                 (u16)parity_value,
+                                                 aggregate_state.ecc_block_count_value,
+                                                 aggregate_state.ecc_original_bytes_value)) {
+                bool differs = false;
+                for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
+                    if (bitstream.data[i] != header_bytes[i]) {
+                        differs = true;
+                        break;
+                    }
+                }
+                if (differs) {
+                    for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
+                        bitstream.data[i] = header_bytes[i];
+                    }
+                    ecc_header_repaired = true;
+                }
+            }
+        }
+    } else if (have_metadata &&
+               aggregate_state.has_ecc_flag &&
+               aggregate_state.ecc_flag_value) {
+        console_line(2, "decode: warning: ECC metadata incomplete; header reconstruction skipped");
+    }
+    if (ecc_header_repaired) {
+        console_line(2, "decode: repaired ECC header from metadata");
     }
     makocode::DecoderContext decoder;
     if (!decoder.parse(bitstream.data, bit_count)) {
-        console_line(2, "decode: parse failure");
+        if (decoder.ecc_correction_failed()) {
+            console_line(2, "decode: ECC could not repair the payload");
+        } else {
+            console_line(2, "decode: parse failure");
+        }
         return 1;
+    }
+    if (decoder.ecc_correction_failed()) {
+        console_line(2, "decode: warning: payload may contain uncorrected errors");
     }
     if (decoder.has_payload && decoder.payload.size) {
         write(1, decoder.payload.data, decoder.payload.size);
