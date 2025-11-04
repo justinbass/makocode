@@ -861,15 +861,7 @@ static inline u8 gf_div(u8 a, u8 b) {
     return g_rs_tables.exp_table[diff];
 }
 
-static inline u8 gf_inverse(u8 value) {
-    if (!value) {
-        return 0u;
-    }
-    rs_ensure_tables();
-    u16 log_v = g_rs_tables.log_table[value];
-    u16 inverse_index = (u16)((RS_FIELD_SIZE - log_v) % RS_FIELD_SIZE);
-    return g_rs_tables.exp_table[inverse_index];
-}
+
 
 static inline u8 gf_pow_alpha(u32 power) {
     rs_ensure_tables();
@@ -1092,7 +1084,8 @@ static bool rs_find_error_locations(const u8* locator,
             if (position_count >= (locator_size - 1u)) {
                 return false;
             }
-            positions[position_count++] = (u16)(codeword_length - 1u - i);
+            u16 position = (i == 0u) ? (u16)(codeword_length - 1u) : (u16)(i - 1u);
+            positions[position_count++] = position;
         }
     }
     return (position_count == (locator_size - 1u));
@@ -1156,20 +1149,20 @@ static bool rs_correct_errors(u8* codeword,
         if (pos >= codeword_length) {
             return false;
         }
-        u16 exponent = (u16)((codeword_length - 1u - pos) % RS_FIELD_SIZE);
-        u8 X = gf_pow_alpha(exponent);
-        u8 X_inv = gf_inverse(X);
-        u8 numerator = poly_eval(omega, omega_size, X_inv);
-        u8 denominator = poly_eval(locator_derivative, derivative_size, X_inv);
+        u16 exponent = (u16)((pos + 1u) % RS_FIELD_SIZE);
+        u8 root = gf_pow_alpha(exponent);
+        u8 numerator = poly_eval(omega, omega_size, root);
+        u8 denominator = poly_eval(locator_derivative, derivative_size, root);
         if (!denominator) {
             return false;
         }
-        u8 magnitude = gf_mul(numerator, X_inv);
-        magnitude = gf_div(magnitude, denominator);
+        u8 magnitude = gf_div(numerator, denominator);
         codeword[pos] ^= magnitude;
     }
     return true;
 }
+
+
 
 static bool rs_decode_block(u8* block,
                             u16 data_symbols,
@@ -1217,6 +1210,8 @@ static bool rs_decode_block(u8* block,
     }
     return rs_correct_errors(block, codeword_length, evaluator, evaluator_size, locator_derivative, derivative_size, error_positions, error_count);
 }
+
+
 
 static bool compute_ecc_layout(usize data_bytes,
                                double requested_redundancy,
@@ -4356,6 +4351,112 @@ static bool compute_frame_bit_count(const ImageMappingConfig& mapping,
     return true;
 }
 
+static bool validate_ecc_random_bit_flips(const makocode::ByteBuffer& original_payload,
+                                          const makocode::ByteBuffer& compressed_payload,
+                                          const makocode::ByteBuffer& encoded_bits,
+                                          u64 encoded_bit_count,
+                                          const makocode::EccSummary& summary,
+                                          u64 seed) {
+    if (!summary.enabled || summary.parity_symbols < 2u) {
+        return true;
+    }
+    if (!encoded_bits.data || encoded_bits.size == 0u || encoded_bit_count == 0u) {
+        return true;
+    }
+    if (original_payload.size == 0u) {
+        return true;
+    }
+    usize byte_count = (usize)((encoded_bit_count + 7u) >> 3u);
+    if (byte_count <= makocode::ECC_HEADER_BYTES) {
+        return true;
+    }
+    if (byte_count > encoded_bits.size) {
+        return false;
+    }
+    makocode::ByteBuffer corrupted;
+    if (!corrupted.ensure(byte_count)) {
+        return false;
+    }
+    for (usize i = 0u; i < byte_count; ++i) {
+        corrupted.data[i] = encoded_bits.data ? encoded_bits.data[i] : 0u;
+    }
+    corrupted.size = byte_count;
+    u64 max_symbol_errors = summary.parity_symbols / 2u;
+    if (max_symbol_errors == 0u) {
+        return true;
+    }
+    u64 available_symbols = (u64)(byte_count - makocode::ECC_HEADER_BYTES);
+    if (available_symbols == 0u) {
+        return true;
+    }
+    if (max_symbol_errors > available_symbols) {
+        max_symbol_errors = available_symbols;
+    }
+    u64 desired_errors = (max_symbol_errors > 0u) ? 1u : 0u;
+    if (desired_errors == 0u) {
+        return true;
+    }
+    usize chosen[4] = {0u, 0u, 0u, 0u};
+    u64 prng = seed ? seed : 0x9e3779b97f4a7c15ull;
+    for (u64 error_index = 0u; error_index < desired_errors; ++error_index) {
+        for (;;) {
+            prng = prng * 6364136223846793005ull + 0x9e3779b97f4a7c15ull;
+            usize candidate = (usize)((prng >> 24u) % (usize)available_symbols);
+            bool duplicate = false;
+            for (u64 seen = 0u; seen < error_index; ++seen) {
+                if (chosen[seen] == candidate) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                chosen[error_index] = candidate;
+                break;
+            }
+        }
+        prng = prng * 6364136223846793005ull + 0x9e3779b97f4a7c15ull;
+        u8 bit_mask = (u8)(1u << ((prng >> 11u) & 7u));
+        if (bit_mask == 0u) {
+            bit_mask = 1u;
+        }
+        usize byte_offset = makocode::ECC_HEADER_BYTES + chosen[error_index];
+        if (byte_offset >= corrupted.size) {
+            byte_offset = corrupted.size - 1u;
+        }
+        corrupted.data[byte_offset] ^= bit_mask;
+    }
+    makocode::EccHeaderInfo header_info;
+    if (!makocode::parse_ecc_header(corrupted.data, byte_count, header_info) || !header_info.valid || !header_info.enabled) {
+        return false;
+    }
+    makocode::ByteBuffer repaired_payload;
+    if (!makocode::decode_ecc_payload(corrupted.data + makocode::ECC_HEADER_BYTES, header_info, repaired_payload)) {
+        return false;
+    }
+    if (compressed_payload.size == repaired_payload.size) {
+        for (usize i = 0u; i < repaired_payload.size; ++i) {
+            if (repaired_payload.data[i] != compressed_payload.data[i]) {
+                return false;
+            }
+        }
+    }
+    makocode::DecoderContext validator;
+    if (!validator.parse(corrupted.data, (usize)encoded_bit_count)) {
+        return false;
+    }
+    if (!validator.has_payload || validator.payload.size != original_payload.size) {
+        return false;
+    }
+    for (usize i = 0u; i < original_payload.size; ++i) {
+        if (validator.payload.data[i] != original_payload.data[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+
 static int command_test(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
@@ -4616,6 +4717,21 @@ static int command_test(int arg_count, char** args) {
                 console_line(2, "test: payload mismatch");
                 return 1;
             }
+        }
+        makocode::ByteBuffer compressed_snapshot;
+        if (!encoder.encode_payload(compressed_snapshot)) {
+            console_line(2, "test: failed to recompute compressed payload for ECC validation");
+            return 1;
+        }
+        const makocode::ByteBuffer& encoded_stream = encoder.bit_writer.buffer;
+        u64 encoded_stream_bits = (u64)encoder.bit_writer.bit_size();
+        if (!validate_ecc_random_bit_flips(payload,
+                                            compressed_snapshot,
+                                            encoded_stream,
+                                            encoded_stream_bits,
+                                            *ecc_summary,
+                                            final_seed ^ (u64)page_count)) {
+            return 1;
         }
         char digits_color[8];
         u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));

@@ -1,0 +1,47 @@
+Using the notes, start generating this projects from scratch in C++. Note that it should be totally self contained in a giant single file called makocode.cpp, pulling in literally no libraries of any kind.
+Create a makefile and a singular test file that encodes random data with the simplest default settings, then decodes it and verifies the output is the same
+The output format of encode, and input to decode, should be in ppm (portable pixmap format). The test file should just be test.cpp
+Rename test_runner to just test.
+I didn't see you had selftest already in makocode.cpp. Remove test.cpp, rename selftest to test and make sure it's writing random data out too.
+Have an option for test to leave the test files for visual inspection. The default is still to remove them
+Make the default encode/decode work against black and white with no shades. There should be an option to specify color channels and shade channels, however.
+Add 3 colors versus 3 shades in the test, so 9 output ppm files to test in total
+Make clean needs to remove all the test files. I just ran it and there are some remaining, take a look
+The 2 channel option should be CMY (cyan magenta yellow) looks like you've done different colors, maybe red and blue. Make it CMY.
+2 channels now looks like RGB, not CMY. Fix it. Also remove the --keep option, just always keep by default. Make clean already does the deleting so it's extraneous.
+Ok when I ./makocode test, the c2_s1 is clearly RGB on my Mac. That should only have the color Cyan, Magenta, and Yellow. And white of course. That file has also red, blue, and green - which is incorrect. Fix this.
+Ok once again look at encoded_c2_s1.ppm, there are obviously red pixels here. It should only be printing out cyan, magenta, and yellow, and white. Do not print out red for color channels 2.
+Excellent! However you simply need to do shades 2 and 3 in the test as well.
+Make test should generate shades 2 and 3 for color channel 2. It does so for 1 and 3. Fix it, there should be 9 ppms after this.
+The output ppm for colors=2 shades=2 or 3 is wrong. If it were correct, it would at least have cyan, magenta, yellow, and white in there along with intermediate shades. It does not. Fix it.
+Add LZW compression and decompression in the encode/decode
+Can you completely remove the headers like metadata, fiducial, payload, address, etc? Just put the straight data starting at byte 0, there are no options or metadata.
+But keep LZW I mean
+Drop the comment tag as you suggest, also fix the initial comment to summarize the code correctly as it's somewhat working now.
+Remove all #MAKOCODE * comments from the PPM
+Round trip mismatch when running test
+Fix the makocode.cpp comment to reflect the functionality now, it has changed. Remove NOTES.md mentions now, it's not a prototype anymore.
+Remove shade channels completely
+These output ppm's have shades. I want color=1 to be only black and white. Color=2 is only cyan, magenta, and yellow. Color=3 is RGB CMY and white/black.
+Color=2 is CMY, and white - I mean.
+I ran make clean but there are some files remaining, make sure they're all cleaned up
+In colors=3 RGBCMYWB setting, I see structure in the output file - there is 1 column of white every 4th column. If this were perfectly compressed, like the colors=1 and 2 examples, I would not see the columns. Can you either explain it or fix it?
+Whoa don't switch to python. Leave it as a single cpp file.
+I'm curious why the filesize is approx the same after. If these were white columns making up 25% of the file, that implies a pretty bad compression no?
+Add a page width, height and dots per inch. Default to A4 paper sizes and 300 DPI. If the file would span multiple pages, print out multiple ppm files. The decoder must read in multiple files as well, and should support * syntax, e.g. makocode decode scanned*.ppm . Make sure the test for each of c=1, 2, 3 tests exactly 2 full pages of data.
+Make the pagewidth and height arguments not be in inches, but pixels instead. Remove density (dpi) and inches completely.
+print an optional user provided title string at the bottom of the page, with an argument for font size. Valid characters are alphanumeric only.
+Make the title print as small as possible with no margin, e.g. 5x5 pixels on the page, starting from the left. Use only 1 column, 1x5, as a space between characters.
+I see 5x7 gylphs in the code. Print those as small as possible, 5x7 pixels total, with 1 white column for a space, at the bottom. Currently it prints huge text.
+Write the file out with default name being the UTC timestamp (and page num as before), whether it's one or multiple pages. E.g. don't pipe the output out, always write the file. Right now looks like the single page is a pipe, while multiple pages is a write.
+Can you add to the characters allowed in the title: lower and upper alpha, numeric, and the most common special characters - like space, !@#$%^&*(){}[]:\";'<>?,./`~|\\
+Also add -=_+
+Can you make lowercase a-z characters work too?
+I want the following additional options for printing text in the bottom row: Filename (needs to be an input - currently it's read from stdin I think and I just want it read from a file) and page count (e.g. Page 2/10) only if there's more than one page. So filename and page count should be displayed by default, and the previous arbitrary title field should not be displayed unless entered. There's also a title-font field that should be renamed font-size and applies to all these fields.
+Add an option to not display the filename in the footer. Additionally, make the optional title come before the filename.
+Add a page count to the footer, with an option to remove it, that displays like 1/1 or 3/7, e.g. current page / total pages
+Add error correcting codes, e.g. Reed Solomon, with an argument for the percent redundancy. E.g. 0.10 means that the data is covered 10%, and the output is thus 10% larger. 2.00 means the output is triple the size of the data, as there are 2x as much ECC as data.
+Previously you had written some ECC code, parts of the calculation might be right but I'm skeptical because the ECC lines are horizontal black lines, which couldn't carry any useful data.
+Can you invert white and black in the color channel 1 image? Black should be 1, and White should be 0 - essentially.
+Write me a new test case that encodes, then randomly flips some bits, then decodes, to check the ECC works as expected.
+Continue working to fix the fact that ./makocode test --ecc=0.2 doesn't work yet.
