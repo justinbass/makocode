@@ -753,6 +753,218 @@ static bool compute_page_dimensions(const ImageMappingConfig& config,
     return true;
 }
 
+static const u32 FOOTER_BASE_GLYPH_WIDTH  = 5u;
+static const u32 FOOTER_BASE_GLYPH_HEIGHT = 7u;
+
+struct PageFooterConfig {
+    const char* title_text;
+    usize title_length;
+    u32 font_scale;
+    bool has_title;
+
+    PageFooterConfig()
+        : title_text(0),
+          title_length(0u),
+          font_scale(16u),
+          has_title(false) {}
+};
+
+struct FooterLayout {
+    bool has_title;
+    u32 font_scale;
+    u32 glyph_width_pixels;
+    u32 glyph_height_pixels;
+    u32 char_spacing_pixels;
+    u32 footer_height_pixels;
+    u32 data_height_pixels;
+    u32 text_top_row;
+    u32 text_left_column;
+    u32 title_pixel_width;
+
+    FooterLayout()
+        : has_title(false),
+          font_scale(0u),
+          glyph_width_pixels(0u),
+          glyph_height_pixels(0u),
+          char_spacing_pixels(0u),
+          footer_height_pixels(0u),
+          data_height_pixels(0u),
+          text_top_row(0u),
+          text_left_column(0u),
+          title_pixel_width(0u) {}
+};
+
+struct GlyphPattern {
+    char symbol;
+    const char* rows[FOOTER_BASE_GLYPH_HEIGHT];
+};
+
+static const GlyphPattern FOOTER_GLYPHS[] = {
+    {'0', {"01110", "10001", "10001", "10001", "10001", "10001", "01110"}},
+    {'1', {"00100", "01100", "00100", "00100", "00100", "00100", "01110"}},
+    {'2', {"01110", "10001", "00001", "00010", "00100", "01000", "11111"}},
+    {'3', {"01110", "10001", "00001", "00110", "00001", "10001", "01110"}},
+    {'4', {"00010", "00110", "01010", "10010", "11111", "00010", "00010"}},
+    {'5', {"11111", "10000", "11110", "00001", "00001", "10001", "01110"}},
+    {'6', {"01110", "10000", "11110", "10001", "10001", "10001", "01110"}},
+    {'7', {"11111", "00001", "00010", "00100", "01000", "01000", "01000"}},
+    {'8', {"01110", "10001", "10001", "01110", "10001", "10001", "01110"}},
+    {'9', {"01110", "10001", "10001", "01111", "00001", "00001", "01110"}},
+    {'A', {"01110", "10001", "10001", "11111", "10001", "10001", "10001"}},
+    {'B', {"11110", "10001", "10001", "11110", "10001", "10001", "11110"}},
+    {'C', {"01110", "10001", "10000", "10000", "10000", "10001", "01110"}},
+    {'D', {"11110", "10001", "10001", "10001", "10001", "10001", "11110"}},
+    {'E', {"11111", "10000", "10000", "11110", "10000", "10000", "11111"}},
+    {'F', {"11111", "10000", "10000", "11110", "10000", "10000", "10000"}},
+    {'G', {"01110", "10001", "10000", "10000", "10011", "10001", "01110"}},
+    {'H', {"10001", "10001", "10001", "11111", "10001", "10001", "10001"}},
+    {'I', {"01110", "00100", "00100", "00100", "00100", "00100", "01110"}},
+    {'J', {"00111", "00010", "00010", "00010", "10010", "10010", "01100"}},
+    {'K', {"10001", "10010", "10100", "11000", "10100", "10010", "10001"}},
+    {'L', {"10000", "10000", "10000", "10000", "10000", "10000", "11111"}},
+    {'M', {"10001", "11011", "10101", "10101", "10001", "10001", "10001"}},
+    {'N', {"10001", "11001", "10101", "10011", "10001", "10001", "10001"}},
+    {'O', {"01110", "10001", "10001", "10001", "10001", "10001", "01110"}},
+    {'P', {"11110", "10001", "10001", "11110", "10000", "10000", "10000"}},
+    {'Q', {"01110", "10001", "10001", "10001", "10101", "10010", "01101"}},
+    {'R', {"11110", "10001", "10001", "11110", "10100", "10010", "10001"}},
+    {'S', {"01110", "10001", "10000", "01110", "00001", "10001", "01110"}},
+    {'T', {"11111", "00100", "00100", "00100", "00100", "00100", "00100"}},
+    {'U', {"10001", "10001", "10001", "10001", "10001", "10001", "01110"}},
+    {'V', {"10001", "10001", "10001", "10001", "10001", "01010", "00100"}},
+    {'W', {"10001", "10001", "10001", "10101", "10101", "10101", "01010"}},
+    {'X', {"10001", "10001", "01010", "00100", "01010", "10001", "10001"}},
+    {'Y', {"10001", "10001", "01010", "00100", "00100", "00100", "00100"}},
+    {'Z', {"11111", "00001", "00010", "00100", "01000", "10000", "11111"}}
+};
+
+static const usize FOOTER_GLYPH_COUNT = (usize)(sizeof(FOOTER_GLYPHS) / sizeof(FOOTER_GLYPHS[0]));
+
+static const GlyphPattern* footer_lookup_glyph(char c) {
+    if (c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 'A');
+    }
+    for (usize i = 0u; i < FOOTER_GLYPH_COUNT; ++i) {
+        if (FOOTER_GLYPHS[i].symbol == c) {
+            return &FOOTER_GLYPHS[i];
+        }
+    }
+    return 0;
+}
+
+static bool compute_footer_layout(u32 page_width_pixels,
+                                  u32 page_height_pixels,
+                                  const PageFooterConfig& footer,
+                                  FooterLayout& layout) {
+    layout = FooterLayout();
+    layout.font_scale = footer.font_scale;
+    layout.data_height_pixels = page_height_pixels;
+    if (!footer.has_title || footer.title_length == 0u) {
+        return true;
+    }
+    if (footer.font_scale == 0u) {
+        return false;
+    }
+    if (page_width_pixels == 0u || page_height_pixels == 0u) {
+        return false;
+    }
+    if (footer.title_length > (USIZE_MAX_VALUE / FOOTER_BASE_GLYPH_WIDTH)) {
+        return false;
+    }
+    if (footer.font_scale > 2048u) {
+        return false;
+    }
+    u32 scale = footer.font_scale;
+    u64 glyph_width_pixels = (u64)FOOTER_BASE_GLYPH_WIDTH * (u64)scale;
+    u64 glyph_height_pixels = (u64)FOOTER_BASE_GLYPH_HEIGHT * (u64)scale;
+    u64 char_spacing_pixels = (u64)scale;
+    u64 top_margin_pixels = (u64)scale;
+    u64 bottom_margin_pixels = (u64)scale;
+    u64 title_pixel_width = (u64)footer.title_length * glyph_width_pixels;
+    if (footer.title_length > 1u) {
+        title_pixel_width += (u64)(footer.title_length - 1u) * char_spacing_pixels;
+    }
+    if (title_pixel_width > (u64)page_width_pixels) {
+        return false;
+    }
+    u64 footer_height_pixels = glyph_height_pixels + top_margin_pixels + bottom_margin_pixels;
+    if (footer_height_pixels >= (u64)page_height_pixels) {
+        return false;
+    }
+    u32 footer_height_u32 = (u32)footer_height_pixels;
+    u32 data_height = page_height_pixels - footer_height_u32;
+    if (data_height == 0u) {
+        return false;
+    }
+    u32 title_width_u32 = (u32)title_pixel_width;
+    u32 text_left = 0u;
+    if (page_width_pixels > title_width_u32) {
+        text_left = (page_width_pixels - title_width_u32) / 2u;
+    }
+    u32 text_top = data_height + (u32)top_margin_pixels;
+    layout.has_title = true;
+    layout.font_scale = scale;
+    layout.glyph_width_pixels = (u32)glyph_width_pixels;
+    layout.glyph_height_pixels = (u32)glyph_height_pixels;
+    layout.char_spacing_pixels = (u32)char_spacing_pixels;
+    layout.footer_height_pixels = footer_height_u32;
+    layout.data_height_pixels = data_height;
+    layout.text_top_row = text_top;
+    layout.text_left_column = text_left;
+    layout.title_pixel_width = title_width_u32;
+    return true;
+}
+
+static bool footer_is_text_pixel(const PageFooterConfig& footer,
+                                 const FooterLayout& layout,
+                                 u32 column,
+                                 u32 row) {
+    if (!footer.has_title || !layout.has_title) {
+        return false;
+    }
+    if (!footer.title_text) {
+        return false;
+    }
+    if (layout.font_scale == 0u) {
+        return false;
+    }
+    if (row < layout.text_top_row || row >= (layout.text_top_row + layout.glyph_height_pixels)) {
+        return false;
+    }
+    if (column < layout.text_left_column || column >= (layout.text_left_column + layout.title_pixel_width)) {
+        return false;
+    }
+    u32 char_span = layout.glyph_width_pixels + layout.char_spacing_pixels;
+    if (char_span == 0u) {
+        return false;
+    }
+    u32 local_x = column - layout.text_left_column;
+    u32 glyph_index = local_x / char_span;
+    if (glyph_index >= footer.title_length) {
+        return false;
+    }
+    u32 within_char = local_x - glyph_index * char_span;
+    if (within_char >= layout.glyph_width_pixels) {
+        return false;
+    }
+    u32 local_y = row - layout.text_top_row;
+    u32 glyph_x = within_char / layout.font_scale;
+    u32 glyph_y = local_y / layout.font_scale;
+    if (glyph_x >= FOOTER_BASE_GLYPH_WIDTH || glyph_y >= FOOTER_BASE_GLYPH_HEIGHT) {
+        return false;
+    }
+    const GlyphPattern* glyph = footer_lookup_glyph(footer.title_text[glyph_index]);
+    if (!glyph) {
+        return false;
+    }
+    const char* row_pattern = glyph->rows[glyph_y];
+    if (!row_pattern) {
+        return false;
+    }
+    char bit = row_pattern[glyph_x];
+    return (bit == '1');
+}
+
 static u8 color_mode_samples_per_pixel(u8 mode) {
     if (mode >= 1u && mode <= 3u) {
         return 1u;
@@ -808,6 +1020,45 @@ static bool palette_for_mode(u8 mode, const PaletteColor*& colors, u32& count) {
     colors = 0;
     count = 0u;
     return false;
+}
+
+static void footer_select_colors(u8 color_mode, u8* text_rgb, u8* background_rgb) {
+    if (!text_rgb || !background_rgb) {
+        return;
+    }
+    background_rgb[0] = 255u;
+    background_rgb[1] = 255u;
+    background_rgb[2] = 255u;
+    text_rgb[0] = 0u;
+    text_rgb[1] = 0u;
+    text_rgb[2] = 0u;
+    if (color_mode == 1u) {
+        background_rgb[0] = PALETTE_GRAY[1].r;
+        background_rgb[1] = PALETTE_GRAY[1].g;
+        background_rgb[2] = PALETTE_GRAY[1].b;
+        text_rgb[0] = PALETTE_GRAY[0].r;
+        text_rgb[1] = PALETTE_GRAY[0].g;
+        text_rgb[2] = PALETTE_GRAY[0].b;
+        return;
+    }
+    if (color_mode == 2u) {
+        background_rgb[0] = PALETTE_CMYW[0].r;
+        background_rgb[1] = PALETTE_CMYW[0].g;
+        background_rgb[2] = PALETTE_CMYW[0].b;
+        text_rgb[0] = PALETTE_CMYW[1].r;
+        text_rgb[1] = PALETTE_CMYW[1].g;
+        text_rgb[2] = PALETTE_CMYW[1].b;
+        return;
+    }
+    if (color_mode == 3u) {
+        background_rgb[0] = PALETTE_RGB_CMY_WB[0].r;
+        background_rgb[1] = PALETTE_RGB_CMY_WB[0].g;
+        background_rgb[2] = PALETTE_RGB_CMY_WB[0].b;
+        text_rgb[0] = PALETTE_RGB_CMY_WB[1].r;
+        text_rgb[1] = PALETTE_RGB_CMY_WB[1].g;
+        text_rgb[2] = PALETTE_RGB_CMY_WB[1].b;
+        return;
+    }
 }
 
 static u8 bits_per_sample(u8 mode) {
@@ -942,6 +1193,10 @@ struct PpmParserState {
     u64 page_count_value;
     bool has_page_bits;
     u64 page_bits_value;
+    bool has_footer_rows;
+    u64 footer_rows_value;
+    bool has_title_font;
+    u64 title_font_value;
 
     PpmParserState()
         : data(0),
@@ -962,7 +1217,11 @@ struct PpmParserState {
           has_page_count(false),
           page_count_value(0u),
           has_page_bits(false),
-          page_bits_value(0u) {}
+          page_bits_value(0u),
+          has_footer_rows(false),
+          footer_rows_value(0u),
+          has_title_font(false),
+          title_font_value(0u) {}
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -1295,6 +1554,90 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             return;
         }
     }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char footer_rows_tag[] = "MAKOCODE_FOOTER_ROWS";
+    const usize footer_rows_tag_len = (usize)sizeof(footer_rows_tag) - 1u;
+    if ((length - index) >= footer_rows_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < footer_rows_tag_len; ++i) {
+            if (comment[index + i] != footer_rows_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += footer_rows_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_footer_rows = true;
+                    state.footer_rows_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char title_font_tag[] = "MAKOCODE_TITLE_FONT";
+    const usize title_font_tag_len = (usize)sizeof(title_font_tag) - 1u;
+    if ((length - index) >= title_font_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < title_font_tag_len; ++i) {
+            if (comment[index + i] != title_font_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += title_font_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_title_font = true;
+                    state.title_font_value = value;
+                }
+            }
+            return;
+        }
+    }
 }
 
 static bool ppm_next_token(PpmParserState& state, const char** out_start, usize* out_length) {
@@ -1385,6 +1728,18 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (pixel_count == 0u) {
         return false;
     }
+    u64 footer_rows = 0u;
+    if (state.has_footer_rows) {
+        footer_rows = state.footer_rows_value;
+        if (footer_rows > height) {
+            return false;
+        }
+    }
+    u64 data_height = height - footer_rows;
+    if (data_height == 0u) {
+        return false;
+    }
+    u64 data_pixels = width * data_height;
     u8 color_mode = overrides.color_channels;
     if (overrides.color_set) {
         color_mode = overrides.color_channels;
@@ -1442,10 +1797,12 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         if (!map_rgb_to_samples(color_mode, rgb, samples_raw)) {
             return false;
         }
-        for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
-            u32 sample = samples_raw[sample_index];
-            if (!writer.write_bits(sample, sample_bits)) {
-                return false;
+        if (pixel < data_pixels) {
+            for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
+                u32 sample = samples_raw[sample_index];
+                if (!writer.write_bits(sample, sample_bits)) {
+                    return false;
+                }
             }
         }
     }
@@ -1549,6 +1906,20 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_page_bits = true;
         dest.page_bits_value = src.page_bits_value;
+    }
+    if (src.has_footer_rows) {
+        if (dest.has_footer_rows && dest.footer_rows_value != src.footer_rows_value) {
+            return false;
+        }
+        dest.has_footer_rows = true;
+        dest.footer_rows_value = src.footer_rows_value;
+    }
+    if (src.has_title_font) {
+        if (dest.has_title_font && dest.title_font_value != src.title_font_value) {
+            return false;
+        }
+        dest.has_title_font = true;
+        dest.title_font_value = src.title_font_value;
     }
     return true;
 }
@@ -1739,6 +2110,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u64 page_count,
                                u64 bits_per_page,
                                u64 payload_bit_count,
+                               const PageFooterConfig& footer_config,
+                               const FooterLayout& footer_layout,
                                makocode::ByteBuffer& output) {
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
         return false;
@@ -1755,6 +2128,30 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (total_pixels == 0u) {
         return false;
     }
+    if (footer_config.has_title && !footer_layout.has_title) {
+        return false;
+    }
+    u32 data_height_pixels = height_pixels;
+    if (footer_layout.has_title) {
+        if (footer_layout.data_height_pixels == 0u || footer_layout.data_height_pixels > height_pixels) {
+            return false;
+        }
+        data_height_pixels = footer_layout.data_height_pixels;
+    }
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        return false;
+    }
+    u64 expected_bits_per_page = (u64)width_pixels *
+                                 (u64)data_height_pixels *
+                                 (u64)sample_bits *
+                                 (u64)samples_per_pixel;
+    if (expected_bits_per_page != bits_per_page) {
+        return false;
+    }
+    u32 footer_rows = height_pixels - data_height_pixels;
+    u8 footer_text_rgb[3] = {0u, 0u, 0u};
+    u8 footer_background_rgb[3] = {255u, 255u, 255u};
+    footer_select_colors(mapping.color_channels, footer_text_rgb, footer_background_rgb);
     output.release();
     if (!output.append_ascii("P3\n")) {
         return false;
@@ -1780,6 +2177,16 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
         return false;
     }
+    if (footer_rows) {
+        if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
+            return false;
+        }
+        if (footer_config.has_title) {
+            if (!append_comment_number(output, "MAKOCODE_TITLE_FONT", (u64)footer_layout.font_scale)) {
+                return false;
+            }
+        }
+    }
     if (!buffer_append_number(output, (u64)width_pixels) || !output.append_char(' ')) {
         return false;
     }
@@ -1791,38 +2198,52 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     const u8* frame_data = frame_bits.data;
     u64 bit_cursor = bit_offset;
-    for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
-        u32 samples_raw[3] = {0u, 0u, 0u};
-        for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
-            u32 sample = 0u;
-            for (u8 bit = 0u; bit < sample_bits; ++bit) {
-                u8 bit_value = 0u;
-                if (bit_cursor < frame_bit_count && frame_data) {
-                    usize byte_index = (usize)(bit_cursor >> 3u);
-                    u8 mask = (u8)(1u << (bit_cursor & 7u));
-                    bit_value = (frame_data[byte_index] & mask) ? 1u : 0u;
+    for (u32 row = 0u; row < height_pixels; ++row) {
+        bool is_footer_row = (row >= data_height_pixels);
+        for (u32 column = 0u; column < width_pixels; ++column) {
+            u8 rgb[3] = {0u, 0u, 0u};
+            if (!is_footer_row) {
+                u32 samples_raw[3] = {0u, 0u, 0u};
+                for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
+                    u32 sample = 0u;
+                    for (u8 bit = 0u; bit < sample_bits; ++bit) {
+                        u8 bit_value = 0u;
+                        if (bit_cursor < frame_bit_count && frame_data) {
+                            usize byte_index = (usize)(bit_cursor >> 3u);
+                            u8 mask = (u8)(1u << (bit_cursor & 7u));
+                            bit_value = (frame_data[byte_index] & mask) ? 1u : 0u;
+                        }
+                        sample |= ((u32)bit_value) << bit;
+                        ++bit_cursor;
+                    }
+                    samples_raw[sample_index] = sample;
                 }
-                sample |= ((u32)bit_value) << bit;
-                ++bit_cursor;
+                if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
+                    return false;
+                }
+            } else {
+                rgb[0] = footer_background_rgb[0];
+                rgb[1] = footer_background_rgb[1];
+                rgb[2] = footer_background_rgb[2];
+                if (footer_is_text_pixel(footer_config, footer_layout, column, row)) {
+                    rgb[0] = footer_text_rgb[0];
+                    rgb[1] = footer_text_rgb[1];
+                    rgb[2] = footer_text_rgb[2];
+                }
             }
-            samples_raw[sample_index] = sample;
-        }
-        u8 rgb[3] = {0u, 0u, 0u};
-        if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
-            return false;
-        }
-        for (u8 channel = 0u; channel < 3u; ++channel) {
-            if (channel) {
-                if (!output.append_char(' ')) {
+            for (u8 channel = 0u; channel < 3u; ++channel) {
+                if (channel) {
+                    if (!output.append_char(' ')) {
+                        return false;
+                    }
+                }
+                if (!buffer_append_number(output, (u64)rgb[channel])) {
                     return false;
                 }
             }
-            if (!buffer_append_number(output, (u64)rgb[channel])) {
+            if (!output.append_char('\n')) {
                 return false;
             }
-        }
-        if (!output.append_char('\n')) {
-            return false;
         }
     }
     return true;
@@ -1968,18 +2389,72 @@ static void write_usage() {
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
+    console_line(1, "  --title=TEXT       (optional alphanumeric footer title)");
+    console_line(1, "  --title-font=PX    (footer font scale in pixels; default 16)");
 }
 
 static int command_encode(int arg_count, char** args) {
     ImageMappingConfig mapping;
+    PageFooterConfig footer_config;
+    makocode::ByteBuffer title_buffer;
     for (int i = 0; i < arg_count; ++i) {
+        const char* arg = args[i];
         bool handled = false;
-        if (!process_image_mapping_option(args[i], mapping, "encode", &handled)) {
+        if (!process_image_mapping_option(arg, mapping, "encode", &handled)) {
             return 1;
         }
         if (!handled) {
+            const char title_prefix[] = "--title=";
+            if (ascii_starts_with(arg, title_prefix)) {
+                const char* value_text = arg + (sizeof(title_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "encode: --title requires a non-empty value");
+                    return 1;
+                }
+                if (!title_buffer.ensure(length + 1u)) {
+                    console_line(2, "encode: failed to allocate title buffer");
+                    return 1;
+                }
+                for (usize j = 0u; j < length; ++j) {
+                    char c = value_text[j];
+                    bool is_digit = (c >= '0' && c <= '9');
+                    bool is_upper = (c >= 'A' && c <= 'Z');
+                    bool is_lower = (c >= 'a' && c <= 'z');
+                    if (!is_digit && !is_upper && !is_lower) {
+                        console_line(2, "encode: title must contain only alphanumeric characters");
+                        return 1;
+                    }
+                    if (is_lower) {
+                        c = (char)(c - 'a' + 'A');
+                    }
+                    title_buffer.data[j] = (u8)c;
+                }
+                title_buffer.data[length] = 0u;
+                title_buffer.size = length;
+                footer_config.has_title = true;
+                footer_config.title_length = length;
+                footer_config.title_text = (const char*)title_buffer.data;
+                continue;
+            }
+            const char font_prefix[] = "--title-font=";
+            if (ascii_starts_with(arg, font_prefix)) {
+                const char* value_text = arg + (sizeof(font_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "encode: --title-font requires a positive integer value");
+                    return 1;
+                }
+                u64 value = 0u;
+                if (!ascii_to_u64(value_text, length, &value) || value == 0u || value > 2048u) {
+                    console_line(2, "encode: --title-font must be between 1 and 2048");
+                    return 1;
+                }
+                footer_config.font_scale = (u32)value;
+                continue;
+            }
             console_write(2, "encode: unknown option: ");
-            console_line(2, args[i]);
+            console_line(2, arg);
             return 1;
         }
     }
@@ -2016,7 +2491,21 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: unsupported color configuration");
         return 1;
     }
-    u64 bits_per_page = (u64)width_pixels * (u64)height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+    if (footer_config.has_title && (!footer_config.title_text || footer_config.title_length == 0u)) {
+        console_line(2, "encode: title configuration is invalid");
+        return 1;
+    }
+    FooterLayout footer_layout;
+    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+        console_line(2, "encode: title does not fit within the page layout");
+        return 1;
+    }
+    u32 data_height_pixels = footer_layout.data_height_pixels ? footer_layout.data_height_pixels : height_pixels;
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        console_line(2, "encode: invalid footer configuration");
+        return 1;
+    }
+    u64 bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
     if (bits_per_page == 0u) {
         console_line(2, "encode: page capacity is zero");
         return 1;
@@ -2037,6 +2526,8 @@ static int command_encode(int arg_count, char** args) {
                                 1u,
                                 bits_per_page,
                                 payload_bit_count,
+                                footer_config,
+                                footer_layout,
                                 page_output)) {
             console_line(2, "encode: failed to format ppm");
             return 1;
@@ -2059,6 +2550,8 @@ static int command_encode(int arg_count, char** args) {
                                     page_count,
                                     bits_per_page,
                                     payload_bit_count,
+                                    footer_config,
+                                    footer_layout,
                                     page_output)) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
@@ -2228,6 +2721,7 @@ static bool compute_frame_bit_count(const ImageMappingConfig& mapping,
 
 static int command_test(int arg_count, char** args) {
     ImageMappingConfig mapping;
+    PageFooterConfig footer_config;
     for (int i = 0; i < arg_count; ++i) {
         const char* arg = args[i];
         if (!arg) {
@@ -2274,7 +2768,17 @@ static int command_test(int arg_count, char** args) {
             console_line(2, "test: unsupported color configuration");
             return 1;
         }
-        u64 bits_per_page = (u64)width_pixels * (u64)height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+        FooterLayout footer_layout;
+        if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+            console_line(2, "test: footer layout computation failed");
+            return 1;
+        }
+        u32 data_height_pixels = footer_layout.data_height_pixels ? footer_layout.data_height_pixels : height_pixels;
+        if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+            console_line(2, "test: footer configuration invalid");
+            return 1;
+        }
+        u64 bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
         if (bits_per_page == 0u) {
             console_line(2, "test: page capacity is zero");
             return 1;
@@ -2374,6 +2878,8 @@ static int command_test(int arg_count, char** args) {
                                     page_count,
                                     bits_per_page,
                                     payload_bit_count,
+                                    footer_config,
+                                    footer_layout,
                                     page_output)) {
                 console_line(2, "test: failed to format ppm page");
                 return 1;
