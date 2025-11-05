@@ -1,5 +1,4 @@
 TODO:
-- Multiple files, e.g. tar. Filename print applies to all, possibly concats...
 - Fiducial data (if needed), test should create distortions
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 - Script to create art in output that is actually readable. Possibly just apply matrix code steganographically to an input image.

@@ -26,6 +26,11 @@ typedef unsigned long       usize;
 typedef unsigned long long  u64;
 typedef long long           i64;
 
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
 static const usize USIZE_MAX_VALUE = (usize)~(usize)0;
 
 extern "C" void* malloc(unsigned long size);
@@ -4931,6 +4936,777 @@ static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
     return true;
 }
 
+static const char ARCHIVE_MAGIC[8] = {'M', 'K', 'A', 'R', 'C', 'H', '0', '1'};
+static const usize ARCHIVE_MAGIC_SIZE = (usize)sizeof(ARCHIVE_MAGIC);
+static const usize ARCHIVE_HEADER_SIZE = ARCHIVE_MAGIC_SIZE + 4u;
+static const usize MAX_ARCHIVE_PATH_COMPONENTS = 512u;
+
+struct ArchiveBuildContext {
+    makocode::ByteBuffer buffer;
+    makocode::ByteBuffer path_registry;
+    u32 entry_count;
+
+    ArchiveBuildContext()
+        : buffer(),
+          path_registry(),
+          entry_count(0u) {}
+};
+
+static bool archive_init(ArchiveBuildContext& ctx) {
+    ctx.buffer.release();
+    ctx.path_registry.release();
+    ctx.entry_count = 0u;
+    if (!ctx.buffer.ensure(ARCHIVE_HEADER_SIZE)) {
+        return false;
+    }
+    for (usize i = 0u; i < ARCHIVE_MAGIC_SIZE; ++i) {
+        ctx.buffer.data[i] = (u8)ARCHIVE_MAGIC[i];
+    }
+    write_le_u32(ctx.buffer.data + ARCHIVE_MAGIC_SIZE, 0u);
+    ctx.buffer.size = ARCHIVE_HEADER_SIZE;
+    return true;
+}
+
+static bool archive_append_u8(makocode::ByteBuffer& buffer, u8 value) {
+    if (!buffer.ensure(buffer.size + 1u)) {
+        return false;
+    }
+    buffer.data[buffer.size++] = value;
+    return true;
+}
+
+static bool archive_append_u32(makocode::ByteBuffer& buffer, u32 value) {
+    if (!buffer.ensure(buffer.size + 4u)) {
+        return false;
+    }
+    write_le_u32(buffer.data + buffer.size, value);
+    buffer.size += 4u;
+    return true;
+}
+
+static bool archive_append_u64(makocode::ByteBuffer& buffer, u64 value) {
+    if (!buffer.ensure(buffer.size + 8u)) {
+        return false;
+    }
+    write_le_u64(buffer.data + buffer.size, value);
+    buffer.size += 8u;
+    return true;
+}
+
+static bool archive_append_bytes(makocode::ByteBuffer& buffer,
+                                 const u8* data,
+                                 usize length) {
+    if (length == 0u) {
+        return true;
+    }
+    if (!buffer.ensure(buffer.size + length)) {
+        return false;
+    }
+    for (usize i = 0u; i < length; ++i) {
+        buffer.data[buffer.size + i] = data ? data[i] : 0u;
+    }
+    buffer.size += length;
+    return true;
+}
+
+static bool archive_register_path(ArchiveBuildContext& ctx,
+                                  const char* path,
+                                  usize length,
+                                  bool* duplicate_out) {
+    if (duplicate_out) {
+        *duplicate_out = false;
+    }
+    if (!path || length == 0u) {
+        return false;
+    }
+    usize cursor = 0u;
+    while (cursor < ctx.path_registry.size) {
+        const char* existing = (const char*)(ctx.path_registry.data + cursor);
+        usize existing_length = ascii_length(existing);
+        if (existing_length == length) {
+            bool same = true;
+            for (usize i = 0u; i < length; ++i) {
+                if (existing[i] != path[i]) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                if (duplicate_out) {
+                    *duplicate_out = true;
+                }
+                return false;
+            }
+        }
+        cursor += existing_length + 1u;
+    }
+    if (!ctx.path_registry.ensure(ctx.path_registry.size + length + 1u)) {
+        return false;
+    }
+    u8* dest = ctx.path_registry.data + ctx.path_registry.size;
+    for (usize i = 0u; i < length; ++i) {
+        dest[i] = (u8)path[i];
+    }
+    dest[length] = 0u;
+    ctx.path_registry.size += length + 1u;
+    return true;
+}
+
+static bool archive_add_directory(ArchiveBuildContext& ctx,
+                                  const char* rel_path) {
+    if (!rel_path) {
+        return false;
+    }
+    usize path_len = ascii_length(rel_path);
+    if (path_len == 0u || path_len > 0xFFFFFFFFu) {
+        return false;
+    }
+    bool duplicate = false;
+    if (!archive_register_path(ctx, rel_path, path_len, &duplicate)) {
+        if (duplicate) {
+            console_write(2, "encode: duplicate entry path ");
+            console_line(2, rel_path);
+        }
+        return false;
+    }
+    if (!archive_append_u8(ctx.buffer, 1u)) {
+        return false;
+    }
+    if (!archive_append_u32(ctx.buffer, (u32)path_len)) {
+        return false;
+    }
+    if (!archive_append_bytes(ctx.buffer, (const u8*)rel_path, path_len)) {
+        return false;
+    }
+    ++ctx.entry_count;
+    return true;
+}
+
+static bool archive_add_file(ArchiveBuildContext& ctx,
+                             const char* rel_path,
+                             const u8* data,
+                             usize length) {
+    if (!rel_path) {
+        return false;
+    }
+    usize path_len = ascii_length(rel_path);
+    if (path_len == 0u || path_len > 0xFFFFFFFFu) {
+        return false;
+    }
+    bool duplicate = false;
+    if (!archive_register_path(ctx, rel_path, path_len, &duplicate)) {
+        if (duplicate) {
+            console_write(2, "encode: duplicate entry path ");
+            console_line(2, rel_path);
+        }
+        return false;
+    }
+    if (!archive_append_u8(ctx.buffer, 0u)) {
+        return false;
+    }
+    if (!archive_append_u32(ctx.buffer, (u32)path_len)) {
+        return false;
+    }
+    if (!archive_append_bytes(ctx.buffer, (const u8*)rel_path, path_len)) {
+        return false;
+    }
+    if (!archive_append_u64(ctx.buffer, (u64)length)) {
+        return false;
+    }
+    if (!archive_append_bytes(ctx.buffer, data, length)) {
+        return false;
+    }
+    ++ctx.entry_count;
+    return true;
+}
+
+static bool archive_finalize(ArchiveBuildContext& ctx) {
+    if (ctx.buffer.size < ARCHIVE_HEADER_SIZE) {
+        return false;
+    }
+    write_le_u32(ctx.buffer.data + ARCHIVE_MAGIC_SIZE, ctx.entry_count);
+    return true;
+}
+
+static const char* find_last_path_component(const char* path) {
+    if (!path) {
+        return path;
+    }
+    usize length = ascii_length(path);
+    if (length == 0u) {
+        return path;
+    }
+    const char* start = path;
+    const char* end = path + length;
+    while (end > start) {
+        char c = end[-1];
+        if (c == '/' || c == '\\') {
+            --end;
+        } else {
+            break;
+        }
+    }
+    const char* component = start;
+    const char* cursor = start;
+    while (cursor < end) {
+        char c = *cursor;
+        if (c == '/' || c == '\\') {
+            component = cursor + 1;
+        }
+        ++cursor;
+    }
+    if (component >= end) {
+        return component;
+    }
+    return component;
+}
+
+static bool normalize_store_path(const char* source,
+                                 makocode::ByteBuffer& output) {
+    output.release();
+    if (!source) {
+        return false;
+    }
+    usize length = ascii_length(source);
+    if (length == 0u) {
+        return false;
+    }
+    makocode::ByteBuffer scratch;
+    if (!scratch.ensure(length)) {
+        return false;
+    }
+    scratch.size = length;
+    for (usize i = 0u; i < length; ++i) {
+        char c = source[i];
+        if (c == '\\') {
+            c = '/';
+        }
+        scratch.data[i] = (u8)c;
+    }
+    usize component_offsets[MAX_ARCHIVE_PATH_COMPONENTS];
+    usize component_lengths[MAX_ARCHIVE_PATH_COMPONENTS];
+    usize component_count = 0u;
+    usize index = 0u;
+    while (index < length) {
+        char c = (char)scratch.data[index];
+        if (c == '/') {
+            ++index;
+            continue;
+        }
+        usize start = index;
+        while (index < length) {
+            char d = (char)scratch.data[index];
+            if (d == '/') {
+                break;
+            }
+            ++index;
+        }
+        usize segment_length = index - start;
+        if (segment_length == 0u) {
+            continue;
+        }
+        if (segment_length == 1u && scratch.data[start] == '.') {
+            continue;
+        }
+        if (segment_length == 2u &&
+            scratch.data[start] == '.' &&
+            scratch.data[start + 1u] == '.') {
+            if (component_count == 0u) {
+                scratch.release();
+                return false;
+            }
+            --component_count;
+            continue;
+        }
+        if (component_count >= MAX_ARCHIVE_PATH_COMPONENTS) {
+            scratch.release();
+            return false;
+        }
+        component_offsets[component_count] = start;
+        component_lengths[component_count] = segment_length;
+        ++component_count;
+    }
+    if (component_count == 0u) {
+        scratch.release();
+        return false;
+    }
+    usize result_length = 0u;
+    for (usize i = 0u; i < component_count; ++i) {
+        result_length += component_lengths[i];
+        if ((i + 1u) < component_count) {
+            ++result_length;
+        }
+    }
+    if (!output.ensure(result_length + 1u)) {
+        scratch.release();
+        return false;
+    }
+    usize cursor = 0u;
+    for (usize i = 0u; i < component_count; ++i) {
+        if (i) {
+            output.data[cursor++] = (u8)'/';
+        }
+        usize start = component_offsets[i];
+        usize seg_len = component_lengths[i];
+        for (usize j = 0u; j < seg_len; ++j) {
+            output.data[cursor++] = scratch.data[start + j];
+        }
+    }
+    output.data[cursor] = 0u;
+    output.size = cursor;
+    scratch.release();
+    return true;
+}
+
+static bool join_rel_path(const char* base,
+                          const char* name,
+                          makocode::ByteBuffer& out) {
+    out.release();
+    if (!name) {
+        return false;
+    }
+    usize name_len = ascii_length(name);
+    if (name_len == 0u) {
+        return false;
+    }
+    usize base_len = base ? ascii_length(base) : 0u;
+    bool include_base = (base_len > 0u);
+    usize total = name_len;
+    if (include_base) {
+        total += base_len;
+        char last = base[base_len - 1u];
+        if (last != '/' && last != '\\') {
+            ++total;
+        }
+    }
+    if (!out.ensure(total + 1u)) {
+        return false;
+    }
+    usize cursor = 0u;
+    if (include_base) {
+        for (usize i = 0u; i < base_len; ++i) {
+            char c = base[i];
+            if (c == '\\') {
+                c = '/';
+            }
+            out.data[cursor++] = (u8)c;
+        }
+        if (cursor && out.data[cursor - 1u] != '/') {
+            out.data[cursor++] = (u8)'/';
+        }
+    }
+    for (usize i = 0u; i < name_len; ++i) {
+        char c = name[i];
+        if (c == '\\') {
+            c = '/';
+        }
+        out.data[cursor++] = (u8)c;
+    }
+    out.data[cursor] = 0u;
+    out.size = cursor;
+    return true;
+}
+
+static bool join_fs_path(const char* base,
+                         const char* name,
+                         makocode::ByteBuffer& out) {
+    out.release();
+    if (!base || !name) {
+        return false;
+    }
+    usize base_len = ascii_length(base);
+    usize name_len = ascii_length(name);
+    bool need_separator = (base_len > 0u);
+    if (need_separator) {
+        char last = base[base_len - 1u];
+        if (last == '/' || last == '\\') {
+            need_separator = false;
+        }
+    }
+    usize total = base_len + name_len + (need_separator ? 1u : 0u);
+    if (!out.ensure(total + 1u)) {
+        return false;
+    }
+    usize cursor = 0u;
+    for (usize i = 0u; i < base_len; ++i) {
+        out.data[cursor++] = (u8)base[i];
+    }
+    if (need_separator) {
+        out.data[cursor++] = (u8)'/';
+    }
+    for (usize i = 0u; i < name_len; ++i) {
+        out.data[cursor++] = (u8)name[i];
+    }
+    out.data[cursor] = 0u;
+    out.size = cursor;
+    return true;
+}
+
+static bool archive_collect_directory(const char* fs_path,
+                                      const char* rel_path,
+                                      ArchiveBuildContext& ctx) {
+    if (!fs_path || !rel_path) {
+        return false;
+    }
+    if (!archive_add_directory(ctx, rel_path)) {
+        return false;
+    }
+    DIR* dir = opendir(fs_path);
+    if (!dir) {
+        console_write(2, "encode: failed to open directory ");
+        console_line(2, fs_path);
+        return false;
+    }
+    struct dirent* entry = 0;
+    while ((entry = readdir(dir)) != (struct dirent*)0) {
+        const char* name = entry->d_name;
+        if (!name) {
+            continue;
+        }
+        if (name[0] == '.' &&
+            (name[1] == '\0' ||
+             (name[1] == '.' && name[2] == '\0'))) {
+            continue;
+        }
+        makocode::ByteBuffer child_fs;
+        if (!join_fs_path(fs_path, name, child_fs)) {
+            closedir(dir);
+            return false;
+        }
+        makocode::ByteBuffer child_rel;
+        if (!join_rel_path(rel_path, name, child_rel)) {
+            closedir(dir);
+            return false;
+        }
+        struct stat st;
+        if (stat((const char*)child_fs.data, &st) != 0) {
+            console_write(2, "encode: unable to stat ");
+            console_line(2, (const char*)child_fs.data);
+            closedir(dir);
+            return false;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (!archive_collect_directory((const char*)child_fs.data,
+                                           (const char*)child_rel.data,
+                                           ctx)) {
+                closedir(dir);
+                return false;
+            }
+        } else if (S_ISREG(st.st_mode)) {
+            makocode::ByteBuffer file_data;
+            if (!read_entire_file((const char*)child_fs.data, file_data)) {
+                console_write(2, "encode: failed to read ");
+                console_line(2, (const char*)child_fs.data);
+                closedir(dir);
+                return false;
+            }
+            if (!archive_add_file(ctx,
+                                  (const char*)child_rel.data,
+                                  file_data.data,
+                                  file_data.size)) {
+                file_data.release();
+                closedir(dir);
+                return false;
+            }
+            file_data.release();
+        } else {
+            console_write(2, "encode: unsupported entry type for ");
+            console_line(2, (const char*)child_rel.data);
+            closedir(dir);
+            return false;
+        }
+    }
+    closedir(dir);
+    return true;
+}
+
+static bool is_safe_archive_path(const char* path, usize length) {
+    if (!path || length == 0u) {
+        return false;
+    }
+    if (path[0] == '/') {
+        return false;
+    }
+    for (usize i = 0u; i < length; ++i) {
+        char c = path[i];
+        if (c == '\\' || c == '\0') {
+            return false;
+        }
+    }
+    usize index = 0u;
+    while (index < length) {
+        while (index < length && path[index] == '/') {
+            ++index;
+        }
+        usize start = index;
+        while (index < length && path[index] != '/') {
+            ++index;
+        }
+        usize segment_length = index - start;
+        if (segment_length == 0u) {
+            continue;
+        }
+        if (segment_length == 1u && path[start] == '.') {
+            return false;
+        }
+        if (segment_length == 2u &&
+            path[start] == '.' &&
+            path[start + 1u] == '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ensure_directory_exists(const char* path) {
+    if (!path || !path[0]) {
+        return true;
+    }
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    if (mkdir(path, 0755) == 0) {
+        return true;
+    }
+    if (errno == EEXIST) {
+        if (stat(path, &st) == 0) {
+            return S_ISDIR(st.st_mode);
+        }
+    }
+    return false;
+}
+
+static bool ensure_directory_tree(const char* path) {
+    if (!path || !path[0]) {
+        return true;
+    }
+    makocode::ByteBuffer temp;
+    usize length = ascii_length(path);
+    if (!temp.ensure(length + 1u)) {
+        return false;
+    }
+    for (usize i = 0u; i < length; ++i) {
+        char c = path[i];
+        if (c == '\\') {
+            c = '/';
+        }
+        temp.data[i] = (u8)c;
+    }
+    temp.data[length] = 0u;
+    temp.size = length;
+    for (usize i = 1u; i <= length; ++i) {
+        char c = (char)temp.data[i];
+        if (c == '/' || c == 0) {
+            char saved = (char)temp.data[i];
+            temp.data[i] = 0u;
+            const char* partial = (const char*)temp.data;
+            if (partial[0] != 0) {
+                if (!ensure_directory_exists(partial)) {
+                    temp.data[i] = saved;
+                    return false;
+                }
+            }
+            temp.data[i] = (u8)saved;
+        }
+    }
+    return true;
+}
+
+static bool ensure_parent_directories(const char* file_path) {
+    if (!file_path) {
+        return false;
+    }
+    usize length = ascii_length(file_path);
+    if (length == 0u) {
+        return false;
+    }
+    usize i = length;
+    while (i > 0u) {
+        char c = file_path[i - 1u];
+        if (c == '/' || c == '\\') {
+            break;
+        }
+        --i;
+    }
+    if (i == 0u) {
+        return true;
+    }
+    makocode::ByteBuffer parent;
+    if (!parent.ensure(i + 1u)) {
+        return false;
+    }
+    for (usize j = 0u; j < i; ++j) {
+        char c = file_path[j];
+        if (c == '\\') {
+            c = '/';
+        }
+        parent.data[j] = (u8)c;
+    }
+    parent.data[i] = 0u;
+    parent.size = i;
+    return ensure_directory_tree((const char*)parent.data);
+}
+
+static bool join_output_path(const char* base_dir,
+                             const char* rel_path,
+                             makocode::ByteBuffer& out) {
+    out.release();
+    if (!rel_path) {
+        return false;
+    }
+    usize rel_len = ascii_length(rel_path);
+    if (rel_len == 0u) {
+        return false;
+    }
+    bool include_base = false;
+    usize base_len = 0u;
+    if (base_dir && base_dir[0]) {
+        base_len = ascii_length(base_dir);
+        if (!(base_len == 1u && base_dir[0] == '.')) {
+            include_base = true;
+        }
+    }
+    bool need_separator = false;
+    if (include_base) {
+        char last = base_dir[base_len - 1u];
+        if (last != '/' && last != '\\') {
+            need_separator = true;
+        }
+    }
+    usize total = rel_len;
+    if (include_base) {
+        total += base_len + (need_separator ? 1u : 0u);
+    }
+    if (!out.ensure(total + 1u)) {
+        return false;
+    }
+    usize cursor = 0u;
+    if (include_base) {
+        for (usize i = 0u; i < base_len; ++i) {
+            char c = base_dir[i];
+            if (c == '\\') {
+                c = '/';
+            }
+            out.data[cursor++] = (u8)c;
+        }
+        if (need_separator) {
+            out.data[cursor++] = (u8)'/';
+        }
+    }
+    for (usize i = 0u; i < rel_len; ++i) {
+        char c = rel_path[i];
+        if (c == '\\') {
+            c = '/';
+        }
+        out.data[cursor++] = (u8)c;
+    }
+    out.data[cursor] = 0u;
+    out.size = cursor;
+    return true;
+}
+
+static bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
+                                        const char* output_dir) {
+    if (!payload.data || payload.size < ARCHIVE_HEADER_SIZE) {
+        console_line(2, "decode: payload missing archive header");
+        return false;
+    }
+    for (usize i = 0u; i < ARCHIVE_MAGIC_SIZE; ++i) {
+        if (payload.data[i] != (u8)ARCHIVE_MAGIC[i]) {
+            console_line(2, "decode: payload is not a makocode archive");
+            return false;
+        }
+    }
+    u32 entry_count = read_le_u32(payload.data + ARCHIVE_MAGIC_SIZE);
+    usize cursor = ARCHIVE_HEADER_SIZE;
+    for (u32 entry_index = 0u; entry_index < entry_count; ++entry_index) {
+        if (cursor >= payload.size) {
+            console_line(2, "decode: archive truncated before entries completed");
+            return false;
+        }
+        u8 entry_type = payload.data[cursor++];
+        if ((payload.size - cursor) < 4u) {
+            console_line(2, "decode: archive truncated during path length read");
+            return false;
+        }
+        u32 path_length = read_le_u32(payload.data + cursor);
+        cursor += 4u;
+        if (path_length == 0u) {
+            console_line(2, "decode: archive entry has empty path");
+            return false;
+        }
+        if ((payload.size - cursor) < (usize)path_length) {
+            console_line(2, "decode: archive truncated during path read");
+            return false;
+        }
+        makocode::ByteBuffer path_buffer;
+        if (!path_buffer.ensure(path_length + 1u)) {
+            return false;
+        }
+        for (u32 i = 0u; i < path_length; ++i) {
+            path_buffer.data[i] = payload.data[cursor + i];
+        }
+        path_buffer.data[path_length] = 0u;
+        path_buffer.size = path_length;
+        const char* entry_path = (const char*)path_buffer.data;
+        if (!is_safe_archive_path(entry_path, path_length)) {
+            console_write(2, "decode: unsafe archive path ");
+            console_line(2, entry_path);
+            return false;
+        }
+        cursor += (usize)path_length;
+        if (entry_type == 1u) {
+            makocode::ByteBuffer output_path;
+            if (!join_output_path(output_dir, entry_path, output_path)) {
+                return false;
+            }
+            if (!ensure_directory_tree((const char*)output_path.data)) {
+                console_write(2, "decode: failed to create directory ");
+                console_line(2, (const char*)output_path.data);
+                return false;
+            }
+        } else if (entry_type == 0u) {
+            if ((payload.size - cursor) < 8u) {
+                console_line(2, "decode: archive truncated during file size read");
+                return false;
+            }
+            u64 file_size = read_le_u64(payload.data + cursor);
+            cursor += 8u;
+            if ((payload.size - cursor) < file_size) {
+                console_line(2, "decode: archive truncated during file data read");
+                return false;
+            }
+            const u8* file_data = payload.data + cursor;
+            cursor += (usize)file_size;
+            makocode::ByteBuffer output_path;
+            if (!join_output_path(output_dir, entry_path, output_path)) {
+                return false;
+            }
+            if (!ensure_parent_directories((const char*)output_path.data)) {
+                console_write(2, "decode: failed to prepare directories for ");
+                console_line(2, (const char*)output_path.data);
+                return false;
+            }
+            if (!write_bytes_to_file((const char*)output_path.data,
+                                     file_data,
+                                     (usize)file_size)) {
+                console_write(2, "decode: failed to write file ");
+                console_line(2, (const char*)output_path.data);
+                return false;
+            }
+        } else {
+            console_line(2, "decode: unknown archive entry type");
+            return false;
+        }
+    }
+    if (cursor != payload.size) {
+        console_line(2, "decode: archive payload has trailing data");
+        return false;
+    }
+    return true;
+}
+
 static void write_usage() {
     console_line(1, "MakoCode CLI");
     console_line(1, "Usage:");
@@ -4941,7 +5717,8 @@ static void write_usage() {
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
-    console_line(1, "  --input=FILE       (payload input path; required for encode)");
+    console_line(1, "  --input=PATH       (encode: repeat to add files or directories)");
+    console_line(1, "  --output-dir=PATH  (decode: destination directory; default .)");
     console_line(1, "  --ecc=RATIO        (Reed-Solomon redundancy; 0 disables, e.g., 0.10)");
     console_line(1, "  --password=TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
@@ -5138,7 +5915,9 @@ static int command_encode(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
     double ecc_redundancy = 0.0;
-    const char* input_path = 0;
+    static const usize MAX_INPUT_ITEMS = 512u;
+    const char* input_paths[MAX_INPUT_ITEMS];
+    usize input_count = 0u;
     makocode::ByteBuffer title_buffer;
     makocode::ByteBuffer filename_buffer;
     makocode::ByteBuffer password_buffer;
@@ -5185,7 +5964,11 @@ static int command_encode(int arg_count, char** args) {
                     console_line(2, "encode: --input requires a file path");
                     return 1;
                 }
-                input_path = value_text;
+                if (input_count >= MAX_INPUT_ITEMS) {
+                    console_line(2, "encode: too many input paths specified");
+                    return 1;
+                }
+                input_paths[input_count++] = value_text;
                 continue;
             }
             const char title_prefix[] = "--title=";
@@ -5259,46 +6042,125 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
     }
-    if (!input_path) {
-        console_line(2, "encode: --input=FILE is required");
+    if (input_count == 0u) {
+        console_line(2, "encode: at least one --input=PATH is required");
         return 1;
     }
-    makocode::ByteBuffer payload;
-    if (!read_entire_file(input_path, payload)) {
-        console_write(2, "encode: failed to read ");
-        console_line(2, input_path);
+    ArchiveBuildContext archive;
+    if (!archive_init(archive)) {
+        console_line(2, "encode: failed to initialize archive buffer");
         return 1;
     }
-    const char* base_name = input_path;
-    const char* scan = input_path;
-    while (scan && *scan) {
-        if (*scan == '/' || *scan == '\\') {
-            base_name = scan + 1;
-        }
-        ++scan;
-    }
-    usize base_length = ascii_length(base_name);
-    if (base_length == 0u) {
-        console_line(2, "encode: input filename is empty");
-        return 1;
-    }
-    if (!filename_buffer.ensure(base_length + 1u)) {
-        console_line(2, "encode: failed to allocate filename buffer");
-        return 1;
-    }
-    for (usize j = 0u; j < base_length; ++j) {
-        char c = base_name[j];
-        if (!title_char_is_allowed(c)) {
-            console_line(2, "encode: filename contains unsupported characters for footer text");
+    bool single_input = (input_count == 1u);
+    makocode::ByteBuffer single_normalized;
+    bool have_single_normalized = false;
+    for (usize path_index = 0u; path_index < input_count; ++path_index) {
+        const char* input_path = input_paths[path_index];
+        struct stat path_info;
+        if (stat(input_path, &path_info) != 0) {
+            console_write(2, "encode: unable to stat ");
+            console_line(2, input_path);
             return 1;
         }
-        filename_buffer.data[j] = (u8)c;
+        makocode::ByteBuffer normalized_path;
+        if (!normalize_store_path(input_path, normalized_path)) {
+            console_write(2, "encode: failed to normalize input path ");
+            console_line(2, input_path);
+            return 1;
+        }
+        const char* stored_rel = (const char*)normalized_path.data;
+        if (!stored_rel || stored_rel[0] == '\0') {
+            console_write(2, "encode: input path resolves to empty relative name ");
+            console_line(2, input_path);
+            return 1;
+        }
+        if (S_ISDIR(path_info.st_mode)) {
+            if (!archive_collect_directory(input_path, stored_rel, archive)) {
+                return 1;
+            }
+        } else if (S_ISREG(path_info.st_mode)) {
+            makocode::ByteBuffer file_data;
+            if (!read_entire_file(input_path, file_data)) {
+                console_write(2, "encode: failed to read ");
+                console_line(2, input_path);
+                return 1;
+            }
+            if (!archive_add_file(archive, stored_rel, file_data.data, file_data.size)) {
+                file_data.release();
+                return 1;
+            }
+            file_data.release();
+        } else {
+            console_write(2, "encode: unsupported input type for ");
+            console_line(2, input_path);
+            return 1;
+        }
+        if (single_input && !have_single_normalized) {
+            if (!single_normalized.ensure(normalized_path.size + 1u)) {
+                console_line(2, "encode: failed to record normalized path");
+                return 1;
+            }
+            for (usize j = 0u; j < normalized_path.size; ++j) {
+                single_normalized.data[j] = normalized_path.data[j];
+            }
+            single_normalized.data[normalized_path.size] = 0u;
+            single_normalized.size = normalized_path.size;
+            have_single_normalized = true;
+        }
     }
-    filename_buffer.data[base_length] = 0u;
-    filename_buffer.size = base_length;
-    footer_config.filename_text = (const char*)filename_buffer.data;
-    footer_config.filename_length = base_length;
-    footer_config.has_filename = (base_length > 0u);
+    if (archive.entry_count == 0u) {
+        console_line(2, "encode: no files or directories to encode");
+        return 1;
+    }
+    if (!archive_finalize(archive)) {
+        console_line(2, "encode: failed to finalize archive payload");
+        return 1;
+    }
+    footer_config.filename_text = 0;
+    footer_config.filename_length = 0u;
+    footer_config.has_filename = false;
+    if (footer_config.display_filename) {
+        if (single_input && have_single_normalized) {
+            const char* base_name = find_last_path_component((const char*)single_normalized.data);
+            usize base_length = ascii_length(base_name);
+            if (base_length == 0u) {
+                console_line(2, "encode: input path yielded empty filename");
+                return 1;
+            }
+            if (!filename_buffer.ensure(base_length + 1u)) {
+                console_line(2, "encode: failed to allocate filename buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < base_length; ++j) {
+                char c = base_name[j];
+                if (!title_char_is_allowed(c)) {
+                    console_line(2, "encode: filename contains unsupported characters for footer text");
+                    return 1;
+                }
+                filename_buffer.data[j] = (u8)c;
+            }
+            filename_buffer.data[base_length] = 0u;
+            filename_buffer.size = base_length;
+            footer_config.filename_text = (const char*)filename_buffer.data;
+            footer_config.filename_length = base_length;
+            footer_config.has_filename = true;
+        } else {
+            const char bundle_label[] = "bundle";
+            usize label_length = (usize)(sizeof(bundle_label) - 1u);
+            if (!filename_buffer.ensure(label_length + 1u)) {
+                console_line(2, "encode: failed to allocate filename buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < label_length; ++j) {
+                filename_buffer.data[j] = (u8)bundle_label[j];
+            }
+            filename_buffer.data[label_length] = 0u;
+            filename_buffer.size = label_length;
+            footer_config.filename_text = (const char*)filename_buffer.data;
+            footer_config.filename_length = label_length;
+            footer_config.has_filename = true;
+        }
+    }
     if (footer_config.has_title && (!footer_config.title_text || footer_config.title_length == 0u)) {
         console_line(2, "encode: title configuration is invalid");
         return 1;
@@ -5311,7 +6173,7 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
     }
-    if (!encoder.set_payload(payload.data, payload.size)) {
+    if (!encoder.set_payload(archive.buffer.data, archive.buffer.size)) {
         console_line(2, "encode: failed to set payload");
         return 1;
     }
@@ -5482,12 +6344,40 @@ static int command_decode(int arg_count, char** args) {
     usize file_count = 0u;
     makocode::ByteBuffer password_buffer;
     bool have_password = false;
+    makocode::ByteBuffer output_dir_buffer;
+    const char* output_dir = ".";
+    bool have_output_dir = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(args[i], mapping, "decode", &handled)) {
             return 1;
         }
         if (!handled) {
+            const char output_prefix[] = "--output-dir=";
+            if (ascii_starts_with(args[i], output_prefix)) {
+                if (have_output_dir) {
+                    console_line(2, "decode: output directory specified multiple times");
+                    return 1;
+                }
+                const char* value_text = args[i] + (sizeof(output_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "decode: --output-dir requires a non-empty path");
+                    return 1;
+                }
+                if (!output_dir_buffer.ensure(length + 1u)) {
+                    console_line(2, "decode: failed to allocate output directory buffer");
+                    return 1;
+                }
+                for (usize j = 0u; j < length; ++j) {
+                    output_dir_buffer.data[j] = (u8)value_text[j];
+                }
+                output_dir_buffer.data[length] = 0u;
+                output_dir_buffer.size = length;
+                output_dir = (const char*)output_dir_buffer.data;
+                have_output_dir = true;
+                continue;
+            }
             const char password_prefix[] = "--password=";
             if (ascii_starts_with(args[i], password_prefix)) {
                 if (have_password) {
@@ -5696,12 +6586,18 @@ static int command_decode(int arg_count, char** args) {
     if (decoder.password_attempt_made() && decoder.password_was_ignored()) {
         console_line(2, "decode: warning: payload was not encrypted; password ignored");
     }
-    if (decoder.ecc_correction_failed()) {
+   if (decoder.ecc_correction_failed()) {
         console_line(2, "decode: warning: payload may contain uncorrected errors");
     }
-    if (decoder.has_payload && decoder.payload.size) {
-        write(1, decoder.payload.data, decoder.payload.size);
+    if (!decoder.has_payload) {
+        console_line(2, "decode: no payload recovered");
+        return 1;
     }
+    if (!unpack_archive_to_directory(decoder.payload, output_dir)) {
+        return 1;
+    }
+    console_write(1, "decode: wrote files to ");
+    console_line(1, output_dir);
     return 0;
 }
 
