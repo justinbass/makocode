@@ -4100,6 +4100,170 @@ static bool ppm_next_token(PpmParserState& state, const char** out_start, usize*
     return false;
 }
 
+static u64 gcd_u64(u64 a, u64 b) {
+    while (b) {
+        u64 temp = a % b;
+        a = b;
+        b = temp;
+    }
+    return a ? a : b;
+}
+
+static bool rgb_equal(const u8* a, const u8* b) {
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+static bool ppm_read_rgb_pixels(PpmParserState& state,
+                                u64 pixel_count,
+                                makocode::ByteBuffer& pixel_buffer) {
+    if (pixel_count == 0u) {
+        return false;
+    }
+    u64 total_bytes = pixel_count * 3u;
+    if (total_bytes > (u64)USIZE_MAX_VALUE) {
+        return false;
+    }
+    if (!pixel_buffer.ensure((usize)total_bytes)) {
+        return false;
+    }
+    for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
+        for (u32 channel = 0u; channel < 3u; ++channel) {
+            const char* token = 0;
+            usize length = 0u;
+            if (!ppm_next_token(state, &token, &length)) {
+                return false;
+            }
+            u64 value = 0u;
+            if (!ascii_to_u64(token, length, &value) || value > 255u) {
+                return false;
+            }
+            pixel_buffer.data[pixel * 3u + channel] = (u8)value;
+        }
+    }
+    pixel_buffer.size = (usize)total_bytes;
+    return true;
+}
+
+static u64 detect_horizontal_scale(const u8* pixels, u64 width, u64 height) {
+    if (!pixels || width == 0u || height == 0u) {
+        return 1u;
+    }
+    u64 row_limit = (height < 256u) ? height : 256u;
+    u64 scale = 0u;
+    for (u64 row = 0u; row < row_limit; ++row) {
+        const u8* row_ptr = pixels + (row * width * 3u);
+        u64 run = 1u;
+        for (u64 col = 1u; col < width; ++col) {
+            const u8* current = row_ptr + col * 3u;
+            const u8* previous = row_ptr + (col - 1u) * 3u;
+            if (rgb_equal(current, previous)) {
+                ++run;
+            } else {
+                scale = scale ? gcd_u64(scale, run) : run;
+                run = 1u;
+            }
+            if (scale == 1u) {
+                return 1u;
+            }
+        }
+        scale = scale ? gcd_u64(scale, run) : run;
+        if (scale == 1u) {
+            return 1u;
+        }
+    }
+    if (!scale || scale > width || scale == width) {
+        return 1u;
+    }
+    if ((width % scale) != 0u) {
+        scale = gcd_u64(scale, width);
+        if (!scale || (width % scale) != 0u) {
+            return 1u;
+        }
+    }
+    return scale ? scale : 1u;
+}
+
+static u64 detect_vertical_scale(const u8* pixels, u64 width, u64 height) {
+    if (!pixels || width == 0u || height == 0u) {
+        return 1u;
+    }
+    u64 column_limit = (width < 256u) ? width : 256u;
+    u64 row_limit = (height < 256u) ? height : 256u;
+    u64 scale = 0u;
+    for (u64 col = 0u; col < column_limit; ++col) {
+        u64 run = 1u;
+        for (u64 row = 1u; row < row_limit; ++row) {
+            const u8* current = pixels + (row * width + col) * 3u;
+            const u8* previous = pixels + ((row - 1u) * width + col) * 3u;
+            if (rgb_equal(current, previous)) {
+                ++run;
+            } else {
+                scale = scale ? gcd_u64(scale, run) : run;
+                run = 1u;
+            }
+            if (scale == 1u) {
+                return 1u;
+            }
+        }
+        scale = scale ? gcd_u64(scale, run) : run;
+        if (scale == 1u) {
+            return 1u;
+        }
+    }
+    if (!scale || scale > height || scale == height) {
+        return 1u;
+    }
+    if ((height % scale) != 0u) {
+        scale = gcd_u64(scale, height);
+        if (!scale || (height % scale) != 0u) {
+            return 1u;
+        }
+    }
+    return scale ? scale : 1u;
+}
+
+static bool validate_integer_scale(const u8* pixels,
+                                   u64 width,
+                                   u64 height,
+                                   u64 scale_x,
+                                   u64 scale_y) {
+    if (!pixels || width == 0u || height == 0u) {
+        return false;
+    }
+    if (scale_x <= 1u && scale_y <= 1u) {
+        return true;
+    }
+    if (scale_x == 0u || scale_y == 0u) {
+        return false;
+    }
+    if ((width % scale_x) != 0u || (height % scale_y) != 0u) {
+        return false;
+    }
+    u64 logical_width = width / scale_x;
+    u64 logical_height = height / scale_y;
+    for (u64 logical_row = 0u; logical_row < logical_height; ++logical_row) {
+        u64 base_row = logical_row * scale_y;
+        for (u64 logical_col = 0u; logical_col < logical_width; ++logical_col) {
+            u64 base_col = logical_col * scale_x;
+            const u8* origin = pixels + ((base_row * width) + base_col) * 3u;
+            for (u64 dy = 0u; dy < scale_y; ++dy) {
+                u64 row_index = base_row + dy;
+                if (row_index >= height) {
+                    return false;
+                }
+                const u8* row_ptr = pixels + ((row_index * width) + base_col) * 3u;
+                for (u64 dx = 0u; dx < scale_x; ++dx) {
+                    const u8* sample = row_ptr + dx * 3u;
+                    if (!rgb_equal(origin, sample)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    const ImageMappingConfig& overrides,
                                    makocode::ByteBuffer& frame_bits,
@@ -4179,22 +4343,88 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         console_line(2, "debug: invalid max value token");
         return false;
     }
-    u64 pixel_count = width * height;
-    if (pixel_count == 0u) {
+    u64 raw_pixel_count = width * height;
+    if (raw_pixel_count == 0u) {
+        return false;
+    }
+    makocode::ByteBuffer pixel_buffer;
+    if (!ppm_read_rgb_pixels(state, raw_pixel_count, pixel_buffer)) {
+        return false;
+    }
+    const u8* pixel_data = pixel_buffer.data;
+    if (!pixel_data) {
+        return false;
+    }
+    u64 scale_x = 1u;
+    u64 scale_y = 1u;
+    bool width_known = false;
+    bool height_known = false;
+    u64 expected_width = 0u;
+    u64 expected_height = 0u;
+    if (overrides.page_width_set && overrides.page_width_pixels) {
+        expected_width = overrides.page_width_pixels;
+        width_known = true;
+    } else if (state.has_page_width_pixels && state.page_width_pixels_value) {
+        expected_width = state.page_width_pixels_value;
+        width_known = true;
+    }
+    if (overrides.page_height_set && overrides.page_height_pixels) {
+        expected_height = overrides.page_height_pixels;
+        height_known = true;
+    } else if (state.has_page_height_pixels && state.page_height_pixels_value) {
+        expected_height = state.page_height_pixels_value;
+        height_known = true;
+    }
+    if (width_known && expected_width && (width % expected_width) == 0u) {
+        scale_x = width / expected_width;
+    }
+    if (height_known && expected_height && (height % expected_height) == 0u) {
+        scale_y = height / expected_height;
+    }
+    if ((width % scale_x) != 0u) {
+        scale_x = 1u;
+    }
+    if ((height % scale_y) != 0u) {
+        scale_y = 1u;
+    }
+    if (scale_x == 1u && width > 1u) {
+        u64 detected_x = detect_horizontal_scale(pixel_data, width, height);
+        if (detected_x > 1u && (width % detected_x) == 0u) {
+            scale_x = detected_x;
+        }
+    }
+    if (scale_y == 1u && height > 1u) {
+        u64 detected_y = detect_vertical_scale(pixel_data, width, height);
+        if (detected_y > 1u && (height % detected_y) == 0u) {
+            scale_y = detected_y;
+        }
+    }
+    if (!validate_integer_scale(pixel_data, width, height, scale_x, scale_y)) {
+        scale_x = 1u;
+        scale_y = 1u;
+    }
+    if (scale_x == 0u || (width % scale_x) != 0u) {
+        scale_x = 1u;
+    }
+    if (scale_y == 0u || (height % scale_y) != 0u) {
+        scale_y = 1u;
+    }
+    u64 logical_width = width / scale_x;
+    u64 logical_height = height / scale_y;
+    if (logical_width == 0u || logical_height == 0u) {
         return false;
     }
     u64 footer_rows = 0u;
     if (state.has_footer_rows) {
         footer_rows = state.footer_rows_value;
-        if (footer_rows > height) {
+        if (footer_rows > logical_height) {
             return false;
         }
     }
-    u64 data_height = height - footer_rows;
+    u64 data_height = logical_height - footer_rows;
     if (data_height == 0u) {
         return false;
     }
-    u64 data_pixels = width * data_height;
     u8 color_mode = overrides.color_channels;
     if (overrides.color_set) {
         color_mode = overrides.color_channels;
@@ -4222,37 +4452,21 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     (void)palette;
     u8 samples_per_pixel = color_mode_samples_per_pixel(color_mode);
     makocode::BitWriter writer;
-    for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
-        u64 r_value = 0u;
-        u64 g_value = 0u;
-        u64 b_value = 0u;
-        if (!ppm_next_token(state, &token, &token_length)) {
-            return false;
-        }
-        if (!ascii_to_u64(token, token_length, &r_value) || r_value > 255u) {
-            return false;
-        }
-        if (!ppm_next_token(state, &token, &token_length)) {
-            return false;
-        }
-        if (!ascii_to_u64(token, token_length, &g_value) || g_value > 255u) {
-            return false;
-        }
-        if (!ppm_next_token(state, &token, &token_length)) {
-            return false;
-        }
-        if (!ascii_to_u64(token, token_length, &b_value) || b_value > 255u) {
-            return false;
-        }
-        u8 rgb[3];
-        rgb[0] = (u8)r_value;
-        rgb[1] = (u8)g_value;
-        rgb[2] = (u8)b_value;
-        u32 samples_raw[3] = {0u, 0u, 0u};
-        if (!map_rgb_to_samples(color_mode, rgb, samples_raw)) {
-            return false;
-        }
-        if (pixel < data_pixels) {
+    u64 raw_width = width;
+    u64 pixel_stride = raw_width;
+    for (u64 logical_row = 0u; logical_row < data_height; ++logical_row) {
+        u64 raw_row = logical_row * scale_y;
+        for (u64 logical_col = 0u; logical_col < logical_width; ++logical_col) {
+            u64 raw_col = logical_col * scale_x;
+            u64 pixel_index = (raw_row * pixel_stride) + raw_col;
+            if (pixel_index >= raw_pixel_count) {
+                return false;
+            }
+            const u8* rgb = pixel_data + (usize)(pixel_index * 3u);
+            u32 samples_raw[3] = {0u, 0u, 0u};
+            if (!map_rgb_to_samples(color_mode, rgb, samples_raw)) {
+                return false;
+            }
             for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
                 u32 sample = samples_raw[sample_index];
                 if (!writer.write_bits(sample, sample_bits)) {
@@ -4517,6 +4731,206 @@ static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
         }
     }
     return buffer.append_ascii(digits);
+}
+
+static bool ppm_scale_integer(const makocode::ByteBuffer& input,
+                              u32 factor,
+                              makocode::ByteBuffer& output) {
+    if (factor == 0u) {
+        return false;
+    }
+    if (factor == 1u) {
+        output.release();
+        if (input.size) {
+            if (!output.ensure(input.size)) {
+                return false;
+            }
+            const u8* source = input.data;
+            if (!source) {
+                return false;
+            }
+            for (usize i = 0u; i < input.size; ++i) {
+                output.data[i] = source[i];
+            }
+            output.size = input.size;
+        } else {
+            output.size = 0u;
+        }
+        return true;
+    }
+    if (!input.data || input.size == 0u) {
+        return false;
+    }
+    PpmParserState state;
+    state.data = input.data;
+    state.size = input.size;
+    const char* token = 0;
+    usize token_length = 0u;
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    if (!ascii_equals_token(token, token_length, "P3")) {
+        return false;
+    }
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    u64 width = 0u;
+    if (!ascii_to_u64(token, token_length, &width) || width == 0u) {
+        return false;
+    }
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    u64 height = 0u;
+    if (!ascii_to_u64(token, token_length, &height) || height == 0u) {
+        return false;
+    }
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    u64 max_value = 0u;
+    if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u) {
+        return false;
+    }
+    u64 pixel_count = width * height;
+    if (pixel_count == 0u) {
+        return false;
+    }
+    makocode::ByteBuffer pixels;
+    if (!ppm_read_rgb_pixels(state, pixel_count, pixels)) {
+        return false;
+    }
+    const u8* pixel_data = pixels.data;
+    if (!pixel_data) {
+        return false;
+    }
+    u64 scaled_width = width * (u64)factor;
+    u64 scaled_height = height * (u64)factor;
+    if (scaled_width == 0u || scaled_height == 0u) {
+        return false;
+    }
+    output.release();
+    if (!output.append_ascii("P3\n")) {
+        return false;
+    }
+    if (state.has_bytes) {
+        if (!append_comment_number(output, "MAKOCODE_BYTES", state.bytes_value)) {
+            return false;
+        }
+    }
+    if (state.has_bits) {
+        if (!append_comment_number(output, "MAKOCODE_BITS", state.bits_value)) {
+            return false;
+        }
+    }
+    if (state.has_ecc_flag) {
+        if (!append_comment_number(output, "MAKOCODE_ECC", state.ecc_flag_value)) {
+            return false;
+        }
+    }
+    if (state.has_ecc_block_data) {
+        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", state.ecc_block_data_value)) {
+            return false;
+        }
+    }
+    if (state.has_ecc_parity) {
+        if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", state.ecc_parity_value)) {
+            return false;
+        }
+    }
+    if (state.has_ecc_block_count) {
+        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_COUNT", state.ecc_block_count_value)) {
+            return false;
+        }
+    }
+    if (state.has_ecc_original_bytes) {
+        if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", state.ecc_original_bytes_value)) {
+            return false;
+        }
+    }
+    if (state.has_color_channels) {
+        if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", state.color_channels_value)) {
+            return false;
+        }
+    }
+    if (state.has_page_count) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
+            return false;
+        }
+    }
+    if (state.has_page_index) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
+            return false;
+        }
+    }
+    if (state.has_page_bits) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", state.page_bits_value)) {
+            return false;
+        }
+    }
+    if (state.has_page_width_pixels) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", state.page_width_pixels_value)) {
+            return false;
+        }
+    }
+    if (state.has_page_height_pixels) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", state.page_height_pixels_value)) {
+            return false;
+        }
+    }
+    if (state.has_footer_rows) {
+        if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", state.footer_rows_value)) {
+            return false;
+        }
+        if (state.has_font_size) {
+            if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
+                return false;
+            }
+        }
+    } else if (state.has_font_size) {
+        if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
+            return false;
+        }
+    }
+    if (!buffer_append_number(output, scaled_width) || !output.append_char(' ')) {
+        return false;
+    }
+    if (!buffer_append_number(output, scaled_height) || !output.append_char('\n')) {
+        return false;
+    }
+    if (!output.append_ascii("255\n")) {
+        return false;
+    }
+    u64 src_width = width;
+    for (u64 row = 0u; row < scaled_height; ++row) {
+        u64 src_row = row / factor;
+        if (src_row >= height) {
+            return false;
+        }
+        const u8* src_row_ptr = pixel_data + (usize)(src_row * src_width * 3u);
+        for (u64 col = 0u; col < scaled_width; ++col) {
+            u64 src_col = col / factor;
+            if (src_col >= width) {
+                return false;
+            }
+            const u8* rgb = src_row_ptr + (usize)(src_col * 3u);
+            for (u8 channel = 0u; channel < 3u; ++channel) {
+                if (channel) {
+                    if (!output.append_char(' ')) {
+                        return false;
+                    }
+                }
+                if (!buffer_append_number(output, (u64)rgb[channel])) {
+                    return false;
+                }
+            }
+            if (!output.append_char('\n')) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 static bool build_page_filename(makocode::ByteBuffer& buffer,
@@ -6893,6 +7307,7 @@ static int command_test(int arg_count, char** args) {
     }
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
+    bool two_page_test_done = false;
     for (usize scenario_index = 0u; scenario_index < scenario_count; ++scenario_index) {
         const TestScenario& scenario = scenarios[scenario_index];
         const char* scenario_password = scenario.use_password ? base_password : (const char*)0;
@@ -6908,6 +7323,8 @@ static int command_test(int arg_count, char** args) {
         } else {
             run_mapping.color_channels = color_options[color_index];
         }
+        char digits_color[8];
+        u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
         u32 width_pixels = 0u;
         u32 height_pixels = 0u;
         if (!compute_page_dimensions(run_mapping, width_pixels, height_pixels)) {
@@ -6935,6 +7352,14 @@ static int command_test(int arg_count, char** args) {
             console_line(2, "test: page capacity is zero");
             return 1;
         }
+        bool require_two_pages = (!two_page_test_done &&
+                                  !scenario.use_password &&
+                                  !scenario.use_ecc &&
+                                  run_mapping.color_channels == 1u);
+        u64 target_pages = require_two_pages ? 2u : 1u;
+        if (require_two_pages) {
+            two_page_test_done = true;
+        }
         usize max_payload_size = (usize)((bits_per_page * 2u) / 8u) + 1024u;
         if (max_payload_size < 32u) {
             max_payload_size = 32u;
@@ -6944,72 +7369,116 @@ static int command_test(int arg_count, char** args) {
         }
         const char* password_ptr = scenario_password;
         usize password_length = scenario_password_length;
-        usize low_size = 0u;
-        usize high_size = 1u;
-        u64 high_bits = 0u;
-        while (true) {
-            u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)high_size;
+        usize best_size = 0u;
+        if (target_pages == 1u) {
+            usize left = 1u;
+            usize right = max_payload_size;
+            bool found = false;
+            while (left <= right) {
+                usize mid = left + (right - left) / 2u;
+                u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
+                u64 mid_bits = 0u;
+                if (!compute_frame_bit_count(run_mapping,
+                                             mid,
+                                             seed,
+                                             scenario.ecc_redundancy,
+                                             password_ptr,
+                                             password_length,
+                                             mid_bits)) {
+                    console_line(2, "test: failed to evaluate payload size");
+                    return 1;
+                }
+                u64 mid_pages = (mid_bits + bits_per_page - 1u) / bits_per_page;
+                if (mid_pages <= 1u && mid_bits > 0u) {
+                    found = true;
+                    best_size = mid;
+                    left = mid + 1u;
+                } else {
+                    if (mid == 0u) {
+                        break;
+                    }
+                    if (mid_pages > 1u) {
+                        if (mid == 0u) {
+                            break;
+                        }
+                        right = mid - 1u;
+                    } else {
+                        left = mid + 1u;
+                    }
+                }
+            }
+            if (!found || best_size == 0u) {
+                console_line(2, "test: unable to locate single-page payload");
+                return 1;
+            }
+            u64 confirm_bits = 0u;
+            u64 confirm_seed = ((u64)run_mapping.color_channels << 32u) | (u64)best_size;
             if (!compute_frame_bit_count(run_mapping,
-                                         high_size,
-                                         seed,
+                                         best_size,
+                                         confirm_seed,
                                          scenario.ecc_redundancy,
                                          password_ptr,
                                          password_length,
-                                         high_bits)) {
-                console_line(2, "test: failed to evaluate payload size");
+                                         confirm_bits)) {
+                console_line(2, "test: failed to confirm single-page payload size");
                 return 1;
             }
-            if (high_bits > bits_per_page) {
-                break;
-            }
-            low_size = high_size;
-            if (high_size >= max_payload_size) {
-                console_line(2, "test: unable to construct two-page payload");
+            u64 confirm_pages = (confirm_bits + bits_per_page - 1u) / bits_per_page;
+            if (confirm_pages != 1u || confirm_bits == 0u) {
+                console_line(2, "test: single-page payload confirmation failed");
                 return 1;
             }
-            high_size *= 2u;
-            if (high_size > max_payload_size) {
-                high_size = max_payload_size;
+        } else {
+            usize left = 1u;
+            usize right = max_payload_size;
+            bool found = false;
+            while (left <= right) {
+                usize mid = left + (right - left) / 2u;
+                u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
+                u64 mid_bits = 0u;
+                if (!compute_frame_bit_count(run_mapping,
+                                             mid,
+                                             seed,
+                                             scenario.ecc_redundancy,
+                                             password_ptr,
+                                             password_length,
+                                             mid_bits)) {
+                    console_line(2, "test: failed to evaluate payload size");
+                    return 1;
+                }
+                u64 mid_pages = (mid_bits + bits_per_page - 1u) / bits_per_page;
+                if (mid_pages >= 2u) {
+                    found = true;
+                    best_size = mid;
+                    if (mid == 0u) {
+                        break;
+                    }
+                    right = mid - 1u;
+                } else {
+                    left = mid + 1u;
+                }
             }
-            if (high_size == low_size) {
-                ++high_size;
+            if (!found || best_size == 0u) {
+                console_line(2, "test: unable to locate two-page payload");
+                return 1;
             }
-        }
-        usize left = (low_size == 0u) ? 1u : (low_size + 1u);
-        usize right = high_size;
-        usize best_size = high_size;
-        u64 best_bits = high_bits;
-        while (left <= right) {
-            usize mid = left + (right - left) / 2u;
-            u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
-            u64 mid_bits = 0u;
+            u64 confirm_bits = 0u;
+            u64 confirm_seed = ((u64)run_mapping.color_channels << 32u) | (u64)best_size;
             if (!compute_frame_bit_count(run_mapping,
-                                         mid,
-                                         seed,
+                                         best_size,
+                                         confirm_seed,
                                          scenario.ecc_redundancy,
                                          password_ptr,
                                          password_length,
-                                         mid_bits)) {
-                console_line(2, "test: failed to evaluate payload size");
+                                         confirm_bits)) {
+                console_line(2, "test: failed to confirm two-page payload size");
                 return 1;
             }
-            if (mid_bits > bits_per_page) {
-                best_size = mid;
-                best_bits = mid_bits;
-                if (mid == 0u) {
-                    break;
-                }
-                if (mid == left) {
-                    break;
-                }
-                right = mid - 1u;
-            } else {
-                left = mid + 1u;
+            u64 confirm_pages = (confirm_bits + bits_per_page - 1u) / bits_per_page;
+            if (confirm_pages != 2u) {
+                console_line(2, "test: two-page payload confirmation failed");
+                return 1;
             }
-        }
-        if (best_bits <= bits_per_page || best_bits > bits_per_page * 2u) {
-            console_line(2, "test: could not find payload yielding exactly two pages");
-            return 1;
         }
         makocode::ByteBuffer payload;
         makocode::EncoderContext encoder;
@@ -7032,7 +7501,7 @@ static int command_test(int arg_count, char** args) {
             return 1;
         }
         u64 page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
-        if (page_count != 2u) {
+        if (page_count != target_pages) {
             console_line(2, "test: unexpected page count");
             return 1;
         }
@@ -7091,8 +7560,6 @@ static int command_test(int arg_count, char** args) {
                 return 1;
             }
             name_buffer.release();
-            char digits_color[8];
-            u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
             if (!name_buffer.append_ascii("encoded_s") ||
                 !name_buffer.append_ascii(digits_scenario) ||
                 !name_buffer.append_ascii("_c") ||
@@ -7158,8 +7625,119 @@ static int command_test(int arg_count, char** args) {
             console_line(2, "test: ECC random flip validation failed");
             return 1;
         }
-        char digits_color[8];
-        u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
+        if (!scenario.use_password && !scenario.use_ecc && run_mapping.color_channels == 1u) {
+            static const u32 scale_factors[2] = {2u, 3u};
+            for (usize scale_index = 0u; scale_index < 2u; ++scale_index) {
+                u32 scale_factor = scale_factors[scale_index];
+                makocode::BitWriter scaled_writer;
+                scaled_writer.reset();
+                PpmParserState scaled_state;
+                bool scaled_state_initialized = false;
+                for (u64 page = 0u; page < page_count; ++page) {
+                    makocode::ByteBuffer baseline_page;
+                    u64 bit_offset = page * bits_per_page;
+                    if (!encode_page_to_ppm(run_mapping,
+                                            frame_bits,
+                                            frame_bit_count,
+                                            bit_offset,
+                                            width_pixels,
+                                            height_pixels,
+                                            page + 1u,
+                                            page_count,
+                                            bits_per_page,
+                                            payload_bit_count,
+                                            ecc_summary,
+                                            0,
+                                            0u,
+                                            footer_layout,
+                                            baseline_page)) {
+                        console_line(2, "test: failed to regenerate baseline page for scaling");
+                        return 1;
+                    }
+                    makocode::ByteBuffer scaled_page;
+                    if (!ppm_scale_integer(baseline_page, scale_factor, scaled_page)) {
+                        console_line(2, "test: failed to scale ppm page");
+                        return 1;
+                    }
+                    makocode::ByteBuffer scaled_name;
+                    if (!scaled_name.append_ascii("scaled_s") ||
+                        !scaled_name.append_ascii(digits_scenario) ||
+                        !scaled_name.append_ascii("_c") ||
+                        !scaled_name.append_ascii(digits_color) ||
+                        !scaled_name.append_ascii("_p") ||
+                        !buffer_append_zero_padded(scaled_name, page + 1u, 2u) ||
+                        !scaled_name.append_ascii("_x") ||
+                        !buffer_append_number(scaled_name, (u64)scale_factor) ||
+                        !scaled_name.append_ascii(".ppm") ||
+                        !scaled_name.append_char('\0')) {
+                        console_line(2, "test: failed to build scaled filename");
+                        return 1;
+                    }
+                    if (!write_buffer_to_file((const char*)scaled_name.data, scaled_page)) {
+                        console_line(2, "test: failed to write scaled page");
+                        return 1;
+                    }
+                    makocode::ByteBuffer scaled_bits;
+                    u64 scaled_bit_count = 0u;
+                    PpmParserState scaled_page_state;
+                    if (!ppm_extract_frame_bits(scaled_page, run_mapping, scaled_bits, scaled_bit_count, scaled_page_state)) {
+                        console_line(2, "test: scaled ppm parse failed");
+                        return 1;
+                    }
+                    if (!scaled_state_initialized) {
+                        if (!merge_parser_state(scaled_state, scaled_page_state)) {
+                            console_line(2, "test: scaled metadata mismatch");
+                            return 1;
+                        }
+                        scaled_state_initialized = true;
+                    } else {
+                        if (!merge_parser_state(scaled_state, scaled_page_state)) {
+                            console_line(2, "test: scaled metadata mismatch between pages");
+                            return 1;
+                        }
+                    }
+                    u64 scaled_effective_bits = scaled_bit_count;
+                    if (scaled_page_state.has_page_bits && scaled_page_state.page_bits_value <= scaled_effective_bits) {
+                        scaled_effective_bits = scaled_page_state.page_bits_value;
+                    }
+                    if (!append_bits_from_buffer(scaled_writer, scaled_bits.data, scaled_effective_bits)) {
+                        console_line(2, "test: failed to assemble scaled bitstream");
+                        return 1;
+                    }
+                }
+                if (scaled_state.has_page_count && scaled_state.page_count_value != page_count) {
+                    console_line(2, "test: scaled page count metadata mismatch");
+                    return 1;
+                }
+                const u8* scaled_data = scaled_writer.data();
+                u64 scaled_total_bits = scaled_writer.bit_size();
+                if (scaled_total_bits == 0u) {
+                    console_line(2, "test: scaled aggregate bitstream empty");
+                    return 1;
+                }
+                makocode::ByteBuffer scaled_payload_bits;
+                u64 scaled_payload_bit_count = 0u;
+                if (!frame_bits_to_payload(scaled_data, scaled_total_bits, scaled_state, scaled_payload_bits, scaled_payload_bit_count)) {
+                    console_line(2, "test: failed to reconstruct payload from scaled pages");
+                    return 1;
+                }
+                makocode::DecoderContext scaled_decoder;
+                if (!scaled_decoder.parse(scaled_payload_bits.data, scaled_payload_bit_count, password_ptr, password_length)) {
+                    console_line(2, "test: scaled decode failed");
+                    return 1;
+                }
+                if (!scaled_decoder.has_payload || scaled_decoder.payload.size != payload.size) {
+                    console_line(2, "test: scaled payload size mismatch");
+                    return 1;
+                }
+                for (usize i = 0u; i < payload.size; ++i) {
+                    if (scaled_decoder.payload.data[i] != payload.data[i]) {
+                        console_line(2, "test: scaled payload mismatch");
+                        return 1;
+                    }
+                }
+            }
+        }
         name_buffer.release();
         if (!name_buffer.append_ascii("payload_s") ||
             !name_buffer.append_ascii(digits_scenario) ||
