@@ -42,6 +42,44 @@ extern "C" long  time(long* tloc);
 extern "C" struct tm* gmtime(const long* timep);
 extern "C" unsigned long strftime(char* s, unsigned long max, const char* format, const struct tm* tm);
 
+static u16 read_le_u16(const u8* ptr);
+static u32 read_le_u32(const u8* ptr);
+static u64 read_le_u64(const u8* ptr);
+static void write_le_u16(u8* ptr, u16 value);
+static void write_le_u32(u8* ptr, u32 value);
+static void write_le_u64(u8* ptr, u64 value);
+
+static u16 read_le_u16(const u8* ptr) {
+    return (u16)ptr[0] | ((u16)ptr[1] << 8);
+}
+
+static u32 read_le_u32(const u8* ptr) {
+    return (u32)ptr[0] | ((u32)ptr[1] << 8) | ((u32)ptr[2] << 16) | ((u32)ptr[3] << 24);
+}
+
+static u64 read_le_u64(const u8* ptr) {
+    u64 low = (u64)read_le_u32(ptr);
+    u64 high = (u64)read_le_u32(ptr + 4u);
+    return low | (high << 32u);
+}
+
+static void write_le_u16(u8* ptr, u16 value) {
+    ptr[0] = (u8)(value & 0xFFu);
+    ptr[1] = (u8)((value >> 8u) & 0xFFu);
+}
+
+static void write_le_u32(u8* ptr, u32 value) {
+    ptr[0] = (u8)(value & 0xFFu);
+    ptr[1] = (u8)((value >> 8u) & 0xFFu);
+    ptr[2] = (u8)((value >> 16u) & 0xFFu);
+    ptr[3] = (u8)((value >> 24u) & 0xFFu);
+}
+
+static void write_le_u64(u8* ptr, u64 value) {
+    write_le_u32(ptr, (u32)(value & 0xFFFFFFFFull));
+    write_le_u32(ptr + 4u, (u32)((value >> 32u) & 0xFFFFFFFFull));
+}
+
 #ifndef O_RDONLY
 #define O_RDONLY 0
 #endif
@@ -354,6 +392,894 @@ struct Pcg64Generator {
         return (xorshifted >> rotate) | (xorshifted << inverse);
     }
 };
+
+static void crypto_random_bytes(u8* dest, usize count) {
+    if (!dest || count == 0u) {
+        return;
+    }
+    static Pcg64Generator rng;
+    static bool seeded = false;
+    if (!seeded) {
+        u64 seed = (u64)time((long*)0);
+        if (!seed) {
+            seed = 0x726f6c6c6572756cull;
+        }
+        rng.seed(seed);
+        seeded = true;
+    }
+    for (usize i = 0u; i < count; ) {
+        u64 value = rng.next();
+        for (u32 j = 0u; j < 8u && i < count; ++j) {
+            dest[i++] = (u8)((value >> (j * 8u)) & 0xFFu);
+        }
+    }
+}
+
+static bool constant_time_equal(const u8* a, const u8* b, usize length) {
+    if (!a || !b) {
+        return false;
+    }
+    u8 diff = 0u;
+    for (usize i = 0u; i < length; ++i) {
+        diff |= (u8)(a[i] ^ b[i]);
+    }
+    return (diff == 0u);
+}
+
+static inline u32 rotl32(u32 value, u32 amount) {
+    return (value << amount) | (value >> (32u - amount));
+}
+
+static inline u32 rotr32(u32 value, u32 amount) {
+    return (value >> amount) | (value << (32u - amount));
+}
+
+static const u32 ENCRYPTION_HEADER_MAGIC = 0x4D454E43u;
+static const u8  ENCRYPTION_HEADER_VERSION = 1u;
+static const u8  ENCRYPTION_FLAG_PASSWORD = 0x01u;
+static const u8  ENCRYPTION_KDF_PBKDF2_SHA256 = 1u;
+static const usize ENCRYPTION_SALT_BYTES = (usize)16;
+static const usize ENCRYPTION_NONCE_BYTES = (usize)12;
+static const usize ENCRYPTION_TAG_BYTES = (usize)16;
+static const usize ENCRYPTION_HEADER_BYTES = (usize)48;
+static const u32 ENCRYPTION_PBKDF2_ITERATIONS = 60000u;
+
+static const u32 SHA256_INITIAL_STATE[8] = {
+    0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+    0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+};
+
+static const u32 SHA256_K[64] = {
+    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
+    0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+    0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
+    0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+    0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+    0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
+    0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+    0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
+    0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
+    0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+    0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u,
+    0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+    0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+};
+
+struct Sha256State {
+    u32 h[8];
+    u8 buffer[64];
+    u64 bit_length;
+    u32 buffer_used;
+
+    Sha256State() : h(), buffer(), bit_length(0u), buffer_used(0u) {}
+};
+
+static void sha256_process_block(Sha256State& state, const u8* block) {
+    u32 w[64];
+    for (u32 i = 0u; i < 16u; ++i) {
+        u32 b0 = (u32)block[i * 4u + 0u];
+        u32 b1 = (u32)block[i * 4u + 1u];
+        u32 b2 = (u32)block[i * 4u + 2u];
+        u32 b3 = (u32)block[i * 4u + 3u];
+        w[i] = (b0 << 24u) | (b1 << 16u) | (b2 << 8u) | b3;
+    }
+    for (u32 i = 16u; i < 64u; ++i) {
+        u32 s0 = rotr32(w[i - 15u], 7u) ^ rotr32(w[i - 15u], 18u) ^ (w[i - 15u] >> 3u);
+        u32 s1 = rotr32(w[i - 2u], 17u) ^ rotr32(w[i - 2u], 19u) ^ (w[i - 2u] >> 10u);
+        w[i] = w[i - 16u] + s0 + w[i - 7u] + s1;
+    }
+    u32 a = state.h[0];
+    u32 b = state.h[1];
+    u32 c = state.h[2];
+    u32 d = state.h[3];
+    u32 e = state.h[4];
+    u32 f = state.h[5];
+    u32 g = state.h[6];
+    u32 h = state.h[7];
+    for (u32 i = 0u; i < 64u; ++i) {
+        u32 s1 = rotr32(e, 6u) ^ rotr32(e, 11u) ^ rotr32(e, 25u);
+        u32 ch = (e & f) ^ ((~e) & g);
+        u32 temp1 = h + s1 + ch + SHA256_K[i] + w[i];
+        u32 s0 = rotr32(a, 2u) ^ rotr32(a, 13u) ^ rotr32(a, 22u);
+        u32 maj = (a & b) ^ (a & c) ^ (b & c);
+        u32 temp2 = s0 + maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+    }
+    state.h[0] += a;
+    state.h[1] += b;
+    state.h[2] += c;
+    state.h[3] += d;
+    state.h[4] += e;
+    state.h[5] += f;
+    state.h[6] += g;
+    state.h[7] += h;
+}
+
+static void sha256_init(Sha256State& state) {
+    for (u32 i = 0u; i < 8u; ++i) {
+        state.h[i] = SHA256_INITIAL_STATE[i];
+    }
+    state.bit_length = 0u;
+    state.buffer_used = 0u;
+}
+
+static void sha256_update(Sha256State& state, const u8* data, usize length) {
+    if (!data || length == 0u) {
+        return;
+    }
+    while (length > 0u) {
+        usize to_copy = 64u - (usize)state.buffer_used;
+        if (to_copy > length) {
+            to_copy = length;
+        }
+        for (usize i = 0u; i < to_copy; ++i) {
+            state.buffer[state.buffer_used + (u32)i] = data[i];
+        }
+        state.buffer_used += (u32)to_copy;
+        data += to_copy;
+        length -= to_copy;
+        if (state.buffer_used == 64u) {
+            sha256_process_block(state, state.buffer);
+            state.bit_length += 512u;
+            state.buffer_used = 0u;
+        }
+    }
+}
+
+static void sha256_finalize(Sha256State& state, u8 digest[32]) {
+    state.bit_length += (u64)state.buffer_used * 8ull;
+    state.buffer[state.buffer_used++] = 0x80u;
+    if (state.buffer_used > 56u) {
+        while (state.buffer_used < 64u) {
+            state.buffer[state.buffer_used++] = 0u;
+        }
+        sha256_process_block(state, state.buffer);
+        state.buffer_used = 0u;
+    }
+    while (state.buffer_used < 56u) {
+        state.buffer[state.buffer_used++] = 0u;
+    }
+    u64 bits = state.bit_length;
+    for (u32 i = 0u; i < 8u; ++i) {
+        state.buffer[63u - i] = (u8)(bits & 0xFFu);
+        bits >>= 8u;
+    }
+    sha256_process_block(state, state.buffer);
+    for (u32 i = 0u; i < 8u; ++i) {
+        digest[i * 4u + 0u] = (u8)((state.h[i] >> 24u) & 0xFFu);
+        digest[i * 4u + 1u] = (u8)((state.h[i] >> 16u) & 0xFFu);
+        digest[i * 4u + 2u] = (u8)((state.h[i] >> 8u) & 0xFFu);
+        digest[i * 4u + 3u] = (u8)(state.h[i] & 0xFFu);
+    }
+}
+
+static bool hmac_sha256(const u8* key,
+                        usize key_length,
+                        const u8* data,
+                        usize data_length,
+                        u8 output[32]) {
+    if (!key || key_length == 0u || !output) {
+        return false;
+    }
+    const usize block_size = 64u;
+    u8 key_block[64];
+    for (usize i = 0u; i < block_size; ++i) {
+        key_block[i] = 0u;
+    }
+    if (key_length > block_size) {
+        Sha256State temp;
+        sha256_init(temp);
+        sha256_update(temp, key, key_length);
+        u8 hashed[32];
+        sha256_finalize(temp, hashed);
+        for (usize i = 0u; i < 32u; ++i) {
+            key_block[i] = hashed[i];
+        }
+        for (usize i = 0u; i < 32u; ++i) {
+            hashed[i] = 0u;
+        }
+    } else {
+        for (usize i = 0u; i < key_length; ++i) {
+            key_block[i] = key[i];
+        }
+    }
+    u8 ipad[64];
+    u8 opad[64];
+    for (usize i = 0u; i < block_size; ++i) {
+        ipad[i] = (u8)(key_block[i] ^ 0x36u);
+        opad[i] = (u8)(key_block[i] ^ 0x5cu);
+    }
+    Sha256State inner;
+    sha256_init(inner);
+    sha256_update(inner, ipad, block_size);
+    sha256_update(inner, data, data_length);
+    u8 inner_digest[32];
+    sha256_finalize(inner, inner_digest);
+    Sha256State outer;
+    sha256_init(outer);
+    sha256_update(outer, opad, block_size);
+    sha256_update(outer, inner_digest, 32u);
+    sha256_finalize(outer, output);
+    for (usize i = 0u; i < block_size; ++i) {
+        key_block[i] = 0u;
+        ipad[i] = 0u;
+        opad[i] = 0u;
+    }
+    for (usize i = 0u; i < 32u; ++i) {
+        inner_digest[i] = 0u;
+    }
+    return true;
+}
+
+static bool pbkdf2_hmac_sha256(const u8* password,
+                               usize password_length,
+                               const u8* salt,
+                               usize salt_length,
+                               u32 iterations,
+                               u8* output,
+                               usize output_length) {
+    if (!password || password_length == 0u || !salt || !output || output_length == 0u || iterations == 0u) {
+        return false;
+    }
+    u32 block_count = (u32)((output_length + 31u) / 32u);
+    makocode::ByteBuffer salt_buffer;
+    if (!salt_buffer.ensure(salt_length + 4u)) {
+        return false;
+    }
+    for (usize i = 0u; i < salt_length; ++i) {
+        salt_buffer.data[i] = salt[i];
+    }
+    salt_buffer.size = salt_length + 4u;
+    u8 u[32];
+    u8 t[32];
+    for (u32 block_index = 1u; block_index <= block_count; ++block_index) {
+        u32 bi = block_index;
+        salt_buffer.data[salt_length + 0u] = (u8)((bi >> 24u) & 0xFFu);
+        salt_buffer.data[salt_length + 1u] = (u8)((bi >> 16u) & 0xFFu);
+        salt_buffer.data[salt_length + 2u] = (u8)((bi >> 8u) & 0xFFu);
+        salt_buffer.data[salt_length + 3u] = (u8)(bi & 0xFFu);
+        if (!hmac_sha256(password, password_length, salt_buffer.data, salt_length + 4u, u)) {
+            salt_buffer.release();
+            return false;
+        }
+        for (u32 i = 0u; i < 32u; ++i) {
+            t[i] = u[i];
+        }
+        for (u32 iter = 1u; iter < iterations; ++iter) {
+            if (!hmac_sha256(password, password_length, u, 32u, u)) {
+                salt_buffer.release();
+                return false;
+            }
+            for (u32 i = 0u; i < 32u; ++i) {
+                t[i] ^= u[i];
+            }
+        }
+        usize offset = (usize)(block_index - 1u) * 32u;
+        usize remaining = output_length - offset;
+        usize to_copy = (remaining < 32u) ? remaining : (usize)32u;
+        for (usize i = 0u; i < to_copy; ++i) {
+            output[offset + i] = t[i];
+        }
+    }
+    for (u32 i = 0u; i < 32u; ++i) {
+        u[i] = 0u;
+        t[i] = 0u;
+    }
+    salt_buffer.release();
+    return true;
+}
+
+static inline void chacha20_quarter_round(u32& a, u32& b, u32& c, u32& d) {
+    a += b;
+    d ^= a;
+    d = rotl32(d, 16u);
+    c += d;
+    b ^= c;
+    b = rotl32(b, 12u);
+    a += b;
+    d ^= a;
+    d = rotl32(d, 8u);
+    c += d;
+    b ^= c;
+    b = rotl32(b, 7u);
+}
+
+static void chacha20_block(const u8 key[32], const u8 nonce[12], u32 counter, u8 output[64]) {
+    static const u32 constants[4] = {0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u};
+    u32 state[16];
+    state[0] = constants[0];
+    state[1] = constants[1];
+    state[2] = constants[2];
+    state[3] = constants[3];
+    for (u32 i = 0u; i < 8u; ++i) {
+        state[4u + i] = read_le_u32(key + i * 4u);
+    }
+    state[12] = counter;
+    state[13] = read_le_u32(nonce + 0u);
+    state[14] = read_le_u32(nonce + 4u);
+    state[15] = read_le_u32(nonce + 8u);
+    u32 working[16];
+    for (u32 i = 0u; i < 16u; ++i) {
+        working[i] = state[i];
+    }
+    for (u32 round = 0u; round < 10u; ++round) {
+        chacha20_quarter_round(working[0], working[4], working[8], working[12]);
+        chacha20_quarter_round(working[1], working[5], working[9], working[13]);
+        chacha20_quarter_round(working[2], working[6], working[10], working[14]);
+        chacha20_quarter_round(working[3], working[7], working[11], working[15]);
+        chacha20_quarter_round(working[0], working[5], working[10], working[15]);
+        chacha20_quarter_round(working[1], working[6], working[11], working[12]);
+        chacha20_quarter_round(working[2], working[7], working[8], working[13]);
+        chacha20_quarter_round(working[3], working[4], working[9], working[14]);
+    }
+    for (u32 i = 0u; i < 16u; ++i) {
+        working[i] += state[i];
+        write_le_u32(output + i * 4u, working[i]);
+    }
+}
+
+static bool chacha20_xor(const u8 key[32],
+                         const u8 nonce[12],
+                         u32 counter,
+                         const u8* input,
+                         u8* output,
+                         usize length) {
+    if ((!input && length > 0u) || !output) {
+        return false;
+    }
+    u8 block[64];
+    usize offset = 0u;
+    while (offset < length) {
+        chacha20_block(key, nonce, counter, block);
+        counter += 1u;
+        usize chunk = (length - offset >= 64u) ? 64u : (length - offset);
+        for (usize i = 0u; i < chunk; ++i) {
+            u8 keystream = block[i];
+            u8 source = input ? input[offset + i] : 0u;
+            output[offset + i] = (u8)(source ^ keystream);
+        }
+        offset += chunk;
+    }
+    for (u32 i = 0u; i < 64u; ++i) {
+        block[i] = 0u;
+    }
+    return true;
+}
+
+struct Poly1305State {
+    u64 r0, r1, r2, r3, r4;
+    u64 s1, s2, s3, s4;
+    u64 h0, h1, h2, h3, h4;
+
+    Poly1305State()
+        : r0(0u), r1(0u), r2(0u), r3(0u), r4(0u),
+          s1(0u), s2(0u), s3(0u), s4(0u),
+          h0(0u), h1(0u), h2(0u), h3(0u), h4(0u) {}
+};
+
+static void poly1305_init_state(Poly1305State& state, const u8 key[32]) {
+    unsigned __int128 r = (unsigned __int128)read_le_u64(key) |
+                          ((unsigned __int128)read_le_u64(key + 8u) << 64u);
+    unsigned __int128 mask = (((unsigned __int128)0x0ffffffc0ffffffcull) << 64u) |
+                             (unsigned __int128)0x0ffffffc0fffffffull;
+    r &= mask;
+    u64 r_low = (u64)(r & ((unsigned __int128)0xFFFFFFFFFFFFFFFFull));
+    u64 r_high = (u64)(r >> 64u);
+    state.r0 = r_low & 0x3ffffffu;
+    state.r1 = ((r_low >> 26u) & 0x3ffffffu);
+    state.r2 = (((r_low >> 52u) | (r_high << 12u)) & 0x3ffffffu);
+    state.r3 = ((r_high >> 14u) & 0x3ffffffu);
+    state.r4 = ((r_high >> 40u) & 0x3ffffffu);
+    state.s1 = state.r1 * 5u;
+    state.s2 = state.r2 * 5u;
+    state.s3 = state.r3 * 5u;
+    state.s4 = state.r4 * 5u;
+    state.h0 = state.h1 = state.h2 = state.h3 = state.h4 = 0u;
+}
+
+static void poly1305_process_block(Poly1305State& state, const u8 block[16], u64 hibit) {
+    u64 t0 = read_le_u64(block);
+    u64 t1 = read_le_u64(block + 8u);
+    state.h0 += t0 & 0x3ffffffu;
+    state.h1 += (t0 >> 26u) & 0x3ffffffu;
+    state.h2 += ((t0 >> 52u) | (t1 << 12u)) & 0x3ffffffu;
+    state.h3 += (t1 >> 14u) & 0x3ffffffu;
+    state.h4 += ((t1 >> 40u) & 0x3ffffffu) + hibit;
+
+    unsigned __int128 d0 = (unsigned __int128)state.h0 * state.r0 +
+                           (unsigned __int128)state.h1 * state.s4 +
+                           (unsigned __int128)state.h2 * state.s3 +
+                           (unsigned __int128)state.h3 * state.s2 +
+                           (unsigned __int128)state.h4 * state.s1;
+    unsigned __int128 d1 = (unsigned __int128)state.h0 * state.r1 +
+                           (unsigned __int128)state.h1 * state.r0 +
+                           (unsigned __int128)state.h2 * state.s4 +
+                           (unsigned __int128)state.h3 * state.s3 +
+                           (unsigned __int128)state.h4 * state.s2;
+    unsigned __int128 d2 = (unsigned __int128)state.h0 * state.r2 +
+                           (unsigned __int128)state.h1 * state.r1 +
+                           (unsigned __int128)state.h2 * state.r0 +
+                           (unsigned __int128)state.h3 * state.s4 +
+                           (unsigned __int128)state.h4 * state.s3;
+    unsigned __int128 d3 = (unsigned __int128)state.h0 * state.r3 +
+                           (unsigned __int128)state.h1 * state.r2 +
+                           (unsigned __int128)state.h2 * state.r1 +
+                           (unsigned __int128)state.h3 * state.r0 +
+                           (unsigned __int128)state.h4 * state.s4;
+    unsigned __int128 d4 = (unsigned __int128)state.h0 * state.r4 +
+                           (unsigned __int128)state.h1 * state.r3 +
+                           (unsigned __int128)state.h2 * state.r2 +
+                           (unsigned __int128)state.h3 * state.r1 +
+                           (unsigned __int128)state.h4 * state.r0;
+
+    u64 h0 = (u64)(d0 & 0x3ffffffu);
+    u64 carry = (u64)(d0 >> 26u);
+    d1 += carry;
+    u64 h1 = (u64)(d1 & 0x3ffffffu);
+    carry = (u64)(d1 >> 26u);
+    d2 += carry;
+    u64 h2 = (u64)(d2 & 0x3ffffffu);
+    carry = (u64)(d2 >> 26u);
+    d3 += carry;
+    u64 h3 = (u64)(d3 & 0x3ffffffu);
+    carry = (u64)(d3 >> 26u);
+    d4 += carry;
+    u64 h4 = (u64)(d4 & 0x3ffffffu);
+    carry = (u64)(d4 >> 26u);
+    h0 += carry * 5u;
+    carry = h0 >> 26u;
+    h0 &= 0x3ffffffu;
+    h1 += carry;
+    carry = h1 >> 26u;
+    h1 &= 0x3ffffffu;
+    h2 += carry;
+    carry = h2 >> 26u;
+    h2 &= 0x3ffffffu;
+    h3 += carry;
+    carry = h3 >> 26u;
+    h3 &= 0x3ffffffu;
+    h4 += carry;
+    state.h0 = h0;
+    state.h1 = h1;
+    state.h2 = h2;
+    state.h3 = h3;
+    state.h4 = h4;
+}
+
+static void poly1305_update(Poly1305State& state, const u8* data, usize length) {
+    if (!data || length == 0u) {
+        return;
+    }
+    while (length >= 16u) {
+        poly1305_process_block(state, data, (1ull << 24u));
+        data += 16u;
+        length -= 16u;
+    }
+    if (length > 0u) {
+        u8 buffer[16];
+        for (usize i = 0u; i < 16u; ++i) {
+            buffer[i] = 0u;
+        }
+        for (usize i = 0u; i < length; ++i) {
+            buffer[i] = data[i];
+        }
+        buffer[length] = 1u;
+        poly1305_process_block(state, buffer, 0u);
+    }
+}
+
+static void poly1305_pad16(Poly1305State& state, usize length) {
+    usize remainder = length & 15u;
+    if (!remainder) {
+        return;
+    }
+    u8 padding[16];
+    for (usize i = 0u; i < 16u; ++i) {
+        padding[i] = 0u;
+    }
+    poly1305_update(state, padding, 16u - remainder);
+}
+
+static void poly1305_finish(Poly1305State& state, const u8 pad[16], u8 tag[16]) {
+    u64 carry = state.h1 >> 26u;
+    state.h1 &= 0x3ffffffu;
+    state.h2 += carry;
+    carry = state.h2 >> 26u;
+    state.h2 &= 0x3ffffffu;
+    state.h3 += carry;
+    carry = state.h3 >> 26u;
+    state.h3 &= 0x3ffffffu;
+    state.h4 += carry;
+    carry = state.h4 >> 26u;
+    state.h4 &= 0x3ffffffu;
+    state.h0 += carry * 5u;
+    carry = state.h0 >> 26u;
+    state.h0 &= 0x3ffffffu;
+    state.h1 += carry;
+    carry = state.h1 >> 26u;
+    state.h1 &= 0x3ffffffu;
+    state.h2 += carry;
+    carry = state.h2 >> 26u;
+    state.h2 &= 0x3ffffffu;
+    state.h3 += carry;
+    carry = state.h3 >> 26u;
+    state.h3 &= 0x3ffffffu;
+    state.h4 += carry;
+
+    u64 g0 = state.h0 + 5u;
+    carry = g0 >> 26u;
+    g0 &= 0x3ffffffu;
+    u64 g1 = state.h1 + carry;
+    carry = g1 >> 26u;
+    g1 &= 0x3ffffffu;
+    u64 g2 = state.h2 + carry;
+    carry = g2 >> 26u;
+    g2 &= 0x3ffffffu;
+    u64 g3 = state.h3 + carry;
+    carry = g3 >> 26u;
+    g3 &= 0x3ffffffu;
+    u64 g4 = state.h4 + carry - (1ull << 26u);
+    u64 mask = ((g4 >> 63u) - 1u);
+    g0 &= mask;
+    g1 &= mask;
+    g2 &= mask;
+    g3 &= mask;
+    g4 &= mask;
+    mask = ~mask;
+    state.h0 = (state.h0 & mask) | g0;
+    state.h1 = (state.h1 & mask) | g1;
+    state.h2 = (state.h2 & mask) | g2;
+    state.h3 = (state.h3 & mask) | g3;
+    state.h4 = (state.h4 & mask) | g4;
+
+    unsigned __int128 acc = (unsigned __int128)state.h0 |
+                            ((unsigned __int128)state.h1 << 26u) |
+                            ((unsigned __int128)state.h2 << 52u) |
+                            ((unsigned __int128)state.h3 << 78u) |
+                            ((unsigned __int128)state.h4 << 104u);
+    unsigned __int128 sum0 = acc + (unsigned __int128)read_le_u64(pad);
+    u64 f0 = (u64)sum0;
+    unsigned __int128 sum1 = ((acc >> 64u) + (unsigned __int128)read_le_u64(pad + 8u) + (sum0 >> 64u));
+    u64 f1 = (u64)sum1;
+    write_le_u64(tag, f0);
+    write_le_u64(tag + 8u, f1);
+}
+
+static bool chacha20_poly1305_encrypt(const u8* key,
+                                      const u8* nonce,
+                                      const u8* plaintext,
+                                      usize plaintext_length,
+                                      const u8* aad,
+                                      usize aad_length,
+                                      ByteBuffer& ciphertext,
+                                      u8 tag[16]) {
+    if (!key || !nonce || !tag) {
+        return false;
+    }
+    ciphertext.release();
+    if (plaintext_length > 0u && !ciphertext.ensure(plaintext_length)) {
+        return false;
+    }
+    ciphertext.size = plaintext_length;
+    if (plaintext_length > 0u && !ciphertext.data) {
+        return false;
+    }
+    u8 initial_block[64];
+    chacha20_block(key, nonce, 0u, initial_block);
+    if (plaintext_length > 0u) {
+        if (!chacha20_xor(key, nonce, 1u, plaintext, ciphertext.data, plaintext_length)) {
+            for (u32 i = 0u; i < 64u; ++i) {
+                initial_block[i] = 0u;
+            }
+            return false;
+        }
+    }
+    Poly1305State mac;
+    poly1305_init_state(mac, initial_block);
+    if (aad && aad_length > 0u) {
+        poly1305_update(mac, aad, aad_length);
+    }
+    poly1305_pad16(mac, aad_length);
+    if (plaintext_length > 0u) {
+        poly1305_update(mac, ciphertext.data, plaintext_length);
+    }
+    poly1305_pad16(mac, plaintext_length);
+    u8 length_block[16];
+    for (u32 i = 0u; i < 16u; ++i) {
+        length_block[i] = 0u;
+    }
+    write_le_u64(length_block, (u64)aad_length);
+    write_le_u64(length_block + 8u, (u64)plaintext_length);
+    poly1305_process_block(mac, length_block, (1ull << 24u));
+    poly1305_finish(mac, initial_block + 16u, tag);
+    for (u32 i = 0u; i < 64u; ++i) {
+        initial_block[i] = 0u;
+    }
+    return true;
+}
+
+static bool chacha20_poly1305_decrypt(const u8* key,
+                                      const u8* nonce,
+                                      const u8* ciphertext,
+                                      usize ciphertext_length,
+                                      const u8* aad,
+                                      usize aad_length,
+                                      ByteBuffer& plaintext,
+                                      const u8 tag[16],
+                                      bool* auth_failed) {
+    if (!key || !nonce || (!ciphertext && ciphertext_length > 0u) || !tag) {
+        return false;
+    }
+    if (auth_failed) {
+        *auth_failed = false;
+    }
+    plaintext.release();
+    u8 initial_block[64];
+    chacha20_block(key, nonce, 0u, initial_block);
+    Poly1305State mac;
+    poly1305_init_state(mac, initial_block);
+    if (aad && aad_length > 0u) {
+        poly1305_update(mac, aad, aad_length);
+    }
+    poly1305_pad16(mac, aad_length);
+    if (ciphertext_length > 0u) {
+        poly1305_update(mac, ciphertext, ciphertext_length);
+    }
+    poly1305_pad16(mac, ciphertext_length);
+    u8 length_block[16];
+    for (u32 i = 0u; i < 16u; ++i) {
+        length_block[i] = 0u;
+    }
+    write_le_u64(length_block, (u64)aad_length);
+    write_le_u64(length_block + 8u, (u64)ciphertext_length);
+    poly1305_process_block(mac, length_block, (1ull << 24u));
+    u8 expected_tag[16];
+    poly1305_finish(mac, initial_block + 16u, expected_tag);
+    bool match = constant_time_equal(expected_tag, tag, ENCRYPTION_TAG_BYTES);
+    for (u32 i = 0u; i < 16u; ++i) {
+        expected_tag[i] = 0u;
+    }
+    if (!match) {
+        if (auth_failed) {
+            *auth_failed = true;
+        }
+        for (u32 i = 0u; i < 64u; ++i) {
+            initial_block[i] = 0u;
+        }
+        return false;
+    }
+    if (ciphertext_length > 0u) {
+        if (!plaintext.ensure(ciphertext_length)) {
+            for (u32 i = 0u; i < 64u; ++i) {
+                initial_block[i] = 0u;
+            }
+            return false;
+        }
+        plaintext.size = ciphertext_length;
+        if (!chacha20_xor(key, nonce, 1u, ciphertext, plaintext.data, ciphertext_length)) {
+            plaintext.release();
+            for (u32 i = 0u; i < 64u; ++i) {
+                initial_block[i] = 0u;
+            }
+            return false;
+        }
+    }
+    for (u32 i = 0u; i < 64u; ++i) {
+        initial_block[i] = 0u;
+    }
+    return true;
+}
+
+enum DecryptStatus {
+    DecryptStatus_NotEncrypted = 0,
+    DecryptStatus_Success = 1,
+    DecryptStatus_AuthFailed = 2,
+    DecryptStatus_FormatError = 3
+};
+
+static bool encrypt_payload_buffer(const ByteBuffer& plaintext,
+                                   const char* password,
+                                   usize password_length,
+                                   ByteBuffer& output) {
+    if (!password || password_length == 0u) {
+        return false;
+    }
+    u8 salt[ENCRYPTION_SALT_BYTES];
+    u8 nonce[ENCRYPTION_NONCE_BYTES];
+    crypto_random_bytes(salt, ENCRYPTION_SALT_BYTES);
+    crypto_random_bytes(nonce, ENCRYPTION_NONCE_BYTES);
+    u8 key[32];
+    if (!pbkdf2_hmac_sha256((const u8*)password,
+                            password_length,
+                            salt,
+                            ENCRYPTION_SALT_BYTES,
+                            ENCRYPTION_PBKDF2_ITERATIONS,
+                            key,
+                            32u)) {
+        for (u32 i = 0u; i < 32u; ++i) {
+            key[i] = 0u;
+        }
+        return false;
+    }
+    const u8* plain_ptr = plaintext.data;
+    usize plain_size = plaintext.size;
+    u8 header[ENCRYPTION_HEADER_BYTES];
+    for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
+        header[i] = 0u;
+    }
+    write_le_u32(header, ENCRYPTION_HEADER_MAGIC);
+    header[4] = ENCRYPTION_HEADER_VERSION;
+    header[5] = ENCRYPTION_FLAG_PASSWORD;
+    header[6] = ENCRYPTION_KDF_PBKDF2_SHA256;
+    header[7] = 0u;
+    write_le_u32(header + 8u, ENCRYPTION_PBKDF2_ITERATIONS);
+    write_le_u64(header + 12u, (u64)plain_size);
+    for (usize i = 0u; i < ENCRYPTION_SALT_BYTES; ++i) {
+        header[20u + i] = salt[i];
+    }
+    for (usize i = 0u; i < ENCRYPTION_NONCE_BYTES; ++i) {
+        header[36u + i] = nonce[i];
+    }
+    ByteBuffer ciphertext;
+    u8 tag[ENCRYPTION_TAG_BYTES];
+    if (!chacha20_poly1305_encrypt(key,
+                                   nonce,
+                                   plain_ptr,
+                                   plain_size,
+                                   header,
+                                   ENCRYPTION_HEADER_BYTES,
+                                   ciphertext,
+                                   tag)) {
+        for (u32 i = 0u; i < 32u; ++i) {
+            key[i] = 0u;
+        }
+        ciphertext.release();
+        return false;
+    }
+    usize total_size = ENCRYPTION_HEADER_BYTES + ciphertext.size + ENCRYPTION_TAG_BYTES;
+    output.release();
+    if (!output.ensure(total_size)) {
+        for (u32 i = 0u; i < 32u; ++i) {
+            key[i] = 0u;
+        }
+        ciphertext.release();
+        return false;
+    }
+    output.size = total_size;
+    u8* dest = output.data;
+    for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
+        dest[i] = header[i];
+    }
+    if (ciphertext.size > 0u) {
+        for (usize i = 0u; i < ciphertext.size; ++i) {
+            dest[ENCRYPTION_HEADER_BYTES + i] = ciphertext.data[i];
+        }
+    }
+    for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
+        dest[ENCRYPTION_HEADER_BYTES + ciphertext.size + i] = tag[i];
+    }
+    ciphertext.release();
+    for (u32 i = 0u; i < 32u; ++i) {
+        key[i] = 0u;
+    }
+    return true;
+}
+
+static DecryptStatus decrypt_payload_buffer(const u8* data,
+                                            usize data_length,
+                                            const char* password,
+                                            usize password_length,
+                                            ByteBuffer& plaintext) {
+    plaintext.release();
+    if (!data || data_length < ENCRYPTION_HEADER_BYTES + ENCRYPTION_TAG_BYTES) {
+        return DecryptStatus_NotEncrypted;
+    }
+    u32 magic = read_le_u32(data);
+    if (magic != ENCRYPTION_HEADER_MAGIC) {
+        return DecryptStatus_NotEncrypted;
+    }
+    if (!password || password_length == 0u) {
+        return DecryptStatus_FormatError;
+    }
+    u8 version = data[4];
+    u8 flags = data[5];
+    u8 kdf = data[6];
+    if (version != ENCRYPTION_HEADER_VERSION || !(flags & ENCRYPTION_FLAG_PASSWORD) || kdf != ENCRYPTION_KDF_PBKDF2_SHA256) {
+        return DecryptStatus_FormatError;
+    }
+    u32 iterations = read_le_u32(data + 8u);
+    if (iterations == 0u) {
+        return DecryptStatus_FormatError;
+    }
+    u64 plain_bytes = read_le_u64(data + 12u);
+    if (plain_bytes > (u64)USIZE_MAX_VALUE) {
+        return DecryptStatus_FormatError;
+    }
+    const u8* salt = data + 20u;
+    const u8* nonce = data + 36u;
+    if (data_length < ENCRYPTION_HEADER_BYTES + ENCRYPTION_TAG_BYTES) {
+        return DecryptStatus_FormatError;
+    }
+    usize cipher_bytes = data_length - ENCRYPTION_HEADER_BYTES - ENCRYPTION_TAG_BYTES;
+    if ((u64)cipher_bytes != plain_bytes) {
+        return DecryptStatus_FormatError;
+    }
+    const u8* cipher = data + ENCRYPTION_HEADER_BYTES;
+    const u8* tag = cipher + cipher_bytes;
+    u8 key[32];
+    if (!pbkdf2_hmac_sha256((const u8*)password,
+                            password_length,
+                            salt,
+                            ENCRYPTION_SALT_BYTES,
+                            iterations,
+                            key,
+                            32u)) {
+        for (u32 i = 0u; i < 32u; ++i) {
+            key[i] = 0u;
+        }
+        return DecryptStatus_FormatError;
+    }
+    bool auth_failed = false;
+    if (!chacha20_poly1305_decrypt(key,
+                                   nonce,
+                                   cipher,
+                                   cipher_bytes,
+                                   data,
+                                   ENCRYPTION_HEADER_BYTES,
+                                   plaintext,
+                                   tag,
+                                   &auth_failed)) {
+        for (u32 i = 0u; i < 32u; ++i) {
+            key[i] = 0u;
+        }
+        plaintext.release();
+        if (auth_failed) {
+            return DecryptStatus_AuthFailed;
+        }
+        return DecryptStatus_FormatError;
+    }
+    if ((u64)plaintext.size != plain_bytes) {
+        for (u32 i = 0u; i < 32u; ++i) {
+            key[i] = 0u;
+        }
+        plaintext.release();
+        return DecryptStatus_FormatError;
+    }
+    for (u32 i = 0u; i < 32u; ++i) {
+        key[i] = 0u;
+    }
+    return DecryptStatus_Success;
+}
 
 static bool fisher_yates_shuffle(u8* data, usize count) {
     if (!data || count <= 1u) {
@@ -801,16 +1727,27 @@ struct EncoderContext {
     EncoderConfig config;
     ByteBuffer payload_bytes;
     BitWriter bit_writer;
+    ByteBuffer encryption_password;
     bool configured;
+    bool encryption_enabled;
 
     EccSummary ecc_summary;
 
-    EncoderContext() : config(), payload_bytes(), bit_writer(), configured(false), ecc_summary() {}
+    EncoderContext()
+        : config(),
+          payload_bytes(),
+          bit_writer(),
+          encryption_password(),
+          configured(false),
+          encryption_enabled(false),
+          ecc_summary() {}
 
     void reset() {
         payload_bytes.release();
         bit_writer.reset();
+        encryption_password.release();
         configured = false;
+        encryption_enabled = false;
         ecc_summary = EccSummary();
     }
 
@@ -826,6 +1763,23 @@ struct EncoderContext {
         return true;
     }
 
+    bool set_password(const char* password, usize length) {
+        encryption_password.release();
+        encryption_enabled = false;
+        if (!password || length == 0u) {
+            return true;
+        }
+        if (!encryption_password.ensure(length)) {
+            return false;
+        }
+        for (usize i = 0u; i < length; ++i) {
+            encryption_password.data[i] = (u8)password[i];
+        }
+        encryption_password.size = length;
+        encryption_enabled = true;
+        return true;
+    }
+
     bool encode_payload(ByteBuffer& output) {
         output.release();
         return lzw_compress(payload_bytes.data, payload_bytes.size, output);
@@ -838,26 +1792,34 @@ struct EncoderContext {
         if (!encode_payload(compressed)) {
             return false;
         }
-        if (compressed.size == 0u) {
-            if (!bit_writer.align_to_byte()) {
+        const ByteBuffer* payload_source = &compressed;
+        ByteBuffer encrypted;
+        if (encryption_enabled && encryption_password.size > 0u) {
+            if (!encrypt_payload_buffer(compressed, (const char*)encryption_password.data, encryption_password.size, encrypted)) {
                 return false;
             }
-            configured = true;
-            return true;
+            payload_source = &encrypted;
         }
         double redundancy = (config.ecc_redundancy > 0.0) ? config.ecc_redundancy : 0.0;
         if (redundancy > 0.0) {
-            if (!encode_payload_with_ecc(compressed, redundancy, bit_writer, ecc_summary)) {
-                return false;
+            if (payload_source->size > 0u) {
+                if (!encode_payload_with_ecc(*payload_source, redundancy, bit_writer, ecc_summary)) {
+                    return false;
+                }
+            } else {
+                ecc_summary = EccSummary();
             }
         } else {
-            for (usize i = 0u; i < compressed.size; ++i) {
-                u8 byte = compressed.data ? compressed.data[i] : 0u;
+            for (usize i = 0u; i < payload_source->size; ++i) {
+                u8 byte = payload_source->data ? payload_source->data[i] : 0u;
                 if (!bit_writer.write_bits((u64)byte, 8u)) {
                     return false;
                 }
             }
-            ecc_summary.original_bytes = compressed.size;
+            if (payload_source->size == 0u) {
+                ecc_summary = EccSummary();
+            }
+            ecc_summary.original_bytes = payload_source->size;
             ecc_summary.redundancy = 0.0;
             ecc_summary.block_count = 0u;
             ecc_summary.block_data_symbols = 0u;
@@ -1461,37 +2423,6 @@ struct EccHeaderInfo {
           original_bytes(0u) {}
 };
 
-static u16 read_le_u16(const u8* ptr) {
-    return (u16)ptr[0] | ((u16)ptr[1] << 8);
-}
-
-static u32 read_le_u32(const u8* ptr) {
-    return (u32)ptr[0] | ((u32)ptr[1] << 8) | ((u32)ptr[2] << 16) | ((u32)ptr[3] << 24);
-}
-
-static u64 read_le_u64(const u8* ptr) {
-    u64 low = (u64)read_le_u32(ptr);
-    u64 high = (u64)read_le_u32(ptr + 4u);
-    return low | (high << 32u);
-}
-
-static void write_le_u16(u8* ptr, u16 value) {
-    ptr[0] = (u8)(value & 0xFFu);
-    ptr[1] = (u8)((value >> 8u) & 0xFFu);
-}
-
-static void write_le_u32(u8* ptr, u32 value) {
-    ptr[0] = (u8)(value & 0xFFu);
-    ptr[1] = (u8)((value >> 8u) & 0xFFu);
-    ptr[2] = (u8)((value >> 16u) & 0xFFu);
-    ptr[3] = (u8)((value >> 24u) & 0xFFu);
-}
-
-static void write_le_u64(u8* ptr, u64 value) {
-    write_le_u32(ptr, (u32)(value & 0xFFFFFFFFull));
-    write_le_u32(ptr + 4u, (u32)((value >> 32u) & 0xFFFFFFFFull));
-}
-
 static bool build_ecc_header_bytes(u8* dest,
                                    usize dest_capacity,
                                    u16 block_data,
@@ -1653,19 +2584,34 @@ struct DecoderContext {
     ByteBuffer payload;
     bool has_payload;
     bool ecc_failed;
+    bool password_attempted;
+    bool password_failed;
+    bool password_not_encrypted;
 
-    DecoderContext() : payload(), has_payload(false), ecc_failed(false) {}
+    DecoderContext()
+        : payload(),
+          has_payload(false),
+          ecc_failed(false),
+          password_attempted(false),
+          password_failed(false),
+          password_not_encrypted(false) {}
 
     void reset() {
         payload.release();
         has_payload = false;
         ecc_failed = false;
+        password_attempted = false;
+        password_failed = false;
+        password_not_encrypted = false;
     }
 
-    bool parse(u8* data, usize size_in_bits) {
+    bool parse(u8* data, usize size_in_bits, const char* password, usize password_length) {
         payload.release();
         has_payload = false;
         ecc_failed = false;
+        password_attempted = false;
+        password_failed = false;
+        password_not_encrypted = false;
         if (size_in_bits == 0u) {
             has_payload = true;
             return true;
@@ -1679,6 +2625,7 @@ struct DecoderContext {
         }
         EccHeaderInfo header;
         bool header_ok = parse_ecc_header(data, byte_count, header);
+        bool have_password = (password && password_length > 0u);
         if (header_ok && header.valid && header.enabled) {
             u16 block_total = (u16)(header.block_data + header.parity);
             u64 expected_bytes = (u64)block_total * header.block_count;
@@ -1690,19 +2637,59 @@ struct DecoderContext {
             const u8* encoded = data + ECC_HEADER_BYTES;
             ByteBuffer compressed;
             if (!decode_ecc_payload(encoded, header, compressed)) {
+                char debug_buffer[128];
+                console_line(2, "debug parse: decode_ecc_payload failure");
+                if (header.block_data || header.parity || header.block_count) {
+                    console_write(2, "debug parse: block_data=");
+                    u64_to_ascii((u64)header.block_data, debug_buffer, sizeof(debug_buffer));
+                    console_line(2, debug_buffer);
+                    console_write(2, "debug parse: parity=");
+                    u64_to_ascii((u64)header.parity, debug_buffer, sizeof(debug_buffer));
+                    console_line(2, debug_buffer);
+                    console_write(2, "debug parse: block_count=");
+                    u64_to_ascii(header.block_count, debug_buffer, sizeof(debug_buffer));
+                    console_line(2, debug_buffer);
+                    console_write(2, "debug parse: original_bytes=");
+                    u64_to_ascii(header.original_bytes, debug_buffer, sizeof(debug_buffer));
+                    console_line(2, debug_buffer);
+                    console_write(2, "debug parse: byte_count=");
+                    u64_to_ascii((u64)byte_count, debug_buffer, sizeof(debug_buffer));
+                    console_line(2, debug_buffer);
+                    console_write(2, "debug parse: expected_bytes=");
+                    u64_to_ascii((u64)((u64)(header.block_data + header.parity) * header.block_count), debug_buffer, sizeof(debug_buffer));
+                    console_line(2, debug_buffer);
+                }
                 ecc_failed = true;
                 return false;
             }
-            if (header.original_bytes == 0u) {
+            const ByteBuffer* working = &compressed;
+            ByteBuffer decrypted;
+            if (have_password) {
+                password_attempted = true;
+                DecryptStatus status = decrypt_payload_buffer(compressed.data,
+                                                              compressed.size,
+                                                              password,
+                                                              password_length,
+                                                              decrypted);
+                if (status == DecryptStatus_NotEncrypted) {
+                    password_not_encrypted = true;
+                } else if (status == DecryptStatus_Success) {
+                    working = &decrypted;
+                } else {
+                    password_failed = true;
+                    return false;
+                }
+            }
+            if (!working->size) {
                 has_payload = true;
                 return true;
             }
-            u64 bit_total = header.original_bytes * 8u;
+            u64 bit_total = (u64)working->size * 8u;
             if (bit_total > (u64)USIZE_MAX_VALUE) {
                 ecc_failed = true;
                 return false;
             }
-            if (!lzw_decompress(compressed.data, (usize)bit_total, payload)) {
+            if (!lzw_decompress(working->data, (usize)bit_total, payload)) {
                 ecc_failed = true;
                 return false;
             }
@@ -1713,7 +2700,31 @@ struct DecoderContext {
             ecc_failed = true;
             return false;
         }
-        if (!lzw_decompress(data, size_in_bits, payload)) {
+        const u8* decode_data = data;
+        usize decode_bits = size_in_bits;
+        ByteBuffer decrypted;
+        if (have_password) {
+            password_attempted = true;
+            DecryptStatus status = decrypt_payload_buffer(data,
+                                                          byte_count,
+                                                          password,
+                                                          password_length,
+                                                          decrypted);
+            if (status == DecryptStatus_NotEncrypted) {
+                password_not_encrypted = true;
+            } else if (status == DecryptStatus_Success) {
+                decode_data = decrypted.data;
+                decode_bits = decrypted.size * 8u;
+            } else {
+                password_failed = true;
+                return false;
+            }
+        }
+        if (decode_bits == 0u) {
+            has_payload = true;
+            return true;
+        }
+        if (!lzw_decompress(decode_data, decode_bits, payload)) {
             return false;
         }
         has_payload = true;
@@ -1722,6 +2733,18 @@ struct DecoderContext {
 
     bool ecc_correction_failed() const {
         return ecc_failed;
+    }
+
+    bool password_attempt_made() const {
+        return password_attempted;
+    }
+
+    bool password_auth_failed() const {
+        return password_failed;
+    }
+
+    bool password_was_ignored() const {
+        return password_not_encrypted;
     }
 };
 
@@ -3920,6 +4943,7 @@ static void write_usage() {
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
     console_line(1, "  --input=FILE       (payload input path; required for encode)");
     console_line(1, "  --ecc=RATIO        (Reed-Solomon redundancy; 0 disables, e.g., 0.10)");
+    console_line(1, "  --password=TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
     console_line(1, "  --title=TEXT       (optional footer title; letters, digits, common symbols)");
@@ -4117,6 +5141,8 @@ static int command_encode(int arg_count, char** args) {
     const char* input_path = 0;
     makocode::ByteBuffer title_buffer;
     makocode::ByteBuffer filename_buffer;
+    makocode::ByteBuffer password_buffer;
+    bool have_password = false;
     for (int i = 0; i < arg_count; ++i) {
         const char* arg = args[i];
         bool handled = false;
@@ -4205,6 +5231,29 @@ static int command_encode(int arg_count, char** args) {
                 footer_config.font_size = (u32)value;
                 continue;
             }
+            const char password_prefix[] = "--password=";
+            if (ascii_starts_with(arg, password_prefix)) {
+                if (have_password) {
+                    console_line(2, "encode: password specified multiple times");
+                    return 1;
+                }
+                const char* value_text = arg + (sizeof(password_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "encode: --password requires a non-empty value");
+                    return 1;
+                }
+                if (!password_buffer.ensure(length)) {
+                    console_line(2, "encode: failed to allocate password buffer");
+                    return 1;
+                }
+                for (usize j = 0u; j < length; ++j) {
+                    password_buffer.data[j] = (u8)value_text[j];
+                }
+                password_buffer.size = length;
+                have_password = true;
+                continue;
+            }
             console_write(2, "encode: unknown option: ");
             console_line(2, arg);
             return 1;
@@ -4256,6 +5305,12 @@ static int command_encode(int arg_count, char** args) {
     }
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
+    if (have_password) {
+        if (!encoder.set_password((const char*)password_buffer.data, password_buffer.size)) {
+            console_line(2, "encode: failed to set encryption password");
+            return 1;
+        }
+    }
     if (!encoder.set_payload(payload.data, payload.size)) {
         console_line(2, "encode: failed to set payload");
         return 1;
@@ -4425,12 +5480,37 @@ static int command_decode(int arg_count, char** args) {
     static const usize MAX_INPUT_FILES = 256u;
     const char* input_files[MAX_INPUT_FILES];
     usize file_count = 0u;
+    makocode::ByteBuffer password_buffer;
+    bool have_password = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(args[i], mapping, "decode", &handled)) {
             return 1;
         }
         if (!handled) {
+            const char password_prefix[] = "--password=";
+            if (ascii_starts_with(args[i], password_prefix)) {
+                if (have_password) {
+                    console_line(2, "decode: password specified multiple times");
+                    return 1;
+                }
+                const char* value_text = args[i] + (sizeof(password_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "decode: --password requires a non-empty value");
+                    return 1;
+                }
+                if (!password_buffer.ensure(length)) {
+                    console_line(2, "decode: failed to allocate password buffer");
+                    return 1;
+                }
+                for (usize j = 0u; j < length; ++j) {
+                    password_buffer.data[j] = (u8)value_text[j];
+                }
+                password_buffer.size = length;
+                have_password = true;
+                continue;
+            }
             if (file_count >= MAX_INPUT_FILES) {
                 console_line(2, "decode: too many input files");
                 return 1;
@@ -4518,7 +5598,11 @@ static int command_decode(int arg_count, char** args) {
                     enforce_page_index = false;
                 }
             }
-            if (!append_bits_from_buffer(frame_aggregator, page_bits.data, page_bit_count)) {
+            u64 effective_bits = page_bit_count;
+            if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
+                effective_bits = page_state.page_bits_value;
+            }
+            if (!append_bits_from_buffer(frame_aggregator, page_bits.data, effective_bits)) {
                 console_line(2, "decode: failed to assemble bitstream");
                 return 1;
             }
@@ -4537,6 +5621,13 @@ static int command_decode(int arg_count, char** args) {
         have_metadata = true;
     }
     bool ecc_header_repaired = false;
+    makocode::EccHeaderInfo bitstream_header;
+    bool bitstream_header_present = false;
+    bool bitstream_header_valid = false;
+    if (bitstream.data && bitstream.size >= makocode::ECC_HEADER_BYTES) {
+        bitstream_header_present = makocode::parse_ecc_header(bitstream.data, bitstream.size, bitstream_header);
+        bitstream_header_valid = bitstream_header_present && bitstream_header.valid && bitstream_header.enabled;
+    }
     bool ecc_metadata_available = have_metadata &&
                                    aggregate_state.has_ecc_flag &&
                                    aggregate_state.ecc_flag_value;
@@ -4545,7 +5636,8 @@ static int command_decode(int arg_count, char** args) {
         !aggregate_state.ecc_flag_value) {
         console_line(2, "decode: warning: payload was encoded without ECC protection");
     }
-    if (ecc_metadata_available &&
+    if (!bitstream_header_valid &&
+        ecc_metadata_available &&
         aggregate_state.has_ecc_block_data &&
         aggregate_state.has_ecc_parity &&
         aggregate_state.has_ecc_block_count &&
@@ -4587,13 +5679,22 @@ static int command_decode(int arg_count, char** args) {
         console_line(2, "decode: repaired ECC header from metadata");
     }
     makocode::DecoderContext decoder;
-    if (!decoder.parse(bitstream.data, bit_count)) {
+    const char* password_ptr = have_password ? (const char*)password_buffer.data : (const char*)0;
+    usize password_length = have_password ? password_buffer.size : 0u;
+    if (!decoder.parse(bitstream.data, bit_count, password_ptr, password_length)) {
+        if (decoder.password_auth_failed()) {
+            console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
+            return 1;
+        }
         if (decoder.ecc_correction_failed()) {
             console_line(2, "decode: ECC could not repair the payload");
         } else {
             console_line(2, "decode: parse failure");
         }
         return 1;
+    }
+    if (decoder.password_attempt_made() && decoder.password_was_ignored()) {
+        console_line(2, "decode: warning: payload was not encrypted; password ignored");
     }
     if (decoder.ecc_correction_failed()) {
         console_line(2, "decode: warning: payload may contain uncorrected errors");
@@ -4607,12 +5708,17 @@ static int command_decode(int arg_count, char** args) {
 static bool build_payload_frame(const ImageMappingConfig& mapping,
                                 usize payload_size,
                                 u64 seed,
+                                const char* password,
+                                usize password_length,
                                 makocode::ByteBuffer& payload,
                                 makocode::EncoderContext& encoder,
                                 makocode::ByteBuffer& frame_bits,
                                 u64& frame_bit_count,
                                 u64& payload_bit_count) {
     if (!makocode::generate_random_bytes(payload, payload_size, seed)) {
+        return false;
+    }
+    if (!encoder.set_password(password, password_length)) {
         return false;
     }
     if (!encoder.set_payload(payload.data, payload.size)) {
@@ -4628,13 +5734,24 @@ static bool compute_frame_bit_count(const ImageMappingConfig& mapping,
                                     usize payload_size,
                                     u64 seed,
                                     double ecc_redundancy,
+                                    const char* password,
+                                    usize password_length,
                                     u64& frame_bit_count) {
     makocode::ByteBuffer payload;
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
     makocode::ByteBuffer frame_bits;
     u64 payload_bits = 0u;
-    if (!build_payload_frame(mapping, payload_size, seed, payload, encoder, frame_bits, frame_bit_count, payload_bits)) {
+    if (!build_payload_frame(mapping,
+                              payload_size,
+                              seed,
+                              password,
+                              password_length,
+                              payload,
+                              encoder,
+                              frame_bits,
+                              frame_bit_count,
+                              payload_bits)) {
         return false;
     }
     return true;
@@ -4645,7 +5762,9 @@ static bool validate_ecc_random_bit_flips(const makocode::ByteBuffer& original_p
                                           const makocode::ByteBuffer& encoded_bits,
                                           u64 encoded_bit_count,
                                           const makocode::EccSummary& summary,
-                                          u64 seed) {
+                                          u64 seed,
+                                          const char* password,
+                                          usize password_length) {
     if (!summary.enabled || summary.parity_symbols < 2u) {
         return true;
     }
@@ -4714,12 +5833,27 @@ static bool validate_ecc_random_bit_flips(const makocode::ByteBuffer& original_p
         }
         corrupted.data[byte_offset] ^= bit_mask;
     }
+    makocode::ByteBuffer ecc_stream;
+    if (!ecc_stream.ensure(byte_count)) {
+        console_line(2, "test: failed to allocate ECC workspace during validation");
+        return false;
+    }
+    for (usize i = 0u; i < byte_count; ++i) {
+        ecc_stream.data[i] = corrupted.data[i];
+    }
+    ecc_stream.size = byte_count;
+    if (!makocode::unshuffle_encoded_stream(ecc_stream.data, byte_count)) {
+        console_line(2, "test: failed to unshuffle stream during ECC validation");
+        return false;
+    }
     makocode::EccHeaderInfo header_info;
-    if (!makocode::parse_ecc_header(corrupted.data, byte_count, header_info) || !header_info.valid || !header_info.enabled) {
+    if (!makocode::parse_ecc_header(ecc_stream.data, byte_count, header_info) || !header_info.valid || !header_info.enabled) {
+        console_line(2, "test: parse_ecc_header failed during ECC validation");
         return false;
     }
     makocode::ByteBuffer repaired_payload;
-    if (!makocode::decode_ecc_payload(corrupted.data + makocode::ECC_HEADER_BYTES, header_info, repaired_payload)) {
+    if (!makocode::decode_ecc_payload(ecc_stream.data + makocode::ECC_HEADER_BYTES, header_info, repaired_payload)) {
+        console_line(2, "test: decode_ecc_payload failed during ECC validation");
         return false;
     }
     if (compressed_payload.size == repaired_payload.size) {
@@ -4730,14 +5864,21 @@ static bool validate_ecc_random_bit_flips(const makocode::ByteBuffer& original_p
         }
     }
     makocode::DecoderContext validator;
-    if (!validator.parse(corrupted.data, (usize)encoded_bit_count)) {
+    if (!validator.parse(corrupted.data, (usize)encoded_bit_count, password, password_length)) {
+        console_line(2, "test: validator parse failed during ECC validation");
+        return false;
+    }
+    if (password && password_length > 0u && validator.password_attempt_made() && validator.password_was_ignored()) {
+        console_line(2, "test: validator ignored password during ECC validation");
         return false;
     }
     if (!validator.has_payload || validator.payload.size != original_payload.size) {
+        console_line(2, "test: validator payload size mismatch during ECC validation");
         return false;
     }
     for (usize i = 0u; i < original_payload.size; ++i) {
         if (validator.payload.data[i] != original_payload.data[i]) {
+            console_line(2, "test: validator payload mismatch during ECC validation");
             return false;
         }
     }
@@ -4750,6 +5891,8 @@ static int command_test(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
     double ecc_redundancy = 0.0;
+    makocode::ByteBuffer password_buffer;
+    bool have_password = false;
     for (int i = 0; i < arg_count; ++i) {
         const char* arg = args[i];
         if (!arg) {
@@ -4780,6 +5923,29 @@ static int command_test(int arg_count, char** args) {
                 ecc_redundancy = redundancy_value;
                 continue;
             }
+            const char password_prefix[] = "--password=";
+            if (ascii_starts_with(arg, password_prefix)) {
+                if (have_password) {
+                    console_line(2, "test: password specified multiple times");
+                    return 1;
+                }
+                const char* value_text = arg + (sizeof(password_prefix) - 1u);
+                usize length = ascii_length(value_text);
+                if (length == 0u) {
+                    console_line(2, "test: --password requires a non-empty value");
+                    return 1;
+                }
+                if (!password_buffer.ensure(length)) {
+                    console_line(2, "test: failed to allocate password buffer");
+                    return 1;
+                }
+                for (usize j = 0u; j < length; ++j) {
+                    password_buffer.data[j] = (u8)value_text[j];
+                }
+                password_buffer.size = length;
+                have_password = true;
+                continue;
+            }
             console_write(2, "test: unknown option: ");
             console_line(2, arg);
             return 1;
@@ -4793,9 +5959,51 @@ static int command_test(int arg_count, char** args) {
         mapping.page_height_pixels = 64u;
         mapping.page_height_set = true;
     }
+    makocode::ByteBuffer default_password_buffer;
+    const char* base_password = (const char*)0;
+    usize base_password_length = 0u;
+    if (have_password) {
+        base_password = (const char*)password_buffer.data;
+        base_password_length = password_buffer.size;
+    } else {
+        const char default_password_text[] = "suite-password";
+        usize default_length = sizeof(default_password_text) - 1u;
+        if (!default_password_buffer.ensure(default_length)) {
+            console_line(2, "test: failed to allocate default password buffer");
+            return 1;
+        }
+        for (usize i = 0u; i < default_length; ++i) {
+            default_password_buffer.data[i] = (u8)default_password_text[i];
+        }
+        default_password_buffer.size = default_length;
+        base_password = (const char*)default_password_buffer.data;
+        base_password_length = default_length;
+    }
+    struct TestScenario {
+        bool use_password;
+        bool use_ecc;
+        double ecc_redundancy;
+    };
+    TestScenario scenarios[4];
+    usize scenario_count = 0u;
+    double enabled_ecc_redundancy = (ecc_redundancy > 0.0) ? ecc_redundancy : 0.5;
+    for (int password_flag = 0; password_flag < 2; ++password_flag) {
+        for (int ecc_flag = 0; ecc_flag < 2; ++ecc_flag) {
+            TestScenario& scenario = scenarios[scenario_count++];
+            scenario.use_password = (password_flag != 0);
+            scenario.use_ecc = (ecc_flag != 0);
+            scenario.ecc_redundancy = scenario.use_ecc ? enabled_ecc_redundancy : 0.0;
+        }
+    }
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
-    for (usize color_index = 0; color_index < 3u; ++color_index) {
+    for (usize scenario_index = 0u; scenario_index < scenario_count; ++scenario_index) {
+        const TestScenario& scenario = scenarios[scenario_index];
+        const char* scenario_password = scenario.use_password ? base_password : (const char*)0;
+        usize scenario_password_length = scenario.use_password ? base_password_length : 0u;
+        char digits_scenario[8];
+        u64_to_ascii((u64)(scenario_index + 1u), digits_scenario, sizeof(digits_scenario));
+        for (usize color_index = 0; color_index < 3u; ++color_index) {
         ImageMappingConfig run_mapping = mapping;
         if (run_mapping.color_set) {
             if (run_mapping.color_channels != color_options[color_index]) {
@@ -4838,12 +6046,20 @@ static int command_test(int arg_count, char** args) {
         if (max_payload_size > (1u << 22u)) {
             max_payload_size = (1u << 22u);
         }
+        const char* password_ptr = scenario_password;
+        usize password_length = scenario_password_length;
         usize low_size = 0u;
         usize high_size = 1u;
         u64 high_bits = 0u;
         while (true) {
             u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)high_size;
-            if (!compute_frame_bit_count(run_mapping, high_size, seed, ecc_redundancy, high_bits)) {
+            if (!compute_frame_bit_count(run_mapping,
+                                         high_size,
+                                         seed,
+                                         scenario.ecc_redundancy,
+                                         password_ptr,
+                                         password_length,
+                                         high_bits)) {
                 console_line(2, "test: failed to evaluate payload size");
                 return 1;
             }
@@ -4871,7 +6087,13 @@ static int command_test(int arg_count, char** args) {
             usize mid = left + (right - left) / 2u;
             u64 seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
             u64 mid_bits = 0u;
-            if (!compute_frame_bit_count(run_mapping, mid, seed, ecc_redundancy, mid_bits)) {
+            if (!compute_frame_bit_count(run_mapping,
+                                         mid,
+                                         seed,
+                                         scenario.ecc_redundancy,
+                                         password_ptr,
+                                         password_length,
+                                         mid_bits)) {
                 console_line(2, "test: failed to evaluate payload size");
                 return 1;
             }
@@ -4895,12 +6117,21 @@ static int command_test(int arg_count, char** args) {
         }
         makocode::ByteBuffer payload;
         makocode::EncoderContext encoder;
-        encoder.config.ecc_redundancy = ecc_redundancy;
+        encoder.config.ecc_redundancy = scenario.ecc_redundancy;
         makocode::ByteBuffer frame_bits;
         u64 frame_bit_count = 0u;
         u64 payload_bit_count = 0u;
         u64 final_seed = ((u64)run_mapping.color_channels << 32u) | (u64)best_size;
-        if (!build_payload_frame(run_mapping, best_size, final_seed, payload, encoder, frame_bits, frame_bit_count, payload_bit_count)) {
+        if (!build_payload_frame(run_mapping,
+                                 best_size,
+                                 final_seed,
+                                 password_ptr,
+                                 password_length,
+                                 payload,
+                                 encoder,
+                                 frame_bits,
+                                 frame_bit_count,
+                                 payload_bit_count)) {
             console_line(2, "test: failed to build payload frame");
             return 1;
         }
@@ -4955,14 +6186,20 @@ static int command_test(int arg_count, char** args) {
                     return 1;
                 }
             }
-            if (!append_bits_from_buffer(aggregate_writer, page_bits_buffer.data, page_bit_count)) {
+            u64 effective_page_bits = page_bit_count;
+            if (page_state.has_page_bits && page_state.page_bits_value <= effective_page_bits) {
+                effective_page_bits = page_state.page_bits_value;
+            }
+            if (!append_bits_from_buffer(aggregate_writer, page_bits_buffer.data, effective_page_bits)) {
                 console_line(2, "test: failed to combine page bits");
                 return 1;
             }
             name_buffer.release();
             char digits_color[8];
             u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
-            if (!name_buffer.append_ascii("encoded_c") ||
+            if (!name_buffer.append_ascii("encoded_s") ||
+                !name_buffer.append_ascii(digits_scenario) ||
+                !name_buffer.append_ascii("_c") ||
                 !name_buffer.append_ascii(digits_color) ||
                 !name_buffer.append_ascii("_p") ||
                 !buffer_append_zero_padded(name_buffer, page + 1u, 2u) ||
@@ -4993,7 +6230,7 @@ static int command_test(int arg_count, char** args) {
             return 1;
         }
         makocode::DecoderContext decoder;
-        if (!decoder.parse(roundtrip_bits.data, roundtrip_count)) {
+        if (!decoder.parse(roundtrip_bits.data, roundtrip_count, password_ptr, password_length)) {
             console_line(2, "test: decode failed");
             return 1;
         }
@@ -5019,13 +6256,18 @@ static int command_test(int arg_count, char** args) {
                                             encoded_stream,
                                             encoded_stream_bits,
                                             *ecc_summary,
-                                            final_seed ^ (u64)page_count)) {
+                                            final_seed ^ (u64)page_count,
+                                            password_ptr,
+                                            password_length)) {
+            console_line(2, "test: ECC random flip validation failed");
             return 1;
         }
         char digits_color[8];
         u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
         name_buffer.release();
-        if (!name_buffer.append_ascii("payload_c") ||
+        if (!name_buffer.append_ascii("payload_s") ||
+            !name_buffer.append_ascii(digits_scenario) ||
+            !name_buffer.append_ascii("_c") ||
             !name_buffer.append_ascii(digits_color) ||
             !name_buffer.append_ascii(".bin") ||
             !name_buffer.append_char('\0')) {
@@ -5037,7 +6279,9 @@ static int command_test(int arg_count, char** args) {
             return 1;
         }
         name_buffer.release();
-        if (!name_buffer.append_ascii("decoded_c") ||
+        if (!name_buffer.append_ascii("decoded_s") ||
+            !name_buffer.append_ascii(digits_scenario) ||
+            !name_buffer.append_ascii("_c") ||
             !name_buffer.append_ascii(digits_color) ||
             !name_buffer.append_ascii(".bin") ||
             !name_buffer.append_char('\0')) {
@@ -5052,6 +6296,7 @@ static int command_test(int arg_count, char** args) {
         if (mapping.color_set) {
             break;
         }
+    }
     }
     char digits_runs[16];
     u64_to_ascii((u64)total_runs, digits_runs, sizeof(digits_runs));
