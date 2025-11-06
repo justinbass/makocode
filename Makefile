@@ -12,4 +12,5 @@ test: makocode
 	./makocode test
 
 clean:
-	rm -f makocode *.ppm *.bin
+	rm -f makocode
+	rm -rf test
