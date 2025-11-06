@@ -83,3 +83,7 @@ I still see decode_...bin, rather than ..._decoded.bin. *Also decoded.ppm doesn'
 Close, you need to name anything that is 1x1 pixels (unmodified) as data_..., anything that is scaled like 2x2 or 3x3 pixels as scaled_..., and anything that is a scan (like the fixtures applied, a fuzzy image) as scan_... . Try to use descriptive prefixes. All of these test data are named \"scan_...\" but they're not scans, they're 1x1 pixel images with no modifications applied.
 Ok now you need to actually apply the data fixture modifications to the scan_ images. They're 1x1 pixels. Apply the modification, it may break the test right now because your decoding is probably not good enough, which is ok.
 Run make test, iterate and fix the code to get image recognition to work for these messy images until you have the source code working.
+Can you add data_s1_c*_p01_encoded.ppm for colors 1 2 and 3 into the README as an example of what the barcode looks like? Not sure if MD supports ppm so you might need to convert them to PNG. Put them in an images/ directory.
+Can you make those images 3 times their current size?
+In github the same. Can you make them back to 1x1 pixels per data point, but scale up in markdown?
+I want the README images to look clean, github looks like it's using some kind of interpolation when sizing it up. Can you make the images be clean 3x3 pixel versions of themselves? No interpolation. I want exactly 1, 4, or 8 colors in the images, no fuzziness.

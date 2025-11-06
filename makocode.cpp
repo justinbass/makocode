@@ -5382,6 +5382,7 @@ static bool buffer_clone_with_suffix(const makocode::ByteBuffer& base,
 }
 
 static bool build_page_base_name(makocode::ByteBuffer& buffer,
+                                 u64 test_case_index,
                                  const char* prefix,
                                  const char* scenario_digits,
                                  const char* color_digits,
@@ -5392,7 +5393,9 @@ static bool build_page_base_name(makocode::ByteBuffer& buffer,
     if (!prefix || !prefix[0]) {
         return false;
     }
-    if (!buffer.append_ascii(prefix) ||
+    if (!buffer_append_zero_padded(buffer, test_case_index, 4u) ||
+        !buffer.append_ascii("_") ||
+        !buffer.append_ascii(prefix) ||
         !buffer.append_ascii("_s") ||
         !buffer.append_ascii(scenario_digits) ||
         !buffer.append_ascii("_c") ||
@@ -8572,6 +8575,7 @@ static int command_test(int arg_count, char** args) {
             u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
             console_write(1, "test:  color=");
             console_line(1, digits_color);
+        u64 test_case_index = (u64)total_runs + 1u;
         u32 width_pixels = 0u;
         u32 height_pixels = 0u;
         if (!compute_page_dimensions(run_mapping, width_pixels, height_pixels)) {
@@ -8813,6 +8817,7 @@ static int command_test(int arg_count, char** args) {
             }
             makocode::ByteBuffer data_base;
             if (!build_page_base_name(data_base,
+                                      test_case_index,
                                       "data",
                                       digits_scenario,
                                       digits_color,
@@ -8849,6 +8854,7 @@ static int command_test(int arg_count, char** args) {
             if (simulate_scan_distortion(page_output, scan_output)) {
                 makocode::ByteBuffer scan_name;
                 if (!build_page_base_name(scan_name,
+                                          test_case_index,
                                           "scan",
                                           digits_scenario,
                                           digits_color,
@@ -9056,6 +9062,7 @@ static int command_test(int arg_count, char** args) {
                     }
                     makocode::ByteBuffer scaled_base;
                     if (!build_page_base_name(scaled_base,
+                                              test_case_index,
                                               "scaled",
                                               digits_scenario,
                                               digits_color,
@@ -9092,6 +9099,7 @@ static int command_test(int arg_count, char** args) {
                     if (simulate_scan_distortion(scaled_page, scan_scaled)) {
                         makocode::ByteBuffer scan_scaled_name;
                         if (!build_page_base_name(scan_scaled_name,
+                                                  test_case_index,
                                                   "scan",
                                                   digits_scenario,
                                                   digits_color,
@@ -9257,7 +9265,8 @@ static int command_test(int arg_count, char** args) {
             }
         }
         name_buffer.release();
-        if (!name_buffer.append_ascii("payload_s") ||
+        if (!buffer_append_zero_padded(name_buffer, test_case_index, 4u) ||
+            !name_buffer.append_ascii("_payload_s") ||
             !name_buffer.append_ascii(digits_scenario) ||
             !name_buffer.append_ascii("_c") ||
             !name_buffer.append_ascii(digits_color) ||
@@ -9273,7 +9282,8 @@ static int command_test(int arg_count, char** args) {
         console_write(1, "test:   payload ");
         console_line(1, (const char*)name_buffer.data);
         name_buffer.release();
-        if (!name_buffer.append_ascii("payload_s") ||
+        if (!buffer_append_zero_padded(name_buffer, test_case_index, 4u) ||
+            !name_buffer.append_ascii("_payload_s") ||
             !name_buffer.append_ascii(digits_scenario) ||
             !name_buffer.append_ascii("_c") ||
             !name_buffer.append_ascii(digits_color) ||
