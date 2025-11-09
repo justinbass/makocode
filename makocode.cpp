@@ -10430,6 +10430,291 @@ static int command_test_scan_basic(int arg_count, char** args) {
     return 0;
 }
 
+static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping) {
+    console_line(1, "test: footer title roundtrip");
+    ImageMappingConfig mapping = base_mapping;
+    if (!mapping.color_set) {
+        mapping.color_channels = 1u;
+    }
+    if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
+        mapping.color_channels = 1u;
+    }
+    mapping.color_set = true;
+    static const char footer_title[] = "MAKOCODE FOOTER TITLE WITH DUST IGNORED 2025-11-09 >>>";
+    usize title_length = ascii_length(footer_title);
+    if (title_length == 0u) {
+        console_line(2, "test: footer title roundtrip invalid title length");
+        return false;
+    }
+    u32 font_size = 1u;
+    u32 glyph_width = FOOTER_BASE_GLYPH_WIDTH * font_size;
+    u32 glyph_height = FOOTER_BASE_GLYPH_HEIGHT * font_size;
+    u32 char_spacing = font_size;
+    u32 text_pixel_width = (u32)title_length * glyph_width;
+    if (title_length > 1u) {
+        text_pixel_width += (u32)(title_length - 1u) * char_spacing;
+    }
+    u32 horizontal_margin = font_size * 4u;
+    u32 desired_width = text_pixel_width + horizontal_margin * 2u;
+    if (desired_width < 128u) {
+        desired_width = 128u;
+    }
+    mapping.page_width_pixels = desired_width;
+    mapping.page_width_set = true;
+    u32 footer_height_estimate = glyph_height + font_size * 2u;
+    if (footer_height_estimate < glyph_height + 2u) {
+        footer_height_estimate = glyph_height + 2u;
+    }
+    u32 desired_data_rows = 48u;
+    mapping.page_height_pixels = desired_data_rows + footer_height_estimate;
+    mapping.page_height_set = true;
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
+        console_line(2, "test: footer title roundtrip invalid page dimensions");
+        return false;
+    }
+    const char* base_dir = "test";
+    if (!ensure_directory(base_dir)) {
+        console_line(2, "test: footer title roundtrip failed to prepare test directory");
+        return false;
+    }
+    auto write_artifact = [&](const char* filename,
+                              const makocode::ByteBuffer& buffer) -> bool {
+        makocode::ByteBuffer path;
+        if (!path.append_ascii(base_dir) ||
+            !path.append_char('/') ||
+            !path.append_ascii(filename) ||
+            !path.append_char('\0')) {
+            path.release();
+            return false;
+        }
+        bool ok = write_buffer_to_file((const char*)path.data, buffer);
+        path.release();
+        return ok;
+    };
+    PageFooterConfig footer_config;
+    footer_config.font_size = font_size;
+    footer_config.display_page_info = false;
+    footer_config.display_filename = false;
+    footer_config.has_title = true;
+    footer_config.title_text = footer_title;
+    footer_config.title_length = title_length;
+    footer_config.max_text_length = footer_compute_max_text_length(footer_config, 1u);
+    FooterLayout footer_layout;
+    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+        console_line(2, "test: footer title roundtrip footer layout failed");
+        return false;
+    }
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        console_line(2, "test: footer title roundtrip unsupported color configuration");
+        return false;
+    }
+    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        console_line(2, "test: footer title roundtrip invalid data height");
+        return false;
+    }
+    u64 bits_per_page = (u64)width_pixels *
+                        (u64)data_height_pixels *
+                        (u64)sample_bits *
+                        (u64)samples_per_pixel;
+    if (bits_per_page == 0u) {
+        console_line(2, "test: footer title roundtrip page capacity is zero");
+        return false;
+    }
+    usize max_payload_size = (usize)(bits_per_page / 8u);
+    if (max_payload_size < 32u) {
+        max_payload_size = 32u;
+    }
+    if (max_payload_size > (1u << 20u)) {
+        max_payload_size = (1u << 20u);
+    }
+    auto fill_payload_buffer = [&](makocode::ByteBuffer& buffer, usize size) -> bool {
+        buffer.release();
+        if (!buffer.ensure(size)) {
+            return false;
+        }
+        u32 prng_local = 0x1234567u ^ (u32)size;
+        for (usize i = 0u; i < size; ++i) {
+            prng_local = prng_local * 1664525u + 1013904223u;
+            buffer.data[i] = (u8)(prng_local >> 24u);
+        }
+        buffer.size = size;
+        return true;
+    };
+    auto compute_bits_for_size = [&](usize candidate, u64& out_bits) -> bool {
+        makocode::ByteBuffer temp_payload;
+        if (!fill_payload_buffer(temp_payload, candidate)) {
+            return false;
+        }
+        makocode::EncoderContext temp_encoder;
+        temp_encoder.config.ecc_redundancy = 0.0;
+        if (!temp_encoder.set_payload(temp_payload.data, temp_payload.size)) {
+            return false;
+        }
+        if (!temp_encoder.build()) {
+            return false;
+        }
+        makocode::ByteBuffer temp_frame;
+        u64 temp_payload_bits = 0u;
+        if (!build_frame_bits(temp_encoder, mapping, temp_frame, out_bits, temp_payload_bits)) {
+            return false;
+        }
+        return true;
+    };
+    usize best_size = 0u;
+    usize left = 1u;
+    usize right = max_payload_size;
+    while (left <= right) {
+        usize mid = left + (right - left) / 2u;
+        u64 mid_bits = 0u;
+        if (!compute_bits_for_size(mid, mid_bits)) {
+            console_line(2, "test: footer title roundtrip failed to evaluate payload size");
+            return false;
+        }
+        u64 mid_pages = (mid_bits + bits_per_page - 1u) / bits_per_page;
+        if (mid_pages <= 1u && mid_bits > 0u) {
+            best_size = mid;
+            left = mid + 1u;
+        } else {
+            if (mid == 0u) {
+                break;
+            }
+            if (mid_pages > 1u) {
+                if (mid == 0u) {
+                    break;
+                }
+                right = mid - 1u;
+            } else {
+                left = mid + 1u;
+            }
+        }
+    }
+    if (best_size == 0u) {
+        console_line(2, "test: footer title roundtrip unable to size payload");
+        return false;
+    }
+    makocode::ByteBuffer payload_original;
+    if (!fill_payload_buffer(payload_original, best_size)) {
+        console_line(2, "test: footer title roundtrip failed to allocate payload buffer");
+        return false;
+    }
+    makocode::EncoderContext encoder;
+    encoder.config.ecc_redundancy = 0.0;
+    if (!encoder.set_payload(payload_original.data, payload_original.size)) {
+        console_line(2, "test: footer title roundtrip failed to set payload");
+        return false;
+    }
+    if (!encoder.build()) {
+        console_line(2, "test: footer title roundtrip encoder build failed");
+        return false;
+    }
+    makocode::ByteBuffer frame_bits;
+    u64 frame_bit_count = 0u;
+    u64 payload_bit_count = 0u;
+    if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count, payload_bit_count)) {
+        console_line(2, "test: footer title roundtrip failed to build frame bits");
+        return false;
+    }
+    if (frame_bit_count == 0u || frame_bit_count > bits_per_page) {
+        console_line(2, "test: footer title roundtrip page capacity mismatch");
+        return false;
+    }
+    const makocode::EccSummary& ecc_summary = encoder.ecc_info();
+    makocode::ByteBuffer ppm_buffer;
+    if (!encode_page_to_ppm(mapping,
+                            frame_bits,
+                            frame_bit_count,
+                            0u,
+                            width_pixels,
+                            height_pixels,
+                            1u,
+                            1u,
+                            bits_per_page,
+                            payload_bit_count,
+                            &ecc_summary,
+                            footer_config.title_text,
+                            footer_config.title_length,
+                            footer_layout,
+                            ppm_buffer)) {
+        console_line(2, "test: footer title roundtrip failed to encode page");
+        return false;
+    }
+    makocode::ByteBuffer extracted_bits;
+    u64 extracted_bit_count = 0u;
+    PpmParserState page_state;
+    if (!ppm_extract_frame_bits(ppm_buffer, mapping, extracted_bits, extracted_bit_count, page_state)) {
+        console_line(2, "test: footer title roundtrip failed to extract frame bits");
+        return false;
+    }
+    if (!page_state.has_bits) {
+        page_state.has_bits = true;
+        page_state.bits_value = payload_bit_count;
+    }
+    if (!page_state.has_page_count) {
+        page_state.has_page_count = true;
+        page_state.page_count_value = 1u;
+    }
+    if (!page_state.has_page_index) {
+        page_state.has_page_index = true;
+        page_state.page_index_value = 1u;
+    }
+    u64 effective_bits = extracted_bit_count;
+    if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
+        effective_bits = page_state.page_bits_value;
+    }
+    makocode::ByteBuffer payload_bits;
+    u64 payload_bits_count = 0u;
+    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
+        console_line(2, "test: footer title roundtrip failed to convert frame bits");
+        return false;
+    }
+    makocode::DecoderContext decoder;
+    if (!decoder.parse(payload_bits.data, payload_bits_count, (const char*)0, 0u)) {
+        console_line(2, "test: footer title roundtrip decoder parse failed");
+        return false;
+    }
+    if (!decoder.has_payload || decoder.payload.size != payload_original.size) {
+        console_line(2, "test: footer title roundtrip payload size mismatch");
+        return false;
+    }
+    for (usize i = 0u; i < decoder.payload.size; ++i) {
+        if (decoder.payload.data[i] != payload_original.data[i]) {
+            console_line(2, "test: footer title roundtrip payload mismatch");
+            return false;
+        }
+    }
+    if (!write_artifact("0022_footer_title_payload.bin", payload_original)) {
+        console_line(2, "test: footer title roundtrip failed to write payload artifact");
+        return false;
+    }
+    console_write(1, "test:   footer payload -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0022_footer_title_payload.bin");
+    console_line(1, "");
+    if (!write_artifact("0022_footer_title_encoded.ppm", ppm_buffer)) {
+        console_line(2, "test: footer title roundtrip failed to write encoded artifact");
+        return false;
+    }
+    console_write(1, "test:   footer encoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0022_footer_title_encoded.ppm");
+    console_line(1, "");
+    if (!write_artifact("0022_footer_title_decoded.bin", decoder.payload)) {
+        console_line(2, "test: footer title roundtrip failed to write decoded artifact");
+        return false;
+    }
+    console_write(1, "test:   footer decoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0022_footer_title_decoded.bin");
+    console_line(1, "");
+    console_line(1, "test: footer title roundtrip ok");
+    return true;
+}
+
 static int command_test_payload(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
@@ -10508,6 +10793,9 @@ static int command_test_payload(int arg_count, char** args) {
     if (!mapping.page_height_set) {
         mapping.page_height_pixels = 64u;
         mapping.page_height_set = true;
+    }
+    if (!verify_footer_title_roundtrip(mapping)) {
+        return 1;
     }
     makocode::ByteBuffer default_password_buffer;
     const char* base_password = (const char*)0;
