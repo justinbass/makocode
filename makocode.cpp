@@ -10756,13 +10756,13 @@ static int command_test_border_dirt(int arg_count, char** args) {
         return 1;
     }
 
-    if (!write_artifact("0013_border_payload.bin", payload)) {
+    if (!write_artifact("1013_border_payload.bin", payload)) {
         console_line(2, "test-border-dirt: failed to write payload artifact");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 13.1 payload -> ");
+    console_write(1, "test-border-dirt:   artifact 1013.1 payload -> ");
     console_write(1, base_dir);
-    console_write(1, "/0013_border_payload.bin");
+    console_write(1, "/1013_border_payload.bin");
     console_line(1, "");
 
     makocode::ByteBuffer page_output;
@@ -10784,13 +10784,13 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to encode page");
         return 1;
     }
-    if (!write_artifact("0013_border_encoded.ppm", page_output)) {
+    if (!write_artifact("1013_border_encoded.ppm", page_output)) {
         console_line(2, "test-border-dirt: failed to write encoded artifact");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 13.2 encoded -> ");
+    console_write(1, "test-border-dirt:   artifact 1013.2 encoded -> ");
     console_write(1, base_dir);
-    console_write(1, "/0013_border_encoded.ppm");
+    console_write(1, "/1013_border_encoded.ppm");
     console_line(1, "");
 
     unsigned ppm_width = 0;
@@ -10914,7 +10914,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
         makocode::ByteBuffer path;
         if (!path.append_ascii(base_dir) ||
             !path.append_char('/') ||
-            !path.append_ascii("0013_border") ||
+            !path.append_ascii("1013_border") ||
             !path.append_ascii(suffix) ||
             !path.append_char('\0')) {
             path.release();
@@ -10994,19 +10994,19 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to marshal ppm fixtures");
         return 1;
     }
-    if (!write_artifact("0013_border_dirty.ppm", dirty_ppm) ||
-        !write_artifact("0013_border_clean.ppm", cleaned_ppm)) {
+    if (!write_artifact("1013_border_dirty.ppm", dirty_ppm) ||
+        !write_artifact("1013_border_clean.ppm", cleaned_ppm)) {
         mask.release();
         console_line(2, "test-border-dirt: failed to write scan artifacts");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 13.3 dirty -> ");
+    console_write(1, "test-border-dirt:   artifact 1013.3 dirty -> ");
     console_write(1, base_dir);
-    console_write(1, "/0013_border_dirty.ppm");
+    console_write(1, "/1013_border_dirty.ppm");
     console_line(1, "");
-    console_write(1, "test-border-dirt:   artifact 13.4 cleaned -> ");
+    console_write(1, "test-border-dirt:   artifact 1013.4 cleaned -> ");
     console_write(1, base_dir);
-    console_write(1, "/0013_border_clean.ppm");
+    console_write(1, "/1013_border_clean.ppm");
     console_line(1, "");
 
     makocode::ByteBuffer dirty_frame_bits;
@@ -11107,14 +11107,14 @@ static int command_test_border_dirt(int arg_count, char** args) {
             return 1;
         }
     }
-    if (!write_artifact("0013_border_payload_decoded.bin", clean_decoder.payload)) {
+    if (!write_artifact("1013_border_payload_decoded.bin", clean_decoder.payload)) {
         mask.release();
         console_line(2, "test-border-dirt: failed to write decoded payload artifact");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 13.5 decoded -> ");
+    console_write(1, "test-border-dirt:   artifact 1013.5 decoded -> ");
     console_write(1, base_dir);
-    console_write(1, "/0013_border_payload_decoded.bin");
+    console_write(1, "/1013_border_payload_decoded.bin");
     console_line(1, "");
 
     const u64 expected_checksum = 378165u;
@@ -11528,29 +11528,29 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
             return false;
         }
     }
-    if (!write_artifact("0022_footer_title_payload.bin", payload_original)) {
+    if (!write_artifact("1022_footer_title_payload.bin", payload_original)) {
         console_line(2, "test: footer title roundtrip failed to write payload artifact");
         return false;
     }
     console_write(1, "test:   footer payload -> ");
     console_write(1, base_dir);
-    console_write(1, "/0022_footer_title_payload.bin");
+    console_write(1, "/1022_footer_title_payload.bin");
     console_line(1, "");
-    if (!write_artifact("0022_footer_title_encoded.ppm", ppm_buffer)) {
+    if (!write_artifact("1022_footer_title_encoded.ppm", ppm_buffer)) {
         console_line(2, "test: footer title roundtrip failed to write encoded artifact");
         return false;
     }
     console_write(1, "test:   footer encoded -> ");
     console_write(1, base_dir);
-    console_write(1, "/0022_footer_title_encoded.ppm");
+    console_write(1, "/1022_footer_title_encoded.ppm");
     console_line(1, "");
-    if (!write_artifact("0022_footer_title_decoded.bin", decoder.payload)) {
+    if (!write_artifact("1022_footer_title_decoded.bin", decoder.payload)) {
         console_line(2, "test: footer title roundtrip failed to write decoded artifact");
         return false;
     }
     console_write(1, "test:   footer decoded -> ");
     console_write(1, base_dir);
-    console_write(1, "/0022_footer_title_decoded.bin");
+    console_write(1, "/1022_footer_title_decoded.bin");
     console_line(1, "");
     console_line(1, "test: footer title roundtrip ok");
     return true;
@@ -12232,6 +12232,7 @@ static int command_test_payload(int arg_count, char** args) {
                 PpmParserState scan_scaled_state;
                 bool scan_scaled_initialized = false;
                 bool scan_scaled_pages_present = false;
+                u64 scaled_anchor_serial = ++artifact_serial;
                 for (u64 page = 0u; page < page_count; ++page) {
                     makocode::ByteBuffer baseline_page;
                     u64 bit_offset = page * bits_per_page;
@@ -12277,7 +12278,7 @@ static int command_test_payload(int arg_count, char** args) {
                         scaled_effective_bits = scaled_page_state.page_bits_value;
                     }
                     makocode::ByteBuffer scaled_base;
-                    u64 scaled_serial = ++artifact_serial;
+                    u64 scaled_serial = scaled_anchor_serial;
                     if (!build_page_base_name(scaled_base,
                                               scaled_serial,
                                               "scaled",
