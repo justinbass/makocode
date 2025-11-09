@@ -53,6 +53,7 @@ struct tm;
 extern "C" long  time(long* tloc);
 extern "C" struct tm* gmtime(const long* timep);
 extern "C" unsigned long strftime(char* s, unsigned long max, const char* format, const struct tm* tm);
+extern "C" char* realpath(const char* path, char* resolved_path);
 
 static u16 read_le_u16(const u8* ptr);
 static u32 read_le_u32(const u8* ptr);
@@ -7053,11 +7054,9 @@ static bool normalize_store_path(const char* source,
         if (segment_length == 2u &&
             scratch.data[start] == '.' &&
             scratch.data[start + 1u] == '.') {
-            if (component_count == 0u) {
-                scratch.release();
-                return false;
+            if (component_count > 0u) {
+                --component_count;
             }
-            --component_count;
             continue;
         }
         if (component_count >= MAX_ARCHIVE_PATH_COMPONENTS) {
@@ -7070,6 +7069,42 @@ static bool normalize_store_path(const char* source,
     }
     if (component_count == 0u) {
         scratch.release();
+        char* resolved = realpath(source, 0);
+        if (!resolved) {
+            return false;
+        }
+        const char* base = find_last_path_component(resolved);
+        usize base_len = ascii_length(base);
+        bool valid_base = (base_len > 0u);
+        if (valid_base) {
+            if (base_len == 1u && base[0] == '.') {
+                valid_base = false;
+            } else if (base_len == 2u && base[0] == '.' && base[1u] == '.') {
+                valid_base = false;
+            } else {
+                for (usize i = 0u; i < base_len; ++i) {
+                    char c = base[i];
+                    if (c == '/' || c == '\\' || c == 0) {
+                        valid_base = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (valid_base && output.ensure(base_len + 1u)) {
+            for (usize i = 0u; i < base_len; ++i) {
+                char c = base[i];
+                if (c == '\\') {
+                    c = '/';
+                }
+                output.data[i] = (u8)c;
+            }
+            output.data[base_len] = 0u;
+            output.size = base_len;
+            free(resolved);
+            return true;
+        }
+        free(resolved);
         return false;
     }
     usize result_length = 0u;
