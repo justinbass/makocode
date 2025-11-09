@@ -11804,55 +11804,69 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
     return 0;
 }
 
-static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
-    (void)arg_count;
-    (void)args;
-
+static int run_test_payload_100k_scaled(u8 color_channels,
+                                        const char* artifact_prefix,
+                                        const char* test_label) {
     const char* base_dir = "test";
+    auto log_prefix = [&](int fd) {
+        console_write(fd, test_label);
+        console_write(fd, ": ");
+    };
+    auto log_line = [&](int fd, const char* message) {
+        log_prefix(fd);
+        console_line(fd, message);
+    };
+
     if (!ensure_directory(base_dir)) {
-        console_line(2, "test-100kb-scale: failed to create test directory");
+        log_line(2, "failed to create test directory");
         return 1;
     }
 
     const double scale_factor = 2.5;
     char scale_label[16];
     if (!format_scale_label(scale_factor, scale_label, sizeof(scale_label))) {
-        console_line(2, "test-100kb-scale: failed to format scale label");
+        log_line(2, "failed to format scale label");
         return 1;
     }
 
     const usize payload_size = 100u * 1024u;
     makocode::ByteBuffer original_payload;
     if (!original_payload.ensure(payload_size)) {
-        console_line(2, "test-100kb-scale: failed to allocate payload buffer");
+        log_line(2, "failed to allocate payload buffer");
         return 1;
     }
     for (usize i = 0u; i < payload_size; ++i) {
         original_payload.data[i] = (u8)(i & 0xFFu);
     }
     original_payload.size = payload_size;
-    console_line(1, "test-100kb-scale: generated 100 KiB grayscale payload");
+
+    char channel_digits[8];
+    u64_to_ascii((u64)color_channels, channel_digits, sizeof(channel_digits));
+    log_prefix(1);
+    console_write(1, "generated 100 KiB payload (color channel ");
+    console_write(1, channel_digits);
+    console_line(1, ")");
 
     ImageMappingConfig mapping;
-    mapping.color_channels = 1u;
+    mapping.color_channels = color_channels;
     mapping.color_set = true;
 
     PageFooterConfig footer_config;
     u8 sample_bits = bits_per_sample(mapping.color_channels);
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
     if (sample_bits == 0u || samples_per_pixel == 0u) {
-        console_line(2, "test-100kb-scale: unsupported color configuration");
+        log_line(2, "unsupported color configuration");
         return 1;
     }
 
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = 0.0;
     if (!encoder.set_payload(original_payload.data, original_payload.size)) {
-        console_line(2, "test-100kb-scale: failed to set encoder payload");
+        log_line(2, "failed to set encoder payload");
         return 1;
     }
     if (!encoder.build()) {
-        console_line(2, "test-100kb-scale: encoder build failed");
+        log_line(2, "encoder build failed");
         return 1;
     }
 
@@ -11860,7 +11874,7 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     u64 frame_bit_count = 0u;
     u64 payload_bit_count = 0u;
     if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count, payload_bit_count)) {
-        console_line(2, "test-100kb-scale: failed to build frame bits");
+        log_line(2, "failed to build frame bits");
         return 1;
     }
 
@@ -11871,12 +11885,12 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     }
     u64 width_candidate = (u64)ceil(width_root);
     if (width_candidate == 0u || width_candidate > 0xFFFFFFFFu) {
-        console_line(2, "test-100kb-scale: computed width out of range");
+        log_line(2, "computed width out of range");
         return 1;
     }
     u64 height_candidate = (required_bits + width_candidate - 1u) / width_candidate;
     if (height_candidate == 0u || height_candidate > 0xFFFFFFFFu) {
-        console_line(2, "test-100kb-scale: computed height out of range");
+        log_line(2, "computed height out of range");
         return 1;
     }
 
@@ -11888,19 +11902,19 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
-        console_line(2, "test-100kb-scale: invalid page dimensions");
+        log_line(2, "invalid page dimensions");
         return 1;
     }
 
     FooterLayout footer_layout;
     if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-        console_line(2, "test-100kb-scale: footer layout computation failed");
+        log_line(2, "footer layout computation failed");
         return 1;
     }
 
     u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
     if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-        console_line(2, "test-100kb-scale: invalid data height");
+        log_line(2, "invalid data height");
         return 1;
     }
 
@@ -11909,7 +11923,7 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
                         (u64)sample_bits *
                         (u64)samples_per_pixel;
     if (bits_per_page == 0u) {
-        console_line(2, "test-100kb-scale: page capacity is zero");
+        log_line(2, "page capacity is zero");
         return 1;
     }
 
@@ -11921,7 +11935,8 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     u64_to_ascii((u64)width_pixels, width_digits, sizeof(width_digits));
     u64_to_ascii((u64)height_pixels, height_digits, sizeof(height_digits));
     u64_to_ascii(bits_per_page, capacity_digits, sizeof(capacity_digits));
-    console_write(1, "test-100kb-scale: frame_bits=");
+    log_prefix(1);
+    console_write(1, "frame_bits=");
     console_write(1, frame_bits_digits);
     console_write(1, " width=");
     console_write(1, width_digits);
@@ -11932,7 +11947,7 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     console_line(1, "");
 
     if (frame_bit_count > bits_per_page) {
-        console_line(2, "test-100kb-scale: payload exceeds single-page capacity");
+        log_line(2, "payload exceeds single-page capacity");
         return 1;
     }
 
@@ -11953,16 +11968,16 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
                              0u,
                              footer_layout,
                              ppm_buffer)) {
-        console_line(2, "test-100kb-scale: failed to encode PPM");
+        log_line(2, "failed to encode baseline PPM");
         return 1;
     }
-    console_line(1, "test-100kb-scale: encoded baseline page");
+    log_line(1, "encoded baseline page");
 
     makocode::ByteBuffer extracted_bits;
     u64 extracted_bit_count = 0u;
     PpmParserState page_state;
     if (!ppm_extract_frame_bits(ppm_buffer, mapping, extracted_bits, extracted_bit_count, page_state)) {
-        console_line(2, "test-100kb-scale: failed to extract frame bits from baseline page");
+        log_line(2, "failed to extract frame bits from baseline page");
         return 1;
     }
     if (!page_state.has_bits) {
@@ -11988,43 +12003,47 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
 
     makocode::ByteBuffer payload_bits;
     u64 payload_bits_count = 0u;
-    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
-        console_line(2, "test-100kb-scale: failed to convert baseline frame bits");
+    if (!frame_bits_to_payload(extracted_bits.data,
+                               effective_bits,
+                               page_state,
+                               payload_bits,
+                               payload_bits_count)) {
+        log_line(2, "failed to convert baseline frame bits");
         return 1;
     }
     if (payload_bits_count != payload_bit_count) {
-        console_line(2, "test-100kb-scale: baseline payload bit count mismatch");
+        log_line(2, "baseline payload bit count mismatch");
         return 1;
     }
 
     makocode::DecoderContext decoder;
     if (!decoder.parse(payload_bits.data, payload_bits_count, (const char*)0, 0u)) {
-        console_line(2, "test-100kb-scale: baseline decoder parse failed");
+        log_line(2, "baseline decoder parse failed");
         return 1;
     }
     if (!decoder.has_payload || decoder.payload.size != original_payload.size) {
-        console_line(2, "test-100kb-scale: baseline decoded payload size mismatch");
+        log_line(2, "baseline decoded payload size mismatch");
         return 1;
     }
     for (usize i = 0u; i < original_payload.size; ++i) {
         if (decoder.payload.data[i] != original_payload.data[i]) {
-            console_line(2, "test-100kb-scale: baseline decoded payload mismatch");
+            log_line(2, "baseline decoded payload mismatch");
             return 1;
         }
     }
 
     makocode::ByteBuffer scaled_ppm;
     if (!ppm_scale_fractional(ppm_buffer, scale_factor, scaled_ppm)) {
-        console_line(2, "test-100kb-scale: failed to scale PPM");
+        log_line(2, "failed to scale PPM");
         return 1;
     }
-    console_line(1, "test-100kb-scale: scaled page with fractional factor 2.5");
+    log_line(1, "scaled page with fractional factor 2.5");
 
     makocode::ByteBuffer scaled_bits;
     u64 scaled_bit_count = 0u;
     PpmParserState scaled_state;
     if (!ppm_extract_frame_bits(scaled_ppm, mapping, scaled_bits, scaled_bit_count, scaled_state)) {
-        console_line(2, "test-100kb-scale: failed to extract frame bits from scaled page");
+        log_line(2, "failed to extract frame bits from scaled page");
         return 1;
     }
     if (!scaled_state.has_bits) {
@@ -12054,31 +12073,30 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
                                scaled_state,
                                scaled_payload_bits,
                                scaled_payload_bit_count)) {
-        console_line(2, "test-100kb-scale: failed to convert scaled frame bits");
+        log_line(2, "failed to convert scaled frame bits");
         return 1;
     }
     if (scaled_payload_bit_count != payload_bit_count) {
-        console_line(2, "test-100kb-scale: scaled payload bit count mismatch");
+        log_line(2, "scaled payload bit count mismatch");
         return 1;
     }
 
     makocode::DecoderContext scaled_decoder;
     if (!scaled_decoder.parse(scaled_payload_bits.data, scaled_payload_bit_count, (const char*)0, 0u)) {
-        console_line(2, "test-100kb-scale: scaled decoder parse failed");
+        log_line(2, "scaled decoder parse failed");
         return 1;
     }
     if (!scaled_decoder.has_payload || scaled_decoder.payload.size != original_payload.size) {
-        console_line(2, "test-100kb-scale: scaled decoded payload size mismatch");
+        log_line(2, "scaled decoded payload size mismatch");
         return 1;
     }
     for (usize i = 0u; i < original_payload.size; ++i) {
         if (scaled_decoder.payload.data[i] != original_payload.data[i]) {
-            console_line(2, "test-100kb-scale: scaled decoded payload mismatch");
+            log_line(2, "scaled decoded payload mismatch");
             return 1;
         }
     }
 
-    const char* prefix = "2002_payload_gray_100k_scaled";
     auto write_artifact = [&](const char* filename,
                               const makocode::ByteBuffer& buffer) -> bool {
         makocode::ByteBuffer path;
@@ -12094,74 +12112,121 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
         return ok;
     };
 
-    const char* payload_filename = "2002_payload_gray_100k_scaled.bin";
-    if (!write_artifact(payload_filename, original_payload)) {
-        console_line(2, "test-100kb-scale: failed to write payload artifact");
+    makocode::ByteBuffer payload_name;
+    if (!payload_name.append_ascii(artifact_prefix) ||
+        !payload_name.append_ascii(".bin") ||
+        !payload_name.append_char('\0')) {
+        log_line(2, "failed to build payload filename");
         return 1;
     }
-    console_write(1, "test-100kb-scale:   payload -> ");
+    if (!write_artifact((const char*)payload_name.data, original_payload)) {
+        log_line(2, "failed to write payload artifact");
+        return 1;
+    }
+    log_prefix(1);
+    console_write(1, "  payload -> ");
     console_write(1, base_dir);
     console_write(1, "/");
-    console_line(1, payload_filename);
+    console_line(1, (const char*)payload_name.data);
 
-    const char* encoded_filename = "2002_payload_gray_100k_scaled_encoded.ppm";
-    if (!write_artifact(encoded_filename, ppm_buffer)) {
-        console_line(2, "test-100kb-scale: failed to write baseline encoded artifact");
+    makocode::ByteBuffer encoded_name;
+    if (!encoded_name.append_ascii(artifact_prefix) ||
+        !encoded_name.append_ascii("_encoded.ppm") ||
+        !encoded_name.append_char('\0')) {
+        log_line(2, "failed to build baseline encoded filename");
         return 1;
     }
-    console_write(1, "test-100kb-scale:   encoded -> ");
+    if (!write_artifact((const char*)encoded_name.data, ppm_buffer)) {
+        log_line(2, "failed to write baseline encoded artifact");
+        return 1;
+    }
+    log_prefix(1);
+    console_write(1, "  encoded -> ");
     console_write(1, base_dir);
     console_write(1, "/");
-    console_line(1, encoded_filename);
+    console_line(1, (const char*)encoded_name.data);
 
-    const char* decoded_filename = "2002_payload_gray_100k_scaled_decoded.bin";
-    if (!write_artifact(decoded_filename, decoder.payload)) {
-        console_line(2, "test-100kb-scale: failed to write baseline decoded artifact");
+    makocode::ByteBuffer decoded_name;
+    if (!decoded_name.append_ascii(artifact_prefix) ||
+        !decoded_name.append_ascii("_decoded.bin") ||
+        !decoded_name.append_char('\0')) {
+        log_line(2, "failed to build baseline decoded filename");
         return 1;
     }
-    console_write(1, "test-100kb-scale:   decoded -> ");
+    if (!write_artifact((const char*)decoded_name.data, decoder.payload)) {
+        log_line(2, "failed to write baseline decoded artifact");
+        return 1;
+    }
+    log_prefix(1);
+    console_write(1, "  decoded -> ");
     console_write(1, base_dir);
     console_write(1, "/");
-    console_line(1, decoded_filename);
+    console_line(1, (const char*)decoded_name.data);
 
     makocode::ByteBuffer scaled_encoded_name;
-    if (!scaled_encoded_name.append_ascii(prefix) ||
+    if (!scaled_encoded_name.append_ascii(artifact_prefix) ||
         !scaled_encoded_name.append_ascii("_encoded_x") ||
         !scaled_encoded_name.append_ascii(scale_label) ||
         !scaled_encoded_name.append_ascii(".ppm") ||
         !scaled_encoded_name.append_char('\0')) {
-        console_line(2, "test-100kb-scale: failed to build scaled encoded filename");
+        log_line(2, "failed to build scaled encoded filename");
         return 1;
     }
     if (!write_artifact((const char*)scaled_encoded_name.data, scaled_ppm)) {
-        console_line(2, "test-100kb-scale: failed to write scaled encoded artifact");
+        log_line(2, "failed to write scaled encoded artifact");
         return 1;
     }
-    console_write(1, "test-100kb-scale:   scaled encoded -> ");
+    log_prefix(1);
+    console_write(1, "  scaled encoded -> ");
     console_write(1, base_dir);
     console_write(1, "/");
     console_line(1, (const char*)scaled_encoded_name.data);
 
     makocode::ByteBuffer scaled_decoded_name;
-    if (!scaled_decoded_name.append_ascii(prefix) ||
+    if (!scaled_decoded_name.append_ascii(artifact_prefix) ||
         !scaled_decoded_name.append_ascii("_decoded_x") ||
         !scaled_decoded_name.append_ascii(scale_label) ||
         !scaled_decoded_name.append_ascii(".bin") ||
         !scaled_decoded_name.append_char('\0')) {
-        console_line(2, "test-100kb-scale: failed to build scaled decoded filename");
+        log_line(2, "failed to build scaled decoded filename");
         return 1;
     }
     if (!write_artifact((const char*)scaled_decoded_name.data, scaled_decoder.payload)) {
-        console_line(2, "test-100kb-scale: failed to write scaled decoded artifact");
+        log_line(2, "failed to write scaled decoded artifact");
         return 1;
     }
-    console_write(1, "test-100kb-scale:   scaled decoded -> ");
+    log_prefix(1);
+    console_write(1, "  scaled decoded -> ");
     console_write(1, base_dir);
     console_write(1, "/");
     console_line(1, (const char*)scaled_decoded_name.data);
 
-    console_line(1, "test-100kb-scale: baseline and scaled roundtrips ok");
+    log_line(1, "baseline and scaled roundtrips ok");
     return 0;
+}
+
+static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_scaled(1u,
+                                        "2002_payload_gray_100k_scaled",
+                                        "test-100kb-scale");
+}
+
+static int command_test_payload_color2_100k_scaled(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_scaled(2u,
+                                        "2003_payload_color2_100k_scaled",
+                                        "test-100kb-scale-c2");
+}
+
+static int command_test_payload_color3_100k_scaled(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_scaled(3u,
+                                        "2004_payload_color3_100k_scaled",
+                                        "test-100kb-scale-c3");
 }
 
 static int command_test_payload(int arg_count, char** args) {
@@ -13147,16 +13212,20 @@ static int command_test(int arg_count, char** args) {
         bool forward_args;
     };
     /* Test suite summary:
-       1) scan-basic           - validates histogram analytics and dirt removal on small fixtures.
-       2) border-dirt          - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
-       3) payload-100kb        - performs a 100 KiB grayscale encode/ppm/decode roundtrip without distortions.
-       4) payload-100kb-scaled - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation.
-       5) payload-suite        - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
+       1) scan-basic              - validates histogram analytics and dirt removal on small fixtures.
+       2) border-dirt             - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
+       3) payload-100kb           - performs a 100 KiB encode/ppm/decode roundtrip without distortions.
+       4) payload-100kb-scaled    - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
+       5) payload-100kb-scaled-c2 - repeats the scaled roundtrip for color channel 2.
+       6) payload-100kb-scaled-c3 - repeats the scaled roundtrip for color channel 3.
+       7) payload-suite           - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
     const TestSuiteEntry suites[] = {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
         {"payload-100kb", command_test_payload_gray_100k, false},
         {"payload-100kb-scaled", command_test_payload_gray_100k_scaled, false},
+        {"payload-100kb-scaled-c2", command_test_payload_color2_100k_scaled, false},
+        {"payload-100kb-scaled-c3", command_test_payload_color3_100k_scaled, false},
         {"payload-suite", command_test_payload, true}
     };
     usize suite_count = sizeof(suites) / sizeof(suites[0]);
