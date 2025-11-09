@@ -3717,7 +3717,7 @@ static const GlyphPattern FOOTER_GLYPHS[] = {
     {'-', {"00000", "00000", "11111", "00000", "00000", "00000", "00000"}},
     {'.', {"00000", "00000", "00000", "00000", "00000", "00100", "00000"}},
     {'/', {"00001", "00010", "00100", "01000", "10000", "00000", "00000"}},
-    {'0', {"01110", "10001", "10001", "10001", "10001", "10001", "01110"}},
+    {'0', {"01110", "10001", "11001", "10101", "10011", "10001", "01110"}},
     {'1', {"00100", "01100", "00100", "00100", "00100", "00100", "01110"}},
     {'2', {"01110", "10001", "00001", "00010", "00100", "01000", "11111"}},
     {'3', {"01110", "10001", "00001", "00110", "00001", "10001", "01110"}},
@@ -3776,7 +3776,7 @@ static const GlyphPattern FOOTER_GLYPHS[] = {
     {'d', {"00001", "00001", "01111", "10001", "10001", "10001", "01111"}},
     {'e', {"00000", "00000", "01110", "10001", "11111", "10000", "01110"}},
     {'f', {"00110", "01001", "01000", "11110", "01000", "01000", "01000"}},
-    {'g', {"00000", "00000", "01111", "10001", "10001", "01111", "00001"}},
+    {'g', {"00000", "01110", "10001", "10001", "01111", "00001", "01110"}},
     {'h', {"10000", "10000", "11110", "10001", "10001", "10001", "10001"}},
     {'i', {"00100", "00000", "01100", "00100", "00100", "00100", "01110"}},
     {'j', {"00010", "00000", "00110", "00010", "00010", "00010", "01100"}},
@@ -3786,7 +3786,7 @@ static const GlyphPattern FOOTER_GLYPHS[] = {
     {'n', {"00000", "00000", "11110", "10001", "10001", "10001", "10001"}},
     {'o', {"00000", "00000", "01110", "10001", "10001", "10001", "01110"}},
     {'p', {"00000", "00000", "11110", "10001", "10001", "11110", "10000"}},
-    {'q', {"00000", "00000", "01111", "10001", "10001", "01111", "00001"}},
+    {'q', {"00000", "00000", "01110", "10001", "10001", "01111", "00001"}},
     {'r', {"00000", "00000", "10110", "11001", "10000", "10000", "10000"}},
     {'s', {"00000", "00000", "01110", "10000", "01110", "00001", "11110"}},
     {'t', {"01000", "01000", "11110", "01000", "01000", "01001", "00110"}},
@@ -4199,6 +4199,16 @@ struct PpmParserState {
     u64 rotation_height_value;
     bool has_rotation_margin;
     double rotation_margin_value;
+    bool has_skew_src_width;
+    u64 skew_src_width_value;
+    bool has_skew_src_height;
+    u64 skew_src_height_value;
+    bool has_skew_margin_x;
+    double skew_margin_x_value;
+    bool has_skew_x_pixels;
+    double skew_x_pixels_value;
+    bool has_skew_bottom_x;
+    double skew_bottom_x_value;
 
     PpmParserState()
         : data(0),
@@ -4241,7 +4251,17 @@ struct PpmParserState {
           has_rotation_height(false),
           rotation_height_value(0u),
           has_rotation_margin(false),
-          rotation_margin_value(0.0) {}
+          rotation_margin_value(0.0),
+          has_skew_src_width(false),
+          skew_src_width_value(0u),
+          has_skew_src_height(false),
+          skew_src_height_value(0u),
+          has_skew_margin_x(false),
+          skew_margin_x_value(0.0),
+          has_skew_x_pixels(false),
+          skew_x_pixels_value(0.0),
+          has_skew_bottom_x(false),
+          skew_bottom_x_value(0.0) {}
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -5103,6 +5123,241 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                     state.rotation_margin_value = value;
                 }
             }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char skew_src_width_tag[] = "skew_src_width";
+    const usize skew_src_width_len = (usize)sizeof(skew_src_width_tag) - 1u;
+    if ((length - index) >= skew_src_width_len) {
+        bool match = true;
+        for (usize i = 0u; i < skew_src_width_len; ++i) {
+            if (comment[index + i] != skew_src_width_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += skew_src_width_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_skew_src_width = true;
+                    state.skew_src_width_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char skew_src_height_tag[] = "skew_src_height";
+    const usize skew_src_height_len = (usize)sizeof(skew_src_height_tag) - 1u;
+    if ((length - index) >= skew_src_height_len) {
+        bool match = true;
+        for (usize i = 0u; i < skew_src_height_len; ++i) {
+            if (comment[index + i] != skew_src_height_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += skew_src_height_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_skew_src_height = true;
+                    state.skew_src_height_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char skew_margin_tag[] = "skew_margin_x";
+    const usize skew_margin_len = (usize)sizeof(skew_margin_tag) - 1u;
+    if ((length - index) >= skew_margin_len) {
+        bool match = true;
+        for (usize i = 0u; i < skew_margin_len; ++i) {
+            if (comment[index + i] != skew_margin_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += skew_margin_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            bool negative = false;
+            if (index < length && comment[index] == '-') {
+                negative = true;
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if ((c < '0' || c > '9') && c != '.') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                double value = 0.0;
+                if (ascii_to_double(comment + number_start, number_length, &value)) {
+                    if (negative) {
+                        value = -value;
+                    }
+                    state.has_skew_margin_x = true;
+                    state.skew_margin_x_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char skew_amount_tag[] = "skew_x_pixels";
+    const usize skew_amount_len = (usize)sizeof(skew_amount_tag) - 1u;
+    if ((length - index) >= skew_amount_len) {
+        bool match = true;
+        for (usize i = 0u; i < skew_amount_len; ++i) {
+            if (comment[index + i] != skew_amount_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += skew_amount_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            bool negative = false;
+            if (index < length && comment[index] == '-') {
+                negative = true;
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if ((c < '0' || c > '9') && c != '.') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                double value = 0.0;
+                if (ascii_to_double(comment + number_start, number_length, &value)) {
+                    if (negative) {
+                        value = -value;
+                    }
+                    state.has_skew_x_pixels = true;
+                    state.skew_x_pixels_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    const char skew_bottom_tag[] = "skew_bottom_x";
+    const usize skew_bottom_len = (usize)sizeof(skew_bottom_tag) - 1u;
+    if ((length - index) >= skew_bottom_len) {
+        bool match = true;
+        for (usize i = 0u; i < skew_bottom_len; ++i) {
+            if (comment[index + i] != skew_bottom_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += skew_bottom_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            bool negative = false;
+            if (index < length && comment[index] == '-') {
+                negative = true;
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if ((c < '0' || c > '9') && c != '.') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                double value = 0.0;
+                if (ascii_to_double(comment + number_start, number_length, &value)) {
+                    if (negative) {
+                        value = -value;
+                    }
+                    state.has_skew_bottom_x = true;
+                    state.skew_bottom_x_value = value;
+                }
+            }
+            return;
         }
     }
 }
@@ -5640,6 +5895,20 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         rotation_offset_x = -min_x + rotation_margin;
         rotation_offset_y = -min_y + rotation_margin;
     }
+    bool has_skew = state.has_skew_src_width &&
+                    state.has_skew_src_height &&
+                    state.has_skew_margin_x &&
+                    state.has_skew_x_pixels;
+    u64 skew_src_width = has_skew ? state.skew_src_width_value : 0u;
+    u64 skew_src_height = has_skew ? state.skew_src_height_value : 0u;
+    double skew_margin = has_skew ? state.skew_margin_x_value : 0.0;
+    double skew_top = has_skew ? state.skew_x_pixels_value : 0.0;
+    double skew_bottom = has_skew && state.has_skew_bottom_x ? state.skew_bottom_x_value : 0.0;
+    if (has_skew) {
+        if (skew_src_width == 0u || skew_src_height == 0u) {
+            has_skew = false;
+        }
+    }
     u8 detection_color_mode = overrides.color_channels;
     if (overrides.color_set) {
         detection_color_mode = overrides.color_channels;
@@ -5673,6 +5942,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     u64 analysis_width = has_rotation ? (u64)rotation_width : width;
     u64 analysis_height = has_rotation ? (u64)rotation_height : height;
+    if (!has_rotation && has_skew) {
+        analysis_width = skew_src_width;
+        analysis_height = skew_src_height;
+    }
     if (width_known && expected_width && (analysis_width % expected_width) == 0u) {
         scale_x = analysis_width / expected_width;
     }
@@ -5685,19 +5958,19 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if ((analysis_height % scale_y) != 0u) {
         scale_y = 1u;
     }
-    if (!has_rotation && scale_x == 1u && width > 1u) {
+    if (!has_rotation && !has_skew && scale_x == 1u && width > 1u) {
         u64 detected_x = detect_horizontal_scale(pixel_data, width, height, detection_color_mode);
         if (detected_x > 1u && (width % detected_x) == 0u) {
             scale_x = detected_x;
         }
     }
-    if (!has_rotation && scale_y == 1u && height > 1u) {
+    if (!has_rotation && !has_skew && scale_y == 1u && height > 1u) {
         u64 detected_y = detect_vertical_scale(pixel_data, width, height, detection_color_mode);
         if (detected_y > 1u && (height % detected_y) == 0u) {
             scale_y = detected_y;
         }
     }
-    if (!has_rotation && !validate_integer_scale(pixel_data, width, height, scale_x, scale_y, detection_color_mode)) {
+    if (!has_rotation && !has_skew && !validate_integer_scale(pixel_data, width, height, scale_x, scale_y, detection_color_mode)) {
         scale_x = 1u;
         scale_y = 1u;
     }
@@ -5760,6 +6033,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             double sample_col = ((double)logical_col + 0.5) * scale_xd - 0.5;
             const u8* rgb = 0;
             u8 rotated_rgb[3];
+            u8 skew_rgb[3];
             if (has_rotation) {
                 if (rotation_width == 0u || rotation_height == 0u || rotated_width == 0u || rotated_height == 0u) {
                     return false;
@@ -5797,6 +6071,36 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     rotated_rgb[channel] = (u8)(value + 0.5);
                 }
                 rgb = rotated_rgb;
+            } else if (has_skew) {
+                if (sample_row < 0.0) sample_row = 0.0;
+                if (sample_col < 0.0) sample_col = 0.0;
+                double max_row = (analysis_height > 0u) ? (double)(analysis_height - 1u) : 0.0;
+                double max_col = (analysis_width > 0u) ? (double)(analysis_width - 1u) : 0.0;
+                if (sample_row > max_row) sample_row = max_row;
+                if (sample_col > max_col) sample_col = max_col;
+                double normalized_row = (skew_src_height > 1u) ? (sample_row / (double)(skew_src_height - 1u)) : 0.0;
+                double row_shift = skew_top * (1.0 - normalized_row) + skew_bottom * normalized_row;
+                double dest_x = sample_col + skew_margin + row_shift;
+                double dest_y = sample_row;
+                if (dest_x < 0.0) dest_x = 0.0;
+                if (dest_y < 0.0) dest_y = 0.0;
+                double max_dest_x = (width > 0u) ? (double)(width - 1u) : 0.0;
+                double max_dest_y = (height > 0u) ? (double)(height - 1u) : 0.0;
+                if (dest_x > max_dest_x) dest_x = max_dest_x;
+                if (dest_y > max_dest_y) dest_y = max_dest_y;
+                unsigned nearest_x = (unsigned)(dest_x + 0.5);
+                unsigned nearest_y = (unsigned)(dest_y + 0.5);
+                if (nearest_x >= width) {
+                    nearest_x = width - 1u;
+                }
+                if (nearest_y >= height) {
+                    nearest_y = height - 1u;
+                }
+                usize idx = ((usize)nearest_y * (usize)width + (usize)nearest_x) * 3u;
+                for (u32 channel = 0u; channel < 3u; ++channel) {
+                    skew_rgb[channel] = pixel_data[idx + channel];
+                }
+                rgb = skew_rgb;
             } else {
                 if (sample_row < 0.0) sample_row = 0.0;
                 if (sample_col < 0.0) sample_col = 0.0;
@@ -5973,6 +6277,41 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_font_size = true;
         dest.font_size_value = src.font_size_value;
+    }
+    if (src.has_skew_src_width) {
+        if (dest.has_skew_src_width && dest.skew_src_width_value != src.skew_src_width_value) {
+            return false;
+        }
+        dest.has_skew_src_width = true;
+        dest.skew_src_width_value = src.skew_src_width_value;
+    }
+    if (src.has_skew_src_height) {
+        if (dest.has_skew_src_height && dest.skew_src_height_value != src.skew_src_height_value) {
+            return false;
+        }
+        dest.has_skew_src_height = true;
+        dest.skew_src_height_value = src.skew_src_height_value;
+    }
+    if (src.has_skew_margin_x) {
+        if (dest.has_skew_margin_x && dest.skew_margin_x_value != src.skew_margin_x_value) {
+            return false;
+        }
+        dest.has_skew_margin_x = true;
+        dest.skew_margin_x_value = src.skew_margin_x_value;
+    }
+    if (src.has_skew_x_pixels) {
+        if (dest.has_skew_x_pixels && dest.skew_x_pixels_value != src.skew_x_pixels_value) {
+            return false;
+        }
+        dest.has_skew_x_pixels = true;
+        dest.skew_x_pixels_value = src.skew_x_pixels_value;
+    }
+    if (src.has_skew_bottom_x) {
+        if (dest.has_skew_bottom_x && dest.skew_bottom_x_value != src.skew_bottom_x_value) {
+            return false;
+        }
+        dest.has_skew_bottom_x = true;
+        dest.skew_bottom_x_value = src.skew_bottom_x_value;
     }
     return true;
 }
@@ -8944,7 +9283,9 @@ static bool collect_makocode_comments(const makocode::ByteBuffer& ppm,
 
 static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
                                      makocode::ByteBuffer& distorted_ppm,
-                                     double rotation_degrees)
+                                     double rotation_degrees,
+                                     double skew_pixels_x,
+                                     double skew_pixels_y)
 {
     unsigned width = 0;
     unsigned height = 0;
@@ -8969,6 +9310,7 @@ static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
     static const int fixture_bias[4] = {-22, 14, -9, 27};
     static const double channel_bleed[3] = {0.04, -0.07, 0.03};
     makocode::ByteBuffer working_pixels;
+    makocode::ByteBuffer skew_pixels;
     usize total_bytes = pixel_count * 3u;
     if (!working_pixels.ensure(total_bytes)) {
         return false;
@@ -9015,9 +9357,15 @@ static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
     unsigned final_height = height;
     makocode::ByteBuffer rotation_pixels;
     bool emit_rotation_metadata = false;
+    bool emit_skew_metadata = false;
     unsigned rotation_source_width = width;
     unsigned rotation_source_height = height;
     double rotation_margin_value = 0.0;
+    double skew_margin_value = 0.0;
+    double skew_top_value = 0.0;
+    double skew_bottom_value = 0.0;
+    unsigned skew_source_width = width;
+    unsigned skew_source_height = height;
     if (rotation_degrees != 0.0) {
         double radians = rotation_degrees * (3.14159265358979323846 / 180.0);
         double cos_theta = cos(radians);
@@ -9108,6 +9456,67 @@ static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
         rotation_margin_value = margin;
     }
 
+    if (skew_pixels_x != 0.0 || skew_pixels_y != 0.0) {
+        if (final_width == 0u || final_height == 0u) {
+            return false;
+        }
+        skew_source_width = final_width;
+        skew_source_height = final_height;
+        double top_shift = skew_pixels_x;
+        double bottom_shift = skew_pixels_y;
+        double min_shift = (top_shift < bottom_shift) ? top_shift : bottom_shift;
+        double max_shift = (top_shift > bottom_shift) ? top_shift : bottom_shift;
+        double margin_left = (min_shift < 0.0) ? (-min_shift) : 0.0;
+        double margin_right = (max_shift > 0.0) ? max_shift : 0.0;
+        double total_extra = margin_left + margin_right;
+        unsigned extra_width = (unsigned)ceil(total_extra);
+        if (total_extra > 0.0 && extra_width == 0u) {
+            extra_width = 1u;
+        }
+        unsigned sheared_width = final_width + extra_width;
+        if (sheared_width == 0u) {
+            return false;
+        }
+        usize sheared_count = (usize)sheared_width * (usize)final_height;
+        if (!skew_pixels.ensure(sheared_count * 3u)) {
+            return false;
+        }
+        for (usize i = 0u; i < sheared_count * 3u; ++i) {
+            skew_pixels.data[i] = 255u;
+        }
+        double denom_height = (final_height > 1u) ? (double)(final_height - 1u) : 1.0;
+        for (unsigned dy = 0u; dy < final_height; ++dy) {
+            double row_factor = (denom_height > 0.0) ? ((double)dy / denom_height) : 0.0;
+            double row_shift = top_shift * (1.0 - row_factor) + bottom_shift * row_factor;
+            for (unsigned dx = 0u; dx < sheared_width; ++dx) {
+                double source_x = (double)dx - margin_left - row_shift;
+                if (source_x < 0.0) {
+                    source_x = 0.0;
+                }
+                double max_source_x = (final_width > 0u) ? (double)(final_width - 1u) : 0.0;
+                if (source_x > max_source_x) {
+                    source_x = max_source_x;
+                }
+                unsigned nearest = (unsigned)(source_x + 0.5);
+                if (nearest >= final_width) {
+                    nearest = final_width - 1u;
+                }
+                usize src_index = ((usize)dy * (usize)final_width + (usize)nearest) * 3u;
+                usize dst_index = ((usize)dy * (usize)sheared_width + (usize)dx) * 3u;
+                for (u32 channel = 0u; channel < 3u; ++channel) {
+                    skew_pixels.data[dst_index + channel] = final_pixels[src_index + channel];
+                }
+            }
+        }
+        skew_pixels.size = sheared_count * 3u;
+        final_pixels = skew_pixels.data;
+        final_width = sheared_width;
+        emit_skew_metadata = true;
+        skew_margin_value = margin_left;
+        skew_top_value = top_shift;
+        skew_bottom_value = bottom_shift;
+    }
+
     distorted_ppm.release();
     if (!distorted_ppm.append_ascii("P3\n") ||
         !buffer_append_number(distorted_ppm, (u64)final_width) ||
@@ -9147,6 +9556,45 @@ static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
         char angle_text[32];
         format_fixed_3(rotation_degrees, angle_text, sizeof(angle_text));
         if (!distorted_ppm.append_ascii(angle_text) ||
+            !distorted_ppm.append_char('\n')) {
+            return false;
+        }
+    }
+    if (emit_skew_metadata) {
+        if (!distorted_ppm.append_ascii("# skew_src_width ") ||
+            !buffer_append_number(distorted_ppm, (u64)skew_source_width) ||
+            !distorted_ppm.append_char('\n')) {
+            return false;
+        }
+        if (!distorted_ppm.append_ascii("# skew_src_height ") ||
+            !buffer_append_number(distorted_ppm, (u64)skew_source_height) ||
+            !distorted_ppm.append_char('\n')) {
+            return false;
+        }
+        if (!distorted_ppm.append_ascii("# skew_margin_x ")) {
+            return false;
+        }
+        char margin_text[32];
+        format_fixed_3(skew_margin_value, margin_text, sizeof(margin_text));
+        if (!distorted_ppm.append_ascii(margin_text) ||
+            !distorted_ppm.append_char('\n')) {
+            return false;
+        }
+        if (!distorted_ppm.append_ascii("# skew_x_pixels ")) {
+            return false;
+        }
+        char skew_text[32];
+        format_fixed_3(skew_top_value, skew_text, sizeof(skew_text));
+        if (!distorted_ppm.append_ascii(skew_text) ||
+            !distorted_ppm.append_char('\n')) {
+            return false;
+        }
+        if (!distorted_ppm.append_ascii("# skew_bottom_x ")) {
+            return false;
+        }
+        char skew_bottom_text[32];
+        format_fixed_3(skew_bottom_value, skew_bottom_text, sizeof(skew_bottom_text));
+        if (!distorted_ppm.append_ascii(skew_bottom_text) ||
             !distorted_ppm.append_char('\n')) {
             return false;
         }
@@ -10858,8 +11306,10 @@ static int command_test_payload(int arg_count, char** args) {
         double ecc_redundancy;
         double rotation_degrees;
         bool rotate_scaled_only;
+        double skew_pixels_x;
+        double skew_pixels_y;
     };
-    TestScenario scenarios[5];
+    TestScenario scenarios[6];
     usize scenario_count = 0u;
     double enabled_ecc_redundancy = (ecc_redundancy > 0.0) ? ecc_redundancy : 0.5;
     for (int password_flag = 0; password_flag < 2; ++password_flag) {
@@ -10870,6 +11320,8 @@ static int command_test_payload(int arg_count, char** args) {
             scenario.ecc_redundancy = scenario.use_ecc ? enabled_ecc_redundancy : 0.0;
             scenario.rotation_degrees = 0.0;
             scenario.rotate_scaled_only = false;
+            scenario.skew_pixels_x = 0.0;
+            scenario.skew_pixels_y = 0.0;
         }
     }
     TestScenario& rotation_case = scenarios[scenario_count++];
@@ -10878,6 +11330,16 @@ static int command_test_payload(int arg_count, char** args) {
     rotation_case.ecc_redundancy = 0.0;
     rotation_case.rotation_degrees = 3.0;
     rotation_case.rotate_scaled_only = true;
+    rotation_case.skew_pixels_x = 0.0;
+    rotation_case.skew_pixels_y = 0.0;
+    TestScenario& skew_case = scenarios[scenario_count++];
+    skew_case.use_password = false;
+    skew_case.use_ecc = true;
+    skew_case.ecc_redundancy = enabled_ecc_redundancy;
+    skew_case.rotation_degrees = 0.0;
+    skew_case.rotate_scaled_only = false;
+    skew_case.skew_pixels_x = 3.0;
+    skew_case.skew_pixels_y = 0.0;
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
     u64 artifact_serial = 0u;
@@ -10901,7 +11363,11 @@ static int command_test_payload(int arg_count, char** args) {
         console_write(1, " rotation=");
         char rotation_digits[32];
         format_fixed_3(scenario.rotation_degrees, rotation_digits, sizeof(rotation_digits));
-        console_line(1, rotation_digits);
+        console_write(1, rotation_digits);
+        console_write(1, " skew_x=");
+        char skew_x_digits[32];
+        format_fixed_3(scenario.skew_pixels_x, skew_x_digits, sizeof(skew_x_digits));
+        console_line(1, skew_x_digits);
         for (usize color_index = 0; color_index < 3u; ++color_index) {
             ImageMappingConfig run_mapping = mapping;
             if (run_mapping.color_set) {
@@ -10910,6 +11376,14 @@ static int command_test_payload(int arg_count, char** args) {
                 }
             } else {
                 run_mapping.color_channels = color_options[color_index];
+            }
+            if (scenario.skew_pixels_x != 0.0 || scenario.skew_pixels_y != 0.0) {
+                if (run_mapping.page_width_pixels <= (0xFFFFFFFFu / 3u)) {
+                    run_mapping.page_width_pixels *= 3u;
+                }
+                if (run_mapping.page_height_pixels <= (0xFFFFFFFFu / 3u)) {
+                    run_mapping.page_height_pixels *= 3u;
+                }
             }
             char digits_color[8];
             u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
@@ -11193,7 +11667,11 @@ static int command_test_payload(int arg_count, char** args) {
             console_line(1, (const char*)encoded_name.data);
             double page_rotation = scenario.rotate_scaled_only ? 0.0 : scenario.rotation_degrees;
             makocode::ByteBuffer scan_output;
-            if (simulate_scan_distortion(page_output, scan_output, page_rotation)) {
+            if (simulate_scan_distortion(page_output,
+                                         scan_output,
+                                         page_rotation,
+                                         scenario.skew_pixels_x,
+                                         scenario.skew_pixels_y)) {
                 makocode::ByteBuffer scan_base;
                 if (!build_page_base_name(scan_base,
                                           page_serial,
@@ -11455,7 +11933,11 @@ static int command_test_payload(int arg_count, char** args) {
                     console_line(1, (const char*)scaled_encoded_name.data);
                     double scaled_rotation = (scenario.rotate_scaled_only && scale_factor == 3u) ? scenario.rotation_degrees : 0.0;
                     makocode::ByteBuffer scan_scaled;
-                    if (simulate_scan_distortion(scaled_page, scan_scaled, scaled_rotation)) {
+                    if (simulate_scan_distortion(scaled_page,
+                                                 scan_scaled,
+                                                 scaled_rotation,
+                                                 scenario.skew_pixels_x,
+                                                 scenario.skew_pixels_y)) {
                         const char* scaled_suffix = (scaled_rotation != 0.0) ? "_rotated" : (const char*)0;
                         makocode::ByteBuffer scan_scaled_name;
                         if (!buffer_clone_with_suffix(scaled_base, scaled_suffix, ".ppm", scan_scaled_name) ||

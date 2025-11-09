@@ -1,8 +1,7 @@
 TODO:
-- Fiducial data (if needed), test should create distortions
-  1. Reintroduce the per-column edge detection and deskew helpers (scale/rotate, column-edge smoothing), then compute per-row left/right boundaries so we can treat each row as an independent 1‑D warp.
-  2. For each row, sweep a small horizontal offset window (±3px) using luminance variance to pick the best alignment, then multi-sample the pixel with the chosen offset.
-  3. For grayscale rows, threshold with row-adaptive Otsu and emit bits; for colour modes, map with the tolerant palette as before.
+- Fractional scale, stretch, all distortions in one large image
+- One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
+- Any way to optionally disable all includes? It only affects pathing
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 - Script to create art in output that is actually readable. Possibly just apply matrix code steganographically to an input image.
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel.
