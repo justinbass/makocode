@@ -772,6 +772,198 @@ struct ByteBuffer {
     }
 };
 
+struct FloodQueue {
+    usize* data;
+    usize capacity;
+    usize head;
+    usize tail;
+
+    FloodQueue() : data(0), capacity(0), head(0), tail(0) {}
+
+    bool initialize(usize max_elements) {
+        if (max_elements < 2u) {
+            max_elements = 2u;
+        }
+        data = (usize*)malloc(max_elements * sizeof(usize));
+        if (!data) {
+            capacity = 0;
+            head = tail = 0;
+            return false;
+        }
+        capacity = max_elements;
+        head = tail = 0;
+        return true;
+    }
+
+    void release() {
+        if (data) {
+            free(data);
+            data = 0;
+        }
+        capacity = 0;
+        head = tail = 0;
+    }
+
+    void reset() {
+        head = tail = 0;
+    }
+
+    bool push(usize value) {
+        usize next = head + 1u;
+        if (next >= capacity) {
+            next = 0u;
+        }
+        if (next == tail) {
+            return false;
+        }
+        data[head] = value;
+        head = next;
+        return true;
+    }
+
+    bool pop(usize& value) {
+        if (head == tail) {
+            return false;
+        }
+        value = data[tail];
+        tail++;
+        if (tail >= capacity) {
+            tail = 0u;
+        }
+        return true;
+    }
+};
+
+bool remove_border_dirt(image::ImageBuffer& image,
+                        unsigned char fill_threshold,
+                        ByteBuffer* out_mask)
+{
+    unsigned width = image.width;
+    unsigned height = image.height;
+    if (!image.pixels || width == 0u || height == 0u) {
+        if (out_mask) {
+            out_mask->release();
+        }
+        return false;
+    }
+    usize total_pixels = (usize)width * (usize)height;
+    if (!total_pixels) {
+        if (out_mask) {
+            out_mask->release();
+        }
+        return false;
+    }
+
+    ByteBuffer mask;
+    if (!mask.ensure(total_pixels)) {
+        return false;
+    }
+    mask.size = total_pixels;
+    for (usize i = 0; i < total_pixels; ++i) {
+        mask.data[i] = 0xFFu;
+    }
+
+    usize queue_capacity = total_pixels + 1u;
+    if (queue_capacity <= total_pixels) {
+        mask.release();
+        if (out_mask) {
+            out_mask->release();
+        }
+        return false;
+    }
+    FloodQueue queue;
+    if (!queue.initialize(queue_capacity)) {
+        mask.release();
+        return false;
+    }
+
+    bool queue_ok = true;
+    unsigned char* pixels = image.pixels;
+
+    auto try_copy = [&](unsigned x, unsigned y, bool require_white) {
+        if (!queue_ok) {
+            return;
+        }
+        if (x >= width || y >= height) {
+            return;
+        }
+        usize index = (usize)y * (usize)width + (usize)x;
+        if (mask.data[index] == 0u) {
+            return;
+        }
+        if (require_white && pixels[index] < fill_threshold) {
+            return;
+        }
+        mask.data[index] = 0u;
+        if (!queue.push(index)) {
+            queue_ok = false;
+        }
+    };
+
+    auto flood = [&](unsigned start_x, unsigned start_y, bool require_white) {
+        if (!queue_ok) {
+            return;
+        }
+        queue.reset();
+        try_copy(start_x, start_y, require_white);
+        usize encoded = 0u;
+        while (queue_ok && queue.pop(encoded)) {
+            unsigned y = (unsigned)(encoded / (usize)width);
+            unsigned x = (unsigned)(encoded - (usize)y * (usize)width);
+            if (x + 1u < width) {
+                try_copy(x + 1u, y, require_white);
+            }
+            if (x > 0u) {
+                try_copy(x - 1u, y, require_white);
+            }
+            if (y + 1u < height) {
+                try_copy(x, y + 1u, require_white);
+            }
+            if (y > 0u) {
+                try_copy(x, y - 1u, require_white);
+            }
+        }
+    };
+
+    flood(0u, 0u, true);
+    flood(width >> 1u, 0u, true);
+    flood(width - 1u, 0u, true);
+    flood(0u, height >> 1u, true);
+    flood(0u, height - 1u, true);
+    flood(width - 1u, height - 1u, true);
+    flood(width - 1u, height >> 1u, true);
+    flood(width >> 1u, height - 1u, true);
+    flood(width >> 1u, height >> 1u, false);
+
+    bool success = queue_ok;
+
+    queue.release();
+
+    if (!success) {
+        mask.release();
+        return false;
+    }
+
+    for (usize i = 0; i < total_pixels; ++i) {
+        pixels[i] = (unsigned char)(pixels[i] | mask.data[i]);
+    }
+
+    if (out_mask) {
+        out_mask->release();
+        if (!out_mask->ensure(total_pixels)) {
+            mask.release();
+            return false;
+        }
+        out_mask->size = total_pixels;
+        for (usize i = 0; i < total_pixels; ++i) {
+            out_mask->data[i] = mask.data[i];
+        }
+    }
+
+    mask.release();
+    return true;
+}
+
 static bool generate_random_bytes(ByteBuffer& buffer, usize count, u64 seed) {
     buffer.release();
     if (!buffer.ensure(count)) {
@@ -8335,6 +8527,397 @@ static bool verify_synthetic_case(const char* name,
     return true;
 }
 
+static bool write_mask_debug_fixture(const char* fixture_dir,
+                                     const char* filename,
+                                     unsigned width,
+                                     unsigned height,
+                                     const makocode::ByteBuffer& mask)
+{
+    usize expected = (usize)width * (usize)height;
+    if (mask.size < expected) {
+        return false;
+    }
+    makocode::ByteBuffer path_buffer;
+    if (!path_buffer.append_ascii(fixture_dir) ||
+        !path_buffer.append_char('/') ||
+        !path_buffer.append_ascii(filename) ||
+        !path_buffer.append_char('\0')) {
+        path_buffer.release();
+        return false;
+    }
+    const char* path = (const char*)path_buffer.data;
+    bool result = write_ppm_fixture(path, width, height, (const unsigned char*)mask.data);
+    path_buffer.release();
+    return result;
+}
+
+static bool verify_border_dirt_cleanup(const char* fixture_dir)
+{
+    const unsigned width = 16u;
+    const unsigned height = 10u;
+    usize total = (usize)width * (usize)height;
+    makocode::image::ImageBuffer image;
+    image.width = width;
+    image.height = height;
+    image.pixels = (unsigned char*)malloc(total);
+    if (!image.pixels) {
+        console_line(2, "test-scan-basic: allocation failure for dirt fixture");
+        return false;
+    }
+    for (usize i = 0; i < total; ++i) {
+        image.pixels[i] = 255u;
+    }
+
+    for (unsigned y = 3u; y + 3u < height; ++y) {
+        for (unsigned x = 4u; x + 4u < width; ++x) {
+            image.pixels[(usize)y * (usize)width + (usize)x] = 32u;
+        }
+    }
+
+    const unsigned border_specks[][2] = {
+        {0u, 1u},
+        {width - 1u, 2u},
+        {width / 2u, 0u},
+        {width - 2u, height - 1u},
+        {1u, height - 1u},
+        {0u, height / 2u}
+    };
+    const usize speck_count = sizeof(border_specks) / sizeof(border_specks[0]);
+    for (usize i = 0; i < speck_count; ++i) {
+        unsigned sx = border_specks[i][0];
+        unsigned sy = border_specks[i][1];
+        image.pixels[(usize)sy * (usize)width + (usize)sx] = 12u;
+    }
+
+    unsigned data_x = width / 2u;
+    unsigned data_y = height / 2u;
+    image.pixels[(usize)data_y * (usize)width + (usize)data_x] = 16u;
+
+    makocode::ByteBuffer mask;
+    if (!remove_border_dirt(image, 200u, &mask)) {
+        console_line(2, "test-scan-basic: remove_border_dirt failed");
+        mask.release();
+        makocode::image::release(image);
+        return false;
+    }
+
+    bool ok = true;
+    for (usize i = 0; i < speck_count; ++i) {
+        unsigned sx = border_specks[i][0];
+        unsigned sy = border_specks[i][1];
+        unsigned char value = image.pixels[(usize)sy * (usize)width + (usize)sx];
+        if (value != 255u) {
+            console_write(2, "test-scan-basic: border speck not cleared at ");
+            char num[32];
+            console_write(2, "(");
+            append_number_ascii(sx, num);
+            console_write(2, num);
+            console_write(2, ",");
+            append_number_ascii(sy, num);
+            console_write(2, num);
+            console_line(2, ")");
+            ok = false;
+            break;
+        }
+    }
+
+    unsigned char inner_value =
+        image.pixels[(usize)data_y * (usize)width + (usize)data_x];
+    if (inner_value != 16u) {
+        console_line(2, "test-scan-basic: data region altered during dirt removal");
+        ok = false;
+    }
+
+    u64 checksum = 0u;
+    if (mask.size != total) {
+        console_line(2, "test-scan-basic: mask size mismatch");
+        ok = false;
+    } else {
+        for (usize i = 0; i < mask.size; ++i) {
+            checksum += (u64)mask.data[i];
+        }
+    }
+
+    const u64 expected_checksum = 1530u;
+    if (ok && checksum != expected_checksum) {
+        console_write(2, "test-scan-basic: mask checksum mismatch (got ");
+        char num[32];
+        append_number_ascii(checksum, num);
+        console_write(2, num);
+        console_write(2, ")");
+        console_line(2, "");
+        ok = false;
+    }
+
+    if (ok) {
+        if (!write_mask_debug_fixture(fixture_dir,
+                                      "border_mask_debug.pgm",
+                                      width,
+                                      height,
+                                      mask)) {
+            console_line(2, "test-scan-basic: failed to write mask debug fixture");
+            ok = false;
+        }
+    }
+
+    mask.release();
+    makocode::image::release(image);
+    return ok;
+}
+
+static int command_test_border_dirt(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    const char* base_dir = "test";
+    const char* fixture_dir = "test/fixtures";
+    if (!ensure_directory(base_dir)) {
+        console_line(2, "test-border-dirt: failed to create test directory");
+        return 1;
+    }
+    if (!ensure_directory(fixture_dir)) {
+        console_line(2, "test-border-dirt: failed to create fixture directory");
+        return 1;
+    }
+
+    ImageMappingConfig mapping;
+    PageFooterConfig footer_config;
+    if (!mapping.page_width_set) {
+        mapping.page_width_pixels = 64u;
+        mapping.page_width_set = true;
+    }
+    if (!mapping.page_height_set) {
+        mapping.page_height_pixels = 64u;
+        mapping.page_height_set = true;
+    }
+    mapping.color_channels = 1u;
+    mapping.color_set = true;
+
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
+        console_line(2, "test-border-dirt: invalid page dimensions");
+        return 1;
+    }
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        console_line(2, "test-border-dirt: unsupported color configuration");
+        return 1;
+    }
+    FooterLayout footer_layout;
+    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+        console_line(2, "test-border-dirt: footer layout computation failed");
+        return 1;
+    }
+    u32 data_height_pixels = footer_layout.data_height_pixels ? footer_layout.data_height_pixels : height_pixels;
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        console_line(2, "test-border-dirt: footer configuration invalid");
+        return 1;
+    }
+    u64 bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+    if (bits_per_page == 0u) {
+        console_line(2, "test-border-dirt: page capacity is zero");
+        return 1;
+    }
+
+    usize max_payload_size = (usize)((bits_per_page) / 8u) + 256u;
+    if (max_payload_size < 32u) {
+        max_payload_size = 32u;
+    }
+    if (max_payload_size > (1u << 20u)) {
+        max_payload_size = (1u << 20u);
+    }
+    usize best_size = 0u;
+    usize left = 1u;
+    usize right = max_payload_size;
+    while (left <= right) {
+        usize mid = left + (right - left) / 2u;
+        u64 mid_bits = 0u;
+        if (!compute_frame_bit_count(mapping, mid, (u64)mid, 0.0, (const char*)0, 0u, mid_bits)) {
+            console_line(2, "test-border-dirt: failed to evaluate payload size");
+            return 1;
+        }
+        u64 mid_pages = (mid_bits + bits_per_page - 1u) / bits_per_page;
+        if (mid_pages <= 1u && mid_bits > 0u) {
+            best_size = mid;
+            left = mid + 1u;
+        } else {
+            if (mid == 0u) {
+                break;
+            }
+            right = mid - 1u;
+        }
+    }
+    if (best_size == 0u) {
+        console_line(2, "test-border-dirt: unable to locate payload size");
+        return 1;
+    }
+
+    makocode::ByteBuffer payload;
+    if (!generate_random_bytes(payload, best_size, 0xB0FDEF11ull)) {
+        console_line(2, "test-border-dirt: failed to generate payload");
+        return 1;
+    }
+    makocode::EncoderContext encoder;
+    encoder.config.ecc_redundancy = 0.0;
+    makocode::ByteBuffer frame_bits;
+    u64 frame_bit_count = 0u;
+    u64 payload_bit_count = 0u;
+    if (!build_payload_frame(mapping,
+                             payload.size,
+                             0xB0FDEF11ull,
+                             (const char*)0,
+                             0u,
+                             payload,
+                             encoder,
+                             frame_bits,
+                             frame_bit_count,
+                             payload_bit_count)) {
+        console_line(2, "test-border-dirt: failed to build payload frame");
+        return 1;
+    }
+
+    u64 page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
+    if (page_count != 1u) {
+        console_line(2, "test-border-dirt: expected single page");
+        return 1;
+    }
+
+    makocode::ByteBuffer page_output;
+    if (!encode_page_to_ppm(mapping,
+                            frame_bits,
+                            frame_bit_count,
+                            0u,
+                            width_pixels,
+                            height_pixels,
+                            1u,
+                            page_count,
+                            bits_per_page,
+                            payload_bit_count,
+                            &encoder.ecc_info(),
+                            0,
+                            0u,
+                            footer_layout,
+                            page_output)) {
+        console_line(2, "test-border-dirt: failed to encode page");
+        return 1;
+    }
+
+    unsigned ppm_width = 0;
+    unsigned ppm_height = 0;
+    makocode::ByteBuffer rgb_data;
+    if (!extract_ppm_pixels(page_output, ppm_width, ppm_height, rgb_data)) {
+        console_line(2, "test-border-dirt: failed to parse encoded page");
+        return 1;
+    }
+    usize pixel_count = (usize)ppm_width * (usize)ppm_height;
+    makocode::ByteBuffer grayscale;
+    if (!grayscale.ensure(pixel_count)) {
+        console_line(2, "test-border-dirt: allocation failure for grayscale buffer");
+        return 1;
+    }
+    grayscale.size = pixel_count;
+    for (usize i = 0u, p = 0u; i < pixel_count; ++i, p += 3u) {
+        unsigned char r = rgb_data.data[p + 0u];
+        unsigned char g = rgb_data.data[p + 1u];
+        unsigned char b = rgb_data.data[p + 2u];
+        grayscale.data[i] = (unsigned char)((r + g + b) / 3u);
+    }
+
+    const unsigned specks[][2] = {
+        {1u, 0u},
+        {ppm_width - 2u, 0u},
+        {ppm_width - 1u, ppm_height / 2u},
+        {0u, ppm_height / 3u},
+        {ppm_width / 2u, ppm_height - 1u},
+        {3u, ppm_height - 1u}
+    };
+    for (usize i = 0u; i < sizeof(specks)/sizeof(specks[0]); ++i) {
+        unsigned sx = specks[i][0];
+        unsigned sy = specks[i][1];
+        if (sx < ppm_width && sy < ppm_height) {
+            grayscale.data[(usize)sy * (usize)ppm_width + (usize)sx] = 0u;
+        }
+    }
+
+    makocode::ByteBuffer dirty_image;
+    if (!dirty_image.ensure(pixel_count)) {
+        console_line(2, "test-border-dirt: allocation failure for dirty copy");
+        return 1;
+    }
+    dirty_image.size = pixel_count;
+    for (usize i = 0u; i < pixel_count; ++i) {
+        dirty_image.data[i] = grayscale.data[i];
+    }
+
+    makocode::image::ImageBuffer image_buf;
+    image_buf.width = ppm_width;
+    image_buf.height = ppm_height;
+    image_buf.pixels = grayscale.data;
+
+    makocode::ByteBuffer mask;
+    if (!remove_border_dirt(image_buf, 200u, &mask)) {
+        console_line(2, "test-border-dirt: remove_border_dirt failed");
+        mask.release();
+        return 1;
+    }
+
+    if (mask.size != pixel_count) {
+        console_line(2, "test-border-dirt: mask size mismatch");
+        mask.release();
+        return 1;
+    }
+
+    auto write_case_fixture = [&](const char* suffix,
+                                  const unsigned char* data) -> bool {
+        makocode::ByteBuffer path;
+        if (!path.append_ascii(base_dir) ||
+            !path.append_char('/') ||
+            !path.append_ascii("0013_border") ||
+            !path.append_ascii(suffix) ||
+            !path.append_char('\0')) {
+            path.release();
+            return false;
+        }
+        bool ok = write_ppm_fixture((const char*)path.data, ppm_width, ppm_height, data);
+        path.release();
+        return ok;
+    };
+
+    if (!write_case_fixture("_dirty.pgm", dirty_image.data) ||
+        !write_case_fixture("_clean.pgm", image_buf.pixels) ||
+        !write_case_fixture("_mask.pgm", mask.data)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to write fixtures");
+        return 1;
+    }
+
+    const u64 expected_checksum = 378165u;
+    u64 checksum = 0u;
+    for (usize i = 0u; i < mask.size; ++i) {
+        checksum += (u64)mask.data[i];
+    }
+    if (checksum != expected_checksum) {
+        console_write(2, "test-border-dirt: mask checksum mismatch (got ");
+        char digits[32];
+        append_number_ascii(checksum, digits);
+        console_write(2, digits);
+        console_line(2, ")");
+        mask.release();
+        return 1;
+    }
+
+    mask.release();
+
+    if (!verify_border_dirt_cleanup(fixture_dir)) {
+        console_line(2, "test-border-dirt: verification failed");
+        return 1;
+    }
+
+    console_line(1, "test-border-dirt: cleanup verified");
+    return 0;
+}
+
 static int command_test_scan_basic(int arg_count, char** args) {
     (void)arg_count;
     (void)args;
@@ -8420,20 +9003,21 @@ static int command_test_scan_basic(int arg_count, char** args) {
     }
     console_line(1, "test-scan-basic: synthetic low_contrast");
 
+    if (!verify_border_dirt_cleanup(fixture_dir)) {
+        return 1;
+    }
+    console_line(1, "test-scan-basic: border dirt removal");
+
     console_line(1, "test-scan-basic: all fixtures passed");
     return 0;
 }
 
-static int command_test(int arg_count, char** args) {
+static int command_test_payload(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
     double ecc_redundancy = 0.0;
     makocode::ByteBuffer password_buffer;
    bool have_password = false;
-
-    if (command_test_scan_basic(0, (char**)0)) {
-        return 1;
-    }
 
     const char* test_output_dir = "test";
     if (!ensure_directory(test_output_dir)) {
@@ -9313,6 +9897,34 @@ static int command_test(int arg_count, char** args) {
     return 0;
 }
 
+static int command_test(int arg_count, char** args) {
+    struct TestSuiteEntry {
+        const char* name;
+        int (*fn)(int, char**);
+        bool forward_args;
+    };
+    const TestSuiteEntry suites[] = {
+        {"scan-basic", command_test_scan_basic, false},
+        {"border-dirt", command_test_border_dirt, false},
+        {"payload-suite", command_test_payload, true}
+    };
+    usize suite_count = sizeof(suites) / sizeof(suites[0]);
+    for (usize i = 0u; i < suite_count; ++i) {
+        const TestSuiteEntry& entry = suites[i];
+        console_write(1, "test-suite: ");
+        console_line(1, entry.name);
+        int result = entry.forward_args ? entry.fn(arg_count, args)
+                                        : entry.fn(0, (char**)0);
+        if (result != 0) {
+            console_write(2, "test-suite: failure in ");
+            console_line(2, entry.name);
+            return result;
+        }
+    }
+    console_line(1, "test-suite: complete");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         write_usage();
@@ -9326,6 +9938,9 @@ int main(int argc, char** argv) {
     }
     if (ascii_compare(argv[1], "test-scan-basic") == 0) {
         return command_test_scan_basic(argc - 2, argv + 2);
+    }
+    if (ascii_compare(argv[1], "test-border-dirt") == 0) {
+        return command_test_border_dirt(argc - 2, argv + 2);
     }
     if (ascii_compare(argv[1], "test") == 0) {
         return command_test(argc - 2, argv + 2);
