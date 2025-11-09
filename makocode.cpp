@@ -45,6 +45,10 @@ extern "C" int   open(const char* path, int flags, ...);
 extern "C" void* realloc(void* ptr, unsigned long size);
 extern "C" double sqrt(double value);
 extern "C" double floor(double value);
+extern "C" double ceil(double value);
+extern "C" double sin(double value);
+extern "C" double cos(double value);
+extern "C" double atan2(double y, double x);
 struct tm;
 extern "C" long  time(long* tloc);
 extern "C" struct tm* gmtime(const long* timep);
@@ -677,6 +681,244 @@ bool analyze_cut_levels(const Histogram& histogram,
 
     out_levels.global_cut = global_cut;
     out_levels.fill_cut = fill_cut;
+    return true;
+}
+
+struct CornerDetectionConfig {
+    u32 logical_width;
+    u32 logical_height;
+    u32 cross_half;
+    double cross_trim;
+
+    CornerDetectionConfig()
+        : logical_width(0u),
+          logical_height(0u),
+          cross_half(3u),
+          cross_trim(0.75) {}
+};
+
+struct CornerDetectionResult {
+    bool valid;
+    double corners[4][2];
+    double hpixel;
+    double vpixel;
+    double pixelhx;
+    double pixelhy;
+    double pixelvx;
+    double pixelvy;
+    int chalf;
+    int chalf_fine;
+    double skew_degrees;
+    double perpendicularity_degrees;
+    unsigned left_edge;
+    unsigned right_edge;
+    unsigned top_edge;
+    unsigned bottom_edge;
+
+    CornerDetectionResult()
+        : valid(false),
+          hpixel(0.0),
+          vpixel(0.0),
+          pixelhx(0.0),
+          pixelhy(0.0),
+          pixelvx(0.0),
+          pixelvy(0.0),
+          chalf(0),
+          chalf_fine(0),
+          skew_degrees(0.0),
+          perpendicularity_degrees(0.0),
+          left_edge(0u),
+          right_edge(0u),
+          top_edge(0u),
+          bottom_edge(0u) {
+        for (int i = 0; i < 4; ++i) {
+            corners[i][0] = 0.0;
+            corners[i][1] = 0.0;
+        }
+    }
+};
+
+static unsigned char sample_pixel(const ImageBuffer& image, int x, int y)
+{
+    if (!image.pixels) {
+        return 0xFFu;
+    }
+    if (x < 0 || y < 0) {
+        return 0xFFu;
+    }
+    if ((unsigned)x >= image.width || (unsigned)y >= image.height) {
+        return 0xFFu;
+    }
+    return image.pixels[(unsigned)y * image.width + (unsigned)x];
+}
+
+static void scan_diagonal(const ImageBuffer& image,
+                          int start_x,
+                          int start_y,
+                          int outer_dx,
+                          int step_y,
+                          unsigned char cutlevel,
+                          int& out_x,
+                          int& out_y)
+{
+    unsigned limit = image.width < image.height ? image.width : image.height;
+    int step_x = -outer_dx;
+    for (unsigned diag = 0u; diag < limit; ++diag) {
+        int x = start_x + outer_dx * (int)diag;
+        int y = start_y;
+        unsigned len = diag + 1u;
+        for (unsigned step = 0u; step < len; ++step) {
+            unsigned char value = sample_pixel(image, x, y);
+            if (value < cutlevel) {
+                out_x = x;
+                out_y = y;
+                return;
+            }
+            x += step_x;
+            y += step_y;
+        }
+    }
+    out_x = -1;
+    out_y = -1;
+}
+
+static void normalize_vector(double& x, double& y)
+{
+    double length = sqrt(x * x + y * y);
+    if (length <= 0.0) {
+        x = 0.0;
+        y = 0.0;
+        return;
+    }
+    x /= length;
+    y /= length;
+}
+
+static double angle(double x, double y)
+{
+    static const double kRadToDeg = 180.0 / 3.14159265358979323846;
+    double radians = atan2(y, x);
+    double degrees = radians * kRadToDeg;
+    if (degrees < 0.0) {
+        degrees += 360.0;
+    }
+    return degrees;
+}
+
+static double normalize_angle(double value)
+{
+    while (value <= -180.0) {
+        value += 360.0;
+    }
+    while (value > 180.0) {
+        value -= 360.0;
+    }
+    return value;
+}
+
+bool find_corners(const ImageBuffer& image,
+                  unsigned char global_cut,
+                  const CornerDetectionConfig& config,
+                  CornerDetectionResult& result)
+{
+    result = CornerDetectionResult();
+    if (!image.pixels || !image.width || !image.height) {
+        return false;
+    }
+    if (config.logical_width == 0u || config.logical_height == 0u) {
+        return false;
+    }
+    if (config.cross_half == 0u) {
+        return false;
+    }
+
+    int x = 0;
+    int y = 0;
+
+    scan_diagonal(image, 0, 0, +1, +1, global_cut, x, y);
+    if (x < 0) {
+        return false;
+    }
+    result.corners[0][0] = (double)x;
+    result.corners[0][1] = (double)y;
+
+    scan_diagonal(image, (int)image.width - 1, 0, -1, +1, global_cut, x, y);
+    if (x < 0) {
+        return false;
+    }
+    result.corners[1][0] = (double)(x + 1);
+    result.corners[1][1] = (double)y;
+
+    scan_diagonal(image, 0, (int)image.height - 1, +1, -1, global_cut, x, y);
+    if (x < 0) {
+        return false;
+    }
+    result.corners[2][0] = (double)x;
+    result.corners[2][1] = (double)(y + 1);
+
+    scan_diagonal(image, (int)image.width - 1, (int)image.height - 1, -1, -1, global_cut, x, y);
+    if (x < 0) {
+        return false;
+    }
+    result.corners[3][0] = (double)(x + 1);
+    result.corners[3][1] = (double)(y + 1);
+
+    double left = result.corners[0][0] < result.corners[2][0] ? result.corners[0][0] : result.corners[2][0];
+    double right = result.corners[1][0] > result.corners[3][0] ? result.corners[1][0] : result.corners[3][0];
+    double top = result.corners[0][1] < result.corners[1][1] ? result.corners[0][1] : result.corners[1][1];
+    double bottom = result.corners[2][1] > result.corners[3][1] ? result.corners[2][1] : result.corners[3][1];
+    if (left < 0.0) left = 0.0;
+    if (top < 0.0) top = 0.0;
+    if (bottom < 0.0) bottom = 0.0;
+    result.left_edge = (unsigned)left;
+    result.right_edge = (unsigned)right;
+    result.top_edge = (unsigned)top;
+    result.bottom_edge = (unsigned)bottom;
+
+    double hpixel = ((result.corners[1][0] + result.corners[3][0]) -
+                     (result.corners[0][0] + result.corners[0][0])) * 0.5;
+    hpixel /= (double)config.logical_width;
+    double vpixel = ((result.corners[2][1] + result.corners[3][1]) -
+                     (result.corners[0][1] + result.corners[1][1])) * 0.5;
+    vpixel /= (double)config.logical_height;
+    result.hpixel = hpixel;
+    result.vpixel = vpixel;
+
+    result.pixelhx = ((result.corners[1][0] + result.corners[3][0]) -
+                      (result.corners[0][0] + result.corners[2][0])) * 0.5;
+    result.pixelhy = ((result.corners[1][1] + result.corners[3][1]) -
+                      (result.corners[0][1] + result.corners[2][1])) * 0.5;
+    result.pixelvx = ((result.corners[2][0] + result.corners[3][0]) -
+                      (result.corners[0][0] + result.corners[1][0])) * 0.5;
+    result.pixelvy = ((result.corners[2][1] + result.corners[3][1]) -
+                      (result.corners[0][1] + result.corners[1][1])) * 0.5;
+
+    normalize_vector(result.pixelhx, result.pixelhy);
+    normalize_vector(result.pixelvx, result.pixelvy);
+
+    double horiz_angle = angle(result.pixelhx, -result.pixelhy);
+    double vert_angle = angle(result.pixelvx, -result.pixelvy);
+    result.skew_degrees = normalize_angle(horiz_angle + vert_angle + 90.0) * 0.5;
+    result.perpendicularity_degrees = horiz_angle - vert_angle;
+
+    double half_scale = (double)config.cross_half * 0.5;
+    unsigned h_half = (unsigned)(hpixel * half_scale);
+    unsigned v_half = (unsigned)(vpixel * half_scale);
+    result.chalf = (int)(h_half < v_half ? h_half : v_half);
+
+    double trim = config.cross_trim;
+    if (trim < 0.0) {
+        trim = 0.0;
+    }
+    double core = (double)config.cross_half - trim;
+    if (core < 0.0) {
+        core = 0.0;
+    }
+    unsigned h_fine = (unsigned)(hpixel * core);
+    unsigned v_fine = (unsigned)(vpixel * core);
+    result.chalf_fine = (int)(h_fine < v_fine ? h_fine : v_fine);
+
+    result.valid = true;
     return true;
 }
 
@@ -8551,6 +8793,353 @@ static bool write_mask_debug_fixture(const char* fixture_dir,
     return result;
 }
 
+static double abs_double(double value)
+{
+    return (value < 0.0) ? -value : value;
+}
+
+static void normalize_components(double& x, double& y)
+{
+    double length = sqrt(x * x + y * y);
+    if (length <= 0.0) {
+        x = 0.0;
+        y = 0.0;
+    } else {
+        x /= length;
+        y /= length;
+    }
+}
+
+static double compute_angle_deg(double x, double y)
+{
+    static const double kRadToDeg = 180.0 / 3.14159265358979323846;
+    double radians = atan2(y, x);
+    double degrees = radians * kRadToDeg;
+    if (degrees < 0.0) {
+        degrees += 360.0;
+    }
+    return degrees;
+}
+
+static double wrap_angle_deg(double value)
+{
+    while (value <= -180.0) {
+        value += 360.0;
+    }
+    while (value > 180.0) {
+        value -= 360.0;
+    }
+    return value;
+}
+
+static bool generate_rotated_page(unsigned base_width,
+                                  unsigned base_height,
+                                  unsigned border_thickness,
+                                  double scale,
+                                  double angle_degrees,
+                                  makocode::image::ImageBuffer& image_out,
+                                  double expected_corners[4][2])
+{
+    makocode::image::release(image_out);
+    if (!base_width || !base_height || scale <= 0.0) {
+        return false;
+    }
+    const double base_w = (double)base_width;
+    const double base_h = (double)base_height;
+    const double base_cx = base_w * 0.5;
+    const double base_cy = base_h * 0.5;
+    const double radians = angle_degrees * (3.14159265358979323846 / 180.0);
+    const double cos_theta = cos(radians);
+    const double sin_theta = sin(radians);
+
+    double transformed[4][2];
+    double min_x = 0.0;
+    double max_x = 0.0;
+    double min_y = 0.0;
+    double max_y = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        double corner_x = (i & 1) ? base_w : 0.0;
+        double corner_y = (i & 2) ? base_h : 0.0;
+        double dx = corner_x - base_cx;
+        double dy = corner_y - base_cy;
+        double sx = dx * scale;
+        double sy = dy * scale;
+        double rx = sx * cos_theta - sy * sin_theta;
+        double ry = sx * sin_theta + sy * cos_theta;
+        transformed[i][0] = rx;
+        transformed[i][1] = ry;
+        if (i == 0) {
+            min_x = max_x = rx;
+            min_y = max_y = ry;
+        } else {
+            if (rx < min_x) min_x = rx;
+            if (rx > max_x) max_x = rx;
+            if (ry < min_y) min_y = ry;
+            if (ry > max_y) max_y = ry;
+        }
+    }
+
+    const double margin = 4.0;
+    double width_span = max_x - min_x;
+    double height_span = max_y - min_y;
+    double offset_x = -min_x + margin;
+    double offset_y = -min_y + margin;
+    double width_extent = width_span + 2.0 * margin + 1.0;
+    double height_extent = height_span + 2.0 * margin + 1.0;
+    unsigned out_width = (unsigned)ceil(width_extent);
+    unsigned out_height = (unsigned)ceil(height_extent);
+    if (!out_width) out_width = 1u;
+    if (!out_height) out_height = 1u;
+
+    usize total_pixels = (usize)out_width * (usize)out_height;
+    if (!total_pixels) {
+        return false;
+    }
+    unsigned char* pixels = (unsigned char*)malloc(total_pixels);
+    if (!pixels) {
+        return false;
+    }
+    for (usize i = 0; i < total_pixels; ++i) {
+        pixels[i] = 255u;
+    }
+
+    double inv_scale = 1.0 / scale;
+    for (unsigned ty = 0u; ty < out_height; ++ty) {
+        double target_y = (double)ty - offset_y;
+        for (unsigned tx = 0u; tx < out_width; ++tx) {
+            double target_x = (double)tx - offset_x;
+            double sx = target_x * cos_theta + target_y * sin_theta;
+            double sy = -target_x * sin_theta + target_y * cos_theta;
+            sx *= inv_scale;
+            sy *= inv_scale;
+            double bx = sx + base_cx;
+            double by = sy + base_cy;
+            if (bx >= -0.5 && bx <= base_w + 0.5 &&
+                by >= -0.5 && by <= base_h + 0.5) {
+                double dist_left = bx;
+                double dist_right = base_w - bx;
+                double dist_top = by;
+                double dist_bottom = base_h - by;
+                if (dist_left < 0.0) dist_left = 0.0;
+                if (dist_right < 0.0) dist_right = 0.0;
+                if (dist_top < 0.0) dist_top = 0.0;
+                if (dist_bottom < 0.0) dist_bottom = 0.0;
+                double min_dist = dist_left;
+                if (dist_right < min_dist) min_dist = dist_right;
+                if (dist_top < min_dist) min_dist = dist_top;
+                if (dist_bottom < min_dist) min_dist = dist_bottom;
+                if (min_dist <= (double)border_thickness) {
+                    pixels[(usize)ty * (usize)out_width + (usize)tx] = 0u;
+                }
+            }
+        }
+    }
+
+    image_out.width = out_width;
+    image_out.height = out_height;
+    image_out.pixels = pixels;
+
+    for (int i = 0; i < 4; ++i) {
+        expected_corners[i][0] = transformed[i][0] + offset_x;
+        expected_corners[i][1] = transformed[i][1] + offset_y;
+    }
+    return true;
+}
+
+static bool verify_corner_detection_case(const char* name,
+                                         unsigned base_width,
+                                         unsigned base_height,
+                                         unsigned border_thickness,
+                                         double scale,
+                                         double rotation_degrees,
+                                         double corner_tolerance,
+                                         double vector_tolerance,
+                                         double metric_tolerance)
+{
+    makocode::image::ImageBuffer image;
+    image.width = 0u;
+    image.height = 0u;
+    image.pixels = 0;
+    double expected_corners[4][2];
+    if (!generate_rotated_page(base_width,
+                               base_height,
+                               border_thickness,
+                               scale,
+                               rotation_degrees,
+                               image,
+                               expected_corners)) {
+        console_write(2, "test-scan-basic: failed to generate rotated page for ");
+        console_line(2, name);
+        makocode::image::release(image);
+        return false;
+    }
+
+    makocode::image::CornerDetectionConfig config;
+    config.logical_width = base_width;
+    config.logical_height = base_height;
+    config.cross_half = 3u;
+    config.cross_trim = 0.75;
+
+    makocode::image::CornerDetectionResult result;
+    if (!makocode::image::find_corners(image, 128u, config, result) || !result.valid) {
+        console_write(2, "test-scan-basic: find_corners failed for ");
+        console_line(2, name);
+        makocode::image::release(image);
+        return false;
+    }
+
+    bool ok = true;
+    for (int i = 0; i < 4; ++i) {
+        double dx = abs_double(result.corners[i][0] - expected_corners[i][0]);
+        double dy = abs_double(result.corners[i][1] - expected_corners[i][1]);
+        if (dx > corner_tolerance || dy > corner_tolerance) {
+            console_write(2, "test-scan-basic: corner mismatch for ");
+            console_write(2, name);
+            console_write(2, " corner=");
+            char num[32];
+            append_number_ascii((unsigned)(i + 1), num);
+            console_write(2, num);
+            console_write(2, " dx=");
+            format_fixed_3(dx, num, sizeof(num));
+            console_write(2, num);
+            console_write(2, " dy=");
+            format_fixed_3(dy, num, sizeof(num));
+            console_write(2, num);
+            console_line(2, "");
+            ok = false;
+            break;
+        }
+    }
+
+    if (ok) {
+        double expected_hx = ((expected_corners[1][0] - expected_corners[0][0]) +
+                              (expected_corners[3][0] - expected_corners[2][0])) * 0.5;
+        double expected_hy = ((expected_corners[1][1] - expected_corners[0][1]) +
+                              (expected_corners[3][1] - expected_corners[2][1])) * 0.5;
+        double expected_vx = ((expected_corners[2][0] - expected_corners[0][0]) +
+                              (expected_corners[3][0] - expected_corners[1][0])) * 0.5;
+        double expected_vy = ((expected_corners[2][1] - expected_corners[0][1]) +
+                              (expected_corners[3][1] - expected_corners[1][1])) * 0.5;
+        normalize_components(expected_hx, expected_hy);
+        normalize_components(expected_vx, expected_vy);
+
+        double diff_hx = abs_double(result.pixelhx - expected_hx);
+        double diff_hy = abs_double(result.pixelhy - expected_hy);
+        double diff_vx = abs_double(result.pixelvx - expected_vx);
+        double diff_vy = abs_double(result.pixelvy - expected_vy);
+        if (diff_hx > vector_tolerance || diff_hy > vector_tolerance ||
+            diff_vx > vector_tolerance || diff_vy > vector_tolerance) {
+            console_write(2, "test-scan-basic: pixel vector mismatch for ");
+            console_line(2, name);
+            ok = false;
+        }
+        if (ok) {
+            double expected_h_angle = compute_angle_deg(expected_hx, -expected_hy);
+            double expected_v_angle = compute_angle_deg(expected_vx, -expected_vy);
+            double expected_skew = wrap_angle_deg(expected_h_angle + expected_v_angle + 90.0) * 0.5;
+            double expected_perp = expected_h_angle - expected_v_angle;
+            if (abs_double(result.skew_degrees - expected_skew) > metric_tolerance ||
+                abs_double(result.perpendicularity_degrees - expected_perp) > metric_tolerance) {
+                console_write(2, "test-scan-basic: angle metrics mismatch for ");
+                console_line(2, name);
+                char num[32];
+                console_write(2, "  expected_skew=");
+                format_fixed_3(expected_skew, num, sizeof(num));
+                console_write(2, num);
+                console_write(2, " actual_skew=");
+                format_fixed_3(result.skew_degrees, num, sizeof(num));
+                console_line(2, num);
+                console_write(2, "  expected_perp=");
+                format_fixed_3(expected_perp, num, sizeof(num));
+                console_write(2, num);
+                console_write(2, " actual_perp=");
+                format_fixed_3(result.perpendicularity_degrees, num, sizeof(num));
+                console_line(2, num);
+                ok = false;
+            }
+        }
+        if (ok) {
+            double expected_h_component = ((expected_corners[1][0] + expected_corners[3][0]) -
+                                           (expected_corners[0][0] + expected_corners[0][0])) * 0.5;
+            double expected_v_component = ((expected_corners[2][1] + expected_corners[3][1]) -
+                                           (expected_corners[0][1] + expected_corners[1][1])) * 0.5;
+            double expected_hpixel = expected_h_component / (double)base_width;
+            double expected_vpixel = expected_v_component / (double)base_height;
+            if (abs_double(result.hpixel - expected_hpixel) > metric_tolerance ||
+                abs_double(result.vpixel - expected_vpixel) > metric_tolerance) {
+                console_write(2, "test-scan-basic: pixel size mismatch for ");
+                console_line(2, name);
+                char num[32];
+                console_write(2, "  expected_h=");
+                format_fixed_3(expected_hpixel, num, sizeof(num));
+                console_write(2, num);
+                console_write(2, " actual_h=");
+                format_fixed_3(result.hpixel, num, sizeof(num));
+                console_line(2, num);
+                console_write(2, "  expected_v=");
+                format_fixed_3(expected_vpixel, num, sizeof(num));
+                console_write(2, num);
+                console_write(2, " actual_v=");
+                format_fixed_3(result.vpixel, num, sizeof(num));
+                console_line(2, num);
+                for (int ci = 0; ci < 4; ++ci) {
+                    console_write(2, "  corner ");
+                    append_number_ascii((unsigned)(ci + 1), num);
+                    console_write(2, num);
+                    console_write(2, " expected=(");
+                    format_fixed_3(expected_corners[ci][0], num, sizeof(num));
+                    console_write(2, num);
+                    console_write(2, ",");
+                    format_fixed_3(expected_corners[ci][1], num, sizeof(num));
+                    console_write(2, num);
+                    console_write(2, ") actual=(");
+                    format_fixed_3(result.corners[ci][0], num, sizeof(num));
+                    console_write(2, num);
+                    console_write(2, ",");
+                    format_fixed_3(result.corners[ci][1], num, sizeof(num));
+                    console_write(2, num);
+                    console_line(2, ")");
+                }
+                ok = false;
+            }
+            if (ok) {
+                double half_scale = (double)config.cross_half * 0.5;
+                unsigned expected_chalf = (unsigned)(expected_hpixel * half_scale);
+                unsigned expected_chalf_v = (unsigned)(expected_vpixel * half_scale);
+                unsigned expected_chalf_val = expected_chalf < expected_chalf_v ? expected_chalf : expected_chalf_v;
+                if (result.chalf != (int)expected_chalf_val) {
+                    console_write(2, "test-scan-basic: chalf mismatch for ");
+                    console_line(2, name);
+                    ok = false;
+                }
+            }
+            if (ok) {
+                double core = (double)config.cross_half - config.cross_trim;
+                if (core < 0.0) core = 0.0;
+                unsigned expected_cf_h = (unsigned)(expected_hpixel * core);
+                unsigned expected_cf_v = (unsigned)(expected_vpixel * core);
+                unsigned expected_cf = expected_cf_h < expected_cf_v ? expected_cf_h : expected_cf_v;
+                if (result.chalf_fine != (int)expected_cf) {
+                    console_write(2, "test-scan-basic: chalf_fine mismatch for ");
+                    console_line(2, name);
+                    ok = false;
+                }
+            }
+        }
+    }
+
+
+
+    makocode::image::release(image);
+    if (!ok) {
+        return false;
+    }
+
+    console_write(1, "test-scan-basic: corner detection ");
+    console_line(1, name);
+    return true;
+}
+
 static bool verify_border_dirt_cleanup(const char* fixture_dir)
 {
     const unsigned width = 16u;
@@ -9270,6 +9859,29 @@ static int command_test_scan_basic(int arg_count, char** args) {
     }
     console_line(1, "test-scan-basic: synthetic low_contrast");
 
+    if (!verify_corner_detection_case("corner-rotation-scale-a",
+                                      160u,
+                                      200u,
+                                      4u,
+                                      1.20,
+                                      12.0,
+                                      1.5,
+                                      0.02,
+                                      0.30)) {
+        return 1;
+    }
+    if (!verify_corner_detection_case("corner-rotation-scale-b",
+                                      160u,
+                                      200u,
+                                      4u,
+                                      0.85,
+                                      -9.0,
+                                      1.5,
+                                      0.02,
+                                      0.30)) {
+        return 1;
+    }
+
     if (!verify_border_dirt_cleanup(fixture_dir)) {
         return 1;
     }
@@ -9396,6 +10008,7 @@ static int command_test_payload(int arg_count, char** args) {
     }
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
+    u64 artifact_serial = 0u;
     bool two_page_test_done = false;
     for (usize scenario_index = 0u; scenario_index < scenario_count; ++scenario_index) {
         const TestScenario& scenario = scenarios[scenario_index];
@@ -9426,7 +10039,6 @@ static int command_test_payload(int arg_count, char** args) {
             u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
             console_write(1, "test:  color=");
             console_line(1, digits_color);
-        u64 test_case_index = (u64)total_runs + 1u;
         u32 width_pixels = 0u;
         u32 height_pixels = 0u;
         if (!compute_page_dimensions(run_mapping, width_pixels, height_pixels)) {
@@ -9607,6 +10219,7 @@ static int command_test_payload(int arg_count, char** args) {
             console_line(2, "test: unexpected page count");
             return 1;
         }
+        u64 scenario_anchor_serial = ++artifact_serial;
         makocode::BitWriter aggregate_writer;
         aggregate_writer.reset();
         PpmParserState aggregate_state;
@@ -9619,6 +10232,7 @@ static int command_test_payload(int arg_count, char** args) {
         makocode::ByteBuffer name_buffer;
         const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
         for (u64 page = 0u; page < page_count; ++page) {
+            u64 page_serial = scenario_anchor_serial;
             makocode::ByteBuffer page_output;
             u64 bit_offset = page * bits_per_page;
             if (!encode_page_to_ppm(run_mapping,
@@ -9668,7 +10282,7 @@ static int command_test_payload(int arg_count, char** args) {
             }
             makocode::ByteBuffer data_base;
             if (!build_page_base_name(data_base,
-                                      test_case_index,
+                                      page_serial,
                                       "data",
                                       digits_scenario,
                                       digits_color,
@@ -9705,7 +10319,7 @@ static int command_test_payload(int arg_count, char** args) {
             if (simulate_scan_distortion(page_output, scan_output)) {
                 makocode::ByteBuffer scan_name;
                 if (!build_page_base_name(scan_name,
-                                          test_case_index,
+                                          page_serial,
                                           "scan",
                                           digits_scenario,
                                           digits_color,
@@ -9912,8 +10526,9 @@ static int command_test_payload(int arg_count, char** args) {
                         scaled_effective_bits = scaled_page_state.page_bits_value;
                     }
                     makocode::ByteBuffer scaled_base;
+                    u64 scaled_serial = ++artifact_serial;
                     if (!build_page_base_name(scaled_base,
-                                              test_case_index,
+                                              scaled_serial,
                                               "scaled",
                                               digits_scenario,
                                               digits_color,
@@ -9950,7 +10565,7 @@ static int command_test_payload(int arg_count, char** args) {
                     if (simulate_scan_distortion(scaled_page, scan_scaled)) {
                         makocode::ByteBuffer scan_scaled_name;
                         if (!build_page_base_name(scan_scaled_name,
-                                                  test_case_index,
+                                                  scaled_serial,
                                                   "scan",
                                                   digits_scenario,
                                                   digits_color,
@@ -10116,7 +10731,12 @@ static int command_test_payload(int arg_count, char** args) {
             }
         }
         name_buffer.release();
-        if (!buffer_append_zero_padded(name_buffer, test_case_index, 4u) ||
+        if (scenario_anchor_serial == 0u) {
+            console_line(2, "test: payload missing anchor serial");
+            return 1;
+        }
+        u64 payload_serial = scenario_anchor_serial;
+        if (!buffer_append_zero_padded(name_buffer, payload_serial, 4u) ||
             !name_buffer.append_ascii("_payload_s") ||
             !name_buffer.append_ascii(digits_scenario) ||
             !name_buffer.append_ascii("_c") ||
@@ -10133,7 +10753,7 @@ static int command_test_payload(int arg_count, char** args) {
         console_write(1, "test:   payload ");
         console_line(1, (const char*)name_buffer.data);
         name_buffer.release();
-        if (!buffer_append_zero_padded(name_buffer, test_case_index, 4u) ||
+        if (!buffer_append_zero_padded(name_buffer, payload_serial, 4u) ||
             !name_buffer.append_ascii("_payload_s") ||
             !name_buffer.append_ascii(digits_scenario) ||
             !name_buffer.append_ascii("_c") ||
