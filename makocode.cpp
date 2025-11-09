@@ -3609,6 +3609,16 @@ struct DecoderContext {
 static const u32 DEFAULT_PAGE_WIDTH_PIXELS  = 2480u; // matches prior A4 default
 static const u32 DEFAULT_PAGE_HEIGHT_PIXELS = 3508u; // matches prior A4 default
 
+static void byte_buffer_move(makocode::ByteBuffer& dest, makocode::ByteBuffer& src) {
+    dest.release();
+    dest.data = src.data;
+    dest.size = src.size;
+    dest.capacity = src.capacity;
+    src.data = 0;
+    src.size = 0;
+    src.capacity = 0;
+}
+
 struct ImageMappingConfig {
     u8  color_channels;
     bool color_set;
@@ -4152,7 +4162,19 @@ static bool write_bytes_to_file(const char* path, const u8* data, usize length) 
     return ok;
 }
 
+static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::ByteBuffer& buffer);
+
 static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+    if (!path) {
+        return false;
+    }
+    usize path_length = ascii_length(path);
+    if (path_length >= 4u) {
+        const char* suffix = path + (path_length - 4u);
+        if (suffix[0] == '.' && suffix[1] == 'p' && suffix[2] == 'p' && suffix[3] == 'm') {
+            return write_ppm_with_fiducials_to_file(path, buffer);
+        }
+    }
     return write_bytes_to_file(path, buffer.data, buffer.size);
 }
 
@@ -7256,9 +7278,9 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                         continue;
                     }
                     usize index = ((usize)pixel_y * (usize)width_px + (usize)pixel_x) * 3u;
-                    pixel_data[index + 0u] = 0u;
-                    pixel_data[index + 1u] = 0u;
-                    pixel_data[index + 2u] = 0u;
+                    pixel_data[index + 0u] = 255u;
+                    pixel_data[index + 1u] = 255u;
+                    pixel_data[index + 2u] = 255u;
                 }
             }
         }
@@ -7301,6 +7323,82 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         }
     }
     return true;
+}
+
+static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
+                                   u32& width_pixels,
+                                   u32& height_pixels) {
+    width_pixels = 0u;
+    height_pixels = 0u;
+    if (!input.data || input.size == 0u) {
+        return false;
+    }
+    PpmParserState state;
+    state.data = input.data;
+    state.size = input.size;
+    const char* token = 0;
+    usize token_length = 0u;
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    if (!ascii_equals_token(token, token_length, "P3")) {
+        return false;
+    }
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    u64 width_value = 0u;
+    if (!ascii_to_u64(token, token_length, &width_value) ||
+        width_value == 0u ||
+        width_value > (u64)0xFFFFFFFFu) {
+        return false;
+    }
+    if (!ppm_next_token(state, &token, &token_length)) {
+        return false;
+    }
+    u64 height_value = 0u;
+    if (!ascii_to_u64(token, token_length, &height_value) ||
+        height_value == 0u ||
+        height_value > (u64)0xFFFFFFFFu) {
+        return false;
+    }
+    width_pixels = (u32)width_value;
+    height_pixels = (u32)height_value;
+    return true;
+}
+
+static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
+                                        makocode::ByteBuffer& output) {
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
+        return false;
+    }
+    const u32 fiducial_spacing = 72u;
+    const u32 fiducial_marker_size = 3u;
+    const u32 fiducial_margin = 12u;
+    u32 fiducial_columns = fiducial_spacing ? (width_pixels / fiducial_spacing) : 0u;
+    if (fiducial_columns < 4u) {
+        fiducial_columns = 4u;
+    }
+    u32 fiducial_rows = fiducial_spacing ? (height_pixels / fiducial_spacing) : 0u;
+    if (fiducial_rows < 6u) {
+        fiducial_rows = 6u;
+    }
+    return ppm_insert_fiducial_grid(input,
+                                    fiducial_marker_size,
+                                    fiducial_columns,
+                                    fiducial_rows,
+                                    fiducial_margin,
+                                    output);
+}
+
+static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+    makocode::ByteBuffer fiducial_buffer;
+    if (!apply_default_fiducial_grid(buffer, fiducial_buffer)) {
+        return false;
+    }
+    return write_bytes_to_file(path, fiducial_buffer.data, fiducial_buffer.size);
 }
 
 static bool ppm_apply_wavy_ripple(const makocode::ByteBuffer& input,
@@ -9254,6 +9352,12 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to format ppm");
             return 1;
         }
+        makocode::ByteBuffer fiducial_page;
+        if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
+            console_line(2, "encode: failed to embed fiducial grid");
+            return 1;
+        }
+        byte_buffer_move(page_output, fiducial_page);
         makocode::ByteBuffer output_name;
         if (!build_page_filename(output_name, timestamp_name, 1u, 1u)) {
             console_line(2, "encode: failed to build output filename");
@@ -9295,6 +9399,12 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
             }
+            makocode::ByteBuffer fiducial_page;
+            if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
+                console_line(2, "encode: failed to embed fiducial grid");
+                return 1;
+            }
+            byte_buffer_move(page_output, fiducial_page);
             if (!build_page_filename(name_buffer, timestamp_name, page + 1u, page_count)) {
                 console_line(2, "encode: failed to build filename");
                 return 1;
@@ -12346,25 +12456,8 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
     }
     log_line(1, "encoded baseline page");
 
-    u32 fiducial_spacing = 72u;
-    u32 fiducial_columns = (width_pixels / fiducial_spacing);
-    if (fiducial_columns < 4u) {
-        fiducial_columns = 4u;
-    }
-    u32 fiducial_rows = (height_pixels / fiducial_spacing);
-    if (fiducial_rows < 6u) {
-        fiducial_rows = 6u;
-    }
-    const u32 fiducial_marker_size = 3u;
-    const u32 fiducial_margin = 12u;
-
     makocode::ByteBuffer fiducial_ppm;
-    if (!ppm_insert_fiducial_grid(ppm_buffer,
-                                  fiducial_marker_size,
-                                  fiducial_columns,
-                                  fiducial_rows,
-                                  fiducial_margin,
-                                  fiducial_ppm)) {
+    if (!apply_default_fiducial_grid(ppm_buffer, fiducial_ppm)) {
         log_line(2, "failed to embed fiducial grid");
         return 1;
     }
