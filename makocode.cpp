@@ -8720,6 +8720,21 @@ static int command_test_border_dirt(int arg_count, char** args) {
         return 1;
     }
 
+    auto write_artifact = [&](const char* filename,
+                              const makocode::ByteBuffer& buffer) -> bool {
+        makocode::ByteBuffer path;
+        if (!path.append_ascii(base_dir) ||
+            !path.append_char('/') ||
+            !path.append_ascii(filename) ||
+            !path.append_char('\0')) {
+            path.release();
+            return false;
+        }
+        bool ok = write_buffer_to_file((const char*)path.data, buffer);
+        path.release();
+        return ok;
+    };
+
     usize max_payload_size = (usize)((bits_per_page) / 8u) + 256u;
     if (max_payload_size < 32u) {
         max_payload_size = 32u;
@@ -8783,6 +8798,15 @@ static int command_test_border_dirt(int arg_count, char** args) {
         return 1;
     }
 
+    if (!write_artifact("0013_border_payload.bin", payload)) {
+        console_line(2, "test-border-dirt: failed to write payload artifact");
+        return 1;
+    }
+    console_write(1, "test-border-dirt:   artifact 13.1 payload -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0013_border_payload.bin");
+    console_line(1, "");
+
     makocode::ByteBuffer page_output;
     if (!encode_page_to_ppm(mapping,
                             frame_bits,
@@ -8802,6 +8826,14 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to encode page");
         return 1;
     }
+    if (!write_artifact("0013_border_encoded.ppm", page_output)) {
+        console_line(2, "test-border-dirt: failed to write encoded artifact");
+        return 1;
+    }
+    console_write(1, "test-border-dirt:   artifact 13.2 encoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0013_border_encoded.ppm");
+    console_line(1, "");
 
     unsigned ppm_width = 0;
     unsigned ppm_height = 0;
@@ -8811,6 +8843,27 @@ static int command_test_border_dirt(int arg_count, char** args) {
         return 1;
     }
     usize pixel_count = (usize)ppm_width * (usize)ppm_height;
+    usize rgb_bytes = pixel_count * 3u;
+    makocode::ByteBuffer rgb_dirty;
+    makocode::ByteBuffer rgb_clean;
+    if (rgb_bytes) {
+        if (!rgb_dirty.ensure(rgb_bytes) || !rgb_clean.ensure(rgb_bytes)) {
+            console_line(2, "test-border-dirt: allocation failure for rgb copies");
+            return 1;
+        }
+        rgb_dirty.size = rgb_bytes;
+        rgb_clean.size = rgb_bytes;
+        const u8* rgb_source = rgb_data.data;
+        if (!rgb_source) {
+            console_line(2, "test-border-dirt: missing rgb source data");
+            return 1;
+        }
+        for (usize i = 0u; i < rgb_bytes; ++i) {
+            u8 value = rgb_source[i];
+            rgb_dirty.data[i] = value;
+            rgb_clean.data[i] = value;
+        }
+    }
     makocode::ByteBuffer grayscale;
     if (!grayscale.ensure(pixel_count)) {
         console_line(2, "test-border-dirt: allocation failure for grayscale buffer");
@@ -8832,11 +8885,23 @@ static int command_test_border_dirt(int arg_count, char** args) {
         {ppm_width / 2u, ppm_height - 1u},
         {3u, ppm_height - 1u}
     };
+    usize speck_indices[sizeof(specks) / sizeof(specks[0])];
+    usize speck_total = 0u;
     for (usize i = 0u; i < sizeof(specks)/sizeof(specks[0]); ++i) {
         unsigned sx = specks[i][0];
         unsigned sy = specks[i][1];
         if (sx < ppm_width && sy < ppm_height) {
-            grayscale.data[(usize)sy * (usize)ppm_width + (usize)sx] = 0u;
+            usize index = (usize)sy * (usize)ppm_width + (usize)sx;
+            grayscale.data[index] = 0u;
+            usize rgb_index = index * 3u;
+            if (rgb_index + 2u < rgb_dirty.size) {
+                rgb_dirty.data[rgb_index + 0u] = 0u;
+                rgb_dirty.data[rgb_index + 1u] = 0u;
+                rgb_dirty.data[rgb_index + 2u] = 0u;
+            }
+            if (speck_total < sizeof(speck_indices)/sizeof(speck_indices[0])) {
+                speck_indices[speck_total++] = index;
+            }
         }
     }
 
@@ -8861,11 +8926,29 @@ static int command_test_border_dirt(int arg_count, char** args) {
         mask.release();
         return 1;
     }
-
     if (mask.size != pixel_count) {
         console_line(2, "test-border-dirt: mask size mismatch");
         mask.release();
         return 1;
+    }
+
+    for (usize i = 0u; i < speck_total; ++i) {
+        usize index = speck_indices[i];
+        if (index >= pixel_count) {
+            continue;
+        }
+        if (image_buf.pixels[index] != 255u) {
+            mask.release();
+            console_line(2, "test-border-dirt: speck not cleared by removal");
+            return 1;
+        }
+        usize rgb_index = index * 3u;
+        if (rgb_index + 2u < rgb_clean.size) {
+            unsigned char cleaned_value = image_buf.pixels[index];
+            rgb_clean.data[rgb_index + 0u] = cleaned_value;
+            rgb_clean.data[rgb_index + 1u] = cleaned_value;
+            rgb_clean.data[rgb_index + 2u] = cleaned_value;
+        }
     }
 
     auto write_case_fixture = [&](const char* suffix,
@@ -8891,6 +8974,190 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to write fixtures");
         return 1;
     }
+
+    auto make_ppm_from_rgb = [&](const makocode::ByteBuffer& source,
+                                 makocode::ByteBuffer& ppm) -> bool {
+        if (source.size < rgb_bytes) {
+            return false;
+        }
+        ppm.release();
+        if (!ppm.append_ascii("P3\n")) {
+            return false;
+        }
+        if (!append_comment_number(ppm, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels) ||
+            !append_comment_number(ppm, "MAKOCODE_BITS", payload_bit_count) ||
+            !append_comment_number(ppm, "MAKOCODE_ECC", 0u) ||
+            !append_comment_number(ppm, "MAKOCODE_PAGE_COUNT", page_count) ||
+            !append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
+            !append_comment_number(ppm, "MAKOCODE_PAGE_BITS", bits_per_page) ||
+            !append_comment_number(ppm, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels) ||
+            !append_comment_number(ppm, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
+            return false;
+        }
+        u32 footer_rows = height_pixels - data_height_pixels;
+        if (footer_rows) {
+            if (!append_comment_number(ppm, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
+                return false;
+            }
+        }
+        if (!buffer_append_number(ppm, (u64)ppm_width) ||
+            !ppm.append_char(' ') ||
+            !buffer_append_number(ppm, (u64)ppm_height) ||
+            !ppm.append_char('\n')) {
+            return false;
+        }
+        if (!ppm.append_ascii("255\n")) {
+            return false;
+        }
+        for (usize i = 0u; i < pixel_count; ++i) {
+            usize rgb_index = i * 3u;
+            for (u32 channel = 0u; channel < 3u; ++channel) {
+                if (channel) {
+                    if (!ppm.append_char(' ')) {
+                        return false;
+                    }
+                }
+                if (!buffer_append_number(ppm, (u64)source.data[rgb_index + channel])) {
+                    return false;
+                }
+            }
+            if (!ppm.append_char('\n')) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    makocode::ByteBuffer dirty_ppm;
+    makocode::ByteBuffer cleaned_ppm;
+    if (!make_ppm_from_rgb(rgb_dirty, dirty_ppm) ||
+        !make_ppm_from_rgb(rgb_clean, cleaned_ppm)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to marshal ppm fixtures");
+        return 1;
+    }
+    if (!write_artifact("0013_border_dirty.ppm", dirty_ppm) ||
+        !write_artifact("0013_border_clean.ppm", cleaned_ppm)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to write scan artifacts");
+        return 1;
+    }
+    console_write(1, "test-border-dirt:   artifact 13.3 dirty -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0013_border_dirty.ppm");
+    console_line(1, "");
+    console_write(1, "test-border-dirt:   artifact 13.4 cleaned -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0013_border_clean.ppm");
+    console_line(1, "");
+
+    makocode::ByteBuffer dirty_frame_bits;
+    u64 dirty_frame_bit_count = 0u;
+    PpmParserState dirty_state;
+    bool dirty_frame_ok =
+        ppm_extract_frame_bits(dirty_ppm, mapping, dirty_frame_bits, dirty_frame_bit_count, dirty_state);
+    if (dirty_frame_ok) {
+        dirty_state.has_bits = true;
+        dirty_state.bits_value = payload_bit_count;
+        dirty_state.has_page_count = true;
+        dirty_state.page_count_value = 1u;
+        dirty_state.has_page_index = true;
+        dirty_state.page_index_value = 1u;
+        u64 dirty_effective_bits = frame_bit_count;
+        if (dirty_effective_bits == 0u || dirty_effective_bits > dirty_frame_bit_count) {
+            dirty_effective_bits = dirty_frame_bit_count;
+        }
+        makocode::ByteBuffer dirty_payload_bits;
+        u64 dirty_payload_bit_count = 0u;
+        bool dirty_payload_ok = frame_bits_to_payload(dirty_frame_bits.data,
+                                                      dirty_effective_bits,
+                                                      dirty_state,
+                                                      dirty_payload_bits,
+                                                      dirty_payload_bit_count);
+        bool dirty_payload_match = false;
+        if (dirty_payload_ok) {
+            makocode::DecoderContext dirty_decoder;
+            if (dirty_decoder.parse(dirty_payload_bits.data,
+                                    dirty_payload_bit_count,
+                                    (const char*)0,
+                                    0u) &&
+                dirty_decoder.has_payload &&
+                dirty_decoder.payload.size == payload.size) {
+                dirty_payload_match = true;
+                for (usize i = 0u; i < payload.size; ++i) {
+                    if (dirty_decoder.payload.data[i] != payload.data[i]) {
+                        dirty_payload_match = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (dirty_payload_match) {
+            mask.release();
+            console_line(2, "test-border-dirt: dirty image decoded without cleanup");
+            return 1;
+        }
+    }
+
+    makocode::ByteBuffer clean_frame_bits;
+    u64 clean_frame_bit_count = 0u;
+    PpmParserState clean_state;
+    if (!ppm_extract_frame_bits(cleaned_ppm, mapping, clean_frame_bits, clean_frame_bit_count, clean_state)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to parse cleaned ppm");
+        return 1;
+    }
+    clean_state.has_bits = true;
+    clean_state.bits_value = payload_bit_count;
+    clean_state.has_page_count = true;
+    clean_state.page_count_value = 1u;
+    clean_state.has_page_index = true;
+    clean_state.page_index_value = 1u;
+    u64 clean_effective_bits = frame_bit_count;
+    if (clean_effective_bits == 0u || clean_effective_bits > clean_frame_bit_count) {
+        clean_effective_bits = clean_frame_bit_count;
+    }
+    makocode::ByteBuffer clean_payload_bits;
+    u64 clean_payload_bit_count = 0u;
+    if (!frame_bits_to_payload(clean_frame_bits.data,
+                               clean_effective_bits,
+                               clean_state,
+                               clean_payload_bits,
+                               clean_payload_bit_count)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to reassemble cleaned payload bits");
+        return 1;
+    }
+    makocode::DecoderContext clean_decoder;
+    if (!clean_decoder.parse(clean_payload_bits.data,
+                             clean_payload_bit_count,
+                             (const char*)0,
+                             0u)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to decode cleaned payload");
+        return 1;
+    }
+    if (!clean_decoder.has_payload || clean_decoder.payload.size != payload.size) {
+        mask.release();
+        console_line(2, "test-border-dirt: cleaned payload size mismatch");
+        return 1;
+    }
+    for (usize i = 0u; i < payload.size; ++i) {
+        if (clean_decoder.payload.data[i] != payload.data[i]) {
+            mask.release();
+            console_line(2, "test-border-dirt: cleaned payload mismatch");
+            return 1;
+        }
+    }
+    if (!write_artifact("0013_border_payload_decoded.bin", clean_decoder.payload)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to write decoded payload artifact");
+        return 1;
+    }
+    console_write(1, "test-border-dirt:   artifact 13.5 decoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/0013_border_payload_decoded.bin");
+    console_line(1, "");
 
     const u64 expected_checksum = 378165u;
     u64 checksum = 0u;
@@ -9903,6 +10170,10 @@ static int command_test(int arg_count, char** args) {
         int (*fn)(int, char**);
         bool forward_args;
     };
+    /* Test suite summary:
+       1) scan-basic     - validates histogram analytics and dirt removal on small fixtures.
+       2) border-dirt    - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
+       3) payload-suite  - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
     const TestSuiteEntry suites[] = {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
