@@ -1,6 +1,6 @@
 TODO:
-- Fiducial data markings. Confirm the data write/read actually skips over, rather than just being in place and error corrected.
-- Wavy distortion test
+- Fiducial data markings, fix wavy distortion test. Needs to be broken down before proceeding.
+- Confirm the data write/read actually skips over, rather than just being in place and error corrected.
 - Stretch test, e.g. in one direction only
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
