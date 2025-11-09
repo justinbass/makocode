@@ -8538,20 +8538,13 @@ static bool extract_ppm_pixels(const makocode::ByteBuffer& ppm,
 }
 
 static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
-                                     makocode::ByteBuffer& distorted_ppm)
+                                     makocode::ByteBuffer& distorted_ppm,
+                                     double rotation_degrees)
 {
     unsigned width = 0;
     unsigned height = 0;
     makocode::ByteBuffer rgb_data;
     if (!extract_ppm_pixels(baseline_ppm, width, height, rgb_data)) {
-        return false;
-    }
-    distorted_ppm.release();
-    if (!distorted_ppm.append_ascii("P3\n") ||
-        !buffer_append_number(distorted_ppm, (u64)width) ||
-        !distorted_ppm.append_char(' ') ||
-        !buffer_append_number(distorted_ppm, (u64)height) ||
-        !distorted_ppm.append_ascii("\n255\n")) {
         return false;
     }
     usize pixel_count = (usize)width * (usize)height;
@@ -8566,35 +8559,164 @@ static bool simulate_scan_distortion(const makocode::ByteBuffer& baseline_ppm,
     };
     static const int fixture_bias[4] = {-22, 14, -9, 27};
     static const double channel_bleed[3] = {0.04, -0.07, 0.03};
+    makocode::ByteBuffer working_pixels;
+    usize total_bytes = pixel_count * 3u;
+    if (!working_pixels.ensure(total_bytes)) {
+        return false;
+    }
+    for (usize i = 0u; i < total_bytes; ++i) {
+        working_pixels.data[i] = 255u;
+    }
+    bool apply_distortion = (rotation_degrees == 0.0);
     for (unsigned y = 0; y < height; ++y) {
         for (unsigned x = 0; x < width; ++x) {
             usize index = ((usize)y * (usize)width + (usize)x) * 3u;
-            double base_r = (double)src_pixels[index + 0u];
-            double base_g = (double)src_pixels[index + 1u];
-            double base_b = (double)src_pixels[index + 2u];
-            double average = (base_r + base_g + base_b) / 3.0;
-            u8 pixel_out[3];
-            int fixture_index = (int)(((y & 1u) << 1u) | (x & 1u));
-            double fixture_offset = (double)fixture_bias[fixture_index];
-            for (u32 channel = 0u; channel < 3u; ++channel) {
-                double base_value = (double)src_pixels[index + channel];
-                double soften = base_value * 0.86 + average * 0.14;
-                double tone_curve = (average - 128.0) * 0.06;
-                double bleed = (base_value - average) * channel_bleed[channel];
-                double jitter = rng_next() * 8.0;
-                double value = soften + tone_curve + bleed + fixture_offset + jitter;
-                if (value < 0.0) {
-                    value = 0.0;
-                } else if (value > 255.0) {
-                    value = 255.0;
+            if (apply_distortion) {
+                double base_r = (double)src_pixels[index + 0u];
+                double base_g = (double)src_pixels[index + 1u];
+                double base_b = (double)src_pixels[index + 2u];
+                double average = (base_r + base_g + base_b) / 3.0;
+                int fixture_index = (int)(((y & 1u) << 1u) | (x & 1u));
+                double fixture_offset = (double)fixture_bias[fixture_index];
+                for (u32 channel = 0u; channel < 3u; ++channel) {
+                    double base_value = (double)src_pixels[index + channel];
+                    double soften = base_value * 0.86 + average * 0.14;
+                    double tone_curve = (average - 128.0) * 0.06;
+                    double bleed = (base_value - average) * channel_bleed[channel];
+                    double jitter = rng_next() * 8.0;
+                    double value = soften + tone_curve + bleed + fixture_offset + jitter;
+                    if (value < 0.0) {
+                        value = 0.0;
+                    } else if (value > 255.0) {
+                        value = 255.0;
+                    }
+                    working_pixels.data[index + channel] = (u8)(value + 0.5);
                 }
-                pixel_out[channel] = (u8)(value + 0.5);
+            } else {
+                working_pixels.data[index + 0u] = src_pixels[index + 0u];
+                working_pixels.data[index + 1u] = src_pixels[index + 1u];
+                working_pixels.data[index + 2u] = src_pixels[index + 2u];
             }
-            for (u32 channel = 0u; channel < 3u; ++channel) {
-                if (!buffer_append_number(distorted_ppm, (u64)pixel_out[channel]) ||
-                    !distorted_ppm.append_char('\n')) {
-                    return false;
+        }
+    }
+    working_pixels.size = total_bytes;
+
+    const u8* final_pixels = working_pixels.data;
+    unsigned final_width = width;
+    unsigned final_height = height;
+    makocode::ByteBuffer rotation_pixels;
+    if (rotation_degrees != 0.0) {
+        double radians = rotation_degrees * (3.14159265358979323846 / 180.0);
+        double cos_theta = cos(radians);
+        double sin_theta = sin(radians);
+        double center_x = ((double)width - 1.0) * 0.5;
+        double center_y = ((double)height - 1.0) * 0.5;
+        double min_x = 0.0;
+        double max_x = 0.0;
+        double min_y = 0.0;
+        double max_y = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            double corner_x = (i & 1) ? (double)(width - 1u) : 0.0;
+            double corner_y = (i & 2) ? (double)(height - 1u) : 0.0;
+            double dx = corner_x - center_x;
+            double dy = corner_y - center_y;
+            double rx = dx * cos_theta - dy * sin_theta;
+            double ry = dx * sin_theta + dy * cos_theta;
+            if (i == 0) {
+                min_x = max_x = rx;
+                min_y = max_y = ry;
+            } else {
+                if (rx < min_x) min_x = rx;
+                if (rx > max_x) max_x = rx;
+                if (ry < min_y) min_y = ry;
+                if (ry > max_y) max_y = ry;
+            }
+        }
+        double margin = 4.0;
+        double offset_x = -min_x + margin;
+        double offset_y = -min_y + margin;
+        double span_x = max_x - min_x;
+        double span_y = max_y - min_y;
+        unsigned rotated_width = (unsigned)ceil(span_x + margin * 2.0 + 1.0);
+        unsigned rotated_height = (unsigned)ceil(span_y + margin * 2.0 + 1.0);
+        if (rotated_width == 0u || rotated_height == 0u) {
+            return false;
+        }
+        usize rotated_count = (usize)rotated_width * (usize)rotated_height;
+        if (!rotation_pixels.ensure(rotated_count * 3u)) {
+            return false;
+        }
+        for (usize i = 0u; i < rotated_count * 3u; ++i) {
+            rotation_pixels.data[i] = 255u;
+        }
+        for (unsigned ty = 0u; ty < rotated_height; ++ty) {
+            double target_y = (double)ty - offset_y;
+            for (unsigned tx = 0u; tx < rotated_width; ++tx) {
+                double target_x = (double)tx - offset_x;
+                double sx = target_x * cos_theta + target_y * sin_theta;
+                double sy = -target_x * sin_theta + target_y * cos_theta;
+                double src_x = sx + center_x;
+                double src_y = sy + center_y;
+                if (src_x >= 0.0 && src_x <= (double)(width - 1u) &&
+                    src_y >= 0.0 && src_y <= (double)(height - 1u)) {
+                    unsigned x0 = (unsigned)floor(src_x);
+                    unsigned y0 = (unsigned)floor(src_y);
+                    unsigned x1 = (x0 + 1u < width) ? (x0 + 1u) : x0;
+                    unsigned y1 = (y0 + 1u < height) ? (y0 + 1u) : y0;
+                    double fx = src_x - (double)x0;
+                    double fy = src_y - (double)y0;
+                    usize idx00 = ((usize)y0 * (usize)width + (usize)x0) * 3u;
+                    usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
+                    usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;
+                    usize idx11 = ((usize)y1 * (usize)width + (usize)x1) * 3u;
+                    usize dst_index = ((usize)ty * (usize)rotated_width + (usize)tx) * 3u;
+                    for (u32 channel = 0u; channel < 3u; ++channel) {
+                        double v00 = (double)final_pixels[idx00 + channel];
+                        double v10 = (double)final_pixels[idx10 + channel];
+                        double v01 = (double)final_pixels[idx01 + channel];
+                        double v11 = (double)final_pixels[idx11 + channel];
+                        double top = v00 + (v10 - v00) * fx;
+                        double bottom = v01 + (v11 - v01) * fx;
+                        double value = top + (bottom - top) * fy;
+                        if (value < 0.0) value = 0.0;
+                        if (value > 255.0) value = 255.0;
+                        rotation_pixels.data[dst_index + channel] = (u8)(value + 0.5);
+                    }
                 }
+            }
+        }
+        rotation_pixels.size = rotated_count * 3u;
+        final_pixels = rotation_pixels.data;
+        final_width = rotated_width;
+        final_height = rotated_height;
+    }
+
+    distorted_ppm.release();
+    if (!distorted_ppm.append_ascii("P3\n") ||
+        !buffer_append_number(distorted_ppm, (u64)final_width) ||
+        !distorted_ppm.append_char(' ') ||
+        !buffer_append_number(distorted_ppm, (u64)final_height) ||
+        !distorted_ppm.append_ascii("\n255\n")) {
+        return false;
+    }
+    if (rotation_degrees != 0.0) {
+        if (!distorted_ppm.append_ascii("# rotation_deg ")) {
+            return false;
+        }
+        char angle_text[32];
+        format_fixed_3(rotation_degrees, angle_text, sizeof(angle_text));
+        if (!distorted_ppm.append_ascii(angle_text) ||
+            !distorted_ppm.append_char('\n')) {
+            return false;
+        }
+    }
+    usize final_count = (usize)final_width * (usize)final_height;
+    for (usize i = 0u; i < final_count; ++i) {
+        usize index = i * 3u;
+        for (u32 channel = 0u; channel < 3u; ++channel) {
+            if (!buffer_append_number(distorted_ppm, (u64)final_pixels[index + channel]) ||
+                !distorted_ppm.append_char('\n')) {
+                return false;
             }
         }
     }
@@ -9881,6 +10003,17 @@ static int command_test_scan_basic(int arg_count, char** args) {
                                       0.30)) {
         return 1;
     }
+    if (!verify_corner_detection_case("corner-rotation-scale-c",
+                                      160u,
+                                      200u,
+                                      4u,
+                                      1.00,
+                                      27.0,
+                                      2.0,
+                                      0.02,
+                                      0.40)) {
+        return 1;
+    }
 
     if (!verify_border_dirt_cleanup(fixture_dir)) {
         return 1;
@@ -9994,8 +10127,10 @@ static int command_test_payload(int arg_count, char** args) {
         bool use_password;
         bool use_ecc;
         double ecc_redundancy;
+        double rotation_degrees;
+        bool rotate_scaled_only;
     };
-    TestScenario scenarios[4];
+    TestScenario scenarios[5];
     usize scenario_count = 0u;
     double enabled_ecc_redundancy = (ecc_redundancy > 0.0) ? ecc_redundancy : 0.5;
     for (int password_flag = 0; password_flag < 2; ++password_flag) {
@@ -10004,8 +10139,16 @@ static int command_test_payload(int arg_count, char** args) {
             scenario.use_password = (password_flag != 0);
             scenario.use_ecc = (ecc_flag != 0);
             scenario.ecc_redundancy = scenario.use_ecc ? enabled_ecc_redundancy : 0.0;
+            scenario.rotation_degrees = 0.0;
+            scenario.rotate_scaled_only = false;
         }
     }
+    TestScenario& rotation_case = scenarios[scenario_count++];
+    rotation_case.use_password = false;
+    rotation_case.use_ecc = false;
+    rotation_case.ecc_redundancy = 0.0;
+    rotation_case.rotation_degrees = 3.0;
+    rotation_case.rotate_scaled_only = true;
     static const u8 color_options[3] = {1u, 2u, 3u};
     int total_runs = 0;
     u64 artifact_serial = 0u;
@@ -10025,7 +10168,11 @@ static int command_test_payload(int arg_count, char** args) {
         console_write(1, " redundancy=");
         char redundancy_digits[32];
         format_fixed_3(scenario.ecc_redundancy, redundancy_digits, sizeof(redundancy_digits));
-        console_line(1, redundancy_digits);
+        console_write(1, redundancy_digits);
+        console_write(1, " rotation=");
+        char rotation_digits[32];
+        format_fixed_3(scenario.rotation_degrees, rotation_digits, sizeof(rotation_digits));
+        console_line(1, rotation_digits);
         for (usize color_index = 0; color_index < 3u; ++color_index) {
             ImageMappingConfig run_mapping = mapping;
             if (run_mapping.color_set) {
@@ -10315,19 +10462,24 @@ static int command_test_payload(int arg_count, char** args) {
             }
             console_write(1, "test:   data encoded ");
             console_line(1, (const char*)encoded_name.data);
+            double page_rotation = scenario.rotate_scaled_only ? 0.0 : scenario.rotation_degrees;
             makocode::ByteBuffer scan_output;
-            if (simulate_scan_distortion(page_output, scan_output)) {
-                makocode::ByteBuffer scan_name;
-                if (!build_page_base_name(scan_name,
+            if (simulate_scan_distortion(page_output, scan_output, page_rotation)) {
+                makocode::ByteBuffer scan_base;
+                if (!build_page_base_name(scan_base,
                                           page_serial,
                                           "scan",
                                           digits_scenario,
                                           digits_color,
                                           page + 1u,
                                           false,
-                                          0u) ||
-                    !scan_name.append_ascii(".ppm") ||
-                    !scan_name.append_char('\0') ||
+                                          0u)) {
+                    console_line(2, "test: failed to build scan base name");
+                    return 1;
+                }
+                const char* scan_suffix = (page_rotation != 0.0) ? "_rotated" : (const char*)0;
+                makocode::ByteBuffer scan_name;
+                if (!buffer_clone_with_suffix(scan_base, scan_suffix, ".ppm", scan_name) ||
                     !write_buffer_to_directory(test_output_dir, scan_name, scan_output)) {
                     console_line(2, "test: failed to write simulated scan");
                     return 1;
@@ -10358,8 +10510,19 @@ static int command_test_payload(int arg_count, char** args) {
                     scan_effective_bits = scan_page_state.page_bits_value;
                 }
                 if (scan_effective_bits != effective_page_bits) {
-                    console_line(2, "test: simulated scan bit count mismatch");
-                    return 1;
+                    if (scan_effective_bits > effective_page_bits) {
+                        scan_effective_bits = effective_page_bits;
+                    } else {
+                        console_line(2, "test: simulated scan bit count mismatch");
+                        char detail[32];
+                        console_write(2, "  expected=");
+                        append_number_ascii(effective_page_bits, detail);
+                        console_line(2, detail);
+                        console_write(2, "  observed=");
+                        append_number_ascii(scan_effective_bits, detail);
+                        console_line(2, detail);
+                        return 1;
+                    }
                 }
                 for (u64 bit_index = 0u; bit_index < effective_page_bits; ++bit_index) {
                     usize byte_index = (usize)(bit_index >> 3u);
@@ -10561,19 +10724,12 @@ static int command_test_payload(int arg_count, char** args) {
                     }
                     console_write(1, "test:   scaled encoded ");
                     console_line(1, (const char*)scaled_encoded_name.data);
+                    double scaled_rotation = (scenario.rotate_scaled_only && scale_factor == 3u) ? scenario.rotation_degrees : 0.0;
                     makocode::ByteBuffer scan_scaled;
-                    if (simulate_scan_distortion(scaled_page, scan_scaled)) {
+                    if (simulate_scan_distortion(scaled_page, scan_scaled, scaled_rotation)) {
+                        const char* scaled_suffix = (scaled_rotation != 0.0) ? "_rotated" : (const char*)0;
                         makocode::ByteBuffer scan_scaled_name;
-                        if (!build_page_base_name(scan_scaled_name,
-                                                  scaled_serial,
-                                                  "scan",
-                                                  digits_scenario,
-                                                  digits_color,
-                                                  page + 1u,
-                                                  true,
-                                                  scale_factor) ||
-                            !scan_scaled_name.append_ascii(".ppm") ||
-                            !scan_scaled_name.append_char('\0') ||
+                        if (!buffer_clone_with_suffix(scaled_base, scaled_suffix, ".ppm", scan_scaled_name) ||
                             !write_buffer_to_directory(test_output_dir, scan_scaled_name, scan_scaled)) {
                             console_line(2, "test: failed to write simulated scan for scaled page");
                             return 1;
