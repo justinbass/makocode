@@ -11556,6 +11556,254 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
     return true;
 }
 
+static int command_test_payload_gray_100k(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+
+    const char* base_dir = "test";
+    if (!ensure_directory(base_dir)) {
+        console_line(2, "test-100kb: failed to create test directory");
+        return 1;
+    }
+
+    const usize payload_size = 100u * 1024u;
+    makocode::ByteBuffer original_payload;
+    if (!original_payload.ensure(payload_size)) {
+        console_line(2, "test-100kb: failed to allocate payload buffer");
+        return 1;
+    }
+    for (usize i = 0u; i < payload_size; ++i) {
+        original_payload.data[i] = (u8)(i & 0xFFu);
+    }
+    original_payload.size = payload_size;
+    console_line(1, "test-100kb: generated 100 KiB grayscale payload");
+
+    ImageMappingConfig mapping;
+    mapping.color_channels = 1u;
+    mapping.color_set = true;
+
+    PageFooterConfig footer_config;
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        console_line(2, "test-100kb: unsupported color configuration");
+        return 1;
+    }
+
+    makocode::EncoderContext encoder;
+    encoder.config.ecc_redundancy = 0.0;
+    if (!encoder.set_payload(original_payload.data, original_payload.size)) {
+        console_line(2, "test-100kb: failed to set encoder payload");
+        return 1;
+    }
+    if (!encoder.build()) {
+        console_line(2, "test-100kb: encoder build failed");
+        return 1;
+    }
+
+    makocode::ByteBuffer frame_bits;
+    u64 frame_bit_count = 0u;
+    u64 payload_bit_count = 0u;
+    if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count, payload_bit_count)) {
+        console_line(2, "test-100kb: failed to build frame bits");
+        return 1;
+    }
+
+    u64 required_bits = (frame_bit_count > 0u) ? frame_bit_count : 1u;
+    double width_root = sqrt((double)required_bits);
+    if (width_root < 1.0) {
+        width_root = 1.0;
+    }
+    u64 width_candidate = (u64)ceil(width_root);
+    if (width_candidate == 0u || width_candidate > 0xFFFFFFFFu) {
+        console_line(2, "test-100kb: computed width out of range");
+        return 1;
+    }
+    u64 height_candidate = (required_bits + width_candidate - 1u) / width_candidate;
+    if (height_candidate == 0u || height_candidate > 0xFFFFFFFFu) {
+        console_line(2, "test-100kb: computed height out of range");
+        return 1;
+    }
+
+    mapping.page_width_pixels = (u32)width_candidate;
+    mapping.page_width_set = true;
+    mapping.page_height_pixels = (u32)height_candidate;
+    mapping.page_height_set = true;
+
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
+        console_line(2, "test-100kb: invalid page dimensions");
+        return 1;
+    }
+
+    FooterLayout footer_layout;
+    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+        console_line(2, "test-100kb: footer layout computation failed");
+        return 1;
+    }
+
+    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        console_line(2, "test-100kb: invalid data height");
+        return 1;
+    }
+
+    u64 bits_per_page = (u64)width_pixels *
+                        (u64)data_height_pixels *
+                        (u64)sample_bits *
+                        (u64)samples_per_pixel;
+    if (bits_per_page == 0u) {
+        console_line(2, "test-100kb: page capacity is zero");
+        return 1;
+    }
+
+    char frame_bits_digits[32];
+    char width_digits[32];
+    char height_digits[32];
+    char capacity_digits[32];
+    u64_to_ascii(frame_bit_count, frame_bits_digits, sizeof(frame_bits_digits));
+    u64_to_ascii((u64)width_pixels, width_digits, sizeof(width_digits));
+    u64_to_ascii((u64)height_pixels, height_digits, sizeof(height_digits));
+    u64_to_ascii(bits_per_page, capacity_digits, sizeof(capacity_digits));
+    console_write(1, "test-100kb: frame_bits=");
+    console_write(1, frame_bits_digits);
+    console_write(1, " width=");
+    console_write(1, width_digits);
+    console_write(1, " height=");
+    console_write(1, height_digits);
+    console_write(1, " capacity=");
+    console_write(1, capacity_digits);
+    console_line(1, "");
+
+    if (frame_bit_count > bits_per_page) {
+        console_line(2, "test-100kb: payload exceeds single-page capacity");
+        return 1;
+    }
+
+    const makocode::EccSummary& ecc_summary = encoder.ecc_info();
+    makocode::ByteBuffer ppm_buffer;
+    if (!encode_page_to_ppm(mapping,
+                            frame_bits,
+                            frame_bit_count,
+                            0u,
+                            width_pixels,
+                            height_pixels,
+                            1u,
+                            1u,
+                            bits_per_page,
+                            payload_bit_count,
+                            &ecc_summary,
+                            footer_config.title_text,
+                            footer_config.title_length,
+                            footer_layout,
+                            ppm_buffer)) {
+        console_line(2, "test-100kb: failed to encode ppm page");
+        return 1;
+    }
+
+    makocode::ByteBuffer extracted_bits;
+    u64 extracted_bit_count = 0u;
+    PpmParserState page_state;
+    if (!ppm_extract_frame_bits(ppm_buffer, mapping, extracted_bits, extracted_bit_count, page_state)) {
+        console_line(2, "test-100kb: failed to extract frame bits");
+        return 1;
+    }
+    if (!page_state.has_bits) {
+        page_state.has_bits = true;
+        page_state.bits_value = payload_bit_count;
+    }
+    if (!page_state.has_page_bits || page_state.page_bits_value > extracted_bit_count) {
+        page_state.has_page_bits = true;
+        page_state.page_bits_value = payload_bit_count;
+    }
+    if (!page_state.has_page_count) {
+        page_state.has_page_count = true;
+        page_state.page_count_value = 1u;
+    }
+    if (!page_state.has_page_index) {
+        page_state.has_page_index = true;
+        page_state.page_index_value = 1u;
+    }
+
+    u64 effective_bits = extracted_bit_count;
+    if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
+        effective_bits = page_state.page_bits_value;
+    }
+
+    makocode::ByteBuffer payload_bits;
+    u64 payload_bits_count = 0u;
+    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
+        console_line(2, "test-100kb: failed to convert frame bits back to payload stream");
+        return 1;
+    }
+    if (payload_bits_count != payload_bit_count) {
+        console_line(2, "test-100kb: payload bit count mismatch");
+        return 1;
+    }
+
+    makocode::DecoderContext decoder;
+    if (!decoder.parse(payload_bits.data, payload_bits_count, (const char*)0, 0u)) {
+        console_line(2, "test-100kb: decoder parse failed");
+        return 1;
+    }
+    if (!decoder.has_payload || decoder.payload.size != original_payload.size) {
+        console_line(2, "test-100kb: decoded payload size mismatch");
+        return 1;
+    }
+    for (usize i = 0u; i < original_payload.size; ++i) {
+        if (decoder.payload.data[i] != original_payload.data[i]) {
+            console_line(2, "test-100kb: decoded payload mismatch");
+            return 1;
+        }
+    }
+
+    auto write_artifact = [&](const char* filename,
+                              const makocode::ByteBuffer& buffer) -> bool {
+        makocode::ByteBuffer path;
+        if (!path.append_ascii(base_dir) ||
+            !path.append_char('/') ||
+            !path.append_ascii(filename) ||
+            !path.append_char('\0')) {
+            path.release();
+            return false;
+        }
+        bool ok = write_buffer_to_file((const char*)path.data, buffer);
+        path.release();
+        return ok;
+    };
+
+    if (!write_artifact("2001_payload_gray_100k.bin", original_payload)) {
+        console_line(2, "test-100kb: failed to write payload artifact");
+        return 1;
+    }
+    console_write(1, "test-100kb:   payload -> ");
+    console_write(1, base_dir);
+    console_write(1, "/2001_payload_gray_100k.bin");
+    console_line(1, "");
+
+    if (!write_artifact("2001_payload_gray_100k_encoded.ppm", ppm_buffer)) {
+        console_line(2, "test-100kb: failed to write encoded artifact");
+        return 1;
+    }
+    console_write(1, "test-100kb:   encoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/2001_payload_gray_100k_encoded.ppm");
+    console_line(1, "");
+
+    if (!write_artifact("2001_payload_gray_100k_decoded.bin", decoder.payload)) {
+        console_line(2, "test-100kb: failed to write decoded artifact");
+        return 1;
+    }
+    console_write(1, "test-100kb:   decoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/2001_payload_gray_100k_decoded.bin");
+    console_line(1, "");
+
+    console_line(1, "test-100kb: roundtrip ok");
+    return 0;
+}
+
 static int command_test_payload(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
@@ -12541,10 +12789,12 @@ static int command_test(int arg_count, char** args) {
     /* Test suite summary:
        1) scan-basic     - validates histogram analytics and dirt removal on small fixtures.
        2) border-dirt    - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
-       3) payload-suite  - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
+       3) payload-100kb  - performs a 100 KiB grayscale encode/ppm/decode roundtrip without distortions.
+       4) payload-suite  - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
     const TestSuiteEntry suites[] = {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
+        {"payload-100kb", command_test_payload_gray_100k, false},
         {"payload-suite", command_test_payload, true}
     };
     usize suite_count = sizeof(suites) / sizeof(suites[0]);
