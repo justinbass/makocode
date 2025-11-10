@@ -7479,14 +7479,18 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
     return true;
 }
 
-static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
-                                 double factor,
-                                 makocode::ByteBuffer& output) {
-    if (factor <= 0.0) {
+static bool ppm_scale_fractional_axes(const makocode::ByteBuffer& input,
+                                      double factor_x,
+                                      double factor_y,
+                                      makocode::ByteBuffer& output) {
+    if (factor_x <= 0.0 || factor_y <= 0.0) {
         return false;
     }
-    double delta = factor - 1.0;
-    if (delta < 0.000001 && delta > -0.000001) {
+    double delta_x = factor_x - 1.0;
+    double delta_y = factor_y - 1.0;
+    bool near_identity = (delta_x < 0.000001 && delta_x > -0.000001) &&
+                         (delta_y < 0.000001 && delta_y > -0.000001);
+    if (near_identity) {
         output.release();
         if (input.size) {
             if (!output.ensure(input.size)) {
@@ -7551,8 +7555,8 @@ static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
     if (!pixel_data) {
         return false;
     }
-    double scaled_width_d = (double)width * factor;
-    double scaled_height_d = (double)height * factor;
+    double scaled_width_d = (double)width * factor_x;
+    double scaled_height_d = (double)height * factor_y;
     if (scaled_width_d <= 0.0 || scaled_height_d <= 0.0) {
         return false;
     }
@@ -7653,11 +7657,12 @@ static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
     if (!output.append_ascii("255\n")) {
         return false;
     }
-    double inv_factor = 1.0 / factor;
+    double inv_factor_x = 1.0 / factor_x;
+    double inv_factor_y = 1.0 / factor_y;
     double max_src_x = (width > 0u) ? (double)(width - 1u) : 0.0;
     double max_src_y = (height > 0u) ? (double)(height - 1u) : 0.0;
     for (u64 row = 0u; row < scaled_height; ++row) {
-        double src_y = ((double)row + 0.5) * inv_factor - 0.5;
+        double src_y = ((double)row + 0.5) * inv_factor_y - 0.5;
         if (src_y < 0.0) {
             src_y = 0.0;
         }
@@ -7668,7 +7673,7 @@ static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
         unsigned y1 = (y0 + 1u < height) ? (unsigned)(y0 + 1u) : y0;
         double fy = src_y - (double)y0;
         for (u64 col = 0u; col < scaled_width; ++col) {
-            double src_x = ((double)col + 0.5) * inv_factor - 0.5;
+            double src_x = ((double)col + 0.5) * inv_factor_x - 0.5;
             if (src_x < 0.0) {
                 src_x = 0.0;
             }
@@ -7710,6 +7715,12 @@ static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
         }
     }
     return true;
+}
+
+static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
+                                 double factor,
+                                 makocode::ByteBuffer& output) {
+    return ppm_scale_fractional_axes(input, factor, factor, output);
 }
 
 static bool ppm_write_metadata_header(const PpmParserState& state,
@@ -13612,7 +13623,9 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
 
 static int run_test_payload_100k_scaled(u8 color_channels,
                                         const char* artifact_prefix,
-                                        const char* test_label) {
+                                        const char* test_label,
+                                        double scale_factor_x,
+                                        double scale_factor_y) {
     const char* base_dir = "test";
     auto log_prefix = [&](int fd) {
         console_write(fd, test_label);
@@ -13628,12 +13641,61 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
 
-    const double scale_factor = 2.5;
-    char scale_label[16];
-    if (!format_scale_label(scale_factor, scale_label, sizeof(scale_label))) {
-        log_line(2, "failed to format scale label");
+    char scale_x_label[16];
+    char scale_y_label[16];
+    if (!format_scale_label(scale_factor_x, scale_x_label, sizeof(scale_x_label)) ||
+        !format_scale_label(scale_factor_y, scale_y_label, sizeof(scale_y_label))) {
+        log_line(2, "failed to format scale labels");
         return 1;
     }
+    char scale_label[32];
+    if (ascii_compare(scale_x_label, scale_y_label) == 0) {
+        usize len = ascii_length(scale_x_label);
+        if ((len + 1u) > sizeof(scale_label)) {
+            log_line(2, "scale label buffer too small");
+            return 1;
+        }
+        for (usize i = 0u; i <= len; ++i) {
+            scale_label[i] = scale_x_label[i];
+        }
+    } else {
+        usize len_x = ascii_length(scale_x_label);
+        usize len_y = ascii_length(scale_y_label);
+        const char separator[] = "by";
+        usize sep_len = sizeof(separator) - 1u;
+        if ((len_x + sep_len + len_y + 1u) > sizeof(scale_label)) {
+            log_line(2, "anisotropic scale label buffer too small");
+            return 1;
+        }
+        usize cursor = 0u;
+        for (usize i = 0u; i < len_x; ++i) {
+            scale_label[cursor++] = scale_x_label[i];
+        }
+        for (usize i = 0u; i < sep_len; ++i) {
+            scale_label[cursor++] = separator[i];
+        }
+        for (usize i = 0u; i < len_y; ++i) {
+            scale_label[cursor++] = scale_y_label[i];
+        }
+        scale_label[cursor] = '\0';
+    }
+    auto to_display_label = [](const char* source,
+                               char* destination,
+                               usize destination_size) -> bool {
+        if (!source || !destination || destination_size == 0u) {
+            return false;
+        }
+        usize length = ascii_length(source);
+        if ((length + 1u) > destination_size) {
+            return false;
+        }
+        for (usize i = 0u; i < length; ++i) {
+            char c = source[i];
+            destination[i] = (c == 'p') ? '.' : c;
+        }
+        destination[length] = '\0';
+        return true;
+    };
 
     const usize payload_size = 100u * 1024u;
     makocode::ByteBuffer original_payload;
@@ -13839,11 +13901,23 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     }
 
     makocode::ByteBuffer scaled_ppm;
-    if (!ppm_scale_fractional(ppm_buffer, scale_factor, scaled_ppm)) {
+    if (!ppm_scale_fractional_axes(ppm_buffer, scale_factor_x, scale_factor_y, scaled_ppm)) {
         log_line(2, "failed to scale PPM");
         return 1;
     }
-    log_line(1, "scaled page with fractional factor 2.5");
+    char scale_x_display[16];
+    char scale_y_display[16];
+    if (!to_display_label(scale_x_label, scale_x_display, sizeof(scale_x_display)) ||
+        !to_display_label(scale_y_label, scale_y_display, sizeof(scale_y_display))) {
+        log_line(2, "failed to prepare scale display labels");
+        return 1;
+    }
+    log_prefix(1);
+    console_write(1, "scaled page with fractional factors x=");
+    console_write(1, scale_x_display);
+    console_write(1, " y=");
+    console_write(1, scale_y_display);
+    console_line(1, "");
 
     makocode::ByteBuffer scaled_bits;
     u64 scaled_bit_count = 0u;
@@ -14016,7 +14090,9 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     (void)args;
     return run_test_payload_100k_scaled(1u,
                                         "2002_payload_gray_100k_scaled",
-                                        "test-100kb-scale");
+                                        "test-100kb-scale",
+                                        2.5,
+                                        2.5);
 }
 
 static int command_test_payload_color2_100k_scaled(int arg_count, char** args) {
@@ -14024,7 +14100,9 @@ static int command_test_payload_color2_100k_scaled(int arg_count, char** args) {
     (void)args;
     return run_test_payload_100k_scaled(2u,
                                         "2003_payload_color2_100k_scaled",
-                                        "test-100kb-scale-c2");
+                                        "test-100kb-scale-c2",
+                                        2.5,
+                                        2.5);
 }
 
 static int command_test_payload_color3_100k_scaled(int arg_count, char** args) {
@@ -14032,7 +14110,29 @@ static int command_test_payload_color3_100k_scaled(int arg_count, char** args) {
     (void)args;
     return run_test_payload_100k_scaled(3u,
                                         "2004_payload_color3_100k_scaled",
-                                        "test-100kb-scale-c3");
+                                        "test-100kb-scale-c3",
+                                        2.5,
+                                        2.5);
+}
+
+static int command_test_payload_gray_100k_stretch_h26_v24(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_scaled(1u,
+                                        "2005_payload_gray_100k_stretch_h26_v24",
+                                        "test-100kb-stretch-h26-v24",
+                                        2.6,
+                                        2.4);
+}
+
+static int command_test_payload_gray_100k_stretch_h24_v26(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_scaled(1u,
+                                        "2006_payload_gray_100k_stretch_h24_v26",
+                                        "test-100kb-stretch-h24-v26",
+                                        2.4,
+                                        2.6);
 }
 
 static int command_test_payload(int arg_count, char** args) {
@@ -15069,7 +15169,9 @@ static int command_test(int arg_count, char** args) {
        5) payload-100kb-scaled    - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
        6) payload-100kb-scaled-c2 - repeats the scaled roundtrip for color channel 2.
        7) payload-100kb-scaled-c3 - repeats the scaled roundtrip for color channel 3.
-       8) payload-suite           - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
+       8) payload-100kb-stretch-h26-v24 - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
+       9) payload-100kb-stretch-h24-v26 - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
+      10) payload-suite           - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
     const TestSuiteEntry suites[] = {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
@@ -15078,6 +15180,8 @@ static int command_test(int arg_count, char** args) {
         {"payload-100kb-scaled", command_test_payload_gray_100k_scaled, false},
         {"payload-100kb-scaled-c2", command_test_payload_color2_100k_scaled, false},
         {"payload-100kb-scaled-c3", command_test_payload_color3_100k_scaled, false},
+        {"payload-100kb-stretch-h26-v24", command_test_payload_gray_100k_stretch_h26_v24, false},
+        {"payload-100kb-stretch-h24-v26", command_test_payload_gray_100k_stretch_h24_v26, false},
         {"payload-suite", command_test_payload, true}
     };
     usize suite_count = sizeof(suites) / sizeof(suites[0]);
