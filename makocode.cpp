@@ -8014,13 +8014,68 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
         fiducial_spacing = fiducial_marker_size;
     }
     u32 fiducial_margin = g_fiducial_defaults.margin_pixels;
-    u32 fiducial_columns = fiducial_spacing ? (width_pixels / fiducial_spacing) : 0u;
-    if (fiducial_columns < 4u) {
-        fiducial_columns = 4u;
+    double min_x = (fiducial_margin < width_pixels) ? (double)fiducial_margin : 0.0;
+    double max_x = (width_pixels > fiducial_margin)
+                       ? (double)(width_pixels - 1u - fiducial_margin)
+                       : (width_pixels ? (double)(width_pixels - 1u) : 0.0);
+    if (max_x < min_x) {
+        max_x = min_x;
     }
-    u32 fiducial_rows = fiducial_spacing ? (height_pixels / fiducial_spacing) : 0u;
-    if (fiducial_rows < 6u) {
-        fiducial_rows = 6u;
+    double min_y = (fiducial_margin < height_pixels) ? (double)fiducial_margin : 0.0;
+    double max_y = (height_pixels > fiducial_margin)
+                       ? (double)(height_pixels - 1u - fiducial_margin)
+                       : (height_pixels ? (double)(height_pixels - 1u) : 0.0);
+    if (max_y < min_y) {
+        max_y = min_y;
+    }
+    double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
+    double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
+    // Fit the grid into the drawable span so fixtures keep the configured spacing.
+    u32 fiducial_columns = 1u;
+    if (fiducial_spacing > 0u && available_width > 0.0) {
+        double span = available_width / (double)fiducial_spacing;
+        if (span < 0.0) {
+            span = 0.0;
+        }
+        u64 additional = (u64)span;
+        if (additional > 0xFFFFFFFFull - 1ull) {
+            additional = 0xFFFFFFFFull - 1ull;
+        }
+        fiducial_columns = (u32)(additional + 1ull);
+    }
+    if (fiducial_columns == 0u) {
+        fiducial_columns = 1u;
+    }
+    u32 fiducial_rows = 1u;
+    if (fiducial_spacing > 0u && available_height > 0.0) {
+        double span = available_height / (double)fiducial_spacing;
+        if (span < 0.0) {
+            span = 0.0;
+        }
+        u64 additional = (u64)span;
+        if (additional > 0xFFFFFFFFull - 1ull) {
+            additional = 0xFFFFFFFFull - 1ull;
+        }
+        fiducial_rows = (u32)(additional + 1ull);
+    }
+    if (fiducial_rows == 0u) {
+        fiducial_rows = 1u;
+    }
+    if (fiducial_columns > 1u) {
+        double span = (double)fiducial_spacing * (double)(fiducial_columns - 1u);
+        double limit = available_width;
+        while (fiducial_columns > 1u && span > limit + 1e-6) {
+            --fiducial_columns;
+            span = (double)fiducial_spacing * (double)(fiducial_columns - 1u);
+        }
+    }
+    if (fiducial_rows > 1u) {
+        double span = (double)fiducial_spacing * (double)(fiducial_rows - 1u);
+        double limit = available_height;
+        while (fiducial_rows > 1u && span > limit + 1e-6) {
+            --fiducial_rows;
+            span = (double)fiducial_spacing * (double)(fiducial_rows - 1u);
+        }
     }
     return ppm_insert_fiducial_grid(input,
                                     fiducial_marker_size,
