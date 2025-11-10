@@ -15257,53 +15257,104 @@ static int command_minify(int arg_count, char** args) {
         console_line(2, "minify: failed to strip comments");
         return 1;
     }
+    makocode::ByteBuffer minified;
+    bool last_was_space = true;
+    bool line_start = true;
+    bool in_preprocessor = false;
     for (usize i = 0u; i < stripped.size; ++i) {
         u8 ch = stripped.data[i];
-        if (ch == '\n' || ch == '\r') {
-            stripped.data[i] = ' ';
+        if (ch == '\r') {
+            ch = '\n';
         }
-    }
-    makocode::ByteBuffer compacted;
-    bool last_was_space = false;
-    for (usize i = 0u; i < stripped.size; ++i) {
-        u8 ch = stripped.data[i];
-        bool is_space = (ch == ' ') || (ch == '\t') || (ch == '\r') || (ch == '\n') ||
-                        (ch == '\f') || (ch == '\v');
+        if (ch == '\n') {
+            if (in_preprocessor) {
+                if (!minified.push('\n')) {
+                    minified.release();
+                    console_line(2, "minify: failed to compact whitespace");
+                    return 1;
+                }
+                last_was_space = true;
+            } else if (!last_was_space) {
+                if (!minified.push(' ')) {
+                    minified.release();
+                    console_line(2, "minify: failed to compact whitespace");
+                    return 1;
+                }
+                last_was_space = true;
+            }
+            line_start = true;
+            in_preprocessor = false;
+            continue;
+        }
+        bool is_space = (ch == ' ') || (ch == '\t') || (ch == '\f') || (ch == '\v');
         if (is_space) {
-            if (last_was_space) {
+            if (line_start) {
                 continue;
             }
-            if (!compacted.push(' ')) {
-                compacted.release();
-                console_line(2, "minify: failed to compact whitespace");
-                return 1;
+            if (!last_was_space) {
+                if (!minified.push(' ')) {
+                    minified.release();
+                    console_line(2, "minify: failed to compact whitespace");
+                    return 1;
+                }
+                last_was_space = true;
             }
-            last_was_space = true;
-        } else {
-            if (!compacted.push(ch)) {
-                compacted.release();
+            continue;
+        }
+        if (line_start && ch == '#') {
+            if (minified.size > 0u) {
+                u8& previous = minified.data[minified.size - 1u];
+                if (previous == ' ') {
+                    previous = '\n';
+                } else if (previous != '\n') {
+                    if (!minified.push('\n')) {
+                        minified.release();
+                        console_line(2, "minify: failed to compact whitespace");
+                        return 1;
+                    }
+                }
+            }
+            if (!minified.push('#')) {
+                minified.release();
                 console_line(2, "minify: failed to compact whitespace");
                 return 1;
             }
             last_was_space = false;
+            line_start = false;
+            in_preprocessor = true;
+            continue;
         }
+        if (!minified.push(ch)) {
+            minified.release();
+            console_line(2, "minify: failed to compact whitespace");
+            return 1;
+        }
+        last_was_space = false;
+        line_start = false;
     }
     stripped.release();
-    stripped.data = compacted.data;
-    stripped.size = compacted.size;
-    stripped.capacity = compacted.capacity;
-    compacted.data = 0;
-    compacted.size = 0;
-    compacted.capacity = 0;
-    if (stripped.size > 0u && stripped.data[0] == ' ') {
-        for (usize i = 1u; i < stripped.size; ++i) {
-            stripped.data[i - 1u] = stripped.data[i];
+    stripped.data = minified.data;
+    stripped.size = minified.size;
+    stripped.capacity = minified.capacity;
+    minified.data = 0;
+    minified.size = 0;
+    minified.capacity = 0;
+    usize start_index = 0u;
+    while (start_index < stripped.size &&
+           (stripped.data[start_index] == ' ' || stripped.data[start_index] == '\n')) {
+        start_index += 1u;
+    }
+    usize end_index = stripped.size;
+    while (end_index > start_index &&
+           (stripped.data[end_index - 1u] == ' ' || stripped.data[end_index - 1u] == '\n')) {
+        end_index -= 1u;
+    }
+    if (start_index > 0u && end_index > start_index) {
+        for (usize i = start_index; i < end_index; ++i) {
+            stripped.data[i - start_index] = stripped.data[i];
         }
-        stripped.size -= 1u;
     }
-    if (stripped.size > 0u && stripped.data[stripped.size - 1u] == ' ') {
-        stripped.size -= 1u;
-    }
+    stripped.size = (end_index > start_index) ? (end_index - start_index) : 0u;
     if (!write_bytes_to_file("makocode_minified.cpp", stripped.data, stripped.size)) {
         console_line(2, "minify: failed to write makocode_minified.cpp");
         return 1;
