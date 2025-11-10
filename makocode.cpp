@@ -7375,7 +7375,7 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
         return false;
     }
     const u32 fiducial_spacing = 72u;
-    const u32 fiducial_marker_size = 3u;
+    const u32 fiducial_marker_size = 4u;
     const u32 fiducial_margin = 12u;
     u32 fiducial_columns = fiducial_spacing ? (width_pixels / fiducial_spacing) : 0u;
     if (fiducial_columns < 4u) {
