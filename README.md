@@ -6,9 +6,19 @@ Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu,
 
 Written entirely with codex-gpt-5.
 
-## Fiducial Controls
+## Usage
 
-Override the default fiducial markers (4x4 pixels spaced every 24 pixels with a 12 pixel margin) via `--fiducials=SIZE,SPACING[,MARGIN]` when running `makocode encode` or `makocode test`.
+```
+make
+make test
+./makocode encode --input=file.txt
+# Print, store, scan the output shown above
+./makocode decode scan.ppm
+```
+
+### Converting Scans
+
+To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png scan.ppm`.
 
 ## Sample Barcodes
 

@@ -3,13 +3,10 @@ TODO:
 - Stretch test, e.g. in one direction only
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
-- See if we can make fiducial markings smaller. Or make their size configurable.
 - Any way to optionally disable all includes? It only affects pathing. E.g. hardcoded var in header than only does includes/pathing if enable_pathing is true.
-- Generic Makefile, to remove the need for the existing one. Document in README how to compile, test, use, etc.
+- Determine proper defaults
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel.
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
-- Print version in footer
 - Script to create art in output that is actually readable. Possibly just apply matrix code steganographically to an input image, maybe simply use high error correction to resolve.
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
 - Attempt to optimize/shrink/minify/dedupe code, it still should be readable
-- When finished, README should contain makocode.cpp encoded in each color
