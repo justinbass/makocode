@@ -19,17 +19,21 @@
     License: GNU AGPLv3 (intent inherited from the project notes).
 */
 
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#ifndef O_RDONLY
+#define O_RDONLY 0
+#endif
+
 typedef unsigned char       u8;
 typedef unsigned short      u16;
 typedef unsigned int        u32;
 typedef unsigned long       usize;
 typedef unsigned long long  u64;
 typedef long long           i64;
-
-#include <dirent.h>
-#include <errno.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 static const usize USIZE_MAX_VALUE = (usize)~(usize)0;
 
@@ -92,10 +96,6 @@ static void write_le_u64(u8* ptr, u64 value) {
     write_le_u32(ptr, (u32)(value & 0xFFFFFFFFull));
     write_le_u32(ptr + 4u, (u32)((value >> 32u) & 0xFFFFFFFFull));
 }
-
-#ifndef O_RDONLY
-#define O_RDONLY 0
-#endif
 
 static usize ascii_length(const char* text) {
     if (!text) {
