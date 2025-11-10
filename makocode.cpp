@@ -3680,6 +3680,19 @@ struct PageFooterConfig {
           display_filename(true) {}
 };
 
+struct FiducialGridDefaults {
+    u32 marker_size_pixels;
+    u32 spacing_pixels;
+    u32 margin_pixels;
+
+    FiducialGridDefaults()
+        : marker_size_pixels(4u),
+          spacing_pixels(24u),
+          margin_pixels(12u) {}
+};
+
+static FiducialGridDefaults g_fiducial_defaults;
+
 struct FooterLayout {
     bool has_text;
     u32 font_size;
@@ -7992,9 +8005,15 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
         return false;
     }
-    const u32 fiducial_spacing = 72u;
-    const u32 fiducial_marker_size = 4u;
-    const u32 fiducial_margin = 12u;
+    u32 fiducial_marker_size = g_fiducial_defaults.marker_size_pixels;
+    if (fiducial_marker_size == 0u) {
+        fiducial_marker_size = 1u;
+    }
+    u32 fiducial_spacing = g_fiducial_defaults.spacing_pixels;
+    if (fiducial_spacing == 0u) {
+        fiducial_spacing = fiducial_marker_size;
+    }
+    u32 fiducial_margin = g_fiducial_defaults.margin_pixels;
     u32 fiducial_columns = fiducial_spacing ? (width_pixels / fiducial_spacing) : 0u;
     if (fiducial_columns < 4u) {
         fiducial_columns = 4u;
@@ -8451,6 +8470,101 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     return true;
 }
+static bool process_fiducial_option(const char* arg,
+                                    FiducialGridDefaults& defaults,
+                                    const char* command_name,
+                                    bool* handled) {
+    if (!handled) {
+        return false;
+    }
+    *handled = false;
+    if (!arg) {
+        return true;
+    }
+    const char fiducial_prefix[] = "--fiducials=";
+    if (!ascii_starts_with(arg, fiducial_prefix)) {
+        return true;
+    }
+    const char* value_text = arg + (sizeof(fiducial_prefix) - 1u);
+    usize total_length = ascii_length(value_text);
+    if (total_length == 0u) {
+        console_write(2, command_name);
+        console_line(2, ": --fiducials requires size,spacing[,margin]");
+        return false;
+    }
+    u64 parsed_values[3];
+    usize parsed_count = 0u;
+    usize segment_start = 0u;
+    for (usize i = 0u; i <= total_length; ++i) {
+        bool at_end = (i == total_length);
+        char c = at_end ? '\0' : value_text[i];
+        if (c == ',' || at_end) {
+            if (parsed_count >= 3u) {
+                console_write(2, command_name);
+                console_line(2, ": --fiducials accepts at most three numeric values");
+                return false;
+            }
+            if (i < segment_start) {
+                console_write(2, command_name);
+                console_line(2, ": --fiducials parsing failure");
+                return false;
+            }
+            usize segment_length = i - segment_start;
+            if (segment_length == 0u) {
+                console_write(2, command_name);
+                console_line(2, ": --fiducials values must be non-empty");
+                return false;
+            }
+            u64 number_value = 0u;
+            if (!ascii_to_u64(value_text + segment_start, segment_length, &number_value)) {
+                console_write(2, command_name);
+                console_line(2, ": --fiducials values must be unsigned integers");
+                return false;
+            }
+            parsed_values[parsed_count++] = number_value;
+            segment_start = i + 1u;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            console_write(2, command_name);
+            console_line(2, ": --fiducials values must be numeric");
+            return false;
+        }
+    }
+    if (parsed_count < 2u) {
+        console_write(2, command_name);
+        console_line(2, ": --fiducials requires at least size and spacing");
+        return false;
+    }
+    if (parsed_values[0] == 0u || parsed_values[0] > 0xFFFFFFFFull) {
+        console_write(2, command_name);
+        console_line(2, ": --fiducials size must be between 1 and 4294967295");
+        return false;
+    }
+    if (parsed_values[1] == 0u || parsed_values[1] > 0xFFFFFFFFull) {
+        console_write(2, command_name);
+        console_line(2, ": --fiducials spacing must be between 1 and 4294967295");
+        return false;
+    }
+    if (parsed_values[1] < parsed_values[0]) {
+        console_write(2, command_name);
+        console_line(2, ": --fiducials spacing must be >= size");
+        return false;
+    }
+    defaults.marker_size_pixels = (u32)parsed_values[0];
+    defaults.spacing_pixels = (u32)parsed_values[1];
+    if (parsed_count >= 3u) {
+        if (parsed_values[2] > 0xFFFFFFFFull) {
+            console_write(2, command_name);
+            console_line(2, ": --fiducials margin must be between 0 and 4294967295");
+            return false;
+        }
+        defaults.margin_pixels = (u32)parsed_values[2];
+    }
+    *handled = true;
+    return true;
+}
+
 static bool process_image_mapping_option(const char* arg,
                                          ImageMappingConfig& config,
                                          const char* command_name,
@@ -9416,6 +9530,7 @@ static void write_usage() {
     console_line(1, "  --color-channels=N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width=PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height=PX   (page height in pixels; default 3508)");
+    console_line(1, "  --fiducials=S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
     console_line(1, "  --input=PATH       (encode: repeat to add files or directories)");
     console_line(1, "  --output-dir=PATH  (decode: destination directory; default .)");
     console_line(1, "  --ecc=RATIO        (Reed-Solomon redundancy; 0 disables, e.g., 0.10)");
@@ -9623,123 +9738,133 @@ static int command_encode(int arg_count, char** args) {
     bool have_password = false;
     for (int i = 0; i < arg_count; ++i) {
         const char* arg = args[i];
+        if (!arg) {
+            continue;
+        }
         bool handled = false;
         if (!process_image_mapping_option(arg, mapping, "encode", &handled)) {
             return 1;
         }
-        if (!handled) {
-            if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
-                footer_config.display_filename = false;
-                continue;
-            }
-            if (ascii_equals_token(arg, ascii_length(arg), "--no-page-count")) {
-                footer_config.display_page_info = false;
-                continue;
-            }
-            const char ecc_prefix[] = "--ecc=";
-            if (ascii_starts_with(arg, ecc_prefix)) {
-                const char* value_text = arg + (sizeof(ecc_prefix) - 1u);
-                usize length = ascii_length(value_text);
-                if (length == 0u) {
-                    console_line(2, "encode: --ecc requires a numeric value");
-                    return 1;
-                }
-                double redundancy_value = 0.0;
-                if (!ascii_to_double(value_text, length, &redundancy_value)) {
-                    console_line(2, "encode: --ecc value is not a valid decimal number");
-                    return 1;
-                }
-                if (redundancy_value < 0.0 || redundancy_value > 8.0) {
-                    console_line(2, "encode: --ecc must be between 0.0 and 8.0");
-                    return 1;
-                }
-                ecc_redundancy = redundancy_value;
-                continue;
-            }
-            const char input_prefix[] = "--input=";
-            if (ascii_starts_with(arg, input_prefix)) {
-                const char* value_text = arg + (sizeof(input_prefix) - 1u);
-                if (!value_text || value_text[0] == '\0') {
-                    console_line(2, "encode: --input requires a file path");
-                    return 1;
-                }
-                if (input_count >= MAX_INPUT_ITEMS) {
-                    console_line(2, "encode: too many input paths specified");
-                    return 1;
-                }
-                input_paths[input_count++] = value_text;
-                continue;
-            }
-            const char title_prefix[] = "--title=";
-            if (ascii_starts_with(arg, title_prefix)) {
-                const char* value_text = arg + (sizeof(title_prefix) - 1u);
-                usize length = ascii_length(value_text);
-                if (length == 0u) {
-                    console_line(2, "encode: --title requires a non-empty value");
-                    return 1;
-                }
-                if (!title_buffer.ensure(length + 1u)) {
-                    console_line(2, "encode: failed to allocate title buffer");
-                    return 1;
-                }
-                for (usize j = 0u; j < length; ++j) {
-                    char c = value_text[j];
-                    if (!title_char_is_allowed(c)) {
-                        console_line(2, "encode: title supports letters, digits, space, and !@#$%^&*()_+-={}[]:\";'<>?,./`~|\\");
-                        return 1;
-                    }
-                    title_buffer.data[j] = (u8)c;
-                }
-                title_buffer.data[length] = 0u;
-                title_buffer.size = length;
-                footer_config.has_title = true;
-                footer_config.title_length = length;
-                footer_config.title_text = (const char*)title_buffer.data;
-                continue;
-            }
-            const char font_prefix[] = "--font-size=";
-            if (ascii_starts_with(arg, font_prefix)) {
-                const char* value_text = arg + (sizeof(font_prefix) - 1u);
-                usize length = ascii_length(value_text);
-                if (length == 0u) {
-                    console_line(2, "encode: --font-size requires a positive integer value");
-                    return 1;
-                }
-                u64 value = 0u;
-                if (!ascii_to_u64(value_text, length, &value) || value == 0u || value > 2048u) {
-                    console_line(2, "encode: --font-size must be between 1 and 2048");
-                    return 1;
-                }
-                footer_config.font_size = (u32)value;
-                continue;
-            }
-            const char password_prefix[] = "--password=";
-            if (ascii_starts_with(arg, password_prefix)) {
-                if (have_password) {
-                    console_line(2, "encode: password specified multiple times");
-                    return 1;
-                }
-                const char* value_text = arg + (sizeof(password_prefix) - 1u);
-                usize length = ascii_length(value_text);
-                if (length == 0u) {
-                    console_line(2, "encode: --password requires a non-empty value");
-                    return 1;
-                }
-                if (!password_buffer.ensure(length)) {
-                    console_line(2, "encode: failed to allocate password buffer");
-                    return 1;
-                }
-                for (usize j = 0u; j < length; ++j) {
-                    password_buffer.data[j] = (u8)value_text[j];
-                }
-                password_buffer.size = length;
-                have_password = true;
-                continue;
-            }
-            console_write(2, "encode: unknown option: ");
-            console_line(2, arg);
+        if (handled) {
+            continue;
+        }
+        if (!process_fiducial_option(arg, g_fiducial_defaults, "encode", &handled)) {
             return 1;
         }
+        if (handled) {
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
+            footer_config.display_filename = false;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--no-page-count")) {
+            footer_config.display_page_info = false;
+            continue;
+        }
+        const char ecc_prefix[] = "--ecc=";
+        if (ascii_starts_with(arg, ecc_prefix)) {
+            const char* value_text = arg + (sizeof(ecc_prefix) - 1u);
+            usize length = ascii_length(value_text);
+            if (length == 0u) {
+                console_line(2, "encode: --ecc requires a numeric value");
+                return 1;
+            }
+            double redundancy_value = 0.0;
+            if (!ascii_to_double(value_text, length, &redundancy_value)) {
+                console_line(2, "encode: --ecc value is not a valid decimal number");
+                return 1;
+            }
+            if (redundancy_value < 0.0 || redundancy_value > 8.0) {
+                console_line(2, "encode: --ecc must be between 0.0 and 8.0");
+                return 1;
+            }
+            ecc_redundancy = redundancy_value;
+            continue;
+        }
+        const char input_prefix[] = "--input=";
+        if (ascii_starts_with(arg, input_prefix)) {
+            const char* value_text = arg + (sizeof(input_prefix) - 1u);
+            if (!value_text || value_text[0] == '\0') {
+                console_line(2, "encode: --input requires a file path");
+                return 1;
+            }
+            if (input_count >= MAX_INPUT_ITEMS) {
+                console_line(2, "encode: too many input paths specified");
+                return 1;
+            }
+            input_paths[input_count++] = value_text;
+            continue;
+        }
+        const char title_prefix[] = "--title=";
+        if (ascii_starts_with(arg, title_prefix)) {
+            const char* value_text = arg + (sizeof(title_prefix) - 1u);
+            usize length = ascii_length(value_text);
+            if (length == 0u) {
+                console_line(2, "encode: --title requires a non-empty value");
+                return 1;
+            }
+            if (!title_buffer.ensure(length + 1u)) {
+                console_line(2, "encode: failed to allocate title buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < length; ++j) {
+                char c = value_text[j];
+                if (!title_char_is_allowed(c)) {
+                    console_line(2, "encode: title supports letters, digits, space, and !@#$%^&*()_+-={}[]:\";'<>?,./`~|\\");
+                    return 1;
+                }
+                title_buffer.data[j] = (u8)c;
+            }
+            title_buffer.data[length] = 0u;
+            title_buffer.size = length;
+            footer_config.has_title = true;
+            footer_config.title_length = length;
+            footer_config.title_text = (const char*)title_buffer.data;
+            continue;
+        }
+        const char font_prefix[] = "--font-size=";
+        if (ascii_starts_with(arg, font_prefix)) {
+            const char* value_text = arg + (sizeof(font_prefix) - 1u);
+            usize length = ascii_length(value_text);
+            if (length == 0u) {
+                console_line(2, "encode: --font-size requires a positive integer value");
+                return 1;
+            }
+            u64 value = 0u;
+            if (!ascii_to_u64(value_text, length, &value) || value == 0u || value > 2048u) {
+                console_line(2, "encode: --font-size must be between 1 and 2048");
+                return 1;
+            }
+            footer_config.font_size = (u32)value;
+            continue;
+        }
+        const char password_prefix[] = "--password=";
+        if (ascii_starts_with(arg, password_prefix)) {
+            if (have_password) {
+                console_line(2, "encode: password specified multiple times");
+                return 1;
+            }
+            const char* value_text = arg + (sizeof(password_prefix) - 1u);
+            usize length = ascii_length(value_text);
+            if (length == 0u) {
+                console_line(2, "encode: --password requires a non-empty value");
+                return 1;
+            }
+            if (!password_buffer.ensure(length)) {
+                console_line(2, "encode: failed to allocate password buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < length; ++j) {
+                password_buffer.data[j] = (u8)value_text[j];
+            }
+            password_buffer.size = length;
+            have_password = true;
+            continue;
+        }
+        console_write(2, "encode: unknown option: ");
+        console_line(2, arg);
+        return 1;
     }
     if (input_count == 0u) {
         console_line(2, "encode: at least one --input=PATH is required");
@@ -13645,7 +13770,7 @@ static int command_test_payload(int arg_count, char** args) {
     PageFooterConfig footer_config;
     double ecc_redundancy = 0.0;
     makocode::ByteBuffer password_buffer;
-   bool have_password = false;
+    bool have_password = false;
 
     const char* test_output_dir = "test";
     if (!ensure_directory(test_output_dir)) {
@@ -13662,54 +13787,61 @@ static int command_test_payload(int arg_count, char** args) {
         if (!process_image_mapping_option(arg, mapping, "test", &handled)) {
             return 1;
         }
-        if (!handled) {
-            const char ecc_prefix[] = "--ecc=";
-            if (ascii_starts_with(arg, ecc_prefix)) {
-                const char* value_text = arg + (sizeof(ecc_prefix) - 1u);
-                usize length = ascii_length(value_text);
-                if (length == 0u) {
-                    console_line(2, "test: --ecc requires a numeric value");
-                    return 1;
-                }
-                double redundancy_value = 0.0;
-                if (!ascii_to_double(value_text, length, &redundancy_value)) {
-                    console_line(2, "test: --ecc value is not a valid decimal number");
-                    return 1;
-                }
-                if (redundancy_value < 0.0 || redundancy_value > 8.0) {
-                    console_line(2, "test: --ecc must be between 0.0 and 8.0");
-                    return 1;
-                }
-                ecc_redundancy = redundancy_value;
-                continue;
-            }
-            const char password_prefix[] = "--password=";
-            if (ascii_starts_with(arg, password_prefix)) {
-                if (have_password) {
-                    console_line(2, "test: password specified multiple times");
-                    return 1;
-                }
-                const char* value_text = arg + (sizeof(password_prefix) - 1u);
-                usize length = ascii_length(value_text);
-                if (length == 0u) {
-                    console_line(2, "test: --password requires a non-empty value");
-                    return 1;
-                }
-                if (!password_buffer.ensure(length)) {
-                    console_line(2, "test: failed to allocate password buffer");
-                    return 1;
-                }
-                for (usize j = 0u; j < length; ++j) {
-                    password_buffer.data[j] = (u8)value_text[j];
-                }
-                password_buffer.size = length;
-                have_password = true;
-                continue;
-            }
-            console_write(2, "test: unknown option: ");
-            console_line(2, arg);
+        if (handled) {
+            continue;
+        }
+        if (!process_fiducial_option(arg, g_fiducial_defaults, "test", &handled)) {
             return 1;
         }
+        if (handled) {
+            continue;
+        }
+        const char ecc_prefix[] = "--ecc=";
+        if (ascii_starts_with(arg, ecc_prefix)) {
+            const char* value_text = arg + (sizeof(ecc_prefix) - 1u);
+            usize length = ascii_length(value_text);
+            if (length == 0u) {
+                console_line(2, "test: --ecc requires a numeric value");
+                return 1;
+            }
+            double redundancy_value = 0.0;
+            if (!ascii_to_double(value_text, length, &redundancy_value)) {
+                console_line(2, "test: --ecc value is not a valid decimal number");
+                return 1;
+            }
+            if (redundancy_value < 0.0 || redundancy_value > 8.0) {
+                console_line(2, "test: --ecc must be between 0.0 and 8.0");
+                return 1;
+            }
+            ecc_redundancy = redundancy_value;
+            continue;
+        }
+        const char password_prefix[] = "--password=";
+        if (ascii_starts_with(arg, password_prefix)) {
+            if (have_password) {
+                console_line(2, "test: password specified multiple times");
+                return 1;
+            }
+            const char* value_text = arg + (sizeof(password_prefix) - 1u);
+            usize length = ascii_length(value_text);
+            if (length == 0u) {
+                console_line(2, "test: --password requires a non-empty value");
+                return 1;
+            }
+            if (!password_buffer.ensure(length)) {
+                console_line(2, "test: failed to allocate password buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < length; ++j) {
+                password_buffer.data[j] = (u8)value_text[j];
+            }
+            password_buffer.size = length;
+            have_password = true;
+            continue;
+        }
+        console_write(2, "test: unknown option: ");
+        console_line(2, arg);
+        return 1;
     }
     if (!mapping.page_width_set) {
         mapping.page_width_pixels = 64u;

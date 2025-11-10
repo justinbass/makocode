@@ -6,6 +6,10 @@ Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu,
 
 Written entirely with codex-gpt-5.
 
+## Fiducial Controls
+
+Override the default fiducial markers (4x4 pixels spaced every 24 pixels with a 12 pixel margin) via `--fiducials=SIZE,SPACING[,MARGIN]` when running `makocode encode` or `makocode test`.
+
 ## Sample Barcodes
 
 Examples of the encoded output for channel colors 1-3:

@@ -11,4 +11,5 @@ TODO:
 - Print version in footer
 - Script to create art in output that is actually readable. Possibly just apply matrix code steganographically to an input image, maybe simply use high error correction to resolve.
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
+- Attempt to optimize/shrink/minify/dedupe code, it still should be readable
 - When finished, README should contain makocode.cpp encoded in each color
