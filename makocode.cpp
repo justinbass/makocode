@@ -9667,6 +9667,7 @@ static void write_usage() {
     console_line(1, "  makocode encode [options]   (reads payload from file; emits PPM pages)");
     console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
+    console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
@@ -15096,6 +15097,221 @@ static int command_test(int arg_count, char** args) {
     return 0;
 }
 
+static bool read_file_into_buffer(const char* path, makocode::ByteBuffer& buffer) {
+    if (!path) {
+        return false;
+    }
+    buffer.release();
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    u8 chunk[4096];
+    while (1) {
+        int read_result = read(fd, chunk, sizeof(chunk));
+        if (read_result < 0) {
+            close(fd);
+            buffer.release();
+            return false;
+        }
+        if (read_result == 0) {
+            break;
+        }
+        if (!buffer.append_bytes(chunk, (usize)read_result)) {
+            close(fd);
+            buffer.release();
+            return false;
+        }
+    }
+    close(fd);
+    return true;
+}
+
+static bool strip_cpp_comments(const makocode::ByteBuffer& input,
+                               makocode::ByteBuffer& output) {
+    output.release();
+    if (!input.data || input.size == 0u) {
+        return true;
+    }
+    bool in_line_comment = false;
+    bool in_block_comment = false;
+    bool in_string = false;
+    bool in_char = false;
+    const u8* data = input.data;
+    usize size = input.size;
+    usize index = 0u;
+    while (index < size) {
+        u8 ch = data[index];
+        if (in_line_comment) {
+            if (ch == '\n' || ch == '\r') {
+                if (!output.push(ch)) {
+                    return false;
+                }
+                in_line_comment = false;
+            }
+            index += 1u;
+            continue;
+        }
+        if (in_block_comment) {
+            if (ch == '*' && (index + 1u) < size && data[index + 1u] == '/') {
+                in_block_comment = false;
+                index += 2u;
+                continue;
+            }
+            if (ch == '\n' || ch == '\r') {
+                if (!output.push(ch)) {
+                    return false;
+                }
+            }
+            index += 1u;
+            continue;
+        }
+        if (in_string) {
+            if (!output.push(ch)) {
+                return false;
+            }
+            if (ch == '\\') {
+                if ((index + 1u) < size) {
+                    u8 next = data[index + 1u];
+                    if (!output.push(next)) {
+                        return false;
+                    }
+                    index += 2u;
+                    continue;
+                }
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            index += 1u;
+            continue;
+        }
+        if (in_char) {
+            if (!output.push(ch)) {
+                return false;
+            }
+            if (ch == '\\') {
+                if ((index + 1u) < size) {
+                    u8 next = data[index + 1u];
+                    if (!output.push(next)) {
+                        return false;
+                    }
+                    index += 2u;
+                    continue;
+                }
+            } else if (ch == '\'') {
+                in_char = false;
+            }
+            index += 1u;
+            continue;
+        }
+        if (ch == '/' && (index + 1u) < size) {
+            u8 next = data[index + 1u];
+            if (next == '/') {
+                in_line_comment = true;
+                index += 2u;
+                continue;
+            }
+            if (next == '*') {
+                in_block_comment = true;
+                index += 2u;
+                continue;
+            }
+        }
+        if (ch == '"') {
+            in_string = true;
+            if (!output.push(ch)) {
+                return false;
+            }
+            index += 1u;
+            continue;
+        }
+        if (ch == '\'') {
+            in_char = true;
+            if (!output.push(ch)) {
+                return false;
+            }
+            index += 1u;
+            continue;
+        }
+        if (!output.push(ch)) {
+            return false;
+        }
+        index += 1u;
+    }
+    return true;
+}
+
+static int command_minify(int arg_count, char** args) {
+    (void)args;
+    if (arg_count > 0) {
+        console_line(2, "minify: this command does not accept arguments");
+        return 1;
+    }
+    makocode::ByteBuffer source;
+    if (!read_file_into_buffer("makocode.cpp", source)) {
+        console_line(2, "minify: failed to read makocode.cpp");
+        return 1;
+    }
+    makocode::ByteBuffer stripped;
+    if (!strip_cpp_comments(source, stripped)) {
+        console_line(2, "minify: failed to strip comments");
+        return 1;
+    }
+    for (usize i = 0u; i < stripped.size; ++i) {
+        u8 ch = stripped.data[i];
+        if (ch == '\n' || ch == '\r') {
+            stripped.data[i] = ' ';
+        }
+    }
+    makocode::ByteBuffer compacted;
+    bool last_was_space = false;
+    for (usize i = 0u; i < stripped.size; ++i) {
+        u8 ch = stripped.data[i];
+        bool is_space = (ch == ' ') || (ch == '\t') || (ch == '\r') || (ch == '\n') ||
+                        (ch == '\f') || (ch == '\v');
+        if (is_space) {
+            if (last_was_space) {
+                continue;
+            }
+            if (!compacted.push(' ')) {
+                compacted.release();
+                console_line(2, "minify: failed to compact whitespace");
+                return 1;
+            }
+            last_was_space = true;
+        } else {
+            if (!compacted.push(ch)) {
+                compacted.release();
+                console_line(2, "minify: failed to compact whitespace");
+                return 1;
+            }
+            last_was_space = false;
+        }
+    }
+    stripped.release();
+    stripped.data = compacted.data;
+    stripped.size = compacted.size;
+    stripped.capacity = compacted.capacity;
+    compacted.data = 0;
+    compacted.size = 0;
+    compacted.capacity = 0;
+    if (stripped.size > 0u && stripped.data[0] == ' ') {
+        for (usize i = 1u; i < stripped.size; ++i) {
+            stripped.data[i - 1u] = stripped.data[i];
+        }
+        stripped.size -= 1u;
+    }
+    if (stripped.size > 0u && stripped.data[stripped.size - 1u] == ' ') {
+        stripped.size -= 1u;
+    }
+    if (!write_bytes_to_file("makocode_minified.cpp", stripped.data, stripped.size)) {
+        console_line(2, "minify: failed to write makocode_minified.cpp");
+        return 1;
+    }
+    console_line(1, "minify: wrote makocode_minified.cpp");
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         write_usage();
@@ -15115,6 +15331,9 @@ int main(int argc, char** argv) {
     }
     if (ascii_compare(argv[1], "test") == 0) {
         return command_test(argc - 2, argv + 2);
+    }
+    if (ascii_compare(argv[1], "minify") == 0) {
+        return command_minify(argc - 2, argv + 2);
     }
     write_usage();
     return 0;

@@ -2,3 +2,4 @@ makocode
 *.bin
 *.ppm
 .tmp/
+makocode_minified.cpp

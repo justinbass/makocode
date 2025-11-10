@@ -14,3 +14,4 @@ test: makocode
 clean:
 	rm -f makocode
 	rm -rf test
+	rm -f makocode_minified.cpp
