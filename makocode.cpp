@@ -4177,16 +4177,72 @@ static bool write_bytes_to_file(const char* path, const u8* data, usize length) 
 
 static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::ByteBuffer& buffer);
 
-static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+static bool buffer_contains_fiducial_metadata(const makocode::ByteBuffer& buffer) {
+    if (!buffer.data || buffer.size == 0u) {
+        return false;
+    }
+    static const char fiducial_prefix[] = "MAKOCODE_FIDUCIAL";
+    const usize prefix_length = (usize)sizeof(fiducial_prefix) - 1u;
+    if (buffer.size < prefix_length) {
+        return false;
+    }
+    for (usize i = 0u; i <= buffer.size - prefix_length; ++i) {
+        bool match = true;
+        for (usize j = 0u; j < prefix_length; ++j) {
+            if (buffer.data[i + j] != (u8)fiducial_prefix[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool path_contains_substring(const char* path, const char* needle) {
+    if (!path || !needle || !needle[0]) {
+        return false;
+    }
+    for (const char* cursor = path; *cursor; ++cursor) {
+        const char* a = cursor;
+        const char* b = needle;
+        while (*a && *b && (*a == *b)) {
+            ++a;
+            ++b;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool should_embed_fiducials_for_path(const char* path, const makocode::ByteBuffer& buffer) {
     if (!path) {
         return false;
     }
     usize path_length = ascii_length(path);
-    if (path_length >= 4u) {
-        const char* suffix = path + (path_length - 4u);
-        if (suffix[0] == '.' && suffix[1] == 'p' && suffix[2] == 'p' && suffix[3] == 'm') {
-            return write_ppm_with_fiducials_to_file(path, buffer);
-        }
+    if (path_length < 4u) {
+        return false;
+    }
+    const char* suffix = path + (path_length - 4u);
+    if (suffix[0] != '.' || suffix[1] != 'p' || suffix[2] != 'p' || suffix[3] != 'm') {
+        return false;
+    }
+    if (!path_contains_substring(path, "_encoded")) {
+        return false;
+    }
+    if (buffer_contains_fiducial_metadata(buffer)) {
+        return false;
+    }
+    return true;
+}
+
+static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+    if (should_embed_fiducials_for_path(path, buffer)) {
+        return write_ppm_with_fiducials_to_file(path, buffer);
     }
     return write_bytes_to_file(path, buffer.data, buffer.size);
 }
