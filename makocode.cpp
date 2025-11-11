@@ -13996,9 +13996,20 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         }
     }
 
+    makocode::ByteBuffer fiducial_ppm_for_artifact;
+    if (!apply_default_fiducial_grid(ppm_buffer, fiducial_ppm_for_artifact)) {
+        log_line(2, "failed to embed fiducial grid for baseline artifact");
+        return 1;
+    }
+
     makocode::ByteBuffer scaled_ppm;
     if (!ppm_scale_fractional_axes(ppm_buffer, scale_factor_x, scale_factor_y, scaled_ppm)) {
         log_line(2, "failed to scale PPM");
+        return 1;
+    }
+    makocode::ByteBuffer scaled_ppm_with_fiducials;
+    if (!ppm_scale_fractional_axes(fiducial_ppm_for_artifact, scale_factor_x, scale_factor_y, scaled_ppm_with_fiducials)) {
+        log_line(2, "failed to scale fiducial PPM");
         return 1;
     }
     char scale_x_display[16];
@@ -14112,7 +14123,7 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         log_line(2, "failed to build baseline encoded filename");
         return 1;
     }
-    if (!write_artifact((const char*)encoded_name.data, ppm_buffer)) {
+    if (!write_artifact((const char*)encoded_name.data, fiducial_ppm_for_artifact)) {
         log_line(2, "failed to write baseline encoded artifact");
         return 1;
     }
@@ -14148,7 +14159,7 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         log_line(2, "failed to build scaled encoded filename");
         return 1;
     }
-    if (!write_artifact((const char*)scaled_encoded_name.data, scaled_ppm)) {
+    if (!write_artifact((const char*)scaled_encoded_name.data, scaled_ppm_with_fiducials)) {
         log_line(2, "failed to write scaled encoded artifact");
         return 1;
     }

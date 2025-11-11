@@ -1,5 +1,4 @@
 TODO:
-- Uneven scale test shows fiducials messed up
 - Fix wavy distortion test
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
