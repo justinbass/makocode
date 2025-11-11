@@ -1,4 +1,6 @@
 TODO:
+- Make test failing, need to fix fiducial subgrid
+- ECC needs to be ~>=0.3 or it won't scan in. Could be fiducial markings. Warn user to add ECC or else make the data skip over fiducial markings to be much more efficient.
 - Use LZMA rather than LZW compression
 - Fix wavy distortion test
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
