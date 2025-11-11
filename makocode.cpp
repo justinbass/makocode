@@ -13443,12 +13443,18 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
     return 0;
 }
 
-static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
-    (void)arg_count;
-    (void)args;
-
+static int run_test_payload_100k_wavy(u8 color_channels,
+                                      const char* test_label,
+                                      const char* payload_bin_name,
+                                      const char* encoded_ppm_name,
+                                      const char* ripple_ppm_name,
+                                      const char* decoded_bin_name) {
+    auto log_prefix = [&](int fd) {
+        console_write(fd, test_label);
+        console_write(fd, ": ");
+    };
     auto log_line = [&](int fd, const char* message) {
-        console_write(fd, "test-100kb-wavy: ");
+        log_prefix(fd);
         console_line(fd, message);
     };
 
@@ -13468,10 +13474,15 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
         original_payload.data[i] = (u8)(i & 0xFFu);
     }
     original_payload.size = payload_size;
-    log_line(1, "generated 100 KiB grayscale payload");
+    char color_digits[8];
+    u64_to_ascii((u64)color_channels, color_digits, sizeof(color_digits));
+    log_line(1, "generated 100 KiB payload");
+    log_prefix(1);
+    console_write(1, "color=");
+    console_line(1, color_digits);
 
     ImageMappingConfig mapping;
-    mapping.color_channels = 1u;
+    mapping.color_channels = color_channels;
     mapping.color_set = true;
 
     PageFooterConfig footer_config;
@@ -13623,31 +13634,37 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
         return ok;
     };
 
-    if (!write_artifact("2006_payload_gray_100k_wavy.bin", original_payload)) {
+    if (!write_artifact(payload_bin_name, original_payload)) {
         log_line(2, "failed to write payload artifact");
         return 1;
     }
-    console_write(1, "test-100kb-wavy:   payload -> ");
+    log_prefix(1);
+    console_write(1, "  payload -> ");
     console_write(1, base_dir);
-    console_write(1, "/2006_payload_gray_100k_wavy.bin");
+    console_write(1, "/");
+    console_write(1, payload_bin_name);
     console_line(1, "");
 
-    if (!write_artifact("2006_payload_gray_100k_wavy_encoded.ppm", fiducial_ppm)) {
+    if (!write_artifact(encoded_ppm_name, fiducial_ppm)) {
         log_line(2, "failed to write fiducial artifact");
         return 1;
     }
-    console_write(1, "test-100kb-wavy:   fiducial -> ");
+    log_prefix(1);
+    console_write(1, "  fiducial -> ");
     console_write(1, base_dir);
-    console_write(1, "/2006_payload_gray_100k_wavy_encoded.ppm");
+    console_write(1, "/");
+    console_write(1, encoded_ppm_name);
     console_line(1, "");
 
-    if (!write_artifact("2006_payload_gray_100k_wavy_scan.ppm", ripple_ppm)) {
+    if (!write_artifact(ripple_ppm_name, ripple_ppm)) {
         log_line(2, "failed to write ripple artifact");
         return 1;
     }
-    console_write(1, "test-100kb-wavy:   ripple -> ");
+    log_prefix(1);
+    console_write(1, "  ripple -> ");
     console_write(1, base_dir);
-    console_write(1, "/2006_payload_gray_100k_wavy_scan.ppm");
+    console_write(1, "/");
+    console_write(1, ripple_ppm_name);
     console_line(1, "");
 
     makocode::ByteBuffer ripple_bits;
@@ -13710,13 +13727,15 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
         }
     }
 
-    if (!write_artifact("2006_payload_gray_100k_wavy_decoded.bin", decoder.payload)) {
+    if (!write_artifact(decoded_bin_name, decoder.payload)) {
         log_line(2, "failed to write decoded payload artifact");
         return 1;
     }
-    console_write(1, "test-100kb-wavy:   decoded -> ");
+    log_prefix(1);
+    console_write(1, "  decoded -> ");
     console_write(1, base_dir);
-    console_write(1, "/2006_payload_gray_100k_wavy_decoded.bin");
+    console_write(1, "/");
+    console_write(1, decoded_bin_name);
     console_line(1, "");
 
     if (!payload_matches) {
@@ -13726,6 +13745,39 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
 
     log_line(1, "ripple roundtrip ok");
     return 0;
+}
+
+static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_wavy(1u,
+                                      "test-100kb-wavy",
+                                      "2006_payload_gray_100k_wavy.bin",
+                                      "2006_payload_gray_100k_wavy_encoded.ppm",
+                                      "2006_payload_gray_100k_wavy_scan.ppm",
+                                      "2006_payload_gray_100k_wavy_decoded.bin");
+}
+
+static int command_test_payload_color2_100k_wavy(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_wavy(2u,
+                                      "test-100kb-wavy-c2",
+                                      "2007_payload_color2_100k_wavy.bin",
+                                      "2007_payload_color2_100k_wavy_encoded.ppm",
+                                      "2007_payload_color2_100k_wavy_scan.ppm",
+                                      "2007_payload_color2_100k_wavy_decoded.bin");
+}
+
+static int command_test_payload_color3_100k_wavy(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    return run_test_payload_100k_wavy(3u,
+                                      "test-100kb-wavy-c3",
+                                      "2008_payload_color3_100k_wavy.bin",
+                                      "2008_payload_color3_100k_wavy_encoded.ppm",
+                                      "2008_payload_color3_100k_wavy_scan.ppm",
+                                      "2008_payload_color3_100k_wavy_decoded.bin");
 }
 
 static int run_test_payload_100k_scaled(u8 color_channels,
@@ -15294,21 +15346,25 @@ static int command_test(int arg_count, char** args) {
         bool forward_args;
     };
     /* Test suite summary:
-       1) scan-basic              - validates histogram analytics and dirt removal on small fixtures.
-       2) border-dirt             - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
-       3) payload-100kb           - performs a 100 KiB encode/ppm/decode roundtrip without distortions.
-       4) payload-100kb-wavy      - runs a 100 KiB encode with fiducials, ripple distortion, and decode comparison.
-       5) payload-100kb-scaled    - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
-       6) payload-100kb-scaled-c2 - repeats the scaled roundtrip for color channel 2.
-       7) payload-100kb-scaled-c3 - repeats the scaled roundtrip for color channel 3.
-       8) payload-100kb-stretch-h26-v24 - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
-       9) payload-100kb-stretch-h24-v26 - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
-      10) payload-suite           - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
+       1) scan-basic                      - validates histogram analytics and dirt removal on small fixtures.
+       2) border-dirt                     - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
+       3) payload-100kb                   - performs a 100 KiB encode/ppm/decode roundtrip without distortions.
+       4) payload-100kb-wavy (commented)  - runs a 100 KiB encode with fiducials, ripple distortion, and decode comparison.
+       5) payload-100kb-wavy-c2 (commented) - extends the ripple distortion roundtrip to color channel 2.
+       6) payload-100kb-wavy-c3 (commented) - extends the ripple distortion roundtrip to color channel 3.
+       7) payload-100kb-scaled            - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
+       8) payload-100kb-scaled-c2         - repeats the scaled roundtrip for color channel 2.
+       9) payload-100kb-scaled-c3         - repeats the scaled roundtrip for color channel 3.
+      10) payload-100kb-stretch-h26-v24   - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
+      11) payload-100kb-stretch-h24-v26   - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
+      12) payload-suite                   - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
     const TestSuiteEntry suites[] = {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
         {"payload-100kb", command_test_payload_gray_100k, false},
         // {"payload-100kb-wavy", command_test_payload_gray_100k_wavy, false},
+        // {"payload-100kb-wavy-c2", command_test_payload_color2_100k_wavy, false},
+        // {"payload-100kb-wavy-c3", command_test_payload_color3_100k_wavy, false},
         {"payload-100kb-scaled", command_test_payload_gray_100k_scaled, false},
         {"payload-100kb-scaled-c2", command_test_payload_color2_100k_scaled, false},
         {"payload-100kb-scaled-c3", command_test_payload_color3_100k_scaled, false},
