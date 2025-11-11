@@ -58,6 +58,9 @@ extern "C" long  time(long* tloc);
 extern "C" struct tm* gmtime(const long* timep);
 extern "C" unsigned long strftime(char* s, unsigned long max, const char* format, const struct tm* tm);
 extern "C" char* realpath(const char* path, char* resolved_path);
+extern "C" char* getcwd(char* buf, unsigned long size);
+extern "C" int   chdir(const char* path);
+extern "C" int   snprintf(char* buf, unsigned long size, const char* format, ...);
 
 static u16 read_le_u16(const u8* ptr);
 static u32 read_le_u32(const u8* ptr);
@@ -6039,7 +6042,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    const ImageMappingConfig& overrides,
                                    makocode::ByteBuffer& frame_bits,
                                    u64& frame_bit_count,
-                                   PpmParserState& metadata_out) {
+                                   PpmParserState& metadata_out,
+                                   bool force_disable_fiducial_subgrid = false) {
     if (!input.data || input.size == 0u) {
         return false;
     }
@@ -6540,106 +6544,99 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                         if (fiducial_storage.column_weights && fiducial_storage.row_weights &&
                             fiducial_storage.column_offsets && fiducial_storage.row_offsets &&
                             fiducial_storage.cells && cell_total) {
-                            double total_col_weight = 0.0;
                             for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
-                                double sum_len = 0.0;
-                                for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
-                                    usize left_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
-                                    usize right_index = left_index + 1u;
-                                    double dx = fiducial_storage.centers_x[right_index] - fiducial_storage.centers_x[left_index];
-                                    double dy = fiducial_storage.centers_y[right_index] - fiducial_storage.centers_y[left_index];
-                                    double len = sqrt(dx * dx + dy * dy);
-                                    if (len <= 0.0) {
-                                        len = 1.0;
-                                    }
-                                    sum_len += len;
-                                }
-                                double weight = sum_len / (double)fiducial_rows;
-                                if (weight <= 0.0) {
-                                    weight = 1.0;
-                                }
-                                fiducial_storage.column_weights[col_index] = weight;
-                                total_col_weight += weight;
+                                fiducial_storage.column_weights[col_index] = 0.0;
                             }
-                            if (total_col_weight <= 0.0) {
-                                total_col_weight = (double)sub_cols;
-                            }
-
-                            double total_row_weight = 0.0;
                             for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
-                                double sum_len = 0.0;
-                                for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
-                                    usize top_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
-                                    usize bottom_index = top_index + (usize)fiducial_columns;
-                                    double dx = fiducial_storage.centers_x[bottom_index] - fiducial_storage.centers_x[top_index];
-                                    double dy = fiducial_storage.centers_y[bottom_index] - fiducial_storage.centers_y[top_index];
-                                    double len = sqrt(dx * dx + dy * dy);
-                                    if (len <= 0.0) {
-                                        len = 1.0;
-                                    }
-                                    sum_len += len;
-                                }
-                                double weight = sum_len / (double)fiducial_columns;
-                                if (weight <= 0.0) {
-                                    weight = 1.0;
-                                }
-                                fiducial_storage.row_weights[row_index] = weight;
-                                total_row_weight += weight;
-                            }
-                            if (total_row_weight <= 0.0) {
-                                total_row_weight = (double)sub_rows;
+                                fiducial_storage.row_weights[row_index] = 0.0;
                             }
 
-                            double left_margin_accum = 0.0;
-                            double right_margin_accum = 0.0;
-                            for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
-                                usize left_index = (usize)row_index * (usize)fiducial_columns;
-                                usize right_index = left_index + (usize)(fiducial_columns - 1u);
-                                left_margin_accum += fiducial_storage.centers_x[left_index];
-                                right_margin_accum += ((double)(width > 0u ? (double)(width - 1u) : 0.0) -
-                                                       fiducial_storage.centers_x[right_index]);
+                            for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
+                                for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
+                                    usize cell_index = (usize)row_index * (usize)sub_cols + (usize)col_index;
+                                    FiducialSubgridCell& cell = fiducial_storage.cells[cell_index];
+                                    usize top_left_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
+                                    usize top_right_index = top_left_index + 1u;
+                                    usize bottom_left_index = top_left_index + (usize)fiducial_columns;
+                                    usize bottom_right_index = bottom_left_index + 1u;
+                                    double ax = fiducial_storage.centers_x[top_left_index];
+                                    double ay = fiducial_storage.centers_y[top_left_index];
+                                    double bx = fiducial_storage.centers_x[top_right_index];
+                                    double by = fiducial_storage.centers_y[top_right_index];
+                                    double cx = fiducial_storage.centers_x[bottom_left_index];
+                                    double cy = fiducial_storage.centers_y[bottom_left_index];
+                                    double dx = fiducial_storage.centers_x[bottom_right_index];
+                                    double dy = fiducial_storage.centers_y[bottom_right_index];
+
+                                    double vec_top_x = bx - ax;
+                                    double vec_top_y = by - ay;
+                                    double vec_left_x = cx - ax;
+                                    double vec_left_y = cy - ay;
+                                    double vec_right_x = dx - bx;
+                                    double vec_right_y = dy - by;
+                                    double vec_bottom_x = dx - cx;
+                                    double vec_bottom_y = dy - cy;
+
+                                    const double half = 0.5;
+                                    cell.tl_x = ax - half * vec_top_x - half * vec_left_x;
+                                    cell.tl_y = ay - half * vec_top_y - half * vec_left_y;
+                                    cell.tr_x = bx - half * vec_top_x - half * vec_right_x;
+                                    cell.tr_y = by - half * vec_top_y - half * vec_right_y;
+                                    cell.bl_x = cx - half * vec_left_x - half * vec_bottom_x;
+                                    cell.bl_y = cy - half * vec_left_y - half * vec_bottom_y;
+                                    cell.br_x = dx - half * vec_bottom_x - half * vec_right_x;
+                                    cell.br_y = dy - half * vec_bottom_y - half * vec_right_y;
+
+                                    double top_len = sqrt((cell.tr_x - cell.tl_x) * (cell.tr_x - cell.tl_x) +
+                                                          (cell.tr_y - cell.tl_y) * (cell.tr_y - cell.tl_y));
+                                    double bottom_len = sqrt((cell.br_x - cell.bl_x) * (cell.br_x - cell.bl_x) +
+                                                             (cell.br_y - cell.bl_y) * (cell.br_y - cell.bl_y));
+                                    double avg_width = 0.5 * (top_len + bottom_len);
+                                    fiducial_storage.column_weights[col_index] += avg_width;
+
+                                    double left_len = sqrt((cell.bl_x - cell.tl_x) * (cell.bl_x - cell.tl_x) +
+                                                           (cell.bl_y - cell.tl_y) * (cell.bl_y - cell.tl_y));
+                                    double right_len = sqrt((cell.br_x - cell.tr_x) * (cell.br_x - cell.tr_x) +
+                                                            (cell.br_y - cell.tr_y) * (cell.br_y - cell.tr_y));
+                                    double avg_height = 0.5 * (left_len + right_len);
+                                    fiducial_storage.row_weights[row_index] += avg_height;
+
+                                }
                             }
-                            double average_left_margin = left_margin_accum / (double)fiducial_rows;
-                            double average_right_margin = right_margin_accum / (double)fiducial_rows;
-                            if (sub_cols > 0u) {
-                                fiducial_storage.column_weights[0] += average_left_margin;
-                                fiducial_storage.column_weights[sub_cols - 1u] += average_right_margin;
-                            }
-                            total_col_weight = 0.0;
+
+                            double total_phys_width = 0.0;
                             for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
-                                if (fiducial_storage.column_weights[col_index] <= 0.0) {
-                                    fiducial_storage.column_weights[col_index] = 1.0;
+                                double avg_width = fiducial_storage.column_weights[col_index] / (double)sub_rows;
+                                if (avg_width <= 0.0) {
+                                    avg_width = 1.0;
                                 }
-                                total_col_weight += fiducial_storage.column_weights[col_index];
+                                fiducial_storage.column_weights[col_index] = avg_width;
+                                total_phys_width += avg_width;
+                            }
+                            if (total_phys_width <= 0.0) {
+                                total_phys_width = (double)sub_cols;
                             }
 
-                            double top_margin_accum = 0.0;
-                            double bottom_margin_accum = 0.0;
-                            for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
-                                top_margin_accum += fiducial_storage.centers_y[col_index];
-                                bottom_margin_accum += ((double)(height > 0u ? (double)(height - 1u) : 0.0) -
-                                                        fiducial_storage.centers_y[(usize)(fiducial_rows - 1u) * (usize)fiducial_columns + (usize)col_index]);
-                            }
-                            double average_top_margin = top_margin_accum / (double)fiducial_columns;
-                            double average_bottom_margin = bottom_margin_accum / (double)fiducial_columns;
-                            if (sub_rows > 0u) {
-                                fiducial_storage.row_weights[0] += average_top_margin;
-                                fiducial_storage.row_weights[sub_rows - 1u] += average_bottom_margin;
-                            }
-                            total_row_weight = 0.0;
+                            double total_phys_height = 0.0;
                             for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
-                                if (fiducial_storage.row_weights[row_index] <= 0.0) {
-                                    fiducial_storage.row_weights[row_index] = 1.0;
+                                double avg_height = fiducial_storage.row_weights[row_index] / (double)sub_cols;
+                                if (avg_height <= 0.0) {
+                                    avg_height = 1.0;
                                 }
-                                total_row_weight += fiducial_storage.row_weights[row_index];
+                                fiducial_storage.row_weights[row_index] = avg_height;
+                                total_phys_height += avg_height;
+                            }
+                            if (total_phys_height <= 0.0) {
+                                total_phys_height = (double)sub_rows;
                             }
 
                             fiducial_storage.column_offsets[0] = 0u;
-                            double cumulative_weight = 0.0;
+                            double width_accum = 0.0;
+                            double width_scale = (double)logical_width / total_phys_width;
                             u64 assigned_columns = 0u;
                             for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
-                                cumulative_weight += fiducial_storage.column_weights[col_index];
-                                u64 target = (u64)((cumulative_weight / total_col_weight) * (double)logical_width + 0.5);
+                                width_accum += fiducial_storage.column_weights[col_index] * width_scale;
+                                u64 target = (u64)(width_accum + 0.5);
                                 if (target <= assigned_columns) {
                                     target = assigned_columns + 1u;
                                 }
@@ -6656,11 +6653,12 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                             }
 
                             fiducial_storage.row_offsets[0] = 0u;
-                            cumulative_weight = 0.0;
+                            double height_accum = 0.0;
+                            double height_scale = (double)logical_height / total_phys_height;
                             u64 assigned_rows = 0u;
                             for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
-                                cumulative_weight += fiducial_storage.row_weights[row_index];
-                                u64 target = (u64)((cumulative_weight / total_row_weight) * (double)logical_height + 0.5);
+                                height_accum += fiducial_storage.row_weights[row_index] * height_scale;
+                                u64 target = (u64)(height_accum + 0.5);
                                 if (target <= assigned_rows) {
                                     target = assigned_rows + 1u;
                                 }
@@ -6684,18 +6682,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                     cell.row_end = fiducial_storage.row_offsets[row_index + 1u];
                                     cell.col_start = fiducial_storage.column_offsets[col_index];
                                     cell.col_end = fiducial_storage.column_offsets[col_index + 1u];
-                                    usize top_left_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
-                                    usize top_right_index = top_left_index + 1u;
-                                    usize bottom_left_index = top_left_index + (usize)fiducial_columns;
-                                    usize bottom_right_index = bottom_left_index + 1u;
-                                    cell.tl_x = fiducial_storage.centers_x[top_left_index];
-                                    cell.tl_y = fiducial_storage.centers_y[top_left_index];
-                                    cell.tr_x = fiducial_storage.centers_x[top_right_index];
-                                    cell.tr_y = fiducial_storage.centers_y[top_right_index];
-                                    cell.bl_x = fiducial_storage.centers_x[bottom_left_index];
-                                    cell.bl_y = fiducial_storage.centers_y[bottom_left_index];
-                                    cell.br_x = fiducial_storage.centers_x[bottom_right_index];
-                                    cell.br_y = fiducial_storage.centers_y[bottom_right_index];
                                 }
                             }
 
@@ -6710,6 +6696,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 }
             }
         }
+    }
+
+    if (force_disable_fiducial_subgrid) {
+        use_fiducial_subgrid = false;
     }
 
     u32 active_row_cell = 0u;
@@ -6863,13 +6853,40 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 double max_col = (analysis_width > 0u) ? (double)(analysis_width - 1u) : 0.0;
                 if (sample_row > max_row) sample_row = max_row;
                 if (sample_col > max_col) sample_col = max_col;
-                u64 raw_row = (u64)(sample_row + 0.5);
-                u64 raw_col = (u64)(sample_col + 0.5);
-                u64 pixel_index = (raw_row * pixel_stride) + raw_col;
-                if (pixel_index >= raw_pixel_count) {
-                    return false;
+                if (use_fiducial_subgrid) {
+                    unsigned x0 = (unsigned)floor(sample_col);
+                    unsigned y0 = (unsigned)floor(sample_row);
+                    unsigned x1 = (x0 + 1u < analysis_width) ? (x0 + 1u) : x0;
+                    unsigned y1 = (y0 + 1u < analysis_height) ? (y0 + 1u) : y0;
+                    double fx = sample_col - (double)x0;
+                    double fy = sample_row - (double)y0;
+                    usize idx00 = ((usize)y0 * (usize)pixel_stride + (usize)x0) * 3u;
+                    usize idx10 = ((usize)y0 * (usize)pixel_stride + (usize)x1) * 3u;
+                    usize idx01 = ((usize)y1 * (usize)pixel_stride + (usize)x0) * 3u;
+                    usize idx11 = ((usize)y1 * (usize)pixel_stride + (usize)x1) * 3u;
+                    u8 interp_rgb[3];
+                    for (u32 channel = 0u; channel < 3u; ++channel) {
+                        double v00 = (double)pixel_data[idx00 + channel];
+                        double v10 = (double)pixel_data[idx10 + channel];
+                        double v01 = (double)pixel_data[idx01 + channel];
+                        double v11 = (double)pixel_data[idx11 + channel];
+                        double top = v00 + (v10 - v00) * fx;
+                        double bottom = v01 + (v11 - v01) * fx;
+                        double value = top + (bottom - top) * fy;
+                        if (value < 0.0) value = 0.0;
+                        if (value > 255.0) value = 255.0;
+                        interp_rgb[channel] = (u8)(value + 0.5);
+                    }
+                    rgb = interp_rgb;
+                } else {
+                    u64 raw_row = (u64)(sample_row + 0.5);
+                    u64 raw_col = (u64)(sample_col + 0.5);
+                    u64 pixel_index = (raw_row * pixel_stride) + raw_col;
+                    if (pixel_index >= raw_pixel_count) {
+                        return false;
+                    }
+                    rgb = pixel_data + (usize)(pixel_index * 3u);
                 }
-                rgb = pixel_data + (usize)(pixel_index * 3u);
             }
 
             u32 samples_raw[3] = {0u, 0u, 0u};
@@ -10625,6 +10642,14 @@ static int command_decode(int arg_count, char** args) {
     u64 bit_count = 0u;
     PpmParserState aggregate_state;
     bool have_metadata = false;
+    bool force_disable_subgrid = false;
+    bool retried_subgrid = false;
+
+retry_decode:
+    bitstream.release();
+    bit_count = 0u;
+    aggregate_state = PpmParserState();
+    have_metadata = false;
     if (file_count == 0u) {
         makocode::ByteBuffer ppm_stream;
         if (!read_entire_stdin(ppm_stream)) {
@@ -10634,7 +10659,7 @@ static int command_decode(int arg_count, char** args) {
         makocode::ByteBuffer frame_bits;
         u64 frame_bit_count = 0u;
         PpmParserState single_state;
-        if (!ppm_extract_frame_bits(ppm_stream, mapping, frame_bits, frame_bit_count, single_state)) {
+        if (!ppm_extract_frame_bits(ppm_stream, mapping, frame_bits, frame_bit_count, single_state, force_disable_subgrid)) {
             console_line(2, "decode: invalid ppm input");
             return 1;
         }
@@ -10674,7 +10699,7 @@ static int command_decode(int arg_count, char** args) {
             makocode::ByteBuffer page_bits;
             u64 page_bit_count = 0u;
             PpmParserState page_state;
-            if (!ppm_extract_frame_bits(ppm_stream, mapping, page_bits, page_bit_count, page_state)) {
+            if (!ppm_extract_frame_bits(ppm_stream, mapping, page_bits, page_bit_count, page_state, force_disable_subgrid)) {
                 console_write(2, "decode: invalid ppm in ");
                 console_line(2, input_files[file_index]);
                 return 1;
@@ -10788,6 +10813,12 @@ static int command_decode(int arg_count, char** args) {
         if (decoder.password_auth_failed()) {
             console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
             return 1;
+        }
+        if (decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
+            console_line(2, "decode: ECC could not repair the payload; retrying without fiducial subgrid");
+            force_disable_subgrid = true;
+            retried_subgrid = true;
+            goto retry_decode;
         }
         if (decoder.ecc_correction_failed()) {
             console_line(2, "decode: ECC could not repair the payload");
@@ -14305,6 +14336,139 @@ static int command_test_payload_gray_100k_stretch_h24_v26(int arg_count, char** 
                                         2.6);
 }
 
+static int command_test_encode_decode_cli(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    const char* test_root = "test";
+    if (!ensure_directory(test_root)) {
+        console_line(2, "test: failed to create test directory");
+        return 1;
+    }
+    char original_cwd[4096];
+    if (!getcwd(original_cwd, sizeof(original_cwd))) {
+        console_line(2, "test: getcwd failed");
+        return 1;
+    }
+    const char* sandbox_dir = "test/cli_case";
+    if (!ensure_directory(sandbox_dir)) {
+        console_line(2, "test: failed to create sandbox directory");
+        return 1;
+    }
+    if (chdir(sandbox_dir) != 0) {
+        console_line(2, "test: failed to enter sandbox directory");
+        return 1;
+    }
+    DIR* cleanup_dir = opendir(".");
+    if (cleanup_dir) {
+        struct dirent* entry = 0;
+    while ((entry = readdir(cleanup_dir))) {
+        const char* name = entry->d_name;
+            usize len = ascii_length(name);
+            if (len >= 4u && name[len - 4u] == '.' && name[len - 3u] == 'p' &&
+                name[len - 2u] == 'p' && name[len - 1u] == 'm') {
+                unlink(name);
+            }
+        }
+        closedir(cleanup_dir);
+    }
+    const char input_name[] = "cli_payload.bin";
+    const char sample_text[] = "encode-decode-cli test payload";
+    if (!write_bytes_to_file(input_name, (const u8*)sample_text, (usize)(sizeof(sample_text) - 1u))) {
+        console_line(2, "test: failed to write cli payload");
+        chdir(original_cwd);
+        return 1;
+    }
+    char* encode_args[] = {
+        (char*)"--input=cli_payload.bin",
+        (char*)"--ecc=0.5",
+        (char*)"--page-width=100",
+        (char*)"--page-height=100",
+        (char*)"--no-filename",
+        (char*)"--no-page-count"
+    };
+    if (command_encode((int)(sizeof(encode_args) / sizeof(encode_args[0])), encode_args) != 0) {
+        console_line(2, "test: encode command failed");
+        chdir(original_cwd);
+        return 1;
+    }
+    DIR* search_dir = opendir(".");
+    if (!search_dir) {
+        console_line(2, "test: failed to open sandbox directory");
+        chdir(original_cwd);
+        return 1;
+    }
+    char ppm_name[256];
+    ppm_name[0] = '\0';
+    struct dirent* entry = 0;
+    while ((entry = readdir(search_dir))) {
+        const char* name = entry->d_name;
+        usize len = ascii_length(name);
+        if (len >= 4u && name[len - 4u] == '.' && name[len - 3u] == 'p' &&
+            name[len - 2u] == 'p' && name[len - 1u] == 'm') {
+            usize copy_len = (len < (sizeof(ppm_name) - 1u)) ? len : (sizeof(ppm_name) - 1u);
+            for (usize i = 0u; i < copy_len; ++i) {
+                ppm_name[i] = name[i];
+            }
+            ppm_name[copy_len] = '\0';
+            break;
+        }
+    }
+    closedir(search_dir);
+    if (!ppm_name[0]) {
+        console_line(2, "test: encode did not produce a ppm");
+        chdir(original_cwd);
+        return 1;
+    }
+    if (chdir(original_cwd) != 0) {
+        console_line(2, "test: failed to restore working directory");
+        return 1;
+    }
+    char decode_path[512];
+    if (snprintf(decode_path, sizeof(decode_path), "%s/%s/%s", test_root, "cli_case", ppm_name) <= 0) {
+        console_line(2, "test: failed to build decode path");
+        return 1;
+    }
+    const char* output_dir = "test/cli_case/decoded";
+    if (!ensure_directory(output_dir)) {
+        console_line(2, "test: failed to create decode output directory");
+        return 1;
+    }
+    char output_arg[512];
+    if (snprintf(output_arg, sizeof(output_arg), "--output-dir=%s", output_dir) <= 0) {
+        console_line(2, "test: failed to build output argument");
+        return 1;
+    }
+    char* decode_args[] = {
+        output_arg,
+        decode_path
+    };
+    if (command_decode(2, decode_args) != 0) {
+        console_line(2, "test: decode command failed");
+        return 1;
+    }
+    char decoded_path[512];
+    if (snprintf(decoded_path, sizeof(decoded_path), "%s/%s", output_dir, input_name) <= 0) {
+        console_line(2, "test: failed to build decoded payload path");
+        return 1;
+    }
+    makocode::ByteBuffer decoded_data;
+    if (!read_entire_file(decoded_path, decoded_data)) {
+        console_line(2, "test: failed to read decoded payload");
+        return 1;
+    }
+    if (decoded_data.size != (usize)(sizeof(sample_text) - 1u)) {
+        console_line(2, "test: decoded payload size mismatch");
+        return 1;
+    }
+    for (usize i = 0u; i < decoded_data.size; ++i) {
+        if (decoded_data.data[i] != (u8)sample_text[i]) {
+            console_line(2, "test: decoded payload content mismatch");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int command_test_payload(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
@@ -15357,10 +15521,12 @@ static int command_test(int arg_count, char** args) {
        9) payload-100kb-scaled-c3         - repeats the scaled roundtrip for color channel 3.
       10) payload-100kb-stretch-h26-v24   - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
       11) payload-100kb-stretch-h24-v26   - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
-      12) payload-suite                   - runs exhaustive payload encode/decode scenarios across colors/password/ECC. */
+      12) payload-suite                   - runs exhaustive payload encode/decode scenarios across colors/password/ECC.
+      13) encode-decode-cli               - mimics the encode/decode CLI flow with fiducials and ensures roundtrip integrity. */
     const TestSuiteEntry suites[] = {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
+        {"encode-decode-cli", command_test_encode_decode_cli, false},
         {"payload-100kb", command_test_payload_gray_100k, false},
         // {"payload-100kb-wavy", command_test_payload_gray_100k_wavy, false},
         // {"payload-100kb-wavy-c2", command_test_payload_color2_100k_wavy, false},
