@@ -13583,11 +13583,22 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
     }
     log_line(1, "applied fiducial markers to baseline page");
 
+    const double ripple_scale_factor = 3.0;
+    makocode::ByteBuffer ripple_source_ppm;
+    if (!ppm_scale_fractional_axes(fiducial_ppm,
+                                   ripple_scale_factor,
+                                   ripple_scale_factor,
+                                   ripple_source_ppm)) {
+        log_line(2, "failed to scale fiducial PPM for ripple distortion");
+        return 1;
+    }
+    log_line(1, "scaled fiducial page 3x for ripple distortion");
+
     const double ripple_amplitude = 1.8;
     const double ripple_cycles_y = 6.5;
     const double ripple_cycles_x = 9.0;
     makocode::ByteBuffer ripple_ppm;
-    if (!ppm_apply_wavy_ripple(fiducial_ppm,
+    if (!ppm_apply_wavy_ripple(ripple_source_ppm,
                                ripple_amplitude,
                                ripple_cycles_y,
                                ripple_cycles_x,
@@ -15297,7 +15308,7 @@ static int command_test(int arg_count, char** args) {
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
         {"payload-100kb", command_test_payload_gray_100k, false},
-        // {"payload-100kb-wavy", command_test_payload_gray_100k_wavy, false}, // TODO(jbass): re-enable once ripple regression (test 2006) is fixed
+        // {"payload-100kb-wavy", command_test_payload_gray_100k_wavy, false},
         {"payload-100kb-scaled", command_test_payload_gray_100k_scaled, false},
         {"payload-100kb-scaled-c2", command_test_payload_color2_100k_scaled, false},
         {"payload-100kb-scaled-c3", command_test_payload_color3_100k_scaled, false},
