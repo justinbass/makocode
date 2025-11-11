@@ -7495,6 +7495,26 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
             return false;
         }
     }
+    if (state.has_fiducial_size) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_SIZE", state.fiducial_size_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_columns) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_COLUMNS", state.fiducial_columns_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_rows) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_ROWS", state.fiducial_rows_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_margin) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", state.fiducial_margin_value)) {
+            return false;
+        }
+    }
     if (!buffer_append_number(output, scaled_width) || !output.append_char(' ')) {
         return false;
     }
@@ -7701,6 +7721,26 @@ static bool ppm_scale_fractional_axes(const makocode::ByteBuffer& input,
         }
     } else if (state.has_font_size) {
         if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_size) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_SIZE", state.fiducial_size_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_columns) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_COLUMNS", state.fiducial_columns_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_rows) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_ROWS", state.fiducial_rows_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_margin) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", state.fiducial_margin_value)) {
             return false;
         }
     }
@@ -14933,15 +14973,29 @@ static int command_test_payload(int arg_count, char** args) {
                         console_line(2, "test: failed to regenerate baseline page for scaling");
                         return 1;
                     }
+                    makocode::ByteBuffer baseline_page_with_fid;
+                    if (!apply_default_fiducial_grid(baseline_page, baseline_page_with_fid)) {
+                        console_line(2, "test: failed to embed fiducial grid before scaling");
+                        return 1;
+                    }
                     makocode::ByteBuffer scaled_page;
+                    makocode::ByteBuffer scaled_page_for_artifact;
                     if (use_integer_scaler) {
                         if (!ppm_scale_integer(baseline_page, integer_factor, scaled_page)) {
                             console_line(2, "test: failed to scale ppm page");
                             return 1;
                         }
+                        if (!ppm_scale_integer(baseline_page_with_fid, integer_factor, scaled_page_for_artifact)) {
+                            console_line(2, "test: failed to scale fiducial ppm page");
+                            return 1;
+                        }
                     } else {
                         if (!ppm_scale_fractional(baseline_page, scale_factor_value, scaled_page)) {
                             console_line(2, "test: failed to scale ppm page fractionally");
+                            return 1;
+                        }
+                        if (!ppm_scale_fractional(baseline_page_with_fid, scale_factor_value, scaled_page_for_artifact)) {
+                            console_line(2, "test: failed to scale fiducial ppm page fractionally");
                             return 1;
                         }
                     }
@@ -14985,7 +15039,7 @@ static int command_test_payload(int arg_count, char** args) {
                     console_line(1, (const char*)scaled_bin_name.data);
                     makocode::ByteBuffer scaled_encoded_name;
                     if (!buffer_clone_with_suffix(scaled_base, "_encoded", ".ppm", scaled_encoded_name) ||
-                        !write_buffer_to_directory(test_output_dir, scaled_encoded_name, scaled_page)) {
+                        !write_buffer_to_directory(test_output_dir, scaled_encoded_name, scaled_page_for_artifact)) {
                         console_line(2, "test: failed to write scaled scan page");
                         return 1;
                     }
