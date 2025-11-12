@@ -1,5 +1,6 @@
 TODO:
 - ECC needs to be ~>=0.3 or it won't scan in. Could be fiducial markings. Warn user to add ECC or else make the data skip over fiducial markings to be much more efficient.
+- ECC data shuffling causes spot data issues to propagate many times their size. Consider archiving use case here to see if that's appropriate...
 - Use LZMA rather than LZW compression
 - Fix wavy distortion test
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
