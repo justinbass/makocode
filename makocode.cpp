@@ -4251,6 +4251,8 @@ static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& b
 }
 
 
+static const u32 MAX_FIDUCIAL_SUBGRID_ENTRIES = 1024u;
+
 struct PpmParserState {
     const u8* data;
     usize size;
@@ -4311,6 +4313,12 @@ struct PpmParserState {
     u64 fiducial_rows_value;
     bool has_fiducial_margin;
     u64 fiducial_margin_value;
+    bool has_fiducial_col_offsets;
+    u32 fiducial_col_offset_count;
+    u64 fiducial_col_offsets[MAX_FIDUCIAL_SUBGRID_ENTRIES];
+    bool has_fiducial_row_offsets;
+    u32 fiducial_row_offset_count;
+    u64 fiducial_row_offsets[MAX_FIDUCIAL_SUBGRID_ENTRIES];
 
     PpmParserState()
         : data(0),
@@ -4371,7 +4379,16 @@ struct PpmParserState {
           has_fiducial_rows(false),
           fiducial_rows_value(0u),
           has_fiducial_margin(false),
-          fiducial_margin_value(0u) {}
+          fiducial_margin_value(0u),
+          has_fiducial_col_offsets(false),
+          fiducial_col_offset_count(0u),
+          has_fiducial_row_offsets(false),
+          fiducial_row_offset_count(0u) {
+        for (u32 i = 0u; i < MAX_FIDUCIAL_SUBGRID_ENTRIES; ++i) {
+            fiducial_col_offsets[i] = 0u;
+            fiducial_row_offsets[i] = 0u;
+        }
+    }
 };
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
@@ -4396,6 +4413,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char fiducial_columns_tag[] = "MAKOCODE_FIDUCIAL_COLUMNS";
     const char fiducial_rows_tag[] = "MAKOCODE_FIDUCIAL_ROWS";
     const char fiducial_margin_tag[] = "MAKOCODE_FIDUCIAL_MARGIN";
+    const char subgrid_col_offsets_tag[] = "MAKOCODE_SUBGRID_COL_OFFSETS";
+    const char subgrid_row_offsets_tag[] = "MAKOCODE_SUBGRID_ROW_OFFSETS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
     const usize bits_tag_len = (usize)sizeof(bits_tag) - 1u;
     const usize ecc_tag_len = (usize)sizeof(ecc_tag) - 1u;
@@ -4408,6 +4427,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const usize fiducial_columns_tag_len = (usize)sizeof(fiducial_columns_tag) - 1u;
     const usize fiducial_rows_tag_len = (usize)sizeof(fiducial_rows_tag) - 1u;
     const usize fiducial_margin_tag_len = (usize)sizeof(fiducial_margin_tag) - 1u;
+    const usize subgrid_col_offsets_tag_len = (usize)sizeof(subgrid_col_offsets_tag) - 1u;
+    const usize subgrid_row_offsets_tag_len = (usize)sizeof(subgrid_row_offsets_tag) - 1u;
     if ((length - index) >= bytes_tag_len) {
         bool match = true;
         for (usize i = 0u; i < bytes_tag_len; ++i) {
@@ -4912,6 +4933,116 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_fiducial_margin = true;
                     state.fiducial_margin_value = value;
+                }
+            }
+            return;
+        }
+    }
+    if ((length - index) >= subgrid_col_offsets_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < subgrid_col_offsets_tag_len; ++i) {
+            if (comment[index + i] != subgrid_col_offsets_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += subgrid_col_offsets_tag_len;
+            u64 values[MAX_FIDUCIAL_SUBGRID_ENTRIES];
+            u32 count = 0u;
+            while (index < length) {
+                while (index < length && (comment[index] == ' ' || comment[index] == '\t' || comment[index] == ',')) {
+                    ++index;
+                }
+                if (index >= length) {
+                    break;
+                }
+                usize number_start = index;
+                while (index < length) {
+                    char c = comment[index];
+                    if (c < '0' || c > '9') {
+                        break;
+                    }
+                    ++index;
+                }
+                usize number_length = index - number_start;
+                if (!number_length) {
+                    if (index < length) {
+                        ++index;
+                    }
+                    continue;
+                }
+                if (count >= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
+                    count = 0u;
+                    break;
+                }
+                u64 value = 0u;
+                if (!ascii_to_u64(comment + number_start, number_length, &value)) {
+                    count = 0u;
+                    break;
+                }
+                values[count++] = value;
+            }
+            if (count >= 2u) {
+                state.has_fiducial_col_offsets = true;
+                state.fiducial_col_offset_count = count;
+                for (u32 i = 0u; i < count; ++i) {
+                    state.fiducial_col_offsets[i] = values[i];
+                }
+            }
+            return;
+        }
+    }
+    if ((length - index) >= subgrid_row_offsets_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < subgrid_row_offsets_tag_len; ++i) {
+            if (comment[index + i] != subgrid_row_offsets_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += subgrid_row_offsets_tag_len;
+            u64 values[MAX_FIDUCIAL_SUBGRID_ENTRIES];
+            u32 count = 0u;
+            while (index < length) {
+                while (index < length && (comment[index] == ' ' || comment[index] == '\t' || comment[index] == ',')) {
+                    ++index;
+                }
+                if (index >= length) {
+                    break;
+                }
+                usize number_start = index;
+                while (index < length) {
+                    char c = comment[index];
+                    if (c < '0' || c > '9') {
+                        break;
+                    }
+                    ++index;
+                }
+                usize number_length = index - number_start;
+                if (!number_length) {
+                    if (index < length) {
+                        ++index;
+                    }
+                    continue;
+                }
+                if (count >= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
+                    count = 0u;
+                    break;
+                }
+                u64 value = 0u;
+                if (!ascii_to_u64(comment + number_start, number_length, &value)) {
+                    count = 0u;
+                    break;
+                }
+                values[count++] = value;
+            }
+            if (count >= 2u) {
+                state.has_fiducial_row_offsets = true;
+                state.fiducial_row_offset_count = count;
+                for (u32 i = 0u; i < count; ++i) {
+                    state.fiducial_row_offsets[i] = values[i];
                 }
             }
             return;
@@ -6431,6 +6562,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     u64* fiducial_row_offsets = 0;
     u32 fiducial_subgrid_columns = 0u;
     u32 fiducial_subgrid_rows = 0u;
+    bool metadata_columns_overridden = false;
+    bool metadata_rows_overridden = false;
 
     if (!has_rotation && !has_skew &&
         state.has_fiducial_columns && state.has_fiducial_rows &&
@@ -6674,6 +6807,57 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                 fiducial_storage.row_offsets[sub_rows] = logical_height;
                             }
 
+                            if (state.has_fiducial_col_offsets &&
+                                state.fiducial_col_offset_count == (u32)(sub_cols + 1u)) {
+                                bool valid = true;
+                                for (u32 i = 0u; i <= sub_cols; ++i) {
+                                    u64 value = state.fiducial_col_offsets[i];
+                                    if (i == 0u) {
+                                        if (value != 0u) {
+                                            valid = false;
+                                            break;
+                                        }
+                                    } else {
+                                        u64 prev = state.fiducial_col_offsets[i - 1u];
+                                        if (value <= prev || value > logical_width) {
+                                            valid = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (valid) {
+                                    for (u32 i = 0u; i <= sub_cols; ++i) {
+                                        fiducial_storage.column_offsets[i] = state.fiducial_col_offsets[i];
+                                    }
+                                    metadata_columns_overridden = true;
+                                }
+                            }
+                            if (state.has_fiducial_row_offsets &&
+                                state.fiducial_row_offset_count == (u32)(sub_rows + 1u)) {
+                                bool valid = true;
+                                for (u32 i = 0u; i <= sub_rows; ++i) {
+                                    u64 value = state.fiducial_row_offsets[i];
+                                    if (i == 0u) {
+                                        if (value != 0u) {
+                                            valid = false;
+                                            break;
+                                        }
+                                    } else {
+                                        u64 prev = state.fiducial_row_offsets[i - 1u];
+                                        if (value <= prev || value > logical_height) {
+                                            valid = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (valid) {
+                                    for (u32 i = 0u; i <= sub_rows; ++i) {
+                                        fiducial_storage.row_offsets[i] = state.fiducial_row_offsets[i];
+                                    }
+                                    metadata_rows_overridden = true;
+                                }
+                            }
+
                             for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
                                 for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
                                     usize cell_index = (usize)row_index * (usize)sub_cols + (usize)col_index;
@@ -6698,8 +6882,14 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
 
+    bool prefer_nearest_sampling = false;
+    if (use_fiducial_subgrid && metadata_columns_overridden && metadata_rows_overridden) {
+        prefer_nearest_sampling = true;
+    }
+
     if (force_disable_fiducial_subgrid) {
         use_fiducial_subgrid = false;
+        prefer_nearest_sampling = false;
     }
 
     u32 active_row_cell = 0u;
@@ -6744,7 +6934,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             double sample_row = 0.0;
             double sample_col = 0.0;
             if (use_fiducial_subgrid) {
-                const double clamp_min = 0.0005;
+                const double clamp_min = prefer_nearest_sampling ? 0.15 : 0.0005;
                 const double clamp_max = 1.0 - clamp_min;
                 FiducialSubgridCell& cell = row_cells[active_col_cell];
                 double local_u = 0.5;
@@ -6854,30 +7044,46 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 if (sample_row > max_row) sample_row = max_row;
                 if (sample_col > max_col) sample_col = max_col;
                 if (use_fiducial_subgrid) {
-                    unsigned x0 = (unsigned)floor(sample_col);
-                    unsigned y0 = (unsigned)floor(sample_row);
-                    unsigned x1 = (x0 + 1u < analysis_width) ? (x0 + 1u) : x0;
-                    unsigned y1 = (y0 + 1u < analysis_height) ? (y0 + 1u) : y0;
-                    double fx = sample_col - (double)x0;
-                    double fy = sample_row - (double)y0;
-                    usize idx00 = ((usize)y0 * (usize)pixel_stride + (usize)x0) * 3u;
-                    usize idx10 = ((usize)y0 * (usize)pixel_stride + (usize)x1) * 3u;
-                    usize idx01 = ((usize)y1 * (usize)pixel_stride + (usize)x0) * 3u;
-                    usize idx11 = ((usize)y1 * (usize)pixel_stride + (usize)x1) * 3u;
-                    u8 interp_rgb[3];
-                    for (u32 channel = 0u; channel < 3u; ++channel) {
-                        double v00 = (double)pixel_data[idx00 + channel];
-                        double v10 = (double)pixel_data[idx10 + channel];
-                        double v01 = (double)pixel_data[idx01 + channel];
-                        double v11 = (double)pixel_data[idx11 + channel];
-                        double top = v00 + (v10 - v00) * fx;
-                        double bottom = v01 + (v11 - v01) * fx;
-                        double value = top + (bottom - top) * fy;
-                        if (value < 0.0) value = 0.0;
-                        if (value > 255.0) value = 255.0;
-                        interp_rgb[channel] = (u8)(value + 0.5);
+                    if (prefer_nearest_sampling) {
+                        u64 raw_row = (u64)(sample_row + 0.5);
+                        u64 raw_col = (u64)(sample_col + 0.5);
+                        if (raw_row >= (u64)analysis_height) {
+                            raw_row = (analysis_height > 0u) ? (analysis_height - 1u) : 0u;
+                        }
+                        if (raw_col >= (u64)analysis_width) {
+                            raw_col = (analysis_width > 0u) ? (analysis_width - 1u) : 0u;
+                        }
+                        u64 pixel_index = (raw_row * pixel_stride) + raw_col;
+                        if (pixel_index >= raw_pixel_count) {
+                            return false;
+                        }
+                        rgb = pixel_data + (usize)(pixel_index * 3u);
+                    } else {
+                        unsigned x0 = (unsigned)floor(sample_col);
+                        unsigned y0 = (unsigned)floor(sample_row);
+                        unsigned x1 = (x0 + 1u < analysis_width) ? (x0 + 1u) : x0;
+                        unsigned y1 = (y0 + 1u < analysis_height) ? (y0 + 1u) : y0;
+                        double fx = sample_col - (double)x0;
+                        double fy = sample_row - (double)y0;
+                        usize idx00 = ((usize)y0 * (usize)pixel_stride + (usize)x0) * 3u;
+                        usize idx10 = ((usize)y0 * (usize)pixel_stride + (usize)x1) * 3u;
+                        usize idx01 = ((usize)y1 * (usize)pixel_stride + (usize)x0) * 3u;
+                        usize idx11 = ((usize)y1 * (usize)pixel_stride + (usize)x1) * 3u;
+                        u8 interp_rgb[3];
+                        for (u32 channel = 0u; channel < 3u; ++channel) {
+                            double v00 = (double)pixel_data[idx00 + channel];
+                            double v10 = (double)pixel_data[idx10 + channel];
+                            double v01 = (double)pixel_data[idx01 + channel];
+                            double v11 = (double)pixel_data[idx11 + channel];
+                            double top = v00 + (v10 - v00) * fx;
+                            double bottom = v01 + (v11 - v01) * fx;
+                            double value = top + (bottom - top) * fy;
+                            if (value < 0.0) value = 0.0;
+                            if (value > 255.0) value = 255.0;
+                            interp_rgb[channel] = (u8)(value + 0.5);
+                        }
+                        rgb = interp_rgb;
                     }
-                    rgb = interp_rgb;
                 } else {
                     u64 raw_row = (u64)(sample_row + 0.5);
                     u64 raw_col = (u64)(sample_col + 0.5);
@@ -7036,6 +7242,46 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_fiducial_margin = true;
         dest.fiducial_margin_value = src.fiducial_margin_value;
+    }
+    if (src.has_fiducial_col_offsets) {
+        if (src.fiducial_col_offset_count > MAX_FIDUCIAL_SUBGRID_ENTRIES) {
+            return false;
+        }
+        if (dest.has_fiducial_col_offsets) {
+            if (dest.fiducial_col_offset_count != src.fiducial_col_offset_count) {
+                return false;
+            }
+            for (u32 i = 0u; i < src.fiducial_col_offset_count; ++i) {
+                if (dest.fiducial_col_offsets[i] != src.fiducial_col_offsets[i]) {
+                    return false;
+                }
+            }
+        }
+        dest.has_fiducial_col_offsets = true;
+        dest.fiducial_col_offset_count = src.fiducial_col_offset_count;
+        for (u32 i = 0u; i < src.fiducial_col_offset_count; ++i) {
+            dest.fiducial_col_offsets[i] = src.fiducial_col_offsets[i];
+        }
+    }
+    if (src.has_fiducial_row_offsets) {
+        if (src.fiducial_row_offset_count > MAX_FIDUCIAL_SUBGRID_ENTRIES) {
+            return false;
+        }
+        if (dest.has_fiducial_row_offsets) {
+            if (dest.fiducial_row_offset_count != src.fiducial_row_offset_count) {
+                return false;
+            }
+            for (u32 i = 0u; i < src.fiducial_row_offset_count; ++i) {
+                if (dest.fiducial_row_offsets[i] != src.fiducial_row_offsets[i]) {
+                    return false;
+                }
+            }
+        }
+        dest.has_fiducial_row_offsets = true;
+        dest.fiducial_row_offset_count = src.fiducial_row_offset_count;
+        for (u32 i = 0u; i < src.fiducial_row_offset_count; ++i) {
+            dest.fiducial_row_offsets[i] = src.fiducial_row_offsets[i];
+        }
     }
     if (src.has_page_width_pixels) {
         if (dest.has_page_width_pixels && dest.page_width_pixels_value != src.page_width_pixels_value) {
@@ -7198,6 +7444,29 @@ static bool append_comment_number(makocode::ByteBuffer& buffer,
     }
     if (!buffer_append_number(buffer, value)) {
         return false;
+    }
+    return buffer.append_char('\n');
+}
+
+static bool append_comment_list(makocode::ByteBuffer& buffer,
+                                const char* tag,
+                                const u64* values,
+                                u32 count) {
+    if (!tag || !values || count == 0u) {
+        return false;
+    }
+    if (!buffer.append_char('#') ||
+        !buffer.append_char(' ') ||
+        !buffer.append_ascii(tag)) {
+        return false;
+    }
+    for (u32 i = 0u; i < count; ++i) {
+        if (!buffer.append_char(' ')) {
+            return false;
+        }
+        if (!buffer_append_number(buffer, values[i])) {
+            return false;
+        }
     }
     return buffer.append_char('\n');
 }
@@ -7529,6 +7798,22 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
     }
     if (state.has_fiducial_margin) {
         if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", state.fiducial_margin_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count > 0u) {
+        if (!append_comment_list(output,
+                                  "MAKOCODE_SUBGRID_COL_OFFSETS",
+                                  state.fiducial_col_offsets,
+                                  state.fiducial_col_offset_count)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count > 0u) {
+        if (!append_comment_list(output,
+                                  "MAKOCODE_SUBGRID_ROW_OFFSETS",
+                                  state.fiducial_row_offsets,
+                                  state.fiducial_row_offset_count)) {
             return false;
         }
     }
@@ -8002,6 +8287,26 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     if (marker_size > width_px || marker_size > height_px) {
         return false;
     }
+    state.has_fiducial_size = true;
+    state.fiducial_size_value = marker_size;
+    state.has_fiducial_columns = true;
+    state.fiducial_columns_value = grid_columns;
+    state.has_fiducial_rows = true;
+    state.fiducial_rows_value = grid_rows;
+    state.has_fiducial_margin = true;
+    state.fiducial_margin_value = margin_pixels;
+
+    u64 logical_width = width;
+    u64 logical_height = height;
+    u64 footer_rows_value = 0u;
+    if (state.has_footer_rows && state.footer_rows_value <= logical_height) {
+        footer_rows_value = state.footer_rows_value;
+    }
+    u64 data_height = (logical_height >= footer_rows_value) ? (logical_height - footer_rows_value) : logical_height;
+
+    u32 sub_cols = (grid_columns > 0u) ? (grid_columns - 1u) : 0u;
+    u32 sub_rows = (grid_rows > 0u) ? (grid_rows - 1u) : 0u;
+
     double min_x = (margin_pixels < width_px) ? (double)margin_pixels : 0.0;
     double max_x = (width_px > margin_pixels) ? (double)(width_px - 1u - margin_pixels)
                                               : (width_px ? (double)(width_px - 1u) : 0.0);
@@ -8013,6 +8318,123 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     }
     if (max_y < min_y) {
         max_y = min_y;
+    }
+    if (sub_cols > 0u && (sub_cols + 1u) <= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
+        double* column_centers = (double*)((grid_columns > 0u) ? malloc((usize)grid_columns * sizeof(double)) : 0);
+        double* column_weights = (double*)malloc((usize)sub_cols * sizeof(double));
+        if (column_centers && column_weights) {
+            for (u32 col_index = 0u; col_index < grid_columns; ++col_index) {
+                if (grid_columns == 1u) {
+                    column_centers[col_index] = (min_x + max_x) * 0.5;
+                } else {
+                    double t = (double)col_index / (double)(grid_columns - 1u);
+                    column_centers[col_index] = min_x + (max_x - min_x) * t;
+                }
+            }
+            for (u32 i = 0u; i < sub_cols; ++i) {
+                double span = column_centers[i + 1u] - column_centers[i];
+                if (span <= 0.0) {
+                    span = 1.0;
+                }
+                column_weights[i] = span;
+            }
+            double total_phys_width = 0.0;
+            for (u32 i = 0u; i < sub_cols; ++i) {
+                total_phys_width += column_weights[i];
+            }
+            if (total_phys_width <= 0.0) {
+                total_phys_width = (double)sub_cols;
+            }
+            double width_scale = (double)logical_width / total_phys_width;
+            u64 assigned = 0u;
+            state.has_fiducial_col_offsets = true;
+            state.fiducial_col_offset_count = sub_cols + 1u;
+            state.fiducial_col_offsets[0u] = 0u;
+            for (u32 i = 0u; i < sub_cols; ++i) {
+                double scaled = column_weights[i] * width_scale;
+                double accum = (double)assigned + scaled;
+                u64 target = (u64)(accum + 0.5);
+                if (target <= assigned) {
+                    target = assigned + 1u;
+                }
+                if ((i + 1u) == sub_cols || target > logical_width) {
+                    target = logical_width;
+                }
+                state.fiducial_col_offsets[i + 1u] = target;
+                assigned = target;
+            }
+        } else {
+            state.has_fiducial_col_offsets = false;
+            state.fiducial_col_offset_count = 0u;
+        }
+        if (column_centers) {
+            free(column_centers);
+        }
+        if (column_weights) {
+            free(column_weights);
+        }
+    } else {
+        state.has_fiducial_col_offsets = false;
+        state.fiducial_col_offset_count = 0u;
+    }
+
+    if (sub_rows > 0u && (sub_rows + 1u) <= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
+        double* row_centers = (double*)((grid_rows > 0u) ? malloc((usize)grid_rows * sizeof(double)) : 0);
+        double* row_weights = (double*)malloc((usize)sub_rows * sizeof(double));
+        if (row_centers && row_weights) {
+            for (u32 row_index = 0u; row_index < grid_rows; ++row_index) {
+                if (grid_rows == 1u) {
+                    row_centers[row_index] = (min_y + max_y) * 0.5;
+                } else {
+                    double t = (double)row_index / (double)(grid_rows - 1u);
+                    row_centers[row_index] = min_y + (max_y - min_y) * t;
+                }
+            }
+            for (u32 i = 0u; i < sub_rows; ++i) {
+                double span = row_centers[i + 1u] - row_centers[i];
+                if (span <= 0.0) {
+                    span = 1.0;
+                }
+                row_weights[i] = span;
+            }
+            double total_phys_height = 0.0;
+            for (u32 i = 0u; i < sub_rows; ++i) {
+                total_phys_height += row_weights[i];
+            }
+            if (total_phys_height <= 0.0) {
+                total_phys_height = (double)sub_rows;
+            }
+            double height_scale = (double)data_height / total_phys_height;
+            u64 assigned_rows = 0u;
+            state.has_fiducial_row_offsets = true;
+            state.fiducial_row_offset_count = sub_rows + 1u;
+            state.fiducial_row_offsets[0u] = 0u;
+            for (u32 i = 0u; i < sub_rows; ++i) {
+                double scaled = row_weights[i] * height_scale;
+                double accum = (double)assigned_rows + scaled;
+                u64 target = (u64)(accum + 0.5);
+                if (target <= assigned_rows) {
+                    target = assigned_rows + 1u;
+                }
+                if ((i + 1u) == sub_rows || target > data_height) {
+                    target = data_height;
+                }
+                state.fiducial_row_offsets[i + 1u] = target;
+                assigned_rows = target;
+            }
+        } else {
+            state.has_fiducial_row_offsets = false;
+            state.fiducial_row_offset_count = 0u;
+        }
+        if (row_centers) {
+            free(row_centers);
+        }
+        if (row_weights) {
+            free(row_weights);
+        }
+    } else {
+        state.has_fiducial_row_offsets = false;
+        state.fiducial_row_offset_count = 0u;
     }
     for (u32 grid_row = 0u; grid_row < grid_rows; ++grid_row) {
         double t_y = (grid_rows == 1u) ? 0.5 : ((double)grid_row / (double)(grid_rows - 1u));
@@ -8055,6 +8477,22 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     }
     if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", (u64)margin_pixels)) {
         return false;
+    }
+    if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count > 0u) {
+        if (!append_comment_list(output,
+                                  "MAKOCODE_SUBGRID_COL_OFFSETS",
+                                  state.fiducial_col_offsets,
+                                  state.fiducial_col_offset_count)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count > 0u) {
+        if (!append_comment_list(output,
+                                  "MAKOCODE_SUBGRID_ROW_OFFSETS",
+                                  state.fiducial_row_offsets,
+                                  state.fiducial_row_offset_count)) {
+            return false;
+        }
     }
     if (!ppm_write_dimensions(width, height, output)) {
         return false;
