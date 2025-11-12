@@ -50,6 +50,7 @@ extern "C" void* realloc(void* ptr, unsigned long size);
 extern "C" double sqrt(double value);
 extern "C" double floor(double value);
 extern "C" double ceil(double value);
+extern "C" double fabs(double value);
 extern "C" double sin(double value);
 extern "C" double cos(double value);
 extern "C" double atan2(double y, double x);
@@ -6525,6 +6526,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         u64 col_end;
         u64 row_start;
         u64 row_end;
+        u32 node_row;
+        u32 node_col;
+        double horizontal_error;
+        double vertical_error;
     };
 
     struct FiducialGridStorage {
@@ -6534,6 +6539,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         double* row_weights;
         u64* column_offsets;
         u64* row_offsets;
+        double* displacement_x;
+        double* displacement_y;
         FiducialSubgridCell* cells;
 
         FiducialGridStorage()
@@ -6543,6 +6550,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
               row_weights(0),
               column_offsets(0),
               row_offsets(0),
+              displacement_x(0),
+              displacement_y(0),
               cells(0) {}
 
         ~FiducialGridStorage() {
@@ -6552,6 +6561,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             if (row_weights) free(row_weights);
             if (column_offsets) free(column_offsets);
             if (row_offsets) free(row_offsets);
+            if (displacement_x) free(displacement_x);
+            if (displacement_y) free(displacement_y);
             if (cells) free(cells);
         }
     } fiducial_storage;
@@ -6562,6 +6573,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     u64* fiducial_row_offsets = 0;
     u32 fiducial_subgrid_columns = 0u;
     u32 fiducial_subgrid_rows = 0u;
+    u32 fiducial_column_count = 0u;
+    u32 fiducial_row_count = 0u;
+    bool fiducial_displacement_active = false;
     bool metadata_columns_overridden = false;
     bool metadata_rows_overridden = false;
 
@@ -6584,7 +6598,12 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 if (fiducial_point_count > 0u) {
                     fiducial_storage.centers_x = (double*)malloc(fiducial_point_count * sizeof(double));
                     fiducial_storage.centers_y = (double*)malloc(fiducial_point_count * sizeof(double));
-                    if (fiducial_storage.centers_x && fiducial_storage.centers_y) {
+                    fiducial_storage.displacement_x = (double*)malloc(fiducial_point_count * sizeof(double));
+                    fiducial_storage.displacement_y = (double*)malloc(fiducial_point_count * sizeof(double));
+                    if (fiducial_storage.centers_x &&
+                        fiducial_storage.centers_y &&
+                        fiducial_storage.displacement_x &&
+                        fiducial_storage.displacement_y) {
                         double margin_pixels = state.has_fiducial_margin ? (double)state.fiducial_margin_value : 0.0;
                         double min_x = margin_pixels;
                         double max_x = (width > 0u) ? ((double)(width - 1u) - margin_pixels) : 0.0;
@@ -6665,6 +6684,52 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                             }
                         }
 
+                        if (fiducial_storage.centers_x &&
+                            fiducial_storage.centers_y &&
+                            fiducial_storage.displacement_x &&
+                            fiducial_storage.displacement_y) {
+                            for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
+                                double t_row = (fiducial_rows == 1u) ? 0.5 : ((double)row_index / (double)(fiducial_rows - 1u));
+                                double expected_y = min_y + (max_y - min_y) * t_row;
+                                for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
+                                    double t_col = (fiducial_columns == 1u) ? 0.5 : ((double)col_index / (double)(fiducial_columns - 1u));
+                                    double expected_x = min_x + (max_x - min_x) * t_col;
+                                    usize point_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
+                                    fiducial_storage.displacement_x[point_index] = fiducial_storage.centers_x[point_index] - expected_x;
+                                    fiducial_storage.displacement_y[point_index] = fiducial_storage.centers_y[point_index] - expected_y;
+                                }
+                            }
+                            double bias_x = 0.0;
+                            double bias_y = 0.0;
+                            double max_disp = 0.0;
+                            if (fiducial_point_count > 0u) {
+                                double accum_x = 0.0;
+                                double accum_y = 0.0;
+                                for (usize i = 0u; i < fiducial_point_count; ++i) {
+                                    accum_x += fiducial_storage.displacement_x[i];
+                                    accum_y += fiducial_storage.displacement_y[i];
+                                    double dx = fiducial_storage.displacement_x[i];
+                                    double dy = fiducial_storage.displacement_y[i];
+                                    double dist = sqrt(dx * dx + dy * dy);
+                                    if (dist > max_disp) {
+                                        max_disp = dist;
+                                    }
+                                }
+                                bias_x = accum_x / (double)fiducial_point_count;
+                                bias_y = accum_y / (double)fiducial_point_count;
+                                for (usize i = 0u; i < fiducial_point_count; ++i) {
+                                    fiducial_storage.displacement_x[i] -= bias_x;
+                                    fiducial_storage.displacement_y[i] -= bias_y;
+                                }
+                                if (max_disp > 0.0) {
+                                    const double activation_threshold = 15.0;
+                                    if (max_disp >= activation_threshold) {
+                                        fiducial_displacement_active = true;
+                                    }
+                                }
+                            }
+                        }
+
                         fiducial_storage.column_weights = (double*)malloc((usize)sub_cols * sizeof(double));
                         fiducial_storage.row_weights = (double*)malloc((usize)sub_rows * sizeof(double));
                         fiducial_storage.column_offsets = (u64*)malloc(((usize)sub_cols + 1u) * sizeof(u64));
@@ -6688,6 +6753,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                 for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
                                     usize cell_index = (usize)row_index * (usize)sub_cols + (usize)col_index;
                                     FiducialSubgridCell& cell = fiducial_storage.cells[cell_index];
+                                    cell.node_row = row_index;
+                                    cell.node_col = col_index;
                                     usize top_left_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
                                     usize top_right_index = top_left_index + 1u;
                                     usize bottom_left_index = top_left_index + (usize)fiducial_columns;
@@ -6733,6 +6800,20 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                             (cell.br_y - cell.tr_y) * (cell.br_y - cell.tr_y));
                                     double avg_height = 0.5 * (left_len + right_len);
                                     fiducial_storage.row_weights[row_index] += avg_height;
+                                    double expected_width = (double)(cell.col_end - cell.col_start);
+                                    double expected_height = (double)(cell.row_end - cell.row_start);
+                                    if (expected_width > 0.0) {
+                                        double width_error = fabs(avg_width - expected_width) / expected_width;
+                                        cell.horizontal_error = width_error;
+                                    } else {
+                                        cell.horizontal_error = 0.0;
+                                    }
+                                    if (expected_height > 0.0) {
+                                        double height_error = fabs(avg_height - expected_height) / expected_height;
+                                        cell.vertical_error = height_error;
+                                    } else {
+                                        cell.vertical_error = 0.0;
+                                    }
 
                                 }
                             }
@@ -6875,7 +6956,18 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                             fiducial_row_offsets = fiducial_storage.row_offsets;
                             fiducial_subgrid_columns = sub_cols;
                             fiducial_subgrid_rows = sub_rows;
+                            fiducial_column_count = fiducial_columns;
+                            fiducial_row_count = fiducial_rows;
                         }
+                    } else {
+                        if (fiducial_storage.centers_x) free(fiducial_storage.centers_x);
+                        if (fiducial_storage.centers_y) free(fiducial_storage.centers_y);
+                        if (fiducial_storage.displacement_x) free(fiducial_storage.displacement_x);
+                        if (fiducial_storage.displacement_y) free(fiducial_storage.displacement_y);
+                        fiducial_storage.centers_x = 0;
+                        fiducial_storage.centers_y = 0;
+                        fiducial_storage.displacement_x = 0;
+                        fiducial_storage.displacement_y = 0;
                     }
                 }
             }
@@ -6931,11 +7023,16 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 }
             }
 
-            double sample_row = 0.0;
-            double sample_col = 0.0;
-            if (use_fiducial_subgrid) {
-                const double clamp_min = prefer_nearest_sampling ? 0.15 : 0.0005;
-                const double clamp_max = 1.0 - clamp_min;
+            double base_sample_row = ((double)logical_row + 0.5) * scale_yd - 0.5;
+            double base_sample_col = ((double)logical_col + 0.5) * scale_xd - 0.5;
+            double sample_row = base_sample_row;
+            double sample_col = base_sample_col;
+            if (use_fiducial_subgrid &&
+                fiducial_displacement_active &&
+                fiducial_storage.displacement_x &&
+                fiducial_storage.displacement_y &&
+                fiducial_column_count > 1u &&
+                fiducial_row_count > 1u) {
                 FiducialSubgridCell& cell = row_cells[active_col_cell];
                 double local_u = 0.5;
                 double local_v = 0.5;
@@ -6947,19 +7044,60 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     local_v = (((double)(logical_row - cell.row_start) + 0.5) /
                                (double)(cell.row_end - cell.row_start));
                 }
-                if (local_u < clamp_min) local_u = clamp_min;
-                if (local_u > clamp_max) local_u = clamp_max;
-                if (local_v < clamp_min) local_v = clamp_min;
-                if (local_v > clamp_max) local_v = clamp_max;
-                double top_x = cell.tl_x + (cell.tr_x - cell.tl_x) * local_u;
-                double top_y = cell.tl_y + (cell.tr_y - cell.tl_y) * local_u;
-                double bottom_x = cell.bl_x + (cell.br_x - cell.bl_x) * local_u;
-                double bottom_y = cell.bl_y + (cell.br_y - cell.bl_y) * local_u;
-                sample_col = top_x + (bottom_x - top_x) * local_v;
-                sample_row = top_y + (bottom_y - top_y) * local_v;
-            } else {
-                sample_row = ((double)logical_row + 0.5) * scale_yd - 0.5;
-                sample_col = ((double)logical_col + 0.5) * scale_xd - 0.5;
+                double clamp_margin_u = prefer_nearest_sampling
+                                            ? ((cell.col_end > cell.col_start)
+                                                   ? (0.5 / (double)(cell.col_end - cell.col_start))
+                                                   : 0.0005)
+                                            : 0.0005;
+                double clamp_margin_v = prefer_nearest_sampling
+                                            ? ((cell.row_end > cell.row_start)
+                                                   ? (0.5 / (double)(cell.row_end - cell.row_start))
+                                                   : 0.0005)
+                                            : 0.0005;
+                if (clamp_margin_u > 0.2) clamp_margin_u = 0.2;
+                if (clamp_margin_v > 0.2) clamp_margin_v = 0.2;
+                double max_u = 1.0 - clamp_margin_u;
+                double max_v = 1.0 - clamp_margin_v;
+                if (local_u < clamp_margin_u) local_u = clamp_margin_u;
+                if (local_u > max_u) local_u = max_u;
+                if (local_v < clamp_margin_v) local_v = clamp_margin_v;
+                if (local_v > max_v) local_v = max_v;
+                u32 node_row = cell.node_row;
+                u32 node_col = cell.node_col;
+                double horizontal_threshold = prefer_nearest_sampling ? 0.03 : 0.02;
+                double vertical_threshold = prefer_nearest_sampling ? 0.03 : 0.02;
+                double horiz_strength = 0.0;
+                double vert_strength = 0.0;
+                if (horizontal_threshold > 0.0) {
+                    horiz_strength = cell.horizontal_error / horizontal_threshold;
+                    if (horiz_strength > 1.0) horiz_strength = 1.0;
+                }
+                if (vertical_threshold > 0.0) {
+                    vert_strength = cell.vertical_error / vertical_threshold;
+                    if (vert_strength > 1.0) vert_strength = 1.0;
+                }
+                if (node_row + 1u < fiducial_row_count && node_col + 1u < fiducial_column_count) {
+                    usize idx_tl = (usize)node_row * (usize)fiducial_column_count + (usize)node_col;
+                    usize idx_tr = idx_tl + 1u;
+                    usize idx_bl = idx_tl + (usize)fiducial_column_count;
+                    usize idx_br = idx_bl + 1u;
+                    double disp_tl_x = fiducial_storage.displacement_x[idx_tl];
+                    double disp_tr_x = fiducial_storage.displacement_x[idx_tr];
+                    double disp_bl_x = fiducial_storage.displacement_x[idx_bl];
+                    double disp_br_x = fiducial_storage.displacement_x[idx_br];
+                    double disp_tl_y = fiducial_storage.displacement_y[idx_tl];
+                    double disp_tr_y = fiducial_storage.displacement_y[idx_tr];
+                    double disp_bl_y = fiducial_storage.displacement_y[idx_bl];
+                    double disp_br_y = fiducial_storage.displacement_y[idx_br];
+                    double top_disp_x = disp_tl_x * (1.0 - local_u) + disp_tr_x * local_u;
+                    double bottom_disp_x = disp_bl_x * (1.0 - local_u) + disp_br_x * local_u;
+                    double top_disp_y = disp_tl_y * (1.0 - local_u) + disp_tr_y * local_u;
+                    double bottom_disp_y = disp_bl_y * (1.0 - local_u) + disp_br_y * local_u;
+                    double disp_x = (top_disp_x * (1.0 - local_v) + bottom_disp_x * local_v) * horiz_strength;
+                    double disp_y = (top_disp_y * (1.0 - local_v) + bottom_disp_y * local_v) * vert_strength;
+                    sample_col = base_sample_col + disp_x;
+                    sample_row = base_sample_row + disp_y;
+                }
             }
 
             const u8* rgb = 0;
