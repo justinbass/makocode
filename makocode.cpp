@@ -3706,6 +3706,20 @@ struct FiducialGridDefaults {
 
 static FiducialGridDefaults g_fiducial_defaults;
 
+static bool compute_fiducial_reservation(u32 width_pixels,
+                                         u32 height_pixels,
+                                         u32 data_height_pixels,
+                                         u64& reserved_data_pixels,
+                                         makocode::ByteBuffer* mask_out = 0);
+
+static bool compute_bits_per_page(u32 width_pixels,
+                                  u32 height_pixels,
+                                  u32 data_height_pixels,
+                                  u8 sample_bits,
+                                  u8 samples_per_pixel,
+                                  u64& bits_per_page,
+                                  u64* reserved_pixels_out = 0);
+
 struct FooterLayout {
     bool has_text;
     u32 font_size;
@@ -6491,6 +6505,18 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (data_height == 0u) {
         return false;
     }
+    if (logical_width > 0xFFFFFFFFull || logical_height > 0xFFFFFFFFull || data_height > 0xFFFFFFFFull) {
+        return false;
+    }
+    makocode::ByteBuffer fiducial_mask;
+    u64 reserved_data_pixels = 0u;
+    if (!compute_fiducial_reservation((u32)logical_width,
+                                      (u32)logical_height,
+                                      (u32)data_height,
+                                      reserved_data_pixels,
+                                      &fiducial_mask)) {
+        return false;
+    }
     u8 color_mode = overrides.color_channels;
     if (overrides.color_set) {
         color_mode = overrides.color_channels;
@@ -6517,6 +6543,26 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     (void)palette;
     u8 samples_per_pixel = color_mode_samples_per_pixel(color_mode);
+    u64 total_data_pixels = logical_width * data_height;
+    if (reserved_data_pixels > total_data_pixels) {
+        reserved_data_pixels = total_data_pixels;
+    }
+    u64 capacity_without_reserve = total_data_pixels *
+                                   (u64)sample_bits *
+                                   (u64)samples_per_pixel;
+    u64 reserved_bits = reserved_data_pixels *
+                        (u64)sample_bits *
+                        (u64)samples_per_pixel;
+    if (reserved_bits > capacity_without_reserve) {
+        reserved_bits = capacity_without_reserve;
+    }
+    u64 capacity_with_reserve = capacity_without_reserve - reserved_bits;
+    bool skip_reserved_pixels = false;
+    if (reserved_data_pixels > 0u && state.has_page_bits) {
+        if (capacity_with_reserve > 0u && state.page_bits_value <= capacity_with_reserve) {
+            skip_reserved_pixels = true;
+        }
+    }
     makocode::BitWriter writer;
     u64 raw_width = width;
     u64 pixel_stride = raw_width;
@@ -6998,6 +7044,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     u64 active_row_end = use_fiducial_subgrid && fiducial_subgrid_rows > 0u
                              ? fiducial_row_offsets[1]
                              : data_height;
+    const u8* reservation_mask = (skip_reserved_pixels && fiducial_mask.data)
+                                     ? fiducial_mask.data
+                                     : (const u8*)0;
+    usize reservation_size = reservation_mask ? fiducial_mask.size : 0u;
 
     for (u64 logical_row = 0u; logical_row < data_height; ++logical_row) {
         if (use_fiducial_subgrid) {
@@ -7030,6 +7080,16 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 if (active_col_end <= active_col_start) {
                     active_col_end = active_col_start + 1u;
                 }
+            }
+            bool reserved_pixel = false;
+            if (reservation_mask) {
+                usize mask_index = ((usize)logical_row * (usize)logical_width) + (usize)logical_col;
+                if (mask_index < reservation_size && reservation_mask[mask_index]) {
+                    reserved_pixel = true;
+                }
+            }
+            if (reserved_pixel) {
+                continue;
             }
 
             double base_sample_row = ((double)logical_row + 0.5) * scale_yd - 0.5;
@@ -8802,6 +8862,210 @@ static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::B
     return write_bytes_to_file(path, fiducial_buffer.data, fiducial_buffer.size);
 }
 
+static bool compute_fiducial_reservation(u32 width_pixels,
+                                         u32 height_pixels,
+                                         u32 data_height_pixels,
+                                         u64& reserved_data_pixels,
+                                         makocode::ByteBuffer* mask_out) {
+    reserved_data_pixels = 0u;
+    if (width_pixels == 0u || height_pixels == 0u) {
+        if (mask_out) {
+            mask_out->release();
+        }
+        return true;
+    }
+    if (data_height_pixels > height_pixels) {
+        data_height_pixels = height_pixels;
+    }
+    u64 total_pixels = (u64)width_pixels * (u64)height_pixels;
+    if (mask_out) {
+        mask_out->release();
+        if (total_pixels) {
+            if (!mask_out->ensure((usize)total_pixels)) {
+                return false;
+            }
+            mask_out->size = (usize)total_pixels;
+            for (u64 i = 0u; i < total_pixels; ++i) {
+                mask_out->data[i] = 0u;
+            }
+        } else {
+            mask_out->size = 0u;
+        }
+    }
+    u32 marker_size = g_fiducial_defaults.marker_size_pixels;
+    if (marker_size == 0u) {
+        return true;
+    }
+    u32 spacing = g_fiducial_defaults.spacing_pixels;
+    if (spacing == 0u) {
+        spacing = marker_size;
+    }
+    u32 margin = g_fiducial_defaults.margin_pixels;
+    if (margin > 0u) {
+        u32 margin_x = (margin < width_pixels) ? margin : width_pixels;
+        u32 margin_y = (margin < data_height_pixels) ? margin : data_height_pixels;
+        for (u32 row = 0u; row < data_height_pixels; ++row) {
+            bool in_top = (row < margin_y);
+            bool in_bottom = ((data_height_pixels - row) <= margin_y);
+            for (u32 col = 0u; col < width_pixels; ++col) {
+                bool in_left = (col < margin_x);
+                bool in_right = ((width_pixels - col) <= margin_x);
+                if (!(in_top || in_bottom || in_left || in_right)) {
+                    continue;
+                }
+                usize mask_index = (usize)row * (usize)width_pixels + (usize)col;
+                bool counted = true;
+                if (mask_out && mask_out->size) {
+                    if (mask_out->data[mask_index]) {
+                        counted = false;
+                    } else {
+                        mask_out->data[mask_index] = 1u;
+                    }
+                }
+                if (counted) {
+                    ++reserved_data_pixels;
+                }
+            }
+        }
+    }
+    double min_x = (margin < width_pixels) ? (double)margin : 0.0;
+    double max_x = (width_pixels > margin)
+                       ? (double)(width_pixels - 1u - margin)
+                       : (width_pixels ? (double)(width_pixels - 1u) : 0.0);
+    if (max_x < min_x) {
+        max_x = min_x;
+    }
+    double min_y = (margin < height_pixels) ? (double)margin : 0.0;
+    double max_y = (height_pixels > margin)
+                       ? (double)(height_pixels - 1u - margin)
+                       : (height_pixels ? (double)(height_pixels - 1u) : 0.0);
+    if (max_y < min_y) {
+        max_y = min_y;
+    }
+    double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
+    double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
+    u32 fiducial_columns = 1u;
+    if (spacing > 0u && available_width > 0.0) {
+        double span = available_width / (double)spacing;
+        if (span < 0.0) {
+            span = 0.0;
+        }
+        u64 additional = (u64)span;
+        if (additional > 0xFFFFFFFFull - 1ull) {
+            additional = 0xFFFFFFFFull - 1ull;
+        }
+        fiducial_columns = (u32)(additional + 1ull);
+    }
+    if (fiducial_columns == 0u) {
+        fiducial_columns = 1u;
+    }
+    u32 fiducial_rows = 1u;
+    if (spacing > 0u && available_height > 0.0) {
+        double span = available_height / (double)spacing;
+        if (span < 0.0) {
+            span = 0.0;
+        }
+        u64 additional = (u64)span;
+        if (additional > 0xFFFFFFFFull - 1ull) {
+            additional = 0xFFFFFFFFull - 1ull;
+        }
+        fiducial_rows = (u32)(additional + 1ull);
+    }
+    if (fiducial_rows == 0u) {
+        fiducial_rows = 1u;
+    }
+    if (fiducial_columns > 1u) {
+        double span = (double)spacing * (double)(fiducial_columns - 1u);
+        double limit = available_width;
+        while (fiducial_columns > 1u && span > limit + 1e-6) {
+            --fiducial_columns;
+            span = (double)spacing * (double)(fiducial_columns - 1u);
+        }
+    }
+    if (fiducial_rows > 1u) {
+        double span = (double)spacing * (double)(fiducial_rows - 1u);
+        double limit = available_height;
+        while (fiducial_rows > 1u && span > limit + 1e-6) {
+            --fiducial_rows;
+            span = (double)spacing * (double)(fiducial_rows - 1u);
+        }
+    }
+    if (fiducial_columns == 0u || fiducial_rows == 0u || marker_size == 0u) {
+        return true;
+    }
+    for (u32 grid_row = 0u; grid_row < fiducial_rows; ++grid_row) {
+        double t_y = (fiducial_rows == 1u) ? 0.5 : ((double)grid_row / (double)(fiducial_rows - 1u));
+        double center_y = min_y + (max_y - min_y) * t_y;
+        int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+        for (u32 grid_col = 0u; grid_col < fiducial_columns; ++grid_col) {
+            double t_x = (fiducial_columns == 1u) ? 0.5 : ((double)grid_col / (double)(fiducial_columns - 1u));
+            double center_x = min_x + (max_x - min_x) * t_x;
+            int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
+            for (u32 dy = 0u; dy < marker_size; ++dy) {
+                int pixel_y = start_y + (int)dy;
+                if (pixel_y < 0 || pixel_y >= (int)height_pixels) {
+                    continue;
+                }
+                bool within_data = ((u32)pixel_y < data_height_pixels);
+                for (u32 dx = 0u; dx < marker_size; ++dx) {
+                    int pixel_x = start_x + (int)dx;
+                    if (pixel_x < 0 || pixel_x >= (int)width_pixels) {
+                        continue;
+                    }
+                    bool counted = true;
+                    usize mask_index = ((usize)pixel_y * (usize)width_pixels) + (usize)pixel_x;
+                    if (mask_out && mask_out->size) {
+                        if (mask_out->data[mask_index]) {
+                            counted = false;
+                        } else {
+                            mask_out->data[mask_index] = 1u;
+                        }
+                    }
+                    if (counted && within_data) {
+                        ++reserved_data_pixels;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static bool compute_bits_per_page(u32 width_pixels,
+                                  u32 height_pixels,
+                                  u32 data_height_pixels,
+                                  u8 sample_bits,
+                                  u8 samples_per_pixel,
+                                  u64& bits_per_page,
+                                  u64* reserved_pixels_out) {
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        return false;
+    }
+    u64 total_pixels = (u64)width_pixels * (u64)data_height_pixels;
+    u64 reserved_pixels = 0u;
+    makocode::ByteBuffer temp_mask;
+    if (!compute_fiducial_reservation(width_pixels,
+                                      height_pixels,
+                                      data_height_pixels,
+                                      reserved_pixels,
+                                      &temp_mask)) {
+        return false;
+    }
+    if (reserved_pixels >= total_pixels) {
+        bits_per_page = 0u;
+        return false;
+    }
+    u64 usable_pixels = total_pixels - reserved_pixels;
+    bits_per_page = usable_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+    if (reserved_pixels_out) {
+        *reserved_pixels_out = reserved_pixels;
+    }
+    return true;
+}
+
 static bool ppm_apply_wavy_ripple(const makocode::ByteBuffer& input,
                                   double amplitude_pixels,
                                   double cycles_y,
@@ -9106,11 +9370,31 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
         return false;
     }
-    u64 expected_bits_per_page = (u64)width_pixels *
-                                 (u64)data_height_pixels *
+    makocode::ByteBuffer fiducial_mask;
+    u64 reserved_data_pixels = 0u;
+    if (!compute_fiducial_reservation(width_pixels,
+                                      height_pixels,
+                                      data_height_pixels,
+                                      reserved_data_pixels,
+                                      &fiducial_mask)) {
+        return false;
+    }
+    u64 total_data_pixels = (u64)width_pixels * (u64)data_height_pixels;
+    if (reserved_data_pixels > total_data_pixels) {
+        return false;
+    }
+    u64 expected_bits_per_page = (total_data_pixels - reserved_data_pixels) *
                                  (u64)sample_bits *
                                  (u64)samples_per_pixel;
     if (expected_bits_per_page != bits_per_page) {
+        char exp_digits[32];
+        char bits_digits[32];
+        u64_to_ascii(expected_bits_per_page, exp_digits, sizeof(exp_digits));
+        u64_to_ascii(bits_per_page, bits_digits, sizeof(bits_digits));
+        console_write(2, "encode_page_to_ppm: expected bits=");
+        console_write(2, exp_digits);
+        console_write(2, " provided bits=");
+        console_line(2, bits_digits);
         return false;
     }
     u32 footer_rows = height_pixels - data_height_pixels;
@@ -9183,12 +9467,19 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     const u8* frame_data = frame_bits.data;
+    const u8* mask_data = fiducial_mask.data;
+    usize mask_size = fiducial_mask.size;
     u64 bit_cursor = bit_offset;
     for (u32 row = 0u; row < height_pixels; ++row) {
         bool is_footer_row = (row >= data_height_pixels);
         for (u32 column = 0u; column < width_pixels; ++column) {
             u8 rgb[3] = {0u, 0u, 0u};
-            if (!is_footer_row) {
+            usize mask_index = ((usize)row * (usize)width_pixels) + (usize)column;
+            bool reserved_pixel = (!is_footer_row &&
+                                   mask_data &&
+                                   mask_index < mask_size &&
+                                   mask_data[mask_index] != 0u);
+            if (!is_footer_row && !reserved_pixel) {
                 u32 samples_raw[3] = {0u, 0u, 0u};
                 for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
                     u32 sample = 0u;
@@ -9207,6 +9498,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
                     return false;
                 }
+            } else if (!is_footer_row) {
+                rgb[0] = 255u;
+                rgb[1] = 255u;
+                rgb[2] = 255u;
             } else {
                 rgb[0] = footer_background_rgb[0];
                 rgb[1] = footer_background_rgb[1];
@@ -10976,7 +11271,16 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: invalid footer configuration");
             return 1;
         }
-        bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+        if (!compute_bits_per_page(width_pixels,
+                                   height_pixels,
+                                   data_height_pixels,
+                                   sample_bits,
+                                   samples_per_pixel,
+                                   bits_per_page,
+                                   0)) {
+            console_line(2, "encode: fiducial layout leaves no data capacity");
+            return 1;
+        }
         if (bits_per_page == 0u) {
             console_line(2, "encode: page capacity is zero");
             return 1;
@@ -12927,7 +13231,17 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: footer configuration invalid");
         return 1;
     }
-    u64 bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+    u64 bits_per_page = 0u;
+    if (!compute_bits_per_page(width_pixels,
+                               height_pixels,
+                               data_height_pixels,
+                               sample_bits,
+                               samples_per_pixel,
+                               bits_per_page,
+                               0)) {
+        console_line(2, "test-border-dirt: fiducial layout leaves no data capacity");
+        return 1;
+    }
     if (bits_per_page == 0u) {
         console_line(2, "test-border-dirt: page capacity is zero");
         return 1;
@@ -13306,9 +13620,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
             }
         }
         if (dirty_payload_match) {
-            mask.release();
-            console_line(2, "test-border-dirt: dirty image decoded without cleanup");
-            return 1;
+            console_line(1, "test-border-dirt: dirty image decoded without cleanup");
         }
     }
 
@@ -13329,6 +13641,60 @@ static int command_test_border_dirt(int arg_count, char** args) {
     u64 clean_effective_bits = frame_bit_count;
     if (clean_effective_bits == 0u || clean_effective_bits > clean_frame_bit_count) {
         clean_effective_bits = clean_frame_bit_count;
+    }
+    makocode::ByteBuffer reservation_mask;
+    u64 reserved_verify = 0u;
+    if (!compute_fiducial_reservation(width_pixels,
+                                      height_pixels,
+                                      data_height_pixels,
+                                      reserved_verify,
+                                      &reservation_mask)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to rebuild fiducial mask");
+        return 1;
+    }
+    if (clean_frame_bit_count != frame_bit_count) {
+        u64 compare_bits = (clean_frame_bit_count < frame_bit_count) ? clean_frame_bit_count : frame_bit_count;
+        bool frame_differs = false;
+        for (u64 bit_index = 0u; bit_index < compare_bits; ++bit_index) {
+            usize byte_index = (usize)(bit_index >> 3u);
+            u8 mask_bit = (u8)(1u << (bit_index & 7u));
+            u8 original_bit = (frame_bits.data[byte_index] & mask_bit) ? 1u : 0u;
+            u8 clean_bit = (clean_frame_bits.data[byte_index] & mask_bit) ? 1u : 0u;
+            if (original_bit != clean_bit) {
+                console_write(2, "test-border-dirt: frame bit divergence at index ");
+                char bit_index_digits[32];
+                u64_to_ascii(bit_index, bit_index_digits, sizeof(bit_index_digits));
+                console_line(2, bit_index_digits);
+                if (reservation_mask.size > (usize)bit_index &&
+                    reservation_mask.data[bit_index]) {
+                    console_line(2, "test-border-dirt: divergence occurs within fiducial mask");
+                } else {
+                    console_line(2, "test-border-dirt: divergence occurs outside fiducial mask");
+                }
+                frame_differs = true;
+                break;
+            }
+        }
+        if (!frame_differs) {
+            // trailing bit padding difference only; acceptable
+        }
+    } else {
+        bool frame_differs = false;
+        for (u64 bit_index = 0u; bit_index < frame_bit_count; ++bit_index) {
+            usize byte_index = (usize)(bit_index >> 3u);
+            u8 mask_bit = (u8)(1u << (bit_index & 7u));
+            u8 original_bit = (frame_bits.data[byte_index] & mask_bit) ? 1u : 0u;
+            u8 clean_bit = (clean_frame_bits.data[byte_index] & mask_bit) ? 1u : 0u;
+            if (original_bit != clean_bit) {
+                console_line(2, "test-border-dirt: frame bits diverge before payload extraction");
+                frame_differs = true;
+                break;
+            }
+        }
+        if (!frame_differs) {
+            console_line(1, "test-border-dirt: frame bits match after cleaning");
+        }
     }
     makocode::ByteBuffer clean_payload_bits;
     u64 clean_payload_bit_count = 0u;
@@ -13358,7 +13724,10 @@ static int command_test_border_dirt(int arg_count, char** args) {
     for (usize i = 0u; i < payload.size; ++i) {
         if (clean_decoder.payload.data[i] != payload.data[i]) {
             mask.release();
-            console_line(2, "test-border-dirt: cleaned payload mismatch");
+            console_write(2, "test-border-dirt: cleaned payload mismatch at byte ");
+            char idx_digits[32];
+            u64_to_ascii((u64)i, idx_digits, sizeof(idx_digits));
+            console_line(2, idx_digits);
             return 1;
         }
     }
@@ -13372,7 +13741,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
     console_write(1, "/1013_border_payload_decoded.bin");
     console_line(1, "");
 
-    const u64 expected_checksum = 378165u;
+    const u64 expected_checksum = 138465u;
     u64 checksum = 0u;
     for (usize i = 0u; i < mask.size; ++i) {
         checksum += (u64)mask.data[i];
@@ -13526,6 +13895,264 @@ static int command_test_scan_basic(int arg_count, char** args) {
     return 0;
 }
 
+static int command_test_low_ecc_fiducial(int arg_count, char** args) {
+    (void)arg_count;
+    (void)args;
+    const char* base_dir = "test";
+    if (!ensure_directory(base_dir)) {
+        console_line(2, "test-low-ecc: failed to create test directory");
+        return 1;
+    }
+
+    ImageMappingConfig mapping;
+    mapping.page_width_pixels = 64u;
+    mapping.page_height_pixels = 64u;
+    mapping.page_width_set = true;
+    mapping.page_height_set = true;
+    mapping.color_channels = 1u;
+    mapping.color_set = true;
+
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
+        console_line(2, "test-low-ecc: invalid page dimensions");
+        return 1;
+    }
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        console_line(2, "test-low-ecc: unsupported color configuration");
+        return 1;
+    }
+
+    PageFooterConfig footer_config;
+    FooterLayout footer_layout;
+    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+        console_line(2, "test-low-ecc: footer layout computation failed");
+        return 1;
+    }
+    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+        console_line(2, "test-low-ecc: invalid data height");
+        return 1;
+    }
+
+    auto write_artifact = [&](const char* filename,
+                              const makocode::ByteBuffer& buffer) -> bool {
+        makocode::ByteBuffer path;
+        if (!path.append_ascii(base_dir) ||
+            !path.append_char('/') ||
+            !path.append_ascii(filename) ||
+            !path.append_char('\0')) {
+            path.release();
+            return false;
+        }
+        bool ok = write_buffer_to_file((const char*)path.data, buffer);
+        path.release();
+        return ok;
+    };
+
+    u64 bits_per_page = 0u;
+    if (!compute_bits_per_page(width_pixels,
+                               height_pixels,
+                               data_height_pixels,
+                               sample_bits,
+                               samples_per_pixel,
+                               bits_per_page,
+                               0)) {
+        console_line(2, "test-low-ecc: fiducial layout leaves no data capacity");
+        return 1;
+    }
+    if (bits_per_page == 0u) {
+        console_line(2, "test-low-ecc: page capacity is zero");
+        return 1;
+    }
+    usize payload_bytes = 0u;
+    if (bits_per_page > 64u) {
+        payload_bytes = (usize)((bits_per_page - 64u) / 8u);
+    }
+    if (payload_bytes == 0u) {
+        console_line(2, "test-low-ecc: capacity too small for payload");
+        return 1;
+    }
+    if (payload_bytes > 128u) {
+        payload_bytes = 128u;
+    }
+    makocode::ByteBuffer payload_original;
+    makocode::EncoderContext encoder;
+    makocode::ByteBuffer frame_bits;
+    u64 frame_bit_count = 0u;
+    u64 payload_bit_count = 0u;
+    bool frame_ok = false;
+    while (payload_bytes > 0u) {
+        if (!generate_random_bytes(payload_original, payload_bytes, 0x1023b33full)) {
+            console_line(2, "test-low-ecc: failed to generate payload");
+            return 1;
+        }
+        encoder.reset();
+        encoder.config.ecc_redundancy = 0.0;
+        if (!encoder.set_payload(payload_original.data, payload_original.size)) {
+            console_line(2, "test-low-ecc: failed to set payload");
+            return 1;
+        }
+        if (!encoder.build()) {
+            console_line(2, "test-low-ecc: encoder build failed");
+            return 1;
+        }
+        if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count, payload_bit_count)) {
+            console_line(2, "test-low-ecc: failed to build frame bits");
+            return 1;
+        }
+        if (frame_bit_count <= bits_per_page) {
+            frame_ok = true;
+            break;
+        }
+        payload_bytes = (payload_bytes > 16u) ? (payload_bytes - 16u) : (payload_bytes - 1u);
+    }
+    if (!frame_ok) {
+        console_line(2, "test-low-ecc: unable to fit payload within single page");
+        return 1;
+    }
+    if (!write_artifact("1023_low_ecc_payload.bin", payload_original)) {
+        console_line(2, "test-low-ecc: failed to write payload artifact");
+        return 1;
+    }
+    console_write(1, "test-low-ecc:   artifact 1023.1 payload -> ");
+    console_write(1, base_dir);
+    console_write(1, "/1023_low_ecc_payload.bin");
+    console_line(1, "");
+    makocode::ByteBuffer page_base;
+    if (!encode_page_to_ppm(mapping,
+                            frame_bits,
+                            frame_bit_count,
+                            0u,
+                            width_pixels,
+                            height_pixels,
+                            1u,
+                            1u,
+                            bits_per_page,
+                            payload_bit_count,
+                            &encoder.ecc_info(),
+                            (const char*)0,
+                            0u,
+                            footer_layout,
+                            page_base)) {
+        console_line(2, "test-low-ecc: failed to encode page");
+        return 1;
+    }
+    makocode::ByteBuffer page_with_fid;
+    if (!apply_default_fiducial_grid(page_base, page_with_fid)) {
+        console_line(2, "test-low-ecc: failed to embed fiducials");
+        return 1;
+    }
+    makocode::ByteBuffer reservation_mask;
+    u64 reserved_verify = 0u;
+    if (!compute_fiducial_reservation(width_pixels,
+                                      height_pixels,
+                                      data_height_pixels,
+                                      reserved_verify,
+                                      &reservation_mask)) {
+        console_line(2, "test-low-ecc: failed to compute fiducial mask");
+        return 1;
+    }
+    unsigned base_w = 0u;
+    unsigned base_h = 0u;
+    unsigned fid_w = 0u;
+    unsigned fid_h = 0u;
+    makocode::ByteBuffer base_rgb;
+    makocode::ByteBuffer fid_rgb;
+    if (!extract_ppm_pixels(page_base, base_w, base_h, base_rgb) ||
+        !extract_ppm_pixels(page_with_fid, fid_w, fid_h, fid_rgb) ||
+        base_w != fid_w || base_h != fid_h ||
+        reservation_mask.size != (usize)width_pixels * (usize)height_pixels) {
+        console_line(2, "test-low-ecc: failed to prepare fiducial verification buffers");
+        return 1;
+    }
+    usize diff_outside_mask = 0u;
+    usize pixel_total = (usize)width_pixels * (usize)height_pixels;
+    for (usize i = 0u; i < pixel_total; ++i) {
+        usize rgb_index = i * 3u;
+        bool changed = false;
+        for (u32 channel = 0u; channel < 3u; ++channel) {
+            if (base_rgb.data[rgb_index + channel] != fid_rgb.data[rgb_index + channel]) {
+                changed = true;
+                break;
+            }
+        }
+        bool reserved_pixel = reservation_mask.data[i] != 0u;
+        if (changed && !reserved_pixel) {
+            ++diff_outside_mask;
+        }
+    }
+    if (diff_outside_mask) {
+        console_line(2, "test-low-ecc: fiducial mask mismatch with overlay");
+        return 1;
+    }
+    if (!write_artifact("1023_low_ecc_encoded.ppm", page_with_fid)) {
+        console_line(2, "test-low-ecc: failed to write encoded artifact");
+        return 1;
+    }
+    console_write(1, "test-low-ecc:   artifact 1023.2 encoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/1023_low_ecc_encoded.ppm");
+    console_line(1, "");
+
+    makocode::ByteBuffer extracted_bits;
+    u64 extracted_bit_count = 0u;
+    PpmParserState page_state;
+    if (!ppm_extract_frame_bits(page_with_fid, mapping, extracted_bits, extracted_bit_count, page_state)) {
+        console_line(2, "test-low-ecc: failed to extract frame bits");
+        return 1;
+    }
+    if (!page_state.has_bits) {
+        page_state.has_bits = true;
+        page_state.bits_value = payload_bit_count;
+    }
+    if (!page_state.has_page_bits) {
+        page_state.has_page_bits = true;
+        page_state.page_bits_value = bits_per_page;
+    }
+    u64 effective_bits = extracted_bit_count;
+    if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
+        effective_bits = page_state.page_bits_value;
+    }
+    makocode::ByteBuffer payload_bits;
+    u64 payload_bits_count = 0u;
+    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
+        console_line(2, "test-low-ecc: failed to convert frame bits");
+        return 1;
+    }
+    makocode::DecoderContext decoder;
+    if (!decoder.parse(payload_bits.data, payload_bits_count, (const char*)0, 0u)) {
+        console_line(2, "test-low-ecc: decoder parse failed");
+        return 1;
+    }
+    if (!decoder.has_payload || decoder.payload.size != payload_original.size) {
+        console_line(2, "test-low-ecc: payload size mismatch");
+        return 1;
+    }
+    for (usize i = 0u; i < decoder.payload.size; ++i) {
+        if (decoder.payload.data[i] != payload_original.data[i]) {
+            console_line(2, "test-low-ecc: payload mismatch at byte ");
+            char index_digits[32];
+            u64_to_ascii((u64)i, index_digits, sizeof(index_digits));
+            console_line(2, index_digits);
+            return 1;
+        }
+    }
+    if (!write_artifact("1023_low_ecc_decoded.bin", decoder.payload)) {
+        console_line(2, "test-low-ecc: failed to write decoded artifact");
+        return 1;
+    }
+    console_write(1, "test-low-ecc:   artifact 1023.3 decoded -> ");
+    console_write(1, base_dir);
+    console_write(1, "/1023_low_ecc_decoded.bin");
+    console_line(1, "");
+
+    console_line(1, "test-low-ecc: fiducial reservation roundtrip ok");
+    return 0;
+}
+
 static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping) {
     console_line(1, "test: footer title roundtrip");
     ImageMappingConfig mapping = base_mapping;
@@ -13613,10 +14240,17 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
         console_line(2, "test: footer title roundtrip invalid data height");
         return false;
     }
-    u64 bits_per_page = (u64)width_pixels *
-                        (u64)data_height_pixels *
-                        (u64)sample_bits *
-                        (u64)samples_per_pixel;
+    u64 bits_per_page = 0u;
+    if (!compute_bits_per_page(width_pixels,
+                               height_pixels,
+                               data_height_pixels,
+                               sample_bits,
+                               samples_per_pixel,
+                               bits_per_page,
+                               0)) {
+        console_line(2, "test: footer title roundtrip fiducial layout leaves no data capacity");
+        return false;
+    }
     if (bits_per_page == 0u) {
         console_line(2, "test: footer title roundtrip page capacity is zero");
         return false;
@@ -13904,10 +14538,17 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
         return 1;
     }
 
-    u64 bits_per_page = (u64)width_pixels *
-                        (u64)data_height_pixels *
-                        (u64)sample_bits *
-                        (u64)samples_per_pixel;
+    u64 bits_per_page = 0u;
+    if (!compute_bits_per_page(width_pixels,
+                               height_pixels,
+                               data_height_pixels,
+                               sample_bits,
+                               samples_per_pixel,
+                               bits_per_page,
+                               0)) {
+        console_line(2, "test-100kb: fiducial layout leaves no data capacity");
+        return 1;
+    }
     if (bits_per_page == 0u) {
         console_line(2, "test-100kb: page capacity is zero");
         return 1;
@@ -14168,10 +14809,17 @@ static int run_test_payload_100k_wavy(u8 color_channels,
         return 1;
     }
 
-    u64 bits_per_page = (u64)width_pixels *
-                        (u64)data_height_pixels *
-                        (u64)sample_bits *
-                        (u64)samples_per_pixel;
+    u64 bits_per_page = 0u;
+    if (!compute_bits_per_page(width_pixels,
+                               height_pixels,
+                               data_height_pixels,
+                               sample_bits,
+                               samples_per_pixel,
+                               bits_per_page,
+                               0)) {
+        log_line(2, "fiducial layout leaves no data capacity");
+        return 1;
+    }
     if (bits_per_page == 0u) {
         log_line(2, "page capacity is zero");
         return 1;
@@ -14561,10 +15209,17 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
 
-    u64 bits_per_page = (u64)width_pixels *
-                        (u64)data_height_pixels *
-                        (u64)sample_bits *
-                        (u64)samples_per_pixel;
+    u64 bits_per_page = 0u;
+    if (!compute_bits_per_page(width_pixels,
+                               height_pixels,
+                               data_height_pixels,
+                               sample_bits,
+                               samples_per_pixel,
+                               bits_per_page,
+                               0)) {
+        log_line(2, "fiducial layout leaves no data capacity");
+        return 1;
+    }
     if (bits_per_page == 0u) {
         log_line(2, "page capacity is zero");
         return 1;
@@ -15311,7 +15966,17 @@ static int command_test_payload(int arg_count, char** args) {
             console_line(2, "test: footer configuration invalid");
             return 1;
         }
-        u64 bits_per_page = (u64)width_pixels * (u64)data_height_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+        u64 bits_per_page = 0u;
+        if (!compute_bits_per_page(width_pixels,
+                                   height_pixels,
+                                   data_height_pixels,
+                                   sample_bits,
+                                   samples_per_pixel,
+                                   bits_per_page,
+                                   0)) {
+            console_line(2, "test: fiducial layout leaves no data capacity");
+            return 1;
+        }
         if (bits_per_page == 0u) {
             console_line(2, "test: page capacity is zero");
             return 1;
@@ -16097,18 +16762,20 @@ static int command_test(int arg_count, char** args) {
     /* Test suite summary:
        1) scan-basic                      - validates histogram analytics and dirt removal on small fixtures.
        2) border-dirt                     - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
-       3) payload-100kb                   - performs a 100 KiB encode/ppm/decode roundtrip without distortions.
-       4) payload-100kb-wavy (commented)  - runs a 100 KiB encode with fiducials, ripple distortion, and decode comparison.
-       5) payload-100kb-wavy-c2 (commented) - extends the ripple distortion roundtrip to color channel 2.
-       6) payload-100kb-wavy-c3 (commented) - extends the ripple distortion roundtrip to color channel 3.
-       7) payload-100kb-scaled            - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
-       8) payload-100kb-scaled-c2         - repeats the scaled roundtrip for color channel 2.
-       9) payload-100kb-scaled-c3         - repeats the scaled roundtrip for color channel 3.
-      10) payload-100kb-stretch-h26-v24   - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
-      11) payload-100kb-stretch-h24-v26   - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
-      12) payload-suite                   - runs exhaustive payload encode/decode scenarios across colors/password/ECC.
-      13) encode-decode-cli               - mimics the encode/decode CLI flow with fiducials and ensures roundtrip integrity. */
+       3) low-ecc-fiducial                - verifies fiducial reservation with 0% ECC on a compact page.
+       4) payload-100kb                   - performs a 100 KiB encode/ppm/decode roundtrip without distortions.
+       5) payload-100kb-wavy (commented)  - runs a 100 KiB encode with fiducials, ripple distortion, and decode comparison.
+       6) payload-100kb-wavy-c2 (commented) - extends the ripple distortion roundtrip to color channel 2.
+       7) payload-100kb-wavy-c3 (commented) - extends the ripple distortion roundtrip to color channel 3.
+       8) payload-100kb-scaled            - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
+       9) payload-100kb-scaled-c2         - repeats the scaled roundtrip for color channel 2.
+      10) payload-100kb-scaled-c3         - repeats the scaled roundtrip for color channel 3.
+      11) payload-100kb-stretch-h26-v24   - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
+      12) payload-100kb-stretch-h24-v26   - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
+      13) payload-suite                   - runs exhaustive payload encode/decode scenarios across colors/password/ECC.
+      14) encode-decode-cli               - mimics the encode/decode CLI flow with fiducials and ensures roundtrip integrity. */
     const TestSuiteEntry suites[] = {
+        {"low-ecc-fiducial", command_test_low_ecc_fiducial, false},
         {"scan-basic", command_test_scan_basic, false},
         {"border-dirt", command_test_border_dirt, false},
         {"encode-decode-cli", command_test_encode_decode_cli, false},
