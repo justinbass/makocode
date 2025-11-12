@@ -11,15 +11,20 @@ makocode: makocode.cpp
 test: makocode
 	./makocode test
 	bash -eu -o pipefail -c '\
-		rm -rf test/e2e; \
-		mkdir -p test/e2e/decoded; \
-		head -c 8192 /dev/urandom > test/e2e/random.bin; \
 		makocode_bin="$$PWD/makocode"; \
-		( cd test/e2e && "$$makocode_bin" encode --input=random.bin --ecc 0.5 --page-width=500 --page-height=500 ); \
-		ppm_file=$$(cd test/e2e && ls -1 -- *.ppm | head -n1); \
-		mv "test/e2e/$$ppm_file" test/e2e/encoded.ppm; \
-		( cd test/e2e && "$$makocode_bin" decode encoded.ppm --output-dir decoded ); \
-		diff test/e2e/random.bin test/e2e/decoded/random.bin \
+		rm -f test/3001_random_payload.bin \
+		      test/3001_random_payload_decoded.bin \
+		      test/3001_random_payload_encoded.ppm; \
+		tmp_dir=$$(mktemp -d test/3001_tmp.XXXXXX); \
+		trap '\''rm -rf "$$tmp_dir"'\'' EXIT; \
+		head -c 8192 /dev/urandom > "$$tmp_dir/random.bin"; \
+		( cd "$$tmp_dir" && "$$makocode_bin" encode --input=random.bin --ecc 0.5 --page-width=500 --page-height=500 ); \
+		ppm_file=$$(cd "$$tmp_dir" && ls -1 -- *.ppm | head -n1); \
+		( cd "$$tmp_dir" && "$$makocode_bin" decode "$$ppm_file" --output-dir decoded ); \
+		mv "$$tmp_dir/random.bin" test/3001_random_payload.bin; \
+		mv "$$tmp_dir/$$ppm_file" test/3001_random_payload_encoded.ppm; \
+		mv "$$tmp_dir/decoded/random.bin" test/3001_random_payload_decoded.bin; \
+		diff test/3001_random_payload.bin test/3001_random_payload_decoded.bin \
 	'
 
 clean:

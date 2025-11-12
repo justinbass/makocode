@@ -16,6 +16,15 @@
         * Command-line entry points (`encode`, `decode`, `test`) that round-trip data,
           validate the codec, and emit artifacts for inspection.
 
+    Test artifact naming:
+        * 1*** files stem from focused unit/function scenarios that isolate codec
+          behaviors.
+        * 2*** files come from broader integration-style payload suites that mix
+          scaling, color channels, and distortions.
+        * 3*** files are end-to-end CLI regressions; e.g., 3001 covers encode/decode
+          round-trip artifacts
+        * `output_dir` mostly tests the `--output-dir` case.
+
     License: GNU AGPLv3 (intent inherited from the project notes).
 */
 
@@ -14925,7 +14934,7 @@ static int command_test_encode_decode_cli(int arg_count, char** args) {
         console_line(2, "test: getcwd failed");
         return 1;
     }
-    const char* sandbox_dir = "test/cli_case";
+    const char* sandbox_dir = "test/output_dir";
     if (!ensure_directory(sandbox_dir)) {
         console_line(2, "test: failed to create sandbox directory");
         return 1;
@@ -15000,11 +15009,11 @@ static int command_test_encode_decode_cli(int arg_count, char** args) {
         return 1;
     }
     char decode_path[512];
-    if (snprintf(decode_path, sizeof(decode_path), "%s/%s/%s", test_root, "cli_case", ppm_name) <= 0) {
+    if (snprintf(decode_path, sizeof(decode_path), "%s/%s/%s", test_root, "output_dir", ppm_name) <= 0) {
         console_line(2, "test: failed to build decode path");
         return 1;
     }
-    const char* output_dir = "test/cli_case/decoded";
+    const char* output_dir = "test/output_dir/decoded";
     if (!ensure_directory(output_dir)) {
         console_line(2, "test: failed to create decode output directory");
         return 1;
