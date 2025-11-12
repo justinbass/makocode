@@ -4,7 +4,7 @@ TODO:
 - Fix wavy distortion test
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
-- Function overlay to apply a ppm image to another ppm image, with varying levels of percentage applied (use high ECC). Test with high ECC and sample image to confirm readability.
+- Function overlay to apply a ppm image to another ppm image, with varying levels of percentage applied (use high ECC). Test with high ECC and sample image to confirm readability. Steganography?
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel.
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
