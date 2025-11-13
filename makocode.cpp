@@ -4476,8 +4476,6 @@ struct PpmParserState {
     usize cursor;
     bool has_bytes;
     u64 bytes_value;
-    bool has_bits;
-    u64 bits_value;
     bool has_ecc_flag;
     u64 ecc_flag_value;
     bool has_ecc_block_data;
@@ -4543,8 +4541,6 @@ struct PpmParserState {
           cursor(0u),
           has_bytes(false),
           bytes_value(0u),
-          has_bits(false),
-          bits_value(0u),
           has_ecc_flag(false),
           ecc_flag_value(0u),
           has_ecc_block_data(false),
@@ -4619,7 +4615,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         ++index;
     }
     const char bytes_tag[] = "MAKOCODE_BYTES";
-    const char bits_tag[] = "MAKOCODE_BITS";
     const char ecc_tag[] = "MAKOCODE_ECC";
     const char ecc_block_tag[] = "MAKOCODE_ECC_BLOCK_DATA";
     const char ecc_parity_tag[] = "MAKOCODE_ECC_PARITY";
@@ -4633,7 +4628,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char subgrid_col_offsets_tag[] = "MAKOCODE_SUBGRID_COL_OFFSETS";
     const char subgrid_row_offsets_tag[] = "MAKOCODE_SUBGRID_ROW_OFFSETS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
-    const usize bits_tag_len = (usize)sizeof(bits_tag) - 1u;
     const usize ecc_tag_len = (usize)sizeof(ecc_tag) - 1u;
     const usize ecc_block_tag_len = (usize)sizeof(ecc_block_tag) - 1u;
     const usize ecc_parity_tag_len = (usize)sizeof(ecc_parity_tag) - 1u;
@@ -4673,38 +4667,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_bytes = true;
                     state.bytes_value = value;
-                }
-            }
-            return;
-        }
-    }
-    if ((length - index) >= bits_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < bits_tag_len; ++i) {
-            if (comment[index + i] != bits_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += bits_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_bits = true;
-                    state.bits_value = value;
                 }
             }
             return;
@@ -7575,13 +7537,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_bytes = true;
         dest.bytes_value = src.bytes_value;
     }
-    if (src.has_bits) {
-        if (dest.has_bits && dest.bits_value != src.bits_value) {
-            return false;
-        }
-        dest.has_bits = true;
-        dest.bits_value = src.bits_value;
-    }
     if (src.has_ecc_flag) {
         if (dest.has_ecc_flag && dest.ecc_flag_value != src.ecc_flag_value) {
             return false;
@@ -7774,7 +7729,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
 
 static bool frame_bits_to_payload(const u8* frame_data,
                                   u64 frame_bit_count,
-                                  const PpmParserState& metadata,
                                   makocode::ByteBuffer& output,
                                   u64& out_bit_count) {
     output.release();
@@ -7793,13 +7747,8 @@ static bool frame_bits_to_payload(const u8* frame_data,
     }
     u64 available_bits = (frame_bit_count >= 64u) ? (frame_bit_count - 64u) : 0u;
     u64 payload_bits = header_bits;
-    if (metadata.has_bits) {
-        if (metadata.bits_value <= available_bits) {
-            payload_bits = metadata.bits_value;
-        }
-    }
     if (payload_bits > available_bits) {
-        return false;
+        payload_bits = available_bits;
     }
     makocode::BitWriter payload_writer;
     for (u64 bit_index = 0u; bit_index < payload_bits; ++bit_index) {
@@ -8116,11 +8065,6 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_bits) {
-        if (!append_comment_number(output, "MAKOCODE_BITS", state.bits_value)) {
-            return false;
-        }
-    }
     if (state.has_ecc_flag) {
         if (!append_comment_number(output, "MAKOCODE_ECC", state.ecc_flag_value)) {
             return false;
@@ -8361,11 +8305,6 @@ static bool ppm_scale_fractional_axes(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_bits) {
-        if (!append_comment_number(output, "MAKOCODE_BITS", state.bits_value)) {
-            return false;
-        }
-    }
     if (state.has_ecc_flag) {
         if (!append_comment_number(output, "MAKOCODE_ECC", state.ecc_flag_value)) {
             return false;
@@ -8541,11 +8480,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_bytes) {
         if (!append_comment_number(output, "MAKOCODE_BYTES", state.bytes_value)) {
-            return false;
-        }
-    }
-    if (state.has_bits) {
-        if (!append_comment_number(output, "MAKOCODE_BITS", state.bits_value)) {
             return false;
         }
     }
@@ -9713,6 +9647,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                const FooterLayout& footer_layout,
                                makocode::ByteBuffer& output,
                                bool emit_metadata_comments = true) {
+    (void)payload_bit_count;
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
         return false;
     }
@@ -9779,9 +9714,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     if (emit_metadata_comments) {
         if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
-            return false;
-        }
-        if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
             return false;
         }
         if (ecc_summary && ecc_summary->enabled) {
@@ -12609,7 +12541,7 @@ retry_decode:
             console_line(2, "decode: invalid ppm input");
             return 1;
         }
-        if (!frame_bits_to_payload(frame_bits.data, frame_bit_count, single_state, bitstream, bit_count)) {
+        if (!frame_bits_to_payload(frame_bits.data, frame_bit_count, bitstream, bit_count)) {
             console_line(2, "decode: failed to extract payload bits");
             return 1;
         }
@@ -12696,7 +12628,7 @@ retry_decode:
         }
         const u8* frame_data = frame_aggregator.data();
         u64 frame_bit_total = frame_aggregator.bit_size();
-        if (!frame_bits_to_payload(frame_data, frame_bit_total, aggregate_state, bitstream, bit_count)) {
+        if (!frame_bits_to_payload(frame_data, frame_bit_total, bitstream, bit_count)) {
             console_line(2, "decode: failed to extract payload bits");
             return 1;
         }
@@ -14599,7 +14531,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
             return false;
         }
         if (!append_comment_number(ppm, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels) ||
-            !append_comment_number(ppm, "MAKOCODE_BITS", payload_bit_count) ||
             !append_comment_number(ppm, "MAKOCODE_ECC", 0u) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_COUNT", page_count) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
@@ -14671,8 +14602,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
     bool dirty_frame_ok =
         ppm_extract_frame_bits(dirty_ppm, mapping, dirty_frame_bits, dirty_frame_bit_count, dirty_state);
     if (dirty_frame_ok) {
-        dirty_state.has_bits = true;
-        dirty_state.bits_value = payload_bit_count;
         dirty_state.has_page_count = true;
         dirty_state.page_count_value = 1u;
         dirty_state.has_page_index = true;
@@ -14685,7 +14614,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
         u64 dirty_payload_bit_count = 0u;
         bool dirty_payload_ok = frame_bits_to_payload(dirty_frame_bits.data,
                                                       dirty_effective_bits,
-                                                      dirty_state,
                                                       dirty_payload_bits,
                                                       dirty_payload_bit_count);
         bool dirty_payload_match = false;
@@ -14719,8 +14647,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to parse cleaned ppm");
         return 1;
     }
-    clean_state.has_bits = true;
-    clean_state.bits_value = payload_bit_count;
     clean_state.has_page_count = true;
     clean_state.page_count_value = 1u;
     clean_state.has_page_index = true;
@@ -14787,7 +14713,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
     u64 clean_payload_bit_count = 0u;
     if (!frame_bits_to_payload(clean_frame_bits.data,
                                clean_effective_bits,
-                               clean_state,
                                clean_payload_bits,
                                clean_payload_bit_count)) {
         mask.release();
@@ -15191,10 +15116,6 @@ static int command_test_low_ecc_fiducial(int arg_count, char** args) {
         console_line(2, "test-low-ecc: failed to extract frame bits");
         return 1;
     }
-    if (!page_state.has_bits) {
-        page_state.has_bits = true;
-        page_state.bits_value = payload_bit_count;
-    }
     if (!page_state.has_page_bits) {
         page_state.has_page_bits = true;
         page_state.page_bits_value = bits_per_page;
@@ -15205,7 +15126,7 @@ static int command_test_low_ecc_fiducial(int arg_count, char** args) {
     }
     makocode::ByteBuffer payload_bits;
     u64 payload_bits_count = 0u;
-    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
+    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, payload_bits, payload_bits_count)) {
         console_line(2, "test-low-ecc: failed to convert frame bits");
         return 1;
     }
@@ -15467,10 +15388,6 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
         console_line(2, "test: footer title roundtrip failed to extract frame bits");
         return false;
     }
-    if (!page_state.has_bits) {
-        page_state.has_bits = true;
-        page_state.bits_value = payload_bit_count;
-    }
     if (!page_state.has_page_count) {
         page_state.has_page_count = true;
         page_state.page_count_value = 1u;
@@ -15485,7 +15402,7 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
     }
     makocode::ByteBuffer payload_bits;
     u64 payload_bits_count = 0u;
-    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
+    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, payload_bits, payload_bits_count)) {
         console_line(2, "test: footer title roundtrip failed to convert frame bits");
         return false;
     }
@@ -15642,10 +15559,6 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
         console_line(2, "test-100kb: failed to extract frame bits");
         return 1;
     }
-    if (!page_state.has_bits) {
-        page_state.has_bits = true;
-        page_state.bits_value = payload_bit_count;
-    }
     if (!page_state.has_page_bits || page_state.page_bits_value > extracted_bit_count) {
         page_state.has_page_bits = true;
         page_state.page_bits_value = payload_bit_count;
@@ -15666,7 +15579,7 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
 
     makocode::ByteBuffer payload_bits;
     u64 payload_bits_count = 0u;
-    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, page_state, payload_bits, payload_bits_count)) {
+    if (!frame_bits_to_payload(extracted_bits.data, effective_bits, payload_bits, payload_bits_count)) {
         console_line(2, "test-100kb: failed to convert frame bits back to payload stream");
         return 1;
     }
@@ -15926,10 +15839,6 @@ static int run_test_payload_100k_wavy(u8 color_channels,
         log_line(2, "failed to extract frame bits from ripple scan");
         return 1;
     }
-    if (!ripple_state.has_bits) {
-        ripple_state.has_bits = true;
-        ripple_state.bits_value = payload_bit_count;
-    }
     if (!ripple_state.has_page_bits || ripple_state.page_bits_value > ripple_bit_count) {
         ripple_state.has_page_bits = true;
         ripple_state.page_bits_value = payload_bit_count;
@@ -15952,7 +15861,6 @@ static int run_test_payload_100k_wavy(u8 color_channels,
     u64 ripple_payload_bit_count = 0u;
     if (!frame_bits_to_payload(ripple_bits.data,
                                ripple_effective_bits,
-                               ripple_state,
                                ripple_payload_bits,
                                ripple_payload_bit_count)) {
         log_line(2, "failed to convert ripple frame bits to payload stream");
@@ -16216,10 +16124,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         log_line(2, "failed to extract frame bits from baseline page");
         return 1;
     }
-    if (!page_state.has_bits) {
-        page_state.has_bits = true;
-        page_state.bits_value = payload_bit_count;
-    }
     if (!page_state.has_page_bits || page_state.page_bits_value > extracted_bit_count) {
         page_state.has_page_bits = true;
         page_state.page_bits_value = payload_bit_count;
@@ -16241,7 +16145,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     u64 payload_bits_count = 0u;
     if (!frame_bits_to_payload(extracted_bits.data,
                                effective_bits,
-                               page_state,
                                payload_bits,
                                payload_bits_count)) {
         log_line(2, "failed to convert baseline frame bits");
@@ -16305,10 +16208,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         log_line(2, "failed to extract frame bits from scaled page");
         return 1;
     }
-    if (!scaled_state.has_bits) {
-        scaled_state.has_bits = true;
-        scaled_state.bits_value = payload_bit_count;
-    }
     if (!scaled_state.has_page_bits || scaled_state.page_bits_value > scaled_bit_count) {
         scaled_state.has_page_bits = true;
         scaled_state.page_bits_value = payload_bit_count;
@@ -16329,7 +16228,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     u64 scaled_payload_bit_count = 0u;
     if (!frame_bits_to_payload(scaled_bits.data,
                                scaled_effective_bits,
-                               scaled_state,
                                scaled_payload_bits,
                                scaled_payload_bit_count)) {
         log_line(2, "failed to convert scaled frame bits");
@@ -17323,7 +17221,7 @@ static int command_test_payload(int arg_count, char** args) {
         }
         makocode::ByteBuffer roundtrip_bits;
         u64 roundtrip_count = 0u;
-        if (!frame_bits_to_payload(aggregate_data, aggregate_bits, aggregate_state, roundtrip_bits, roundtrip_count)) {
+        if (!frame_bits_to_payload(aggregate_data, aggregate_bits, roundtrip_bits, roundtrip_count)) {
             console_line(2, "test: failed to reconstruct payload bits");
             return 1;
         }
@@ -17358,7 +17256,7 @@ static int command_test_payload(int arg_count, char** args) {
         }
         makocode::ByteBuffer scan_payload_bits;
         u64 scan_payload_bit_count = 0u;
-        if (!frame_bits_to_payload(scan_data, scan_total_bits, scan_state, scan_payload_bits, scan_payload_bit_count)) {
+        if (!frame_bits_to_payload(scan_data, scan_total_bits, scan_payload_bits, scan_payload_bit_count)) {
             console_line(2, "test: failed to reconstruct payload from simulated scans");
             return 1;
         }
@@ -17623,7 +17521,7 @@ static int command_test_payload(int arg_count, char** args) {
                 }
                 makocode::ByteBuffer scaled_payload_bits;
                 u64 scaled_payload_bit_count = 0u;
-                if (!frame_bits_to_payload(scaled_data, scaled_total_bits, scaled_state, scaled_payload_bits, scaled_payload_bit_count)) {
+                if (!frame_bits_to_payload(scaled_data, scaled_total_bits, scaled_payload_bits, scaled_payload_bit_count)) {
                     console_line(2, "test: failed to reconstruct payload from scaled pages");
                     return 1;
                 }
@@ -17660,7 +17558,6 @@ static int command_test_payload(int arg_count, char** args) {
                 u64 scan_scaled_payload_bit_count = 0u;
                 if (!frame_bits_to_payload(scan_scaled_data,
                                            scan_scaled_total_bits,
-                                           scan_scaled_state,
                                            scan_scaled_payload_bits,
                                            scan_scaled_payload_bit_count)) {
                     console_line(2, "test: failed to reconstruct payload from scaled simulated scans");
