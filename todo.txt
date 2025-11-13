@@ -1,7 +1,8 @@
 TODO:
 - Remove white border, or make it optional (distortion tests probably need border space)
 - Fix wavy distortion test
-- All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
+- All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
+- Coffee stain test, black marker test, page folded/cut test
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
 - Use LZMA rather than LZW compression
 - Function overlay to apply a ppm image to another ppm image, with varying levels of percentage applied (use high ECC). Test with high ECC and sample image to confirm readability. Steganography?
