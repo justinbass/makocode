@@ -12227,10 +12227,6 @@ static int command_overlay(int arg_count, char** args) {
         console_line(2, "overlay: ppm images must have identical dimensions");
         return 1;
     }
-    if (base_page.color_mode != overlay_page.color_mode) {
-        console_line(2, "overlay: ppm images use different color channel metadata");
-        return 1;
-    }
     makocode::ByteBuffer base_mask;
     makocode::ByteBuffer overlay_mask;
     u64 base_reserved = 0u;
@@ -12245,17 +12241,6 @@ static int command_overlay(int arg_count, char** args) {
     }
     if (base_mask.size != overlay_mask.size) {
         console_line(2, "overlay: fiducial mask size mismatch");
-        return 1;
-    }
-    bool masks_match = true;
-    for (usize i = 0u; i < base_mask.size; ++i) {
-        if (base_mask.data[i] != overlay_mask.data[i]) {
-            masks_match = false;
-            break;
-        }
-    }
-    if (!masks_match) {
-        console_line(2, "overlay: fiducial reservation differs between images");
         return 1;
     }
     makocode::ByteBuffer base_bits;
