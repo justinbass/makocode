@@ -1,6 +1,5 @@
 TODO:
 - Remove white border, or make it optional (distortion tests probably need border space)
-- Move E2E tests inside makocode.cpp
 - Fix wavy distortion test
 - All distortions (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
