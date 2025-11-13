@@ -29,7 +29,6 @@ test: makocode
 		mv "$$tmp_dir/decoded/random.bin" test/3001_random_payload_decoded.bin; \
 		diff test/3001_random_payload.bin test/3001_random_payload_decoded.bin \
 	'
-	# e2e encode/decode run without ECC (expected to fail until decoder handles missing ecc data)
 	bash -eu -o pipefail -c '\
 		makocode_bin="$$PWD/makocode"; \
 		tmp_dir=$$(mktemp -d test/3002_tmp.XXXXXX); \

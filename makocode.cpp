@@ -1,20 +1,35 @@
 /*
     makocode.cpp
     ------------
-    Self-contained CLI implementation of the MakoCode encoder/decoder. The program
-    performs payload compression, bitstream framing, and image mapping without relying
-    on headers or external libraries; every construct required to build the binary
-    lives inside this translation unit.
+    Monolithic CLI for the MakoCode archival-to-image pipeline. This single
+    translation unit packages file trees into printable/scannable PPM pages and
+    performs the full reverse decode, including optional encryption and forward
+    error correction, without relying on external libraries.
 
-    Major capabilities include:
-        * Lossless payload handling via a shared 12-bit LZW codec used by encoder
-          and decoder contexts.
-        * Byte/bit utilities that assemble payload frames and translate them into
-          pixel samples.
-        * Portable PPM import/export that maps encoded payloads to RGB imagery with
-          configurable color palettes.
-        * Command-line entry points (`encode`, `decode`, `test`) that round-trip data,
-          validate the codec, and emit artifacts for inspection.
+    Supported commands:
+        * `encode` bundles files/directories into an MKARCH01 archive, applies
+          12-bit LZW compression, optional ChaCha20-Poly1305 encryption, optional
+          Reed-Solomon ECC, and maps the bitstream onto fiducial-marked PPM pages
+          with configurable color channels and footer text.
+        * `decode` ingests PPM pages (files or stdin), reconstructs payload
+          bitstreams, repairs ECC, decrypts when required, and unpacks the archive
+          into the requested output directory.
+        * `test` exercises round-trip encode/decode scenarios across color modes,
+          ECC configurations, simulated scanner noise, and password-protected
+          payloads while emitting fixtures under `test/`.
+        * `test-scan-basic` and `test-border-dirt` run focused regression suites
+          for scan alignment, fiducial recovery, and border-cleanup heuristics.
+        * `minify` strips comments/whitespace to emit `makocode_minified.cpp`.
+
+    Core subsystems:
+        * MKARCH01 archive builder that normalizes paths and captures directory
+          trees for the encoder.
+        * Shared buffers, bitstream helpers, fiducial/page layout math, and
+          portable PPM I/O for grayscale and color modes with footer layout logic.
+        * ChaCha20-Poly1305 implementation, Reed-Solomon GF(2^8) tables, and ECC
+          metadata repair helpers used by both encode/decode paths.
+        * Synthetic scan/distortion pipelines that simulate rotation, ripple,
+          skew, and debris to validate robustness of the decoder.
 
     Test artifact naming:
         * 1*** files stem from focused unit/function scenarios that isolate codec
