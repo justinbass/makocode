@@ -1,4 +1,5 @@
 TODO:
+- Image overlay outputs as black and white no matter what (argument or detection required?), # headers cause an error to print, they should be removed
 - Remove white border, or make it optional (distortion tests probably need border space)
 - Fix wavy distortion test
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
