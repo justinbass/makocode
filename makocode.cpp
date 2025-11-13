@@ -2605,6 +2605,19 @@ struct EccSummary {
           block_count(0u) {}
 };
 
+struct EccDecodeStats {
+    u64 corrected_symbols;
+    u64 total_parity_symbols;
+    u64 total_blocks;
+    u64 blocks_with_errors;
+
+    EccDecodeStats()
+        : corrected_symbols(0u),
+          total_parity_symbols(0u),
+          total_blocks(0u),
+          blocks_with_errors(0u) {}
+};
+
 static bool encode_payload_with_ecc(const ByteBuffer& compressed,
                                     double redundancy,
                                     BitWriter& writer,
@@ -3103,7 +3116,11 @@ static bool rs_correct_errors(u8* codeword,
 
 static bool rs_decode_block(u8* block,
                             u16 data_symbols,
-                            u16 parity_symbols) {
+                            u16 parity_symbols,
+                            u16* corrected_errors) {
+    if (corrected_errors) {
+        *corrected_errors = 0u;
+    }
     if (!block || parity_symbols == 0u || data_symbols == 0u) {
         return false;
     }
@@ -3145,7 +3162,13 @@ static bool rs_decode_block(u8* block,
     if (derivative_size == 0u) {
         return false;
     }
-    return rs_correct_errors(block, codeword_length, evaluator, evaluator_size, locator_derivative, derivative_size, error_positions, error_count);
+    if (!rs_correct_errors(block, codeword_length, evaluator, evaluator_size, locator_derivative, derivative_size, error_positions, error_count)) {
+        return false;
+    }
+    if (corrected_errors) {
+        *corrected_errors = error_count;
+    }
+    return true;
 }
 
 
@@ -3392,7 +3415,8 @@ static bool parse_ecc_header(const u8* bytes,
 
 static bool decode_ecc_payload(const u8* bytes,
                                const EccHeaderInfo& header,
-                               ByteBuffer& output) {
+                               ByteBuffer& output,
+                               EccDecodeStats* stats) {
     if (!bytes || !header.valid || !header.enabled) {
         return false;
     }
@@ -3406,14 +3430,25 @@ static bool decode_ecc_payload(const u8* bytes,
     }
     output.size = (usize)header.original_bytes;
     u64 written = 0u;
+    if (stats) {
+        stats->corrected_symbols = 0u;
+        stats->blocks_with_errors = 0u;
+        stats->total_blocks = header.block_count;
+        stats->total_parity_symbols = (u64)header.parity * header.block_count;
+    }
     u8 block_buffer[RS_POLY_CAPACITY];
     for (u64 block_index = 0u; block_index < header.block_count; ++block_index) {
         usize offset = (usize)block_index * (usize)block_total;
         for (u16 i = 0u; i < block_total; ++i) {
             block_buffer[i] = bytes[offset + i];
         }
-        if (!rs_decode_block(block_buffer, header.block_data, header.parity)) {
+        u16 block_errors = 0u;
+        if (!rs_decode_block(block_buffer, header.block_data, header.parity, &block_errors)) {
             return false;
+        }
+        if (stats && block_errors > 0u) {
+            stats->corrected_symbols += (u64)block_errors;
+            stats->blocks_with_errors += 1u;
         }
         u16 copy = header.block_data;
         if (written + copy > header.original_bytes) {
@@ -3474,6 +3509,7 @@ struct DecoderContext {
     bool password_attempted;
     bool password_failed;
     bool password_not_encrypted;
+    EccDecodeStats ecc_stats;
 
     DecoderContext()
         : payload(),
@@ -3481,7 +3517,8 @@ struct DecoderContext {
           ecc_failed(false),
           password_attempted(false),
           password_failed(false),
-          password_not_encrypted(false) {}
+          password_not_encrypted(false),
+          ecc_stats() {}
 
     void reset() {
         payload.release();
@@ -3490,6 +3527,7 @@ struct DecoderContext {
         password_attempted = false;
         password_failed = false;
         password_not_encrypted = false;
+        ecc_stats = EccDecodeStats();
     }
 
     bool parse(u8* data, usize size_in_bits, const char* password, usize password_length) {
@@ -3499,6 +3537,7 @@ struct DecoderContext {
         password_attempted = false;
         password_failed = false;
         password_not_encrypted = false;
+        ecc_stats = EccDecodeStats();
         if (size_in_bits == 0u) {
             has_payload = true;
             return true;
@@ -3523,7 +3562,7 @@ struct DecoderContext {
             }
             const u8* encoded = data + ECC_HEADER_BYTES;
             ByteBuffer compressed;
-            if (!decode_ecc_payload(encoded, header, compressed)) {
+            if (!decode_ecc_payload(encoded, header, compressed, &ecc_stats)) {
                 char debug_buffer[128];
                 console_line(2, "debug parse: decode_ecc_payload failure");
                 if (header.block_data || header.parity || header.block_count) {
@@ -3632,6 +3671,10 @@ struct DecoderContext {
 
     bool password_was_ignored() const {
         return password_not_encrypted;
+    }
+
+    const EccDecodeStats& ecc_statistics() const {
+        return ecc_stats;
     }
 };
 
@@ -10857,7 +10900,7 @@ static void write_usage() {
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
     console_line(1, "  --output-dir PATH  (decode: destination directory; default .)");
-    console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; 0 disables, e.g., 0.10)");
+    console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
@@ -11052,7 +11095,7 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
 static int command_encode(int arg_count, char** args) {
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
-    double ecc_redundancy = 0.0;
+    double ecc_redundancy = 0.2;
     static const usize MAX_INPUT_ITEMS = 512u;
     const char* input_paths[MAX_INPUT_ITEMS];
     usize input_count = 0u;
@@ -11905,8 +11948,30 @@ retry_decode:
     if (decoder.password_attempt_made() && decoder.password_was_ignored()) {
         console_line(2, "decode: warning: payload was not encrypted; password ignored");
     }
-   if (decoder.ecc_correction_failed()) {
+    if (decoder.ecc_correction_failed()) {
         console_line(2, "decode: warning: payload may contain uncorrected errors");
+    }
+    const makocode::EccDecodeStats& ecc_stats = decoder.ecc_statistics();
+    if (ecc_stats.total_parity_symbols > 0u) {
+        u64 corrected_bits = ecc_stats.corrected_symbols * 8u;
+        u64 available_bits = ecc_stats.total_parity_symbols * 8u;
+        double usage = 0.0;
+        if (available_bits > 0u) {
+            usage = ((double)corrected_bits * 100.0) / (double)available_bits;
+        }
+        char count_buffer[32];
+        char bits_buffer[32];
+        char percent_buffer[32];
+        u64_to_ascii(ecc_stats.corrected_symbols, count_buffer, sizeof(count_buffer));
+        u64_to_ascii(corrected_bits, bits_buffer, sizeof(bits_buffer));
+        format_fixed_3(usage, percent_buffer, sizeof(percent_buffer));
+        console_write(1, "decode: ECC detected ");
+        console_write(1, count_buffer);
+        console_write(1, (ecc_stats.corrected_symbols == 1u) ? " symbol error (" : " symbol errors (");
+        console_write(1, bits_buffer);
+        console_write(1, (corrected_bits == 1u) ? " bit corrected, " : " bits corrected, ");
+        console_write(1, percent_buffer);
+        console_line(1, "% of available correction bits)");
     }
     if (!decoder.has_payload) {
         console_line(2, "decode: no payload recovered");
@@ -12067,7 +12132,7 @@ static bool validate_ecc_random_bit_flips(const makocode::ByteBuffer& original_p
         return false;
     }
     makocode::ByteBuffer repaired_payload;
-    if (!makocode::decode_ecc_payload(ecc_stream.data + makocode::ECC_HEADER_BYTES, header_info, repaired_payload)) {
+    if (!makocode::decode_ecc_payload(ecc_stream.data + makocode::ECC_HEADER_BYTES, header_info, repaired_payload, 0)) {
         console_line(2, "test: decode_ecc_payload failed during ECC validation");
         return false;
     }
