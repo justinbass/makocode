@@ -1,4 +1,5 @@
 TODO:
+- Remove all headers from encoding, one by one and fix decoding for each one.
 - Fix wavy distortion test
 - Overlay needs --color-channels arg, mask the overlay image first.
 - Overlay won't work well on final page, need option for ECC to fill up through last page
