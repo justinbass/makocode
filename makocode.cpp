@@ -11768,7 +11768,15 @@ retry_decode:
             if (enforce_page_index) {
                 if (page_state.has_page_index) {
                     if (page_state.page_index_value != expected_page_index) {
-                        console_line(2, "decode: unexpected page order");
+                        char expected_buffer[32];
+                        char actual_buffer[32];
+                        u64_to_ascii(expected_page_index, expected_buffer, sizeof(expected_buffer));
+                        u64_to_ascii(page_state.page_index_value, actual_buffer, sizeof(actual_buffer));
+                        console_write(2, "decode: unexpected page order (expected: ");
+                        console_write(2, expected_buffer);
+                        console_write(2, ", actual: ");
+                        console_write(2, actual_buffer);
+                        console_line(2, ")");
                         return 1;
                     }
                 } else {
