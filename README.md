@@ -13,8 +13,12 @@ make
 make test
 ./makocode encode --input=file.txt
 # Print, store, scan the output shown above
-./makocode decode scan.ppm
+./makocode decode --color-channels=1 scan.ppm
 ```
+
+Decoding relies on the original color palette because scanned images lose
+any custom PPM comments; if you printed a non-gray barcode, pass the matching
+`--color-channels` value (1=gray, 2=CMY, 3=RGB).
 
 ### Converting Scans
 

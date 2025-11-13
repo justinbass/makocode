@@ -4440,8 +4440,6 @@ struct PpmParserState {
     usize cursor;
     bool has_bytes;
     u64 bytes_value;
-    bool has_color_channels;
-    u64 color_channels_value;
     bool has_page_width_pixels;
     u64 page_width_pixels_value;
     bool has_page_height_pixels;
@@ -4495,8 +4493,6 @@ struct PpmParserState {
           cursor(0u),
           has_bytes(false),
           bytes_value(0u),
-          has_color_channels(false),
-          color_channels_value(0u),
           has_page_width_pixels(false),
           page_width_pixels_value(0u),
           has_page_height_pixels(false),
@@ -4559,7 +4555,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         ++index;
     }
     const char bytes_tag[] = "MAKOCODE_BYTES";
-    const char color_tag[] = "MAKOCODE_COLOR_CHANNELS";
     const char fiducial_size_tag[] = "MAKOCODE_FIDUCIAL_SIZE";
     const char fiducial_columns_tag[] = "MAKOCODE_FIDUCIAL_COLUMNS";
     const char fiducial_rows_tag[] = "MAKOCODE_FIDUCIAL_ROWS";
@@ -4567,7 +4562,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char subgrid_col_offsets_tag[] = "MAKOCODE_SUBGRID_COL_OFFSETS";
     const char subgrid_row_offsets_tag[] = "MAKOCODE_SUBGRID_ROW_OFFSETS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
-    const usize color_tag_len = (usize)sizeof(color_tag) - 1u;
     const usize fiducial_size_tag_len = (usize)sizeof(fiducial_size_tag) - 1u;
     const usize fiducial_columns_tag_len = (usize)sizeof(fiducial_columns_tag) - 1u;
     const usize fiducial_rows_tag_len = (usize)sizeof(fiducial_rows_tag) - 1u;
@@ -4613,38 +4607,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             break;
         }
         ++index;
-    }
-    if ((length - index) >= color_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < color_tag_len; ++i) {
-            if (comment[index + i] != color_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += color_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_color_channels = true;
-                    state.color_channels_value = value;
-                }
-            }
-            return;
-        }
     }
     index = 0u;
     while (index < length) {
@@ -6129,21 +6091,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (!pixel_data) {
         return false;
     }
-    bool override_color_valid = overrides.color_set &&
-                                overrides.color_channels >= 1u &&
-                                overrides.color_channels <= 3u;
-    bool metadata_color_valid = state.has_color_channels &&
-                                state.color_channels_value >= 1u &&
-                                state.color_channels_value <= 3u;
-    u8 inferred_color_mode = 1u;
-    if (!override_color_valid && !metadata_color_valid) {
-        inferred_color_mode = detect_color_mode_from_pixels(pixel_data, width, height);
-        if (inferred_color_mode < 1u || inferred_color_mode > 3u) {
-            inferred_color_mode = 1u;
-        }
-        state.has_color_channels = true;
-        state.color_channels_value = inferred_color_mode;
-        metadata_color_valid = true;
+    u8 configured_color_mode = overrides.color_channels;
+    if (configured_color_mode < 1u || configured_color_mode > 3u) {
+        configured_color_mode = 1u;
     }
     bool has_rotation = state.has_rotation_degrees &&
                         state.rotation_degrees_value != 0.0 &&
@@ -6203,14 +6153,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             has_skew = false;
         }
     }
-    u8 detection_color_mode = 1u;
-    if (override_color_valid) {
-        detection_color_mode = overrides.color_channels;
-    } else if (metadata_color_valid) {
-        detection_color_mode = (u8)state.color_channels_value;
-    } else {
-        detection_color_mode = inferred_color_mode;
-    }
+    u8 detection_color_mode = configured_color_mode;
     if (detection_color_mode == 0u || detection_color_mode > 3u) {
         detection_color_mode = 1u;
     }
@@ -6377,14 +6320,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                       &fiducial_mask)) {
         return false;
     }
-    u8 color_mode = 1u;
-    if (override_color_valid) {
-        color_mode = overrides.color_channels;
-    } else if (metadata_color_valid) {
-        color_mode = (u8)state.color_channels_value;
-    } else {
-        color_mode = inferred_color_mode;
-    }
+    u8 color_mode = configured_color_mode;
     if (color_mode == 0u || color_mode > 3u) {
         return false;
     }
@@ -7226,13 +7162,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_bytes = true;
         dest.bytes_value = src.bytes_value;
     }
-    if (src.has_color_channels) {
-        if (dest.has_color_channels && dest.color_channels_value != src.color_channels_value) {
-            return false;
-        }
-        dest.has_color_channels = true;
-        dest.color_channels_value = src.color_channels_value;
-    }
     if (src.has_fiducial_size) {
         if (dest.has_fiducial_size && dest.fiducial_size_value != src.fiducial_size_value) {
             return false;
@@ -7719,11 +7648,6 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_color_channels) {
-        if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", state.color_channels_value)) {
-            return false;
-        }
-    }
     if (state.has_page_count) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
             return false;
@@ -7934,11 +7858,6 @@ static bool ppm_scale_fractional_axes(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_color_channels) {
-        if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", state.color_channels_value)) {
-            return false;
-        }
-    }
     if (state.has_page_count) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
             return false;
@@ -8084,11 +8003,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_bytes) {
         if (!append_comment_number(output, "MAKOCODE_BYTES", state.bytes_value)) {
-            return false;
-        }
-    }
-    if (state.has_color_channels) {
-        if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", state.color_channels_value)) {
             return false;
         }
     }
@@ -9293,9 +9207,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     if (emit_metadata_comments) {
-        if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
-            return false;
-        }
         if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
             return false;
         }
@@ -11411,14 +11322,9 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
     if (page.data_height > page.height) {
         page.data_height = page.height;
     }
-    u8 color_mode = 1u;
-    if (state.has_color_channels) {
-        if (state.color_channels_value == 0u || state.color_channels_value > 3u) {
-            console_write(2, "overlay: unsupported color channel metadata in ");
-            console_line(2, path);
-            return false;
-        }
-        color_mode = (u8)state.color_channels_value;
+    u8 color_mode = detect_color_mode_from_pixels(page.pixels.data, page.width, page.height);
+    if (color_mode < 1u || color_mode > 3u) {
+        color_mode = 1u;
     }
     page.color_mode = color_mode;
     return true;
@@ -11961,6 +11867,8 @@ static int command_overlay(int arg_count, char** args) {
 
 static int command_decode(int arg_count, char** args) {
     ImageMappingConfig mapping;
+    mapping.color_channels = 1u;
+    mapping.color_set = true;
     static const usize MAX_INPUT_FILES = 256u;
     const char* input_files[MAX_INPUT_FILES];
     usize file_count = 0u;
@@ -14039,8 +13947,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
         if (!ppm.append_ascii("P3\n")) {
             return false;
         }
-        if (!append_comment_number(ppm, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels) ||
-            !append_comment_number(ppm, "MAKOCODE_PAGE_COUNT", page_count) ||
+        if (!append_comment_number(ppm, "MAKOCODE_PAGE_COUNT", page_count) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_BITS", bits_per_page) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels) ||
