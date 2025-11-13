@@ -1,7 +1,9 @@
 TODO:
-- Overlay needs --color-channels arg, mask the overlay image first.
-- Remove white border, or make it optional (distortion tests probably need border space)
+- Decoding apparently depends on ppm headers, remove them and retest.
 - Fix wavy distortion test
+- Overlay needs --color-channels arg, mask the overlay image first.
+- Overlay won't work well on final page, need option for ECC to fill up through last page
+- Remove white border, or make it optional (distortion tests probably need border space)
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - Coffee stain test, black marker test, page folded/cut test
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
@@ -11,3 +13,4 @@ TODO:
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
 - Determine proper defaults
 - Attempt to optimize/shrink/minify/dedupe code, it still should be readable
+- Full test coverage
