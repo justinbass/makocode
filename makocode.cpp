@@ -245,6 +245,80 @@ static bool ascii_to_double(const char* text, usize length, double* out_value) {
     return true;
 }
 
+static u64 gcd_u64(u64 a, u64 b);
+
+static bool ascii_to_fraction(const char* text,
+                              usize length,
+                              u64& numerator,
+                              u64& denominator) {
+    numerator = 0u;
+    denominator = 1u;
+    if (!text || length == 0u) {
+        return false;
+    }
+    bool seen_digit = false;
+    bool seen_decimal = false;
+    u64 integer_part = 0u;
+    u64 fraction_part = 0u;
+    u64 fraction_scale = 1u;
+    for (usize i = 0u; i < length; ++i) {
+        char c = text[i];
+        if (c == '.') {
+            if (seen_decimal) {
+                return false;
+            }
+            seen_decimal = true;
+            continue;
+        }
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        seen_digit = true;
+        u64 digit = (u64)(c - '0');
+        if (!seen_decimal) {
+            if (integer_part > (0xFFFFFFFFFFFFFFFFull - digit) / 10u) {
+                return false;
+            }
+            integer_part = integer_part * 10u + digit;
+        } else {
+            if (fraction_scale <= 1000000000u) {
+                fraction_part = fraction_part * 10u + digit;
+                fraction_scale *= 10u;
+            }
+        }
+    }
+    if (!seen_digit) {
+        return false;
+    }
+    if (!seen_decimal) {
+        numerator = integer_part;
+        denominator = 1u;
+        return true;
+    }
+    if (fraction_scale == 0u) {
+        return false;
+    }
+    if (integer_part != 0u) {
+        if (integer_part > (0xFFFFFFFFFFFFFFFFull - fraction_part) / fraction_scale) {
+            return false;
+        }
+    }
+    u64 scaled_integer = integer_part * fraction_scale;
+    u64 combined = scaled_integer + fraction_part;
+    u64 divisor = gcd_u64(combined, fraction_scale);
+    if (divisor == 0u) {
+        numerator = combined;
+        denominator = fraction_scale;
+    } else {
+        numerator = combined / divisor;
+        denominator = fraction_scale / divisor;
+    }
+    if (denominator == 0u) {
+        return false;
+    }
+    return true;
+}
+
 static void console_write(int fd, const char* text) {
     if (!text) {
         return;
@@ -10891,6 +10965,7 @@ static void write_usage() {
     console_line(1, "Usage:");
     console_line(1, "  makocode encode [options]   (reads payload from file; emits PPM pages)");
     console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
+    console_line(1, "  makocode overlay BASE.ppm OVERLAY.ppm FRACTION (writes merged page to stdout)");
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
     console_line(1, "Options:");
@@ -11628,6 +11703,621 @@ static int command_encode(int arg_count, char** args) {
         console_write(1, " pages (");
         console_write(1, (const char*)sample_name.data);
         console_line(1, " ...)");
+    }
+    return 0;
+}
+
+struct OverlayPage {
+    makocode::ByteBuffer original;
+    makocode::ByteBuffer pixels;
+    PpmParserState      metadata;
+    u32                 width;
+    u32                 height;
+    u32                 data_height;
+    u32                 footer_rows;
+    u8                  color_mode;
+
+    OverlayPage()
+        : original(),
+          pixels(),
+          metadata(),
+          width(0u),
+          height(0u),
+          data_height(0u),
+          footer_rows(0u),
+          color_mode(1u) {}
+};
+
+static bool load_overlay_page(const char* path, OverlayPage& page) {
+    page.original.release();
+    page.pixels.release();
+    page.metadata = PpmParserState();
+    page.width = 0u;
+    page.height = 0u;
+    page.data_height = 0u;
+    page.footer_rows = 0u;
+    page.color_mode = 1u;
+    if (!path) {
+        console_line(2, "overlay: missing file path");
+        return false;
+    }
+    if (!read_entire_file(path, page.original)) {
+        console_write(2, "overlay: failed to read ");
+        console_line(2, path);
+        return false;
+    }
+    if (!page.original.data || page.original.size == 0u) {
+        console_write(2, "overlay: empty file ");
+        console_line(2, path);
+        return false;
+    }
+    PpmParserState state;
+    state.data = page.original.data;
+    state.size = page.original.size;
+    const char* token = 0;
+    usize token_length = 0u;
+    if (!ppm_next_token(state, &token, &token_length) ||
+        !ascii_equals_token(token, token_length, "P3")) {
+        console_write(2, "overlay: ");
+        console_write(2, path);
+        console_line(2, " is not a P3 ASCII PPM");
+        return false;
+    }
+    u64 width_value = 0u;
+    if (!ppm_next_token(state, &token, &token_length) ||
+        !ascii_to_u64(token, token_length, &width_value) ||
+        width_value == 0u ||
+        width_value > 0xFFFFFFFFull) {
+        console_write(2, "overlay: invalid width in ");
+        console_line(2, path);
+        return false;
+    }
+    u64 height_value = 0u;
+    if (!ppm_next_token(state, &token, &token_length) ||
+        !ascii_to_u64(token, token_length, &height_value) ||
+        height_value == 0u ||
+        height_value > 0xFFFFFFFFull) {
+        console_write(2, "overlay: invalid height in ");
+        console_line(2, path);
+        return false;
+    }
+    u64 max_value = 0u;
+    if (!ppm_next_token(state, &token, &token_length) ||
+        !ascii_to_u64(token, token_length, &max_value) ||
+        max_value != 255u) {
+        console_write(2, "overlay: unsupported max pixel value in ");
+        console_line(2, path);
+        return false;
+    }
+    if (width_value == 0u || height_value == 0u) {
+        console_write(2, "overlay: zero dimension in ");
+        console_line(2, path);
+        return false;
+    }
+    if (width_value > (u64)USIZE_MAX_VALUE || height_value > (u64)USIZE_MAX_VALUE) {
+        console_write(2, "overlay: dimensions overflow in ");
+        console_line(2, path);
+        return false;
+    }
+    u64 pixel_count = width_value * height_value;
+    if (pixel_count == 0u || pixel_count > ((u64)USIZE_MAX_VALUE / 3u)) {
+        console_write(2, "overlay: pixel count overflow in ");
+        console_line(2, path);
+        return false;
+    }
+    makocode::ByteBuffer pixel_data;
+    if (!ppm_read_rgb_pixels(state, pixel_count, pixel_data)) {
+        console_write(2, "overlay: failed to parse pixel data from ");
+        console_line(2, path);
+        return false;
+    }
+    page.metadata = state;
+    page.metadata.data = 0;
+    page.metadata.size = 0u;
+    page.metadata.cursor = 0u;
+    byte_buffer_move(page.pixels, pixel_data);
+    page.width = (u32)width_value;
+    page.height = (u32)height_value;
+    u32 footer_rows = 0u;
+    if (state.has_footer_rows) {
+        if (state.footer_rows_value > height_value) {
+            console_write(2, "overlay: footer metadata exceeds image height in ");
+            console_line(2, path);
+            return false;
+        }
+        footer_rows = (u32)state.footer_rows_value;
+    }
+    if (footer_rows > page.height) {
+        footer_rows = page.height;
+    }
+    page.footer_rows = footer_rows;
+    page.data_height = page.height - footer_rows;
+    if (page.data_height > page.height) {
+        page.data_height = page.height;
+    }
+    u8 color_mode = 1u;
+    if (state.has_color_channels) {
+        if (state.color_channels_value == 0u || state.color_channels_value > 3u) {
+            console_write(2, "overlay: unsupported color channel metadata in ");
+            console_line(2, path);
+            return false;
+        }
+        color_mode = (u8)state.color_channels_value;
+    }
+    page.color_mode = color_mode;
+    return true;
+}
+
+static bool build_overlay_mask(const OverlayPage& page,
+                               makocode::ByteBuffer& mask_out,
+                               u64& reserved_pixels) {
+    reserved_pixels = 0u;
+    mask_out.release();
+    if (page.width == 0u || page.height == 0u) {
+        return false;
+    }
+    u64 total_pixels = (u64)page.width * (u64)page.height;
+    if (!mask_out.ensure((usize)total_pixels)) {
+        return false;
+    }
+    mask_out.size = (usize)total_pixels;
+    for (usize i = 0u; i < mask_out.size; ++i) {
+        mask_out.data[i] = 0u;
+    }
+    if (page.data_height == 0u) {
+        return true;
+    }
+    u32 marker_size = g_fiducial_defaults.marker_size_pixels;
+    if (page.metadata.has_fiducial_size && page.metadata.fiducial_size_value > 0u && page.metadata.fiducial_size_value <= 0xFFFFFFFFull) {
+        marker_size = (u32)page.metadata.fiducial_size_value;
+    }
+    if (marker_size == 0u) {
+        return true;
+    }
+    u32 margin = g_fiducial_defaults.margin_pixels;
+    if (page.metadata.has_fiducial_margin && page.metadata.fiducial_margin_value <= 0xFFFFFFFFull) {
+        margin = (u32)page.metadata.fiducial_margin_value;
+    }
+    double min_x = (margin < page.width) ? (double)margin : 0.0;
+    double max_x = (page.width > margin)
+                       ? (double)(page.width - 1u - margin)
+                       : (page.width ? (double)(page.width - 1u) : 0.0);
+    if (max_x < min_x) {
+        max_x = min_x;
+    }
+    double min_y = (margin < page.height) ? (double)margin : 0.0;
+    double max_y = (page.height > margin)
+                       ? (double)(page.height - 1u - margin)
+                       : (page.height ? (double)(page.height - 1u) : 0.0);
+    if (max_y < min_y) {
+        max_y = min_y;
+    }
+    double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
+    double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
+    u32 columns = (page.metadata.has_fiducial_columns && page.metadata.fiducial_columns_value > 0u)
+                      ? (u32)page.metadata.fiducial_columns_value
+                      : 0u;
+    u32 rows = (page.metadata.has_fiducial_rows && page.metadata.fiducial_rows_value > 0u)
+                   ? (u32)page.metadata.fiducial_rows_value
+                   : 0u;
+    if (columns == 0u || rows == 0u) {
+        u32 spacing = g_fiducial_defaults.spacing_pixels;
+        if (spacing == 0u) {
+            spacing = marker_size ? marker_size : 1u;
+        }
+        if (columns == 0u) {
+            columns = 1u;
+            if (spacing > 0u && available_width > 0.0) {
+                double span = available_width / (double)spacing;
+                if (span < 0.0) {
+                    span = 0.0;
+                }
+                u64 additional = (u64)span;
+                if (additional > 0xFFFFFFFFull - 1ull) {
+                    additional = 0xFFFFFFFFull - 1ull;
+                }
+                columns = (u32)(additional + 1ull);
+            }
+        }
+        if (rows == 0u) {
+            rows = 1u;
+            if (spacing > 0u && available_height > 0.0) {
+                double span = available_height / (double)spacing;
+                if (span < 0.0) {
+                    span = 0.0;
+                }
+                u64 additional = (u64)span;
+                if (additional > 0xFFFFFFFFull - 1ull) {
+                    additional = 0xFFFFFFFFull - 1ull;
+                }
+                rows = (u32)(additional + 1ull);
+            }
+        }
+        if (columns == 0u) {
+            columns = 1u;
+        }
+        if (rows == 0u) {
+            rows = 1u;
+        }
+    }
+    u32 margin_x = (margin < page.width) ? margin : page.width;
+    u32 margin_y = (margin < page.data_height) ? margin : page.data_height;
+    for (u32 row = 0u; row < page.data_height; ++row) {
+        bool in_top = (row < margin_y);
+        bool in_bottom = ((page.data_height - row) <= margin_y);
+        for (u32 column = 0u; column < page.width; ++column) {
+            bool in_left = (column < margin_x);
+            bool in_right = ((page.width - column) <= margin_x);
+            if (!(in_top || in_bottom || in_left || in_right)) {
+                continue;
+            }
+            usize index = ((usize)row * (usize)page.width) + (usize)column;
+            if (mask_out.data[index]) {
+                continue;
+            }
+            mask_out.data[index] = 1u;
+            ++reserved_pixels;
+        }
+    }
+    for (u32 grid_row = 0u; grid_row < rows; ++grid_row) {
+        double t_y = (rows == 1u) ? 0.5 : ((double)grid_row / (double)(rows - 1u));
+        double center_y = min_y + (max_y - min_y) * t_y;
+        int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+        for (u32 grid_col = 0u; grid_col < columns; ++grid_col) {
+            double t_x = (columns == 1u) ? 0.5 : ((double)grid_col / (double)(columns - 1u));
+            double center_x = min_x + (max_x - min_x) * t_x;
+            int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
+            for (u32 dy = 0u; dy < marker_size; ++dy) {
+                int pixel_y = start_y + (int)dy;
+                if (pixel_y < 0 || pixel_y >= (int)page.height) {
+                    continue;
+                }
+                bool within_data = ((u32)pixel_y < page.data_height);
+                for (u32 dx = 0u; dx < marker_size; ++dx) {
+                    int pixel_x = start_x + (int)dx;
+                    if (pixel_x < 0 || pixel_x >= (int)page.width) {
+                        continue;
+                    }
+                    usize index = ((usize)pixel_y * (usize)page.width) + (usize)pixel_x;
+                    if (mask_out.data[index]) {
+                        continue;
+                    }
+                    mask_out.data[index] = 1u;
+                    if (within_data) {
+                        ++reserved_pixels;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static bool gather_overlay_bits(const OverlayPage& page,
+                                const makocode::ByteBuffer& mask,
+                                makocode::ByteBuffer& bits_out,
+                                u64& bit_count) {
+    bit_count = 0u;
+    bits_out.release();
+    if (!page.pixels.data || page.pixels.size == 0u) {
+        return false;
+    }
+    if (page.width == 0u || page.height == 0u) {
+        return false;
+    }
+    if (mask.size && mask.size != (usize)page.width * (usize)page.height) {
+        return false;
+    }
+    u8 sample_bits = bits_per_sample(page.color_mode);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(page.color_mode);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    makocode::BitWriter writer;
+    for (u32 row = 0u; row < page.data_height; ++row) {
+        for (u32 column = 0u; column < page.width; ++column) {
+            bool reserved = false;
+            if (mask.data && mask.size) {
+                usize index = ((usize)row * (usize)page.width) + (usize)column;
+                reserved = (mask.data[index] != 0u);
+            }
+            if (reserved) {
+                continue;
+            }
+            usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
+            if ((pixel_index + 2u) >= page.pixels.size) {
+                return false;
+            }
+            u32 samples[3] = {0u, 0u, 0u};
+            if (!map_rgb_to_samples(page.color_mode, page.pixels.data + pixel_index, samples)) {
+                return false;
+            }
+            for (u8 sample_idx = 0u; sample_idx < samples_per_pixel; ++sample_idx) {
+                if (!writer.write_bits(samples[sample_idx], sample_bits)) {
+                    return false;
+                }
+            }
+        }
+    }
+    if (!writer.align_to_byte()) {
+        return false;
+    }
+    if (page.color_mode == 3u) {
+        usize total_bytes = writer.byte_size();
+        if (total_bytes && writer.buffer.data) {
+            for (usize i = 0u; i < total_bytes; ++i) {
+                u8 rotate = (u8)((i % 3u) + 1u);
+                writer.buffer.data[i] = rotate_right_u8(writer.buffer.data[i], rotate);
+            }
+        }
+    }
+    bit_count = writer.bit_size();
+    byte_buffer_move(bits_out, writer.buffer);
+    return true;
+}
+
+static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
+                               u64 bit_count,
+                               const makocode::ByteBuffer& mask,
+                               OverlayPage& page) {
+    if (!page.pixels.data || page.pixels.size == 0u) {
+        return false;
+    }
+    if (page.width == 0u || page.height == 0u) {
+        return false;
+    }
+    if (mask.size && mask.size != (usize)page.width * (usize)page.height) {
+        return false;
+    }
+    u8 sample_bits = bits_per_sample(page.color_mode);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(page.color_mode);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    const u8* bit_data = bits.data;
+    usize bit_data_size = bits.size;
+    makocode::ByteBuffer rotated;
+    if (page.color_mode == 3u && bits.size) {
+        if (!rotated.ensure(bits.size)) {
+            return false;
+        }
+        rotated.size = bits.size;
+        for (usize i = 0u; i < bits.size; ++i) {
+            u8 rotate = (u8)((i % 3u) + 1u);
+            rotated.data[i] = rotate_left_u8(bits.data[i], rotate);
+        }
+        bit_data = rotated.data;
+        bit_data_size = rotated.size;
+    }
+    u64 cursor = 0u;
+    for (u32 row = 0u; row < page.data_height; ++row) {
+        for (u32 column = 0u; column < page.width; ++column) {
+            bool reserved = false;
+            if (mask.data && mask.size) {
+                usize index = ((usize)row * (usize)page.width) + (usize)column;
+                reserved = (mask.data[index] != 0u);
+            }
+            if (reserved) {
+                continue;
+            }
+            u32 samples[3] = {0u, 0u, 0u};
+            for (u8 sample_idx = 0u; sample_idx < samples_per_pixel; ++sample_idx) {
+                u32 value = 0u;
+                for (u8 bit = 0u; bit < sample_bits; ++bit) {
+                    u8 bit_value = 0u;
+                    if (cursor < bit_count && bit_data) {
+                        usize byte_index = (usize)(cursor >> 3u);
+                        if (byte_index < bit_data_size) {
+                            u8 mask_bit = (u8)(1u << (cursor & 7u));
+                            bit_value = (bit_data[byte_index] & mask_bit) ? 1u : 0u;
+                        }
+                    }
+                    value |= ((u32)bit_value) << bit;
+                    ++cursor;
+                }
+                samples[sample_idx] = value;
+            }
+            u8 rgb[3];
+            if (!map_samples_to_rgb(page.color_mode, samples, rgb)) {
+                return false;
+            }
+            usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
+            if ((pixel_index + 2u) >= page.pixels.size) {
+                return false;
+            }
+            page.pixels.data[pixel_index + 0u] = rgb[0];
+            page.pixels.data[pixel_index + 1u] = rgb[1];
+            page.pixels.data[pixel_index + 2u] = rgb[2];
+        }
+    }
+    return true;
+}
+
+static bool serialize_overlay_page(const OverlayPage& page,
+                                   makocode::ByteBuffer& output) {
+    output.release();
+    if (!ppm_write_metadata_header(page.metadata, output)) {
+        return false;
+    }
+    if (!ppm_write_dimensions((u64)page.width, (u64)page.height, output)) {
+        return false;
+    }
+    if (!page.pixels.data) {
+        return false;
+    }
+    usize total_pixels = (usize)page.width * (usize)page.height;
+    if (page.pixels.size < total_pixels * 3u) {
+        return false;
+    }
+    for (usize index = 0u; index < total_pixels; ++index) {
+        const u8* rgb = page.pixels.data + index * 3u;
+        for (u8 channel = 0u; channel < 3u; ++channel) {
+            if (channel) {
+                if (!output.append_char(' ')) {
+                    return false;
+                }
+            }
+            if (!buffer_append_number(output, (u64)rgb[channel])) {
+                return false;
+            }
+        }
+        if (!output.append_char('\n')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool write_buffer_to_fd(int fd, const makocode::ByteBuffer& buffer) {
+    if (!buffer.data || buffer.size == 0u) {
+        return true;
+    }
+    usize offset = 0u;
+    while (offset < buffer.size) {
+        unsigned long chunk = (unsigned long)(buffer.size - offset);
+        if (chunk > 65536ul) {
+            chunk = 65536ul;
+        }
+        int wrote = write(fd, buffer.data + offset, chunk);
+        if (wrote <= 0) {
+            return false;
+        }
+        offset += (usize)wrote;
+    }
+    return true;
+}
+
+static int command_overlay(int arg_count, char** args) {
+    if (arg_count != 3) {
+        console_line(2, "overlay: usage: makocode overlay BASE.ppm OVERLAY.ppm FRACTION");
+        return 1;
+    }
+    const char* base_path = args[0];
+    const char* overlay_path = args[1];
+    const char* fraction_text = args[2];
+    if (!base_path || !overlay_path || !fraction_text) {
+        console_line(2, "overlay: arguments may not be empty");
+        return 1;
+    }
+    usize fraction_length = ascii_length(fraction_text);
+    u64 numerator = 0u;
+    u64 denominator = 1u;
+    if (fraction_length == 0u ||
+        !ascii_to_fraction(fraction_text, fraction_length, numerator, denominator)) {
+        console_line(2, "overlay: fraction must be a decimal value such as 0.25");
+        return 1;
+    }
+    if (denominator == 0u) {
+        console_line(2, "overlay: invalid fraction");
+        return 1;
+    }
+    if (numerator >= denominator) {
+        numerator = denominator;
+    }
+    OverlayPage base_page;
+    OverlayPage overlay_page;
+    if (!load_overlay_page(base_path, base_page)) {
+        return 1;
+    }
+    if (!load_overlay_page(overlay_path, overlay_page)) {
+        return 1;
+    }
+    if (base_page.width != overlay_page.width ||
+        base_page.height != overlay_page.height) {
+        console_line(2, "overlay: ppm images must have identical dimensions");
+        return 1;
+    }
+    if (base_page.color_mode != overlay_page.color_mode) {
+        console_line(2, "overlay: ppm images use different color channel metadata");
+        return 1;
+    }
+    makocode::ByteBuffer base_mask;
+    makocode::ByteBuffer overlay_mask;
+    u64 base_reserved = 0u;
+    u64 overlay_reserved = 0u;
+    if (!build_overlay_mask(base_page, base_mask, base_reserved)) {
+        console_line(2, "overlay: failed to prepare fiducial mask for base image");
+        return 1;
+    }
+    if (!build_overlay_mask(overlay_page, overlay_mask, overlay_reserved)) {
+        console_line(2, "overlay: failed to prepare fiducial mask for overlay image");
+        return 1;
+    }
+    if (base_mask.size != overlay_mask.size) {
+        console_line(2, "overlay: fiducial mask size mismatch");
+        return 1;
+    }
+    bool masks_match = true;
+    for (usize i = 0u; i < base_mask.size; ++i) {
+        if (base_mask.data[i] != overlay_mask.data[i]) {
+            masks_match = false;
+            break;
+        }
+    }
+    if (!masks_match) {
+        console_line(2, "overlay: fiducial reservation differs between images");
+        return 1;
+    }
+    makocode::ByteBuffer base_bits;
+    makocode::ByteBuffer overlay_bits;
+    u64 base_bit_count = 0u;
+    u64 overlay_bit_count = 0u;
+    if (!gather_overlay_bits(base_page, base_mask, base_bits, base_bit_count)) {
+        console_line(2, "overlay: failed to extract data bytes from base image");
+        return 1;
+    }
+    if (!gather_overlay_bits(overlay_page, overlay_mask, overlay_bits, overlay_bit_count)) {
+        console_line(2, "overlay: failed to extract data bytes from overlay image");
+        return 1;
+    }
+    if (numerator == 0u) {
+        if (!write_buffer_to_fd(1, base_page.original)) {
+            console_line(2, "overlay: failed to write original base image");
+            return 1;
+        }
+        return 0;
+    }
+    if (base_bit_count == 0u || base_bits.size == 0u) {
+        console_line(2, "overlay: base image does not contain data bytes to modify");
+        return 1;
+    }
+    if (overlay_bits.size == 0u) {
+        console_line(2, "overlay: overlay image does not provide data bytes");
+        return 1;
+    }
+    u64 base_bytes = (base_bit_count + 7u) >> 3u;
+    u64 overlay_bytes = (overlay_bit_count + 7u) >> 3u;
+    u64 copy_bytes = (base_bytes < overlay_bytes) ? base_bytes : overlay_bytes;
+    if (copy_bytes == 0u) {
+        console_line(2, "overlay: no whole bytes available for overlay");
+        return 1;
+    }
+    u8* base_ptr = base_bits.data;
+    const u8* overlay_ptr = overlay_bits.data;
+    if (!base_ptr || !overlay_ptr) {
+        console_line(2, "overlay: internal byte buffer unavailable");
+        return 1;
+    }
+    u64 accumulator = 0u;
+    for (u64 i = 0u; i < copy_bytes; ++i) {
+        accumulator += numerator;
+        if (accumulator >= denominator) {
+            base_ptr[i] = overlay_ptr[i];
+            accumulator -= denominator;
+        }
+    }
+    if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page)) {
+        console_line(2, "overlay: failed to map merged bytes back to base image");
+        return 1;
+    }
+    makocode::ByteBuffer output;
+    if (!serialize_overlay_page(base_page, output)) {
+        console_line(2, "overlay: failed to serialize merged ppm");
+        return 1;
+    }
+    if (!write_buffer_to_fd(1, output)) {
+        console_line(2, "overlay: failed to emit merged ppm");
+        return 1;
     }
     return 0;
 }
@@ -17234,6 +17924,9 @@ int main(int argc, char** argv) {
     }
     if (ascii_compare(argv[1], "decode") == 0) {
         return command_decode(argc - 2, argv + 2);
+    }
+    if (ascii_compare(argv[1], "overlay") == 0) {
+        return command_overlay(argc - 2, argv + 2);
     }
     if (ascii_compare(argv[1], "test-scan-basic") == 0) {
         return command_test_scan_basic(argc - 2, argv + 2);
