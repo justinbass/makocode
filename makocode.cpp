@@ -12133,6 +12133,75 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
     return true;
 }
 
+static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
+                                     const makocode::ByteBuffer& base_mask,
+                                     const makocode::ByteBuffer& overlay_mask,
+                                     u64 numerator,
+                                     u64 denominator,
+                                     OverlayPage& base_page) {
+    if (!base_page.pixels.data || !overlay_page.pixels.data) {
+        return false;
+    }
+    if (base_page.width != overlay_page.width ||
+        base_page.height != overlay_page.height) {
+        return false;
+    }
+    if (denominator == 0u) {
+        return false;
+    }
+    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
+    if (base_page.pixels.size < total_pixels * 3u ||
+        overlay_page.pixels.size < total_pixels * 3u) {
+        return false;
+    }
+    if ((base_mask.size && base_mask.size != total_pixels) ||
+        (overlay_mask.size && overlay_mask.size != total_pixels)) {
+        return false;
+    }
+    u32 apply_height = base_page.data_height;
+    if (overlay_page.data_height < apply_height) {
+        apply_height = overlay_page.data_height;
+    }
+    if (apply_height > base_page.height) {
+        apply_height = base_page.height;
+    }
+    if (apply_height == 0u) {
+        return true;
+    }
+    const bool have_base_mask = (base_mask.data && base_mask.size);
+    const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
+    u64 accumulator = 0u;
+    for (u32 row = 0u; row < apply_height; ++row) {
+        for (u32 column = 0u; column < base_page.width; ++column) {
+            usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
+            bool reserved = false;
+            if (have_base_mask && base_mask.data[pixel_index]) {
+                reserved = true;
+            }
+            if (!reserved && have_overlay_mask && overlay_mask.data[pixel_index]) {
+                reserved = true;
+            }
+            if (reserved) {
+                continue;
+            }
+            for (u8 channel = 0u; channel < 3u; ++channel) {
+                accumulator += numerator;
+                if (accumulator < denominator) {
+                    continue;
+                }
+                accumulator -= denominator;
+                usize byte_index = pixel_index * 3u + (usize)channel;
+                if (byte_index >= base_page.pixels.size ||
+                    byte_index >= overlay_page.pixels.size) {
+                    return false;
+                }
+                base_page.pixels.data[byte_index] = overlay_page.pixels.data[byte_index];
+            }
+        }
+    }
+    return true;
+}
+
 static bool serialize_overlay_page(const OverlayPage& page,
                                    makocode::ByteBuffer& output) {
     output.release();
@@ -12243,18 +12312,6 @@ static int command_overlay(int arg_count, char** args) {
         console_line(2, "overlay: fiducial mask size mismatch");
         return 1;
     }
-    makocode::ByteBuffer base_bits;
-    makocode::ByteBuffer overlay_bits;
-    u64 base_bit_count = 0u;
-    u64 overlay_bit_count = 0u;
-    if (!gather_overlay_bits(base_page, base_mask, base_bits, base_bit_count)) {
-        console_line(2, "overlay: failed to extract data bytes from base image");
-        return 1;
-    }
-    if (!gather_overlay_bits(overlay_page, overlay_mask, overlay_bits, overlay_bit_count)) {
-        console_line(2, "overlay: failed to extract data bytes from overlay image");
-        return 1;
-    }
     if (numerator == 0u) {
         if (!write_buffer_to_fd(1, base_page.original)) {
             console_line(2, "overlay: failed to write original base image");
@@ -12262,38 +12319,57 @@ static int command_overlay(int arg_count, char** args) {
         }
         return 0;
     }
-    if (base_bit_count == 0u || base_bits.size == 0u) {
-        console_line(2, "overlay: base image does not contain data bytes to modify");
-        return 1;
-    }
-    if (overlay_bits.size == 0u) {
-        console_line(2, "overlay: overlay image does not provide data bytes");
-        return 1;
-    }
-    u64 base_bytes = (base_bit_count + 7u) >> 3u;
-    u64 overlay_bytes = (overlay_bit_count + 7u) >> 3u;
-    u64 copy_bytes = (base_bytes < overlay_bytes) ? base_bytes : overlay_bytes;
-    if (copy_bytes == 0u) {
-        console_line(2, "overlay: no whole bytes available for overlay");
-        return 1;
-    }
-    u8* base_ptr = base_bits.data;
-    const u8* overlay_ptr = overlay_bits.data;
-    if (!base_ptr || !overlay_ptr) {
-        console_line(2, "overlay: internal byte buffer unavailable");
-        return 1;
-    }
-    u64 accumulator = 0u;
-    for (u64 i = 0u; i < copy_bytes; ++i) {
-        accumulator += numerator;
-        if (accumulator >= denominator) {
-            base_ptr[i] = overlay_ptr[i];
-            accumulator -= denominator;
+    if (base_page.color_mode != overlay_page.color_mode) {
+        if (!apply_overlay_pixels_raw(overlay_page, base_mask, overlay_mask, numerator, denominator, base_page)) {
+            console_line(2, "overlay: failed to copy raw pixel data between color modes");
+            return 1;
         }
-    }
-    if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page)) {
-        console_line(2, "overlay: failed to map merged bytes back to base image");
-        return 1;
+    } else {
+        makocode::ByteBuffer base_bits;
+        makocode::ByteBuffer overlay_bits;
+        u64 base_bit_count = 0u;
+        u64 overlay_bit_count = 0u;
+        if (!gather_overlay_bits(base_page, base_mask, base_bits, base_bit_count)) {
+            console_line(2, "overlay: failed to extract data bytes from base image");
+            return 1;
+        }
+        if (!gather_overlay_bits(overlay_page, overlay_mask, overlay_bits, overlay_bit_count)) {
+            console_line(2, "overlay: failed to extract data bytes from overlay image");
+            return 1;
+        }
+        if (base_bit_count == 0u || base_bits.size == 0u) {
+            console_line(2, "overlay: base image does not contain data bytes to modify");
+            return 1;
+        }
+        if (overlay_bits.size == 0u) {
+            console_line(2, "overlay: overlay image does not provide data bytes");
+            return 1;
+        }
+        u64 base_bytes = (base_bit_count + 7u) >> 3u;
+        u64 overlay_bytes = (overlay_bit_count + 7u) >> 3u;
+        u64 copy_bytes = (base_bytes < overlay_bytes) ? base_bytes : overlay_bytes;
+        if (copy_bytes == 0u) {
+            console_line(2, "overlay: no whole bytes available for overlay");
+            return 1;
+        }
+        u8* base_ptr = base_bits.data;
+        const u8* overlay_ptr = overlay_bits.data;
+        if (!base_ptr || !overlay_ptr) {
+            console_line(2, "overlay: internal byte buffer unavailable");
+            return 1;
+        }
+        u64 accumulator = 0u;
+        for (u64 i = 0u; i < copy_bytes; ++i) {
+            accumulator += numerator;
+            if (accumulator >= denominator) {
+                base_ptr[i] = overlay_ptr[i];
+                accumulator -= denominator;
+            }
+        }
+        if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page)) {
+            console_line(2, "overlay: failed to map merged bytes back to base image");
+            return 1;
+        }
     }
     makocode::ByteBuffer output;
     if (!serialize_overlay_page(base_page, output)) {
