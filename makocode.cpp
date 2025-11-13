@@ -31,6 +31,9 @@
         * Synthetic scan/distortion pipelines that simulate rotation, ripple,
           skew, and debris to validate robustness of the decoder.
 
+    Data shuffling:
+        * Deterministic Fisher-Yates permutation operates per byte to evenly scatter LZW/ECC output across pages.
+        * Protects long-term archives because edge pages in a stored stack take the most wear; dispersal keeps full-page loss recoverable.
     Test artifact naming:
         * 1*** files stem from focused unit/function scenarios that isolate codec
           behaviors.
