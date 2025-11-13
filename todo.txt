@@ -1,6 +1,5 @@
 TODO:
 - Remove all headers from encoding, one by one and fix decoding for each one.
- - # MAKOCODE_ECC
  - # MAKOCODE_COLOR_CHANNELS
  - # MAKOCODE_PAGE_COUNT
  - # MAKOCODE_PAGE_INDEX
