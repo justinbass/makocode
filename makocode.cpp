@@ -9066,6 +9066,166 @@ static bool compute_bits_per_page(u32 width_pixels,
     return true;
 }
 
+struct PageCapacityResult {
+    u32 width_pixels;
+    u32 height_pixels;
+    u32 data_height_pixels;
+    u64 bits_per_page;
+    FooterLayout footer_layout;
+
+    PageCapacityResult()
+        : width_pixels(0u),
+          height_pixels(0u),
+          data_height_pixels(0u),
+          bits_per_page(0u),
+          footer_layout() {}
+};
+
+static bool ensure_frame_bits_fit_single_page(ImageMappingConfig& mapping,
+                                              const PageFooterConfig& footer_config,
+                                              u8 sample_bits,
+                                              u8 samples_per_pixel,
+                                              u64 frame_bit_count,
+                                              PageCapacityResult& out_capacity) {
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    if (frame_bit_count == 0u) {
+        frame_bit_count = 1u;
+    }
+    u64 bits_per_symbol = (u64)sample_bits * (u64)samples_per_pixel;
+    if (bits_per_symbol == 0u) {
+        return false;
+    }
+    u64 min_data_pixels = (frame_bit_count + bits_per_symbol - 1u) / bits_per_symbol;
+    if (min_data_pixels == 0u) {
+        min_data_pixels = 1u;
+    }
+    double width_root = sqrt((double)min_data_pixels);
+    if (width_root < 1.0) {
+        width_root = 1.0;
+    }
+    u64 width_start = (u64)ceil(width_root);
+    if (width_start == 0u) {
+        width_start = 1u;
+    }
+    u64 width_limit = width_start + 256u;
+    if (width_limit > 0xFFFFFFFFu) {
+        width_limit = 0xFFFFFFFFu;
+    }
+    bool prefer_even_width = (sample_bits > 1u);
+    bool found = false;
+    PageCapacityResult best_capacity;
+    u64 best_area = 0u;
+
+    for (u64 width_option = width_start; width_option <= width_limit; ++width_option) {
+        if (width_option == 0u || width_option > 0xFFFFFFFFu) {
+            break;
+        }
+        if (prefer_even_width && (width_option & 1u)) {
+            continue;
+        }
+        ImageMappingConfig candidate_mapping = mapping;
+        candidate_mapping.page_width_pixels = (u32)width_option;
+        candidate_mapping.page_width_set = true;
+
+        u64 height_option = (min_data_pixels + width_option - 1u) / width_option;
+        if (height_option == 0u) {
+            height_option = 1u;
+        }
+
+        bool width_found = false;
+        for (u32 iter = 0u; iter < 200000u; ++iter) {
+            if (height_option == 0u || height_option > 0xFFFFFFFFu) {
+                break;
+            }
+            candidate_mapping.page_height_pixels = (u32)height_option;
+            candidate_mapping.page_height_set = true;
+
+            PageCapacityResult capacity;
+            if (!compute_page_dimensions(candidate_mapping, capacity.width_pixels, capacity.height_pixels)) {
+                return false;
+            }
+            if (!compute_footer_layout(capacity.width_pixels,
+                                       capacity.height_pixels,
+                                       footer_config,
+                                       capacity.footer_layout)) {
+                break;
+            }
+            u32 data_height_pixels = capacity.footer_layout.has_text
+                                         ? capacity.footer_layout.data_height_pixels
+                                         : capacity.height_pixels;
+            if (data_height_pixels == 0u || data_height_pixels > capacity.height_pixels) {
+                break;
+            }
+            if (!compute_bits_per_page(capacity.width_pixels,
+                                       capacity.height_pixels,
+                                       data_height_pixels,
+                                       sample_bits,
+                                       samples_per_pixel,
+                                       capacity.bits_per_page,
+                                       0)) {
+                break;
+            }
+            if (capacity.bits_per_page >= frame_bit_count) {
+                capacity.data_height_pixels = data_height_pixels;
+                u64 area = (u64)capacity.width_pixels * (u64)capacity.height_pixels;
+                bool accept = false;
+                if (!found || area < best_area) {
+                    accept = true;
+                } else if (area == best_area) {
+                    if (prefer_even_width) {
+                        bool current_even = ((capacity.width_pixels & 1u) == 0u);
+                        bool best_even = ((best_capacity.width_pixels & 1u) == 0u);
+                        if (current_even && !best_even) {
+                            accept = true;
+                        } else if (current_even == best_even) {
+                            if (capacity.width_pixels < best_capacity.width_pixels) {
+                                accept = true;
+                            } else if (capacity.width_pixels == best_capacity.width_pixels &&
+                                       capacity.height_pixels < best_capacity.height_pixels) {
+                                accept = true;
+                            }
+                        }
+                    } else {
+                        if (capacity.width_pixels < best_capacity.width_pixels) {
+                            accept = true;
+                        } else if (capacity.width_pixels == best_capacity.width_pixels &&
+                                   capacity.height_pixels < best_capacity.height_pixels) {
+                            accept = true;
+                        }
+                    }
+                }
+                if (accept) {
+                    best_capacity = capacity;
+                    best_area = area;
+                    found = true;
+                }
+                width_found = true;
+                break;
+            }
+            ++height_option;
+        }
+        if (!width_found) {
+            continue;
+        }
+        if (found && width_option > width_start + 64u) {
+            break;
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+
+    mapping.page_width_pixels = best_capacity.width_pixels;
+    mapping.page_height_pixels = best_capacity.height_pixels;
+    mapping.page_width_set = true;
+    mapping.page_height_set = true;
+    out_capacity = best_capacity;
+    return true;
+}
+
 static bool ppm_apply_wavy_ripple(const makocode::ByteBuffer& input,
                                   double amplitude_pixels,
                                   double cycles_y,
@@ -14498,59 +14658,14 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
         return 1;
     }
 
-    u64 required_bits = (frame_bit_count > 0u) ? frame_bit_count : 1u;
-    double width_root = sqrt((double)required_bits);
-    if (width_root < 1.0) {
-        width_root = 1.0;
-    }
-    u64 width_candidate = (u64)ceil(width_root);
-    if (width_candidate == 0u || width_candidate > 0xFFFFFFFFu) {
-        console_line(2, "test-100kb: computed width out of range");
-        return 1;
-    }
-    u64 height_candidate = (required_bits + width_candidate - 1u) / width_candidate;
-    if (height_candidate == 0u || height_candidate > 0xFFFFFFFFu) {
-        console_line(2, "test-100kb: computed height out of range");
-        return 1;
-    }
-
-    mapping.page_width_pixels = (u32)width_candidate;
-    mapping.page_width_set = true;
-    mapping.page_height_pixels = (u32)height_candidate;
-    mapping.page_height_set = true;
-
-    u32 width_pixels = 0u;
-    u32 height_pixels = 0u;
-    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
-        console_line(2, "test-100kb: invalid page dimensions");
-        return 1;
-    }
-
-    FooterLayout footer_layout;
-    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-        console_line(2, "test-100kb: footer layout computation failed");
-        return 1;
-    }
-
-    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-        console_line(2, "test-100kb: invalid data height");
-        return 1;
-    }
-
-    u64 bits_per_page = 0u;
-    if (!compute_bits_per_page(width_pixels,
-                               height_pixels,
-                               data_height_pixels,
-                               sample_bits,
-                               samples_per_pixel,
-                               bits_per_page,
-                               0)) {
-        console_line(2, "test-100kb: fiducial layout leaves no data capacity");
-        return 1;
-    }
-    if (bits_per_page == 0u) {
-        console_line(2, "test-100kb: page capacity is zero");
+    PageCapacityResult capacity;
+    if (!ensure_frame_bits_fit_single_page(mapping,
+                                           footer_config,
+                                           sample_bits,
+                                           samples_per_pixel,
+                                           frame_bit_count,
+                                           capacity)) {
+        console_line(2, "test-100kb: failed to size page for payload");
         return 1;
     }
 
@@ -14559,9 +14674,9 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
     char height_digits[32];
     char capacity_digits[32];
     u64_to_ascii(frame_bit_count, frame_bits_digits, sizeof(frame_bits_digits));
-    u64_to_ascii((u64)width_pixels, width_digits, sizeof(width_digits));
-    u64_to_ascii((u64)height_pixels, height_digits, sizeof(height_digits));
-    u64_to_ascii(bits_per_page, capacity_digits, sizeof(capacity_digits));
+    u64_to_ascii((u64)capacity.width_pixels, width_digits, sizeof(width_digits));
+    u64_to_ascii((u64)capacity.height_pixels, height_digits, sizeof(height_digits));
+    u64_to_ascii(capacity.bits_per_page, capacity_digits, sizeof(capacity_digits));
     console_write(1, "test-100kb: frame_bits=");
     console_write(1, frame_bits_digits);
     console_write(1, " width=");
@@ -14572,27 +14687,22 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
     console_write(1, capacity_digits);
     console_line(1, "");
 
-    if (frame_bit_count > bits_per_page) {
-        console_line(2, "test-100kb: payload exceeds single-page capacity");
-        return 1;
-    }
-
     const makocode::EccSummary& ecc_summary = encoder.ecc_info();
     makocode::ByteBuffer ppm_buffer;
     if (!encode_page_to_ppm(mapping,
                             frame_bits,
                             frame_bit_count,
                             0u,
-                            width_pixels,
-                            height_pixels,
+                            capacity.width_pixels,
+                            capacity.height_pixels,
                             1u,
                             1u,
-                            bits_per_page,
+                            capacity.bits_per_page,
                             payload_bit_count,
                             &ecc_summary,
                             footer_config.title_text,
                             footer_config.title_length,
-                            footer_layout,
+                            capacity.footer_layout,
                             ppm_buffer)) {
         console_line(2, "test-100kb: failed to encode ppm page");
         return 1;
@@ -14769,63 +14879,14 @@ static int run_test_payload_100k_wavy(u8 color_channels,
         return 1;
     }
 
-    u64 required_bits = (frame_bit_count > 0u) ? frame_bit_count : 1u;
-    double width_root = sqrt((double)required_bits);
-    if (width_root < 1.0) {
-        width_root = 1.0;
-    }
-    u64 width_candidate = (u64)ceil(width_root);
-    if (width_candidate == 0u || width_candidate > 0xFFFFFFFFu) {
-        log_line(2, "computed width out of range");
-        return 1;
-    }
-    u64 height_candidate = (required_bits + width_candidate - 1u) / width_candidate;
-    if (height_candidate == 0u || height_candidate > 0xFFFFFFFFu) {
-        log_line(2, "computed height out of range");
-        return 1;
-    }
-
-    mapping.page_width_pixels = (u32)width_candidate;
-    mapping.page_width_set = true;
-    mapping.page_height_pixels = (u32)height_candidate;
-    mapping.page_height_set = true;
-
-    u32 width_pixels = 0u;
-    u32 height_pixels = 0u;
-    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
-        log_line(2, "invalid page dimensions");
-        return 1;
-    }
-
-    FooterLayout footer_layout;
-    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-        log_line(2, "footer layout computation failed");
-        return 1;
-    }
-
-    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-        log_line(2, "invalid data height");
-        return 1;
-    }
-
-    u64 bits_per_page = 0u;
-    if (!compute_bits_per_page(width_pixels,
-                               height_pixels,
-                               data_height_pixels,
-                               sample_bits,
-                               samples_per_pixel,
-                               bits_per_page,
-                               0)) {
-        log_line(2, "fiducial layout leaves no data capacity");
-        return 1;
-    }
-    if (bits_per_page == 0u) {
-        log_line(2, "page capacity is zero");
-        return 1;
-    }
-    if (frame_bit_count > bits_per_page) {
-        log_line(2, "payload exceeds single-page capacity");
+    PageCapacityResult capacity;
+    if (!ensure_frame_bits_fit_single_page(mapping,
+                                           footer_config,
+                                           sample_bits,
+                                           samples_per_pixel,
+                                           frame_bit_count,
+                                           capacity)) {
+        log_line(2, "failed to size page for payload");
         return 1;
     }
 
@@ -14835,16 +14896,16 @@ static int run_test_payload_100k_wavy(u8 color_channels,
                              frame_bits,
                              frame_bit_count,
                              0u,
-                             width_pixels,
-                             height_pixels,
+                             capacity.width_pixels,
+                             capacity.height_pixels,
                              0u,
                              1u,
-                             bits_per_page,
+                             capacity.bits_per_page,
                              payload_bit_count,
                              &ecc_summary,
                              (const char*)0,
                              0u,
-                             footer_layout,
+                             capacity.footer_layout,
                              ppm_buffer)) {
         log_line(2, "failed to encode baseline PPM");
         return 1;
@@ -15169,59 +15230,14 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
 
-    u64 required_bits = (frame_bit_count > 0u) ? frame_bit_count : 1u;
-    double width_root = sqrt((double)required_bits);
-    if (width_root < 1.0) {
-        width_root = 1.0;
-    }
-    u64 width_candidate = (u64)ceil(width_root);
-    if (width_candidate == 0u || width_candidate > 0xFFFFFFFFu) {
-        log_line(2, "computed width out of range");
-        return 1;
-    }
-    u64 height_candidate = (required_bits + width_candidate - 1u) / width_candidate;
-    if (height_candidate == 0u || height_candidate > 0xFFFFFFFFu) {
-        log_line(2, "computed height out of range");
-        return 1;
-    }
-
-    mapping.page_width_pixels = (u32)width_candidate;
-    mapping.page_width_set = true;
-    mapping.page_height_pixels = (u32)height_candidate;
-    mapping.page_height_set = true;
-
-    u32 width_pixels = 0u;
-    u32 height_pixels = 0u;
-    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
-        log_line(2, "invalid page dimensions");
-        return 1;
-    }
-
-    FooterLayout footer_layout;
-    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-        log_line(2, "footer layout computation failed");
-        return 1;
-    }
-
-    u32 data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-        log_line(2, "invalid data height");
-        return 1;
-    }
-
-    u64 bits_per_page = 0u;
-    if (!compute_bits_per_page(width_pixels,
-                               height_pixels,
-                               data_height_pixels,
-                               sample_bits,
-                               samples_per_pixel,
-                               bits_per_page,
-                               0)) {
-        log_line(2, "fiducial layout leaves no data capacity");
-        return 1;
-    }
-    if (bits_per_page == 0u) {
-        log_line(2, "page capacity is zero");
+    PageCapacityResult capacity;
+    if (!ensure_frame_bits_fit_single_page(mapping,
+                                           footer_config,
+                                           sample_bits,
+                                           samples_per_pixel,
+                                           frame_bit_count,
+                                           capacity)) {
+        log_line(2, "failed to size page for payload");
         return 1;
     }
 
@@ -15230,9 +15246,9 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     char height_digits[32];
     char capacity_digits[32];
     u64_to_ascii(frame_bit_count, frame_bits_digits, sizeof(frame_bits_digits));
-    u64_to_ascii((u64)width_pixels, width_digits, sizeof(width_digits));
-    u64_to_ascii((u64)height_pixels, height_digits, sizeof(height_digits));
-    u64_to_ascii(bits_per_page, capacity_digits, sizeof(capacity_digits));
+    u64_to_ascii((u64)capacity.width_pixels, width_digits, sizeof(width_digits));
+    u64_to_ascii((u64)capacity.height_pixels, height_digits, sizeof(height_digits));
+    u64_to_ascii(capacity.bits_per_page, capacity_digits, sizeof(capacity_digits));
     log_prefix(1);
     console_write(1, "frame_bits=");
     console_write(1, frame_bits_digits);
@@ -15244,27 +15260,22 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     console_write(1, capacity_digits);
     console_line(1, "");
 
-    if (frame_bit_count > bits_per_page) {
-        log_line(2, "payload exceeds single-page capacity");
-        return 1;
-    }
-
     const makocode::EccSummary& ecc_summary = encoder.ecc_info();
     makocode::ByteBuffer ppm_buffer;
     if (!encode_page_to_ppm(mapping,
                              frame_bits,
                              frame_bit_count,
                              0u,
-                             width_pixels,
-                             height_pixels,
+                             capacity.width_pixels,
+                             capacity.height_pixels,
                              0u,
                              1u,
-                             bits_per_page,
+                             capacity.bits_per_page,
                              payload_bit_count,
                              &ecc_summary,
                              (const char*)0,
                              0u,
-                             footer_layout,
+                             capacity.footer_layout,
                              ppm_buffer)) {
         log_line(2, "failed to encode baseline PPM");
         return 1;
@@ -15980,6 +15991,55 @@ static int command_test_payload(int arg_count, char** args) {
         if (bits_per_page == 0u) {
             console_line(2, "test: page capacity is zero");
             return 1;
+        }
+        if (scenario.use_ecc) {
+            u64 min_frame_bits = 0u;
+            u64 sizing_seed = ((u64)run_mapping.color_channels << 32u) | 1u;
+            if (!compute_frame_bit_count(run_mapping,
+                                         1u,
+                                         sizing_seed,
+                                         scenario.ecc_redundancy,
+                                         scenario_password,
+                                         scenario_password_length,
+                                         min_frame_bits)) {
+                console_line(2, "test: failed to estimate ECC payload size");
+                return 1;
+            }
+            if (min_frame_bits > bits_per_page) {
+                for (int attempt = 0; attempt < 6 && bits_per_page < min_frame_bits; ++attempt) {
+                    double scale = sqrt((double)min_frame_bits / (double)bits_per_page);
+                    if (scale < 1.05) {
+                        scale = 1.05;
+                    }
+                    u64 new_width = (u64)ceil(scale * (double)run_mapping.page_width_pixels);
+                    u64 new_height = (u64)ceil(scale * (double)run_mapping.page_height_pixels);
+                    if (new_width == 0u || new_height == 0u || new_width > 0xFFFFFFFFu || new_height > 0xFFFFFFFFu) {
+                        break;
+                    }
+                    run_mapping.page_width_pixels = (u32)new_width;
+                    run_mapping.page_height_pixels = (u32)new_height;
+                    if (!compute_page_dimensions(run_mapping, width_pixels, height_pixels)) {
+                        break;
+                    }
+                    if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+                        break;
+                    }
+                    data_height_pixels = footer_layout.data_height_pixels ? footer_layout.data_height_pixels : height_pixels;
+                    if (!compute_bits_per_page(width_pixels,
+                                               height_pixels,
+                                               data_height_pixels,
+                                               sample_bits,
+                                               samples_per_pixel,
+                                               bits_per_page,
+                                               0)) {
+                        break;
+                    }
+                }
+                if (bits_per_page < min_frame_bits) {
+                    console_line(2, "test: failed to enlarge page for ECC payload");
+                    return 1;
+                }
+            }
         }
         bool require_two_pages = (!two_page_test_done &&
                                   !scenario.use_password &&
