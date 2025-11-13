@@ -4286,6 +4286,64 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
     return true;
 }
 
+static u8 detect_color_mode_from_pixels(const u8* pixel_data,
+                                        u64 width,
+                                        u64 height) {
+    if (!pixel_data || width == 0u || height == 0u) {
+        return 1u;
+    }
+    u64 total_pixels = width * height;
+    u64 sample_step = 1u;
+    if (total_pixels > 65536ull) {
+        sample_step = total_pixels / 65536ull;
+        if (sample_step == 0u) {
+            sample_step = 1u;
+        }
+    }
+    bool best_initialized = false;
+    double best_score = 0.0;
+    u8 best_mode = 1u;
+    for (u8 mode = 1u; mode <= 3u; ++mode) {
+        const PaletteColor* palette = 0;
+        u32 palette_size = 0u;
+        if (!palette_for_mode(mode, palette, palette_size) || palette_size == 0u) {
+            continue;
+        }
+        double total_score = 0.0;
+        u64 samples = 0u;
+        for (u64 index = 0u; index < total_pixels; index += sample_step) {
+            usize pixel_index = (usize)index * 3u;
+            const u8* rgb = pixel_data + pixel_index;
+            u64 best_dist = 0u;
+            for (u32 palette_index = 0u; palette_index < palette_size; ++palette_index) {
+                const PaletteColor& candidate = palette[palette_index];
+                i64 dr = (i64)candidate.r - (i64)rgb[0];
+                i64 dg = (i64)candidate.g - (i64)rgb[1];
+                i64 db = (i64)candidate.b - (i64)rgb[2];
+                u64 dist = (u64)(dr * dr + dg * dg + db * db);
+                if (palette_index == 0u || dist < best_dist) {
+                    best_dist = dist;
+                }
+            }
+            total_score += (double)best_dist;
+            ++samples;
+        }
+        if (samples == 0u) {
+            continue;
+        }
+        double average_score = total_score / (double)samples;
+        const double tolerance = 0.5;
+        if (!best_initialized ||
+            average_score + tolerance < best_score ||
+            (average_score <= best_score + tolerance && mode < best_mode)) {
+            best_initialized = true;
+            best_score = average_score;
+            best_mode = mode;
+        }
+    }
+    return best_mode;
+}
+
 static u8 rotate_left_u8(u8 value, u8 amount) {
     amount &= 7u;
     if (!amount) {
@@ -6420,6 +6478,22 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (!pixel_data) {
         return false;
     }
+    bool override_color_valid = overrides.color_set &&
+                                overrides.color_channels >= 1u &&
+                                overrides.color_channels <= 3u;
+    bool metadata_color_valid = state.has_color_channels &&
+                                state.color_channels_value >= 1u &&
+                                state.color_channels_value <= 3u;
+    u8 inferred_color_mode = 1u;
+    if (!override_color_valid && !metadata_color_valid) {
+        inferred_color_mode = detect_color_mode_from_pixels(pixel_data, width, height);
+        if (inferred_color_mode < 1u || inferred_color_mode > 3u) {
+            inferred_color_mode = 1u;
+        }
+        state.has_color_channels = true;
+        state.color_channels_value = inferred_color_mode;
+        metadata_color_valid = true;
+    }
     bool has_rotation = state.has_rotation_degrees &&
                         state.rotation_degrees_value != 0.0 &&
                         state.has_rotation_width &&
@@ -6478,13 +6552,13 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             has_skew = false;
         }
     }
-    u8 detection_color_mode = overrides.color_channels;
-    if (overrides.color_set) {
+    u8 detection_color_mode = 1u;
+    if (override_color_valid) {
         detection_color_mode = overrides.color_channels;
-    } else if (state.has_color_channels &&
-               state.color_channels_value >= 1u &&
-               state.color_channels_value <= 3u) {
+    } else if (metadata_color_valid) {
         detection_color_mode = (u8)state.color_channels_value;
+    } else {
+        detection_color_mode = inferred_color_mode;
     }
     if (detection_color_mode == 0u || detection_color_mode > 3u) {
         detection_color_mode = 1u;
@@ -6652,14 +6726,13 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                       &fiducial_mask)) {
         return false;
     }
-    u8 color_mode = overrides.color_channels;
-    if (overrides.color_set) {
+    u8 color_mode = 1u;
+    if (override_color_valid) {
         color_mode = overrides.color_channels;
-    } else if (state.has_color_channels) {
-        if (state.color_channels_value == 0u || state.color_channels_value > 3u) {
-            return false;
-        }
+    } else if (metadata_color_valid) {
         color_mode = (u8)state.color_channels_value;
+    } else {
+        color_mode = inferred_color_mode;
     }
     if (color_mode == 0u || color_mode > 3u) {
         return false;
@@ -6691,13 +6764,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (reserved_bits > capacity_without_reserve) {
         reserved_bits = capacity_without_reserve;
     }
-    u64 capacity_with_reserve = capacity_without_reserve - reserved_bits;
-    bool skip_reserved_pixels = false;
-    if (reserved_data_pixels > 0u && state.has_page_bits) {
-        if (capacity_with_reserve > 0u && state.page_bits_value <= capacity_with_reserve) {
-            skip_reserved_pixels = true;
-        }
-    }
+    bool skip_reserved_pixels = (reserved_data_pixels > 0u);
     makocode::BitWriter writer;
     u64 raw_width = width;
     u64 pixel_stride = raw_width;
@@ -8464,9 +8531,13 @@ static bool ppm_scale_fractional(const makocode::ByteBuffer& input,
 }
 
 static bool ppm_write_metadata_header(const PpmParserState& state,
-                                      makocode::ByteBuffer& output) {
+                                      makocode::ByteBuffer& output,
+                                      bool emit_metadata_comments = true) {
     if (!output.append_ascii("P3\n")) {
         return false;
+    }
+    if (!emit_metadata_comments) {
+        return true;
     }
     if (state.has_bytes) {
         if (!append_comment_number(output, "MAKOCODE_BYTES", state.bytes_value)) {
@@ -8570,7 +8641,8 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      u32 grid_columns,
                                      u32 grid_rows,
                                      u32 margin_pixels,
-                                     makocode::ByteBuffer& output) {
+                                     makocode::ByteBuffer& output,
+                                     bool emit_metadata_comments = true) {
     if (!input.data || input.size == 0u) {
         return false;
     }
@@ -8805,35 +8877,37 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         }
     }
     output.release();
-    if (!ppm_write_metadata_header(state, output)) {
+    if (!ppm_write_metadata_header(state, output, emit_metadata_comments)) {
         return false;
     }
-    if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_SIZE", (u64)marker_size)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_COLUMNS", (u64)grid_columns)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_ROWS", (u64)grid_rows)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", (u64)margin_pixels)) {
-        return false;
-    }
-    if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count > 0u) {
-        if (!append_comment_list(output,
-                                  "MAKOCODE_SUBGRID_COL_OFFSETS",
-                                  state.fiducial_col_offsets,
-                                  state.fiducial_col_offset_count)) {
+    if (emit_metadata_comments) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_SIZE", (u64)marker_size)) {
             return false;
         }
-    }
-    if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count > 0u) {
-        if (!append_comment_list(output,
-                                  "MAKOCODE_SUBGRID_ROW_OFFSETS",
-                                  state.fiducial_row_offsets,
-                                  state.fiducial_row_offset_count)) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_COLUMNS", (u64)grid_columns)) {
             return false;
+        }
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_ROWS", (u64)grid_rows)) {
+            return false;
+        }
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", (u64)margin_pixels)) {
+            return false;
+        }
+        if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count > 0u) {
+            if (!append_comment_list(output,
+                                      "MAKOCODE_SUBGRID_COL_OFFSETS",
+                                      state.fiducial_col_offsets,
+                                      state.fiducial_col_offset_count)) {
+                return false;
+            }
+        }
+        if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count > 0u) {
+            if (!append_comment_list(output,
+                                      "MAKOCODE_SUBGRID_ROW_OFFSETS",
+                                      state.fiducial_row_offsets,
+                                      state.fiducial_row_offset_count)) {
+                return false;
+            }
         }
     }
     if (!ppm_write_dimensions(width, height, output)) {
@@ -8903,7 +8977,8 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
 }
 
 static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
-                                        makocode::ByteBuffer& output) {
+                                        makocode::ByteBuffer& output,
+                                        bool emit_metadata_comments = true) {
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
@@ -8986,7 +9061,8 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                     fiducial_columns,
                                     fiducial_rows,
                                     fiducial_margin,
-                                    output);
+                                    output,
+                                    emit_metadata_comments);
 }
 
 static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::ByteBuffer& buffer) {
@@ -9635,7 +9711,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                const char* footer_text,
                                usize footer_length,
                                const FooterLayout& footer_layout,
-                               makocode::ByteBuffer& output) {
+                               makocode::ByteBuffer& output,
+                               bool emit_metadata_comments = true) {
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
         return false;
     }
@@ -9700,53 +9777,59 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (!output.append_ascii("P3\n")) {
         return false;
     }
-    if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
-        return false;
-    }
-    if (ecc_summary && ecc_summary->enabled) {
-        if (!append_comment_number(output, "MAKOCODE_ECC", 1u)) {
+    if (emit_metadata_comments) {
+        if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
             return false;
         }
-        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", (u64)ecc_summary->block_data_symbols)) {
+        if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
             return false;
         }
-        if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
+        if (ecc_summary && ecc_summary->enabled) {
+            if (!append_comment_number(output, "MAKOCODE_ECC", 1u)) {
+                return false;
+            }
+            if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", (u64)ecc_summary->block_data_symbols)) {
+                return false;
+            }
+            if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
+                return false;
+            }
+            if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_COUNT", ecc_summary->block_count)) {
+                return false;
+            }
+            if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", ecc_summary->original_bytes)) {
+                return false;
+            }
+        } else {
+            if (!append_comment_number(output, "MAKOCODE_ECC", 0u)) {
+                return false;
+            }
+        }
+        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
             return false;
         }
-        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_COUNT", ecc_summary->block_count)) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
             return false;
         }
-        if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", ecc_summary->original_bytes)) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
             return false;
         }
-    } else {
-        if (!append_comment_number(output, "MAKOCODE_ECC", 0u)) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels)) {
             return false;
         }
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
-        return false;
-    }
-    if (footer_rows) {
-        if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
             return false;
         }
-        if (footer_layout.has_text) {
+        if (footer_rows) {
+            if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
+                return false;
+            }
+            if (footer_layout.has_text) {
+                if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", (u64)footer_layout.font_size)) {
+                    return false;
+                }
+            }
+        } else if (footer_layout.has_text) {
             if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", (u64)footer_layout.font_size)) {
                 return false;
             }
@@ -11625,12 +11708,13 @@ static int command_encode(int arg_count, char** args) {
                                 footer_text,
                                 footer_length,
                                 footer_layout,
-                                page_output)) {
+                                page_output,
+                                false)) {
             console_line(2, "encode: failed to format ppm");
             return 1;
         }
         makocode::ByteBuffer fiducial_page;
-        if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
+        if (!apply_default_fiducial_grid(page_output, fiducial_page, false)) {
             console_line(2, "encode: failed to embed fiducial grid");
             return 1;
         }
@@ -11672,12 +11756,13 @@ static int command_encode(int arg_count, char** args) {
                                     footer_text,
                                     footer_length,
                                     footer_layout,
-                                    page_output)) {
+                                    page_output,
+                                    false)) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
             }
             makocode::ByteBuffer fiducial_page;
-            if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
+            if (!apply_default_fiducial_grid(page_output, fiducial_page, false)) {
                 console_line(2, "encode: failed to embed fiducial grid");
                 return 1;
             }
