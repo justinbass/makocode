@@ -22,7 +22,7 @@ any custom PPM comments; if you printed a non-gray barcode, pass the matching
 
 ### Converting Scans
 
-To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png scan.ppm`.
+To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -compress none scan.ppm`.
 
 ## Sample Barcodes
 

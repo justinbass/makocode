@@ -22,6 +22,7 @@ TODO:
 - Write no footer by default, make all options opt-it
 - Overlay won't work well on final page, need option for ECC to fill up through last page
 - Detect colors automatically in decoding, optionally write out color channel information in footer
+- Handle 15 column ppm (from convert), ignore newlines
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
 - Determine proper defaults
