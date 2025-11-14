@@ -1,6 +1,6 @@
 TODO:
 - Remove all headers from encoding, one by one and fix decoding for each one.
- - # MAKOCODE_PAGE_INDEX
+ - # MAKOCODE_PAGE_INDEX - would it be easier to expect user to provide blank pages for their gaps? Makocode could also guess. Perhaps assume page ordering on input is correct for now.
  - # MAKOCODE_PAGE_BITS
  - # MAKOCODE_PAGE_WIDTH_PX
  - # MAKOCODE_PAGE_HEIGHT_PX
