@@ -11000,8 +11000,6 @@ static void write_usage() {
     console_line(1, "  makocode overlay BASE.ppm OVERLAY.ppm FRACTION (writes merged page to stdout)");
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
-    console_line(1, "  makocode test-scan-basic    (runs histogram + border cleanup regressions)");
-    console_line(1, "  makocode test-border-dirt   (rebuilds fixtures that stress border cleanup)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
