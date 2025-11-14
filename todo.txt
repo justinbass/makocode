@@ -1,5 +1,4 @@
 - Features
- - Make tests more readable
  - Overlay needs --color-channels arg, mask the overlay image first.
  - Overlay won't work well on final page, need option for ECC to fill up through last page
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines

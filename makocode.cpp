@@ -11000,6 +11000,8 @@ static void write_usage() {
     console_line(1, "  makocode overlay BASE.ppm OVERLAY.ppm FRACTION (writes merged page to stdout)");
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
+    console_line(1, "  makocode test-scan-basic    (runs histogram + border cleanup regressions)");
+    console_line(1, "  makocode test-border-dirt   (rebuilds fixtures that stress border cleanup)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels N (1=Gray, 2=CMY, 3=RGB; default 1)");
     console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
@@ -11013,6 +11015,97 @@ static void write_usage() {
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
     console_line(1, "  --title TEXT       (optional footer title; letters, digits, common symbols)");
     console_line(1, "  --font-size PX     (footer font scale in pixels; default 1)");
+    console_line(1, "");
+    console_line(1, "Run 'makocode <command> --help' (or -h) for command-specific details.");
+}
+
+static bool arguments_request_help(int arg_count, char** args) {
+    for (int i = 0; i < arg_count; ++i) {
+        const char* arg = args ? args[i] : 0;
+        if (!arg) {
+            continue;
+        }
+        usize length = ascii_length(arg);
+        if (ascii_equals_token(arg, length, "--help") ||
+            ascii_equals_token(arg, length, "-h")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void write_encode_help() {
+    console_line(1, "makocode encode");
+    console_line(1, "Usage: makocode encode --input PATH [--input PATH ...] [options]");
+    console_line(1, "Packages files/directories into fiducial-marked printable PPM pages.");
+    console_line(1, "");
+    console_line(1, "Required:");
+    console_line(1, "  --input PATH         Add a file or directory to the archive (repeatable).");
+    console_line(1, "");
+    console_line(1, "Layout:");
+    console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
+    console_line(1, "  --page-width PX      Override page width in pixels (default 2480).");
+    console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
+    console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
+    console_line(1, "");
+    console_line(1, "ECC & security:");
+    console_line(1, "  --ecc RATIO          Reed-Solomon redundancy (default 0.20, 0 disables).");
+    console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
+    console_line(1, "");
+    console_line(1, "Footer customization:");
+    console_line(1, "  --title TEXT         Footer title (letters/digits/common symbols).");
+    console_line(1, "  --font-size PX       Footer font scaling (default 1, max 2048).");
+    console_line(1, "  --no-filename        Remove payload filename from footer text.");
+    console_line(1, "  --no-page-count      Remove page index/total from footer text.");
+    console_line(1, "");
+    console_line(1, "General:");
+    console_line(1, "  --help               Show this message.");
+    console_line(1, "All options accept either --flag=value or --flag value forms where supported.");
+}
+
+static void write_decode_help() {
+    console_line(1, "makocode decode");
+    console_line(1, "Usage: makocode decode [options] [PPM files...]");
+    console_line(1, "Reads pages from files or stdin (when no files) and reconstructs the archive.");
+    console_line(1, "");
+    console_line(1, "Output & security:");
+    console_line(1, "  --output-dir PATH    Destination directory (default current directory).");
+    console_line(1, "  --password TEXT      Supply the decryption password for protected payloads.");
+    console_line(1, "");
+    console_line(1, "Layout overrides (match encoder settings when non-default):");
+    console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
+    console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
+    console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
+    console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
+    console_line(1, "");
+    console_line(1, "General:");
+    console_line(1, "  --help               Show this message.");
+    console_line(1, "Provide one or more PPM files, or pipe pages via stdin.");
+}
+
+static void write_overlay_help() {
+    console_line(1, "makocode overlay");
+    console_line(1, "Usage: makocode overlay BASE.ppm OVERLAY.ppm FRACTION");
+    console_line(1, "Blends OVERLAY data bytes into BASE using FRACTION (0.0-1.0 decimal).");
+    console_line(1, "Both pages must share dimensions and fiducial layout.");
+}
+
+static void write_test_scan_basic_help() {
+    console_line(1, "makocode test-scan-basic");
+    console_line(1, "Usage: makocode test-scan-basic");
+    console_line(1, "Generates synthetic histograms/fixtures to validate scanner heuristics; no extra options.");
+}
+
+static void write_test_border_dirt_help() {
+    console_line(1, "makocode test-border-dirt");
+    console_line(1, "Usage: makocode test-border-dirt");
+    console_line(1, "Creates payload pages with synthetic grime to stress fiducial cleanup; no extra options.");
+}
+
+static void write_minify_help() {
+    console_line(1, "makocode minify");
+    console_line(1, "Usage: makocode minify");
+    console_line(1, "Strips comments/whitespace from makocode.cpp and emits makocode_minified.cpp.");
 }
 
 static bool title_char_is_allowed(char c) {
@@ -11200,6 +11293,10 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
 }
 
 static int command_encode(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_encode_help();
+        return 0;
+    }
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
     double ecc_redundancy = 0.2;
@@ -12270,6 +12367,10 @@ static bool write_buffer_to_fd(int fd, const makocode::ByteBuffer& buffer) {
 }
 
 static int command_overlay(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_overlay_help();
+        return 0;
+    }
     if (arg_count != 3) {
         console_line(2, "overlay: usage: makocode overlay BASE.ppm OVERLAY.ppm FRACTION");
         return 1;
@@ -12397,6 +12498,10 @@ static int command_overlay(int arg_count, char** args) {
 }
 
 static int command_decode(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_decode_help();
+        return 0;
+    }
     ImageMappingConfig mapping;
     static const usize MAX_INPUT_FILES = 256u;
     const char* input_files[MAX_INPUT_FILES];
@@ -14198,6 +14303,10 @@ static bool verify_border_dirt_cleanup(const char* fixture_dir)
 }
 
 static int command_test_border_dirt(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_test_border_dirt_help();
+        return 0;
+    }
     (void)arg_count;
     (void)args;
     const char* base_dir = "test";
@@ -14878,6 +14987,10 @@ static int command_test_border_dirt(int arg_count, char** args) {
 }
 
 static int command_test_scan_basic(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_test_scan_basic_help();
+        return 0;
+    }
     (void)arg_count;
     (void)args;
     const char* base_dir = "test";
@@ -17828,6 +17941,25 @@ struct TestSuiteEntry {
     bool forward_args;
 };
 
+static const TestSuiteEntry g_test_suites[] = {
+    {"low-ecc-fiducial", "Validates fiducial reservation with 0% ECC on a compact page.", command_test_low_ecc_fiducial, false},
+    {"scan-basic", "Exercises histogram analytics and dirt removal fixtures.", command_test_scan_basic, false},
+    {"border-dirt", "Ensures dirty border cleanup recovers frame bits.", command_test_border_dirt, false},
+    {"encode-decode-cli", "Smoke test for the public encode/decode CLI workflow.", command_test_encode_decode_cli, false},
+    {"payload-100kb", "100 KiB grayscale payload roundtrip without distortions.", command_test_payload_gray_100k, false},
+    // {"payload-100kb-wavy", "100 KiB grayscale roundtrip under ripple distortion.", command_test_payload_gray_100k_wavy, false},
+    // {"payload-100kb-wavy-c2", "100 KiB color channel 2 roundtrip with distortion.", command_test_payload_color2_100k_wavy, false},
+    // {"payload-100kb-wavy-c3", "100 KiB color channel 3 roundtrip with distortion.", command_test_payload_color3_100k_wavy, false},
+    {"payload-100kb-scaled", "100 KiB grayscale roundtrip validated at 2.5x fractional scaling.", command_test_payload_gray_100k_scaled, false},
+    {"payload-100kb-scaled-c2", "Color channel 2 scaled roundtrip validation.", command_test_payload_color2_100k_scaled, false},
+    {"payload-100kb-scaled-c3", "Color channel 3 scaled roundtrip validation.", command_test_payload_color3_100k_scaled, false},
+    {"payload-100kb-stretch-h26-v24", "Grayscale fractional scaling with horizontal 2.6x and vertical 2.4x.", command_test_payload_gray_100k_stretch_h26_v24, false},
+    {"payload-100kb-stretch-h24-v26", "Grayscale fractional scaling with horizontal 2.4x and vertical 2.6x.", command_test_payload_gray_100k_stretch_h24_v26, false},
+    {"payload-suite", "Exhaustive payload/ECC/password combinations.", command_test_payload, true}
+};
+
+static const usize g_test_suite_count = sizeof(g_test_suites) / sizeof(g_test_suites[0]);
+
 static bool test_mark_suite_token(const char* token,
                                   usize token_length,
                                   const TestSuiteEntry* suites,
@@ -17895,26 +18027,32 @@ static void test_print_suite_list(const TestSuiteEntry* suites, usize suite_coun
     }
 }
 
+static void write_test_help() {
+    console_line(1, "makocode test");
+    console_line(1, "Usage: makocode test [options] [suite ...] [-- suite-options]");
+    console_line(1, "Runs regression suites; omit suites to run all. '--' forwards args to suites that accept them (payload-suite).");
+    console_line(1, "");
+    console_line(1, "Options:");
+    console_line(1, "  --list              Print available suites and exit.");
+    console_line(1, "  --summary           Show minimal suite start/completion messages.");
+    console_line(1, "  --quiet             Silence suite logs (only failures emit details).");
+    console_line(1, "  --verbose           Force verbose logging (default).");
+    console_line(1, "  --only a,b,c        Comma-separated suite list to run.");
+    console_line(1, "  suite tokens        Positional suite names also select runs.");
+    console_line(1, "  --help              Show this message.");
+    console_line(1, "");
+    console_line(1, "Suites:");
+    test_print_suite_list(g_test_suites, g_test_suite_count);
+}
+
 static int command_test(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_test_help();
+        return 0;
+    }
     test_log_enable();
-    /* Test suite summary mirrors descriptions below. */
-    const TestSuiteEntry suites[] = {
-        {"low-ecc-fiducial", "Validates fiducial reservation with 0% ECC on a compact page.", command_test_low_ecc_fiducial, false},
-        {"scan-basic", "Exercises histogram analytics and dirt removal fixtures.", command_test_scan_basic, false},
-        {"border-dirt", "Ensures dirty border cleanup recovers frame bits.", command_test_border_dirt, false},
-        {"encode-decode-cli", "Smoke test for the public encode/decode CLI workflow.", command_test_encode_decode_cli, false},
-        {"payload-100kb", "100 KiB grayscale payload roundtrip without distortions.", command_test_payload_gray_100k, false},
-        // {"payload-100kb-wavy", "100 KiB grayscale roundtrip under ripple distortion.", command_test_payload_gray_100k_wavy, false},
-        // {"payload-100kb-wavy-c2", "100 KiB color channel 2 roundtrip with distortion.", command_test_payload_color2_100k_wavy, false},
-        // {"payload-100kb-wavy-c3", "100 KiB color channel 3 roundtrip with distortion.", command_test_payload_color3_100k_wavy, false},
-        {"payload-100kb-scaled", "100 KiB grayscale roundtrip validated at 2.5x fractional scaling.", command_test_payload_gray_100k_scaled, false},
-        {"payload-100kb-scaled-c2", "Color channel 2 scaled roundtrip validation.", command_test_payload_color2_100k_scaled, false},
-        {"payload-100kb-scaled-c3", "Color channel 3 scaled roundtrip validation.", command_test_payload_color3_100k_scaled, false},
-        {"payload-100kb-stretch-h26-v24", "Grayscale fractional scaling with horizontal 2.6x and vertical 2.4x.", command_test_payload_gray_100k_stretch_h26_v24, false},
-        {"payload-100kb-stretch-h24-v26", "Grayscale fractional scaling with horizontal 2.4x and vertical 2.6x.", command_test_payload_gray_100k_stretch_h24_v26, false},
-        {"payload-suite", "Exhaustive payload/ECC/password combinations.", command_test_payload, true}
-    };
-    enum { TestSuiteCount = sizeof(suites) / sizeof(suites[0]) };
+    const TestSuiteEntry* suites = g_test_suites;
+    enum { TestSuiteCount = sizeof(g_test_suites) / sizeof(g_test_suites[0]) };
     const usize suite_count = (usize)TestSuiteCount;
     bool run_mask[TestSuiteCount];
     for (usize i = 0u; i < suite_count; ++i) {
@@ -18176,6 +18314,10 @@ static bool strip_cpp_comments(const makocode::ByteBuffer& input,
 }
 
 static int command_minify(int arg_count, char** args) {
+    if (arguments_request_help(arg_count, args)) {
+        write_minify_help();
+        return 0;
+    }
     (void)args;
     if (arg_count > 0) {
         console_line(2, "minify: this command does not accept arguments");
@@ -18299,6 +18441,11 @@ static int command_minify(int arg_count, char** args) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
+        write_usage();
+        return 0;
+    }
+    if (ascii_equals_token(argv[1], ascii_length(argv[1]), "--help") ||
+        ascii_equals_token(argv[1], ascii_length(argv[1]), "-h")) {
         write_usage();
         return 0;
     }
