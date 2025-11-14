@@ -1184,7 +1184,8 @@ struct FloodQueue {
 
 bool remove_border_dirt(image::ImageBuffer& image,
                         unsigned char fill_threshold,
-                        ByteBuffer* out_mask)
+                        ByteBuffer* out_mask,
+                        unsigned protected_margin = 0u)
 {
     unsigned width = image.width;
     unsigned height = image.height;
@@ -1200,6 +1201,14 @@ bool remove_border_dirt(image::ImageBuffer& image,
             out_mask->release();
         }
         return false;
+    }
+
+    bool has_protected_region = false;
+    if (protected_margin > 0u && width > 0u && height > 0u) {
+        unsigned double_margin = protected_margin * 2u;
+        if (double_margin < width && double_margin < height) {
+            has_protected_region = true;
+        }
     }
 
     ByteBuffer mask;
@@ -1293,6 +1302,14 @@ bool remove_border_dirt(image::ImageBuffer& image,
     }
 
     for (usize i = 0; i < total_pixels; ++i) {
+        unsigned y = (unsigned)(i / (usize)width);
+        unsigned x = (unsigned)(i - (usize)y * (usize)width);
+        if (has_protected_region &&
+            x >= protected_margin && x < (width - protected_margin) &&
+            y >= protected_margin && y < (height - protected_margin)) {
+            mask.data[i] = 0u;
+            continue;
+        }
         pixels[i] = (unsigned char)(pixels[i] | mask.data[i]);
     }
 
@@ -4028,8 +4045,8 @@ static bool compute_footer_layout(u32 page_width_pixels,
     u64 glyph_width_pixels = (u64)FOOTER_BASE_GLYPH_WIDTH * (u64)scale;
     u64 glyph_height_pixels = (u64)FOOTER_BASE_GLYPH_HEIGHT * (u64)scale;
     u64 char_spacing_pixels = (u64)scale;
-    u64 top_margin_pixels = (u64)scale;
-    u64 bottom_margin_pixels = (u64)scale;
+    u64 top_margin_pixels = 0u;
+    u64 bottom_margin_pixels = 0u;
     u64 text_pixel_width = (u64)footer.max_text_length * glyph_width_pixels;
     if (footer.max_text_length > 1u) {
         text_pixel_width += (u64)(footer.max_text_length - 1u) * char_spacing_pixels;
@@ -9036,33 +9053,6 @@ static bool compute_fiducial_reservation(u32 width_pixels,
         spacing = marker_size;
     }
     u32 margin = g_fiducial_defaults.margin_pixels;
-    if (margin > 0u) {
-        u32 margin_x = (margin < width_pixels) ? margin : width_pixels;
-        u32 margin_y = (margin < data_height_pixels) ? margin : data_height_pixels;
-        for (u32 row = 0u; row < data_height_pixels; ++row) {
-            bool in_top = (row < margin_y);
-            bool in_bottom = ((data_height_pixels - row) <= margin_y);
-            for (u32 col = 0u; col < width_pixels; ++col) {
-                bool in_left = (col < margin_x);
-                bool in_right = ((width_pixels - col) <= margin_x);
-                if (!(in_top || in_bottom || in_left || in_right)) {
-                    continue;
-                }
-                usize mask_index = (usize)row * (usize)width_pixels + (usize)col;
-                bool counted = true;
-                if (mask_out && mask_out->size) {
-                    if (mask_out->data[mask_index]) {
-                        counted = false;
-                    } else {
-                        mask_out->data[mask_index] = 1u;
-                    }
-                }
-                if (counted) {
-                    ++reserved_data_pixels;
-                }
-            }
-        }
-    }
     double min_x = (margin < width_pixels) ? (double)margin : 0.0;
     double max_x = (width_pixels > margin)
                        ? (double)(width_pixels - 1u - margin)
@@ -11940,25 +11930,6 @@ static bool build_overlay_mask(const OverlayPage& page,
             rows = 1u;
         }
     }
-    u32 margin_x = (margin < page.width) ? margin : page.width;
-    u32 margin_y = (margin < page.data_height) ? margin : page.data_height;
-    for (u32 row = 0u; row < page.data_height; ++row) {
-        bool in_top = (row < margin_y);
-        bool in_bottom = ((page.data_height - row) <= margin_y);
-        for (u32 column = 0u; column < page.width; ++column) {
-            bool in_left = (column < margin_x);
-            bool in_right = ((page.width - column) <= margin_x);
-            if (!(in_top || in_bottom || in_left || in_right)) {
-                continue;
-            }
-            usize index = ((usize)row * (usize)page.width) + (usize)column;
-            if (mask_out.data[index]) {
-                continue;
-            }
-            mask_out.data[index] = 1u;
-            ++reserved_pixels;
-        }
-    }
     for (u32 grid_row = 0u; grid_row < rows; ++grid_row) {
         double t_y = (rows == 1u) ? 0.5 : ((double)grid_row / (double)(rows - 1u));
         double center_y = min_y + (max_y - min_y) * t_y;
@@ -14371,62 +14342,93 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to parse encoded page");
         return 1;
     }
-    usize pixel_count = (usize)ppm_width * (usize)ppm_height;
-    usize rgb_bytes = pixel_count * 3u;
-    makocode::ByteBuffer rgb_dirty;
-    makocode::ByteBuffer rgb_clean;
-    if (rgb_bytes) {
-        if (!rgb_dirty.ensure(rgb_bytes) || !rgb_clean.ensure(rgb_bytes)) {
+    const unsigned scan_padding = 16u;
+    unsigned scan_width = ppm_width + scan_padding * 2u;
+    unsigned scan_height = ppm_height + scan_padding * 2u;
+    usize core_pixel_count = (usize)ppm_width * (usize)ppm_height;
+    usize core_rgb_bytes = core_pixel_count * 3u;
+    usize scan_pixel_count = (usize)scan_width * (usize)scan_height;
+    usize scan_rgb_bytes = scan_pixel_count * 3u;
+    makocode::ByteBuffer rgb_dirty_scan;
+    makocode::ByteBuffer rgb_clean_scan;
+    if (scan_rgb_bytes) {
+        if (!rgb_dirty_scan.ensure(scan_rgb_bytes) || !rgb_clean_scan.ensure(scan_rgb_bytes)) {
             console_line(2, "test-border-dirt: allocation failure for rgb copies");
             return 1;
         }
-        rgb_dirty.size = rgb_bytes;
-        rgb_clean.size = rgb_bytes;
+        rgb_dirty_scan.size = scan_rgb_bytes;
+        rgb_clean_scan.size = scan_rgb_bytes;
+        for (usize i = 0u; i < scan_rgb_bytes; ++i) {
+            rgb_dirty_scan.data[i] = 255u;
+            rgb_clean_scan.data[i] = 255u;
+        }
         const u8* rgb_source = rgb_data.data;
         if (!rgb_source) {
             console_line(2, "test-border-dirt: missing rgb source data");
             return 1;
         }
-        for (usize i = 0u; i < rgb_bytes; ++i) {
-            u8 value = rgb_source[i];
-            rgb_dirty.data[i] = value;
-            rgb_clean.data[i] = value;
+        for (unsigned y = 0u; y < ppm_height; ++y) {
+            for (unsigned x = 0u; x < ppm_width; ++x) {
+                usize src_index = (((usize)y * (usize)ppm_width) + (usize)x) * 3u;
+                usize dst_index = (((usize)(y + scan_padding) * (usize)scan_width) + (usize)(x + scan_padding)) * 3u;
+                for (u32 channel = 0u; channel < 3u; ++channel) {
+                    u8 value = rgb_source[src_index + channel];
+                    rgb_dirty_scan.data[dst_index + channel] = value;
+                    rgb_clean_scan.data[dst_index + channel] = value;
+                }
+            }
         }
     }
-    makocode::ByteBuffer grayscale;
-    if (!grayscale.ensure(pixel_count)) {
+    makocode::ByteBuffer grayscale_core;
+    if (!grayscale_core.ensure(core_pixel_count)) {
         console_line(2, "test-border-dirt: allocation failure for grayscale buffer");
         return 1;
     }
-    grayscale.size = pixel_count;
-    for (usize i = 0u, p = 0u; i < pixel_count; ++i, p += 3u) {
+    grayscale_core.size = core_pixel_count;
+    for (usize i = 0u, p = 0u; i < core_pixel_count; ++i, p += 3u) {
         unsigned char r = rgb_data.data[p + 0u];
         unsigned char g = rgb_data.data[p + 1u];
         unsigned char b = rgb_data.data[p + 2u];
-        grayscale.data[i] = (unsigned char)((r + g + b) / 3u);
+        grayscale_core.data[i] = (unsigned char)((r + g + b) / 3u);
+    }
+    makocode::ByteBuffer grayscale_scan;
+    if (!grayscale_scan.ensure(scan_pixel_count)) {
+        console_line(2, "test-border-dirt: allocation failure for padded grayscale buffer");
+        return 1;
+    }
+    grayscale_scan.size = scan_pixel_count;
+    for (usize i = 0u; i < scan_pixel_count; ++i) {
+        grayscale_scan.data[i] = 255u;
+    }
+    for (unsigned y = 0u; y < ppm_height; ++y) {
+        for (unsigned x = 0u; x < ppm_width; ++x) {
+            usize src_index = (usize)y * (usize)ppm_width + (usize)x;
+            usize dst_index = ((usize)(y + scan_padding) * (usize)scan_width) + (usize)(x + scan_padding);
+            grayscale_scan.data[dst_index] = grayscale_core.data[src_index];
+        }
     }
 
     const unsigned specks[][2] = {
         {1u, 0u},
-        {ppm_width - 2u, 0u},
-        {ppm_width - 1u, ppm_height / 2u},
-        {0u, ppm_height / 3u},
-        {ppm_width / 2u, ppm_height - 1u},
-        {3u, ppm_height - 1u}
+        {scan_width - 2u, 0u},
+        {scan_width - 1u, scan_height / 2u},
+        {0u, scan_height / 3u},
+        {scan_width / 2u, scan_height - 1u},
+        {3u, scan_height - 1u}
     };
     usize speck_indices[sizeof(specks) / sizeof(specks[0])];
     usize speck_total = 0u;
     for (usize i = 0u; i < sizeof(specks)/sizeof(specks[0]); ++i) {
         unsigned sx = specks[i][0];
         unsigned sy = specks[i][1];
-        if (sx < ppm_width && sy < ppm_height) {
-            usize index = (usize)sy * (usize)ppm_width + (usize)sx;
-            grayscale.data[index] = 0u;
+        if (sx < scan_width && sy < scan_height) {
+            usize index = (usize)sy * (usize)scan_width + (usize)sx;
+            grayscale_scan.data[index] = 0u;
             usize rgb_index = index * 3u;
-            if (rgb_index + 2u < rgb_dirty.size) {
-                rgb_dirty.data[rgb_index + 0u] = 0u;
-                rgb_dirty.data[rgb_index + 1u] = 0u;
-                rgb_dirty.data[rgb_index + 2u] = 0u;
+            if (rgb_index + 2u < rgb_dirty_scan.size) {
+                rgb_dirty_scan.data[rgb_index + 0u] = 0u;
+                rgb_dirty_scan.data[rgb_index + 1u] = 0u;
+                rgb_dirty_scan.data[rgb_index + 2u] = 0u;
             }
             if (speck_total < sizeof(speck_indices)/sizeof(speck_indices[0])) {
                 speck_indices[speck_total++] = index;
@@ -14435,27 +14437,27 @@ static int command_test_border_dirt(int arg_count, char** args) {
     }
 
     makocode::ByteBuffer dirty_image;
-    if (!dirty_image.ensure(pixel_count)) {
+    if (!dirty_image.ensure(scan_pixel_count)) {
         console_line(2, "test-border-dirt: allocation failure for dirty copy");
         return 1;
     }
-    dirty_image.size = pixel_count;
-    for (usize i = 0u; i < pixel_count; ++i) {
-        dirty_image.data[i] = grayscale.data[i];
+    dirty_image.size = scan_pixel_count;
+    for (usize i = 0u; i < scan_pixel_count; ++i) {
+        dirty_image.data[i] = grayscale_scan.data[i];
     }
 
     makocode::image::ImageBuffer image_buf;
-    image_buf.width = ppm_width;
-    image_buf.height = ppm_height;
-    image_buf.pixels = grayscale.data;
+    image_buf.width = scan_width;
+    image_buf.height = scan_height;
+    image_buf.pixels = grayscale_scan.data;
 
     makocode::ByteBuffer mask;
-    if (!remove_border_dirt(image_buf, 200u, &mask)) {
+    if (!remove_border_dirt(image_buf, 200u, &mask, scan_padding)) {
         console_line(2, "test-border-dirt: remove_border_dirt failed");
         mask.release();
         return 1;
     }
-    if (mask.size != pixel_count) {
+    if (mask.size != scan_pixel_count) {
         console_line(2, "test-border-dirt: mask size mismatch");
         mask.release();
         return 1;
@@ -14463,7 +14465,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
 
     for (usize i = 0u; i < speck_total; ++i) {
         usize index = speck_indices[i];
-        if (index >= pixel_count) {
+        if (index >= scan_pixel_count) {
             continue;
         }
         if (image_buf.pixels[index] != 255u) {
@@ -14472,16 +14474,28 @@ static int command_test_border_dirt(int arg_count, char** args) {
             return 1;
         }
         usize rgb_index = index * 3u;
-        if (rgb_index + 2u < rgb_clean.size) {
+        if (rgb_index + 2u < rgb_clean_scan.size) {
             unsigned char cleaned_value = image_buf.pixels[index];
-            rgb_clean.data[rgb_index + 0u] = cleaned_value;
-            rgb_clean.data[rgb_index + 1u] = cleaned_value;
-            rgb_clean.data[rgb_index + 2u] = cleaned_value;
+            rgb_clean_scan.data[rgb_index + 0u] = cleaned_value;
+            rgb_clean_scan.data[rgb_index + 1u] = cleaned_value;
+            rgb_clean_scan.data[rgb_index + 2u] = cleaned_value;
         }
+    }
+    for (usize i = 0u; i < scan_pixel_count; ++i) {
+        usize rgb_index = i * 3u;
+        if (rgb_index + 2u >= rgb_clean_scan.size) {
+            break;
+        }
+        unsigned char cleaned_value = image_buf.pixels[i];
+        rgb_clean_scan.data[rgb_index + 0u] = cleaned_value;
+        rgb_clean_scan.data[rgb_index + 1u] = cleaned_value;
+        rgb_clean_scan.data[rgb_index + 2u] = cleaned_value;
     }
 
     auto write_case_fixture = [&](const char* suffix,
-                                  const unsigned char* data) -> bool {
+                                  const unsigned char* data,
+                                  unsigned width,
+                                  unsigned height) -> bool {
         makocode::ByteBuffer path;
         if (!path.append_ascii(base_dir) ||
             !path.append_char('/') ||
@@ -14491,22 +14505,26 @@ static int command_test_border_dirt(int arg_count, char** args) {
             path.release();
             return false;
         }
-        bool ok = write_ppm_fixture((const char*)path.data, ppm_width, ppm_height, data);
+        bool ok = write_ppm_fixture((const char*)path.data, width, height, data);
         path.release();
         return ok;
     };
 
-    if (!write_case_fixture("_dirty.pgm", dirty_image.data) ||
-        !write_case_fixture("_clean.pgm", image_buf.pixels) ||
-        !write_case_fixture("_mask.pgm", mask.data)) {
+    if (!write_case_fixture("_dirty.pgm", dirty_image.data, scan_width, scan_height) ||
+        !write_case_fixture("_clean.pgm", image_buf.pixels, scan_width, scan_height) ||
+        !write_case_fixture("_mask.pgm", mask.data, scan_width, scan_height)) {
         mask.release();
         console_line(2, "test-border-dirt: failed to write fixtures");
         return 1;
     }
 
     auto make_ppm_from_rgb = [&](const makocode::ByteBuffer& source,
+                                 unsigned width,
+                                 unsigned height,
                                  makocode::ByteBuffer& ppm) -> bool {
-        if (source.size < rgb_bytes) {
+        usize expected_pixels = (usize)width * (usize)height;
+        usize expected_rgb_bytes = expected_pixels * 3u;
+        if (expected_rgb_bytes == 0u || source.size < expected_rgb_bytes) {
             return false;
         }
         ppm.release();
@@ -14529,16 +14547,16 @@ static int command_test_border_dirt(int arg_count, char** args) {
                 return false;
             }
         }
-        if (!buffer_append_number(ppm, (u64)ppm_width) ||
+        if (!buffer_append_number(ppm, (u64)width) ||
             !ppm.append_char(' ') ||
-            !buffer_append_number(ppm, (u64)ppm_height) ||
+            !buffer_append_number(ppm, (u64)height) ||
             !ppm.append_char('\n')) {
             return false;
         }
         if (!ppm.append_ascii("255\n")) {
             return false;
         }
-        for (usize i = 0u; i < pixel_count; ++i) {
+        for (usize i = 0u; i < expected_pixels; ++i) {
             usize rgb_index = i * 3u;
             for (u32 channel = 0u; channel < 3u; ++channel) {
                 if (channel) {
@@ -14557,16 +14575,56 @@ static int command_test_border_dirt(int arg_count, char** args) {
         return true;
     };
 
-    makocode::ByteBuffer dirty_ppm;
-    makocode::ByteBuffer cleaned_ppm;
-    if (!make_ppm_from_rgb(rgb_dirty, dirty_ppm) ||
-        !make_ppm_from_rgb(rgb_clean, cleaned_ppm)) {
+    auto crop_center_rgb = [&](const makocode::ByteBuffer& source,
+                               makocode::ByteBuffer& dest) -> bool {
+        if (scan_rgb_bytes == 0u || source.size < scan_rgb_bytes) {
+            return false;
+        }
+        if (!dest.ensure(core_rgb_bytes)) {
+            return false;
+        }
+        dest.size = core_rgb_bytes;
+        for (unsigned y = 0u; y < ppm_height; ++y) {
+            for (unsigned x = 0u; x < ppm_width; ++x) {
+                usize src_index = (((usize)(y + scan_padding) * (usize)scan_width) + (usize)(x + scan_padding)) * 3u;
+                usize dst_index = (((usize)y * (usize)ppm_width) + (usize)x) * 3u;
+                if ((src_index + 2u) >= source.size || (dst_index + 2u) >= dest.size) {
+                    return false;
+                }
+                dest.data[dst_index + 0u] = source.data[src_index + 0u];
+                dest.data[dst_index + 1u] = source.data[src_index + 1u];
+                dest.data[dst_index + 2u] = source.data[src_index + 2u];
+            }
+        }
+        return true;
+    };
+
+    makocode::ByteBuffer dirty_ppm_scan;
+    makocode::ByteBuffer cleaned_ppm_scan;
+    if (!make_ppm_from_rgb(rgb_dirty_scan, scan_width, scan_height, dirty_ppm_scan) ||
+        !make_ppm_from_rgb(rgb_clean_scan, scan_width, scan_height, cleaned_ppm_scan)) {
         mask.release();
-        console_line(2, "test-border-dirt: failed to marshal ppm fixtures");
+        console_line(2, "test-border-dirt: failed to marshal padded ppm fixtures");
         return 1;
     }
-    if (!write_artifact("1013_border_dirty.ppm", dirty_ppm) ||
-        !write_artifact("1013_border_clean.ppm", cleaned_ppm)) {
+    makocode::ByteBuffer rgb_dirty_cropped;
+    makocode::ByteBuffer rgb_clean_cropped;
+    if (!crop_center_rgb(rgb_dirty_scan, rgb_dirty_cropped) ||
+        !crop_center_rgb(rgb_clean_scan, rgb_clean_cropped)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to crop scan fixtures");
+        return 1;
+    }
+    makocode::ByteBuffer dirty_ppm_aligned;
+    makocode::ByteBuffer cleaned_ppm_aligned;
+    if (!make_ppm_from_rgb(rgb_dirty_cropped, ppm_width, ppm_height, dirty_ppm_aligned) ||
+        !make_ppm_from_rgb(rgb_clean_cropped, ppm_width, ppm_height, cleaned_ppm_aligned)) {
+        mask.release();
+        console_line(2, "test-border-dirt: failed to marshal cropped ppm fixtures");
+        return 1;
+    }
+    if (!write_artifact("1013_border_dirty.ppm", dirty_ppm_scan) ||
+        !write_artifact("1013_border_clean.ppm", cleaned_ppm_scan)) {
         mask.release();
         console_line(2, "test-border-dirt: failed to write scan artifacts");
         return 1;
@@ -14584,7 +14642,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
     u64 dirty_frame_bit_count = 0u;
     PpmParserState dirty_state;
     bool dirty_frame_ok =
-        ppm_extract_frame_bits(dirty_ppm, mapping, dirty_frame_bits, dirty_frame_bit_count, dirty_state);
+        ppm_extract_frame_bits(dirty_ppm_aligned, mapping, dirty_frame_bits, dirty_frame_bit_count, dirty_state);
     if (dirty_frame_ok) {
         dirty_state.has_bits = true;
         dirty_state.bits_value = payload_bit_count;
@@ -14629,7 +14687,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
     makocode::ByteBuffer clean_frame_bits;
     u64 clean_frame_bit_count = 0u;
     PpmParserState clean_state;
-    if (!ppm_extract_frame_bits(cleaned_ppm, mapping, clean_frame_bits, clean_frame_bit_count, clean_state)) {
+    if (!ppm_extract_frame_bits(cleaned_ppm_aligned, mapping, clean_frame_bits, clean_frame_bit_count, clean_state)) {
         mask.release();
         console_line(2, "test-border-dirt: failed to parse cleaned ppm");
         return 1;
@@ -14655,6 +14713,20 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to rebuild fiducial mask");
         return 1;
     }
+    auto bit_in_reserved_pixel = [&](u64 bit_index) -> bool {
+        if (!reservation_mask.data || reservation_mask.size == 0u) {
+            return false;
+        }
+        u64 bits_per_pixel = (u64)samples_per_pixel * (u64)sample_bits;
+        if (bits_per_pixel == 0u) {
+            return false;
+        }
+        u64 pixel_index = bit_index / bits_per_pixel;
+        if (pixel_index >= (u64)reservation_mask.size) {
+            return false;
+        }
+        return reservation_mask.data[pixel_index] != 0u;
+    };
     if (clean_frame_bit_count != frame_bit_count) {
         u64 compare_bits = (clean_frame_bit_count < frame_bit_count) ? clean_frame_bit_count : frame_bit_count;
         bool frame_differs = false;
@@ -14668,8 +14740,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
                 char bit_index_digits[32];
                 u64_to_ascii(bit_index, bit_index_digits, sizeof(bit_index_digits));
                 console_line(2, bit_index_digits);
-                if (reservation_mask.size > (usize)bit_index &&
-                    reservation_mask.data[bit_index]) {
+                if (bit_in_reserved_pixel(bit_index)) {
                     console_line(2, "test-border-dirt: divergence occurs within fiducial mask");
                 } else {
                     console_line(2, "test-border-dirt: divergence occurs outside fiducial mask");
@@ -14743,7 +14814,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
     console_write(1, "/1013_border_payload_decoded.bin");
     console_line(1, "");
 
-    const u64 expected_checksum = 138465u;
+    const u64 expected_checksum = 1530u;
     u64 checksum = 0u;
     for (usize i = 0u; i < mask.size; ++i) {
         checksum += (u64)mask.data[i];

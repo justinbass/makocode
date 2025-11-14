@@ -1,5 +1,5 @@
 TODO:
-- Remove white border, or make it optional (distortion tests probably need border space). Multipage tests removed this way too...
+- Fix multipage tests
 - Remove all headers from encoding, one by one and fix decoding for each one.
  - # MAKOCODE_PAGE_BITS
  - # MAKOCODE_PAGE_WIDTH_PX
