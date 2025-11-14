@@ -20,6 +20,10 @@ Decoding relies on the original color palette because scanned images lose
 any custom PPM comments; if you printed a non-gray barcode, pass the matching
 `--color-channels` value (1=gray, 2=CMY, 3=RGB).
 
+If you only have a subset of the pages that were originally printed, you can
+tell the decoder how many pages to expect with `--page-count=<total>`. By
+default it assumes the total matches the number of input images provided.
+
 ### Converting Scans
 
 To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -compress none scan.ppm`.

@@ -5012,40 +5012,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char page_count_tag[] = "MAKOCODE_PAGE_COUNT";
-    const usize page_count_tag_len = (usize)sizeof(page_count_tag) - 1u;
-    if ((length - index) >= page_count_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < page_count_tag_len; ++i) {
-            if (comment[index + i] != page_count_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += page_count_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_count = true;
-                    state.page_count_value = value;
-                }
-            }
-            return;
-        }
-    }
     index = 0u;
     while (index < length) {
         char c = comment[index];
@@ -7648,11 +7614,6 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_page_count) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
-            return false;
-        }
-    }
     if (state.has_page_index) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
             return false;
@@ -7858,11 +7819,6 @@ static bool ppm_scale_fractional_axes(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_page_count) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
-            return false;
-        }
-    }
     if (state.has_page_index) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
             return false;
@@ -8003,11 +7959,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_bytes) {
         if (!append_comment_number(output, "MAKOCODE_BYTES", state.bytes_value)) {
-            return false;
-        }
-    }
-    if (state.has_page_count) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
             return false;
         }
     }
@@ -9131,7 +9082,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u32 width_pixels,
                                u32 height_pixels,
                                u64 page_index,
-                               u64 page_count,
                                u64 bits_per_page,
                                u64 payload_bit_count,
                                const makocode::EccSummary* ecc_summary,
@@ -9207,9 +9157,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     if (emit_metadata_comments) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
-            return false;
-        }
         if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
             return false;
         }
@@ -10460,6 +10407,7 @@ static void write_usage() {
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
     console_line(1, "  --output-dir PATH  (decode: destination directory; default .)");
+    console_line(1, "  --page-count N     (decode: expected total pages; defaults to detected inputs)");
     console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
@@ -11103,7 +11051,6 @@ static int command_encode(int arg_count, char** args) {
                                 width_pixels,
                                 height_pixels,
                                 1u,
-                                1u,
                                 bits_per_page,
                                 payload_bit_count,
                                 ecc_summary,
@@ -11151,7 +11098,6 @@ static int command_encode(int arg_count, char** args) {
                                     width_pixels,
                                     height_pixels,
                                     page + 1u,
-                                    page_count,
                                     bits_per_page,
                                     payload_bit_count,
                                     ecc_summary,
@@ -11875,8 +11821,10 @@ static int command_decode(int arg_count, char** args) {
     makocode::ByteBuffer password_buffer;
     bool have_password = false;
     makocode::ByteBuffer output_dir_buffer;
-   const char* output_dir = ".";
-   bool have_output_dir = false;
+    const char* output_dir = ".";
+    bool have_output_dir = false;
+    bool has_page_count_override = false;
+    u64 page_count_override_value = 0u;
    for (int i = 0; i < arg_count; ++i) {
        bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "decode", &handled)) {
@@ -11977,11 +11925,72 @@ static int command_decode(int arg_count, char** args) {
             have_password = true;
             continue;
         }
+        const char page_count_prefix[] = "--page-count=";
+        const char* page_count_value = 0;
+        usize page_count_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--page-count")) {
+            if (has_page_count_override) {
+                console_line(2, "decode: --page-count specified multiple times");
+                return 1;
+            }
+            if ((i + 1) >= arg_count) {
+                console_line(2, "decode: --page-count requires a positive integer value");
+                return 1;
+            }
+            page_count_value = args[i + 1];
+            if (!page_count_value) {
+                console_line(2, "decode: --page-count requires a positive integer value");
+                return 1;
+            }
+            page_count_length = ascii_length(page_count_value);
+            i += 1;
+        } else if (ascii_starts_with(arg, page_count_prefix)) {
+            if (has_page_count_override) {
+                console_line(2, "decode: --page-count specified multiple times");
+                return 1;
+            }
+            page_count_value = arg + (sizeof(page_count_prefix) - 1u);
+            page_count_length = ascii_length(page_count_value);
+        }
+        if (page_count_value) {
+            if (page_count_length == 0u) {
+                console_line(2, "decode: --page-count requires a positive integer value");
+                return 1;
+            }
+            u64 override_value = 0u;
+            if (!ascii_to_u64(page_count_value, page_count_length, &override_value) || override_value == 0u) {
+                console_line(2, "decode: --page-count must be a positive integer");
+                return 1;
+            }
+            has_page_count_override = true;
+            page_count_override_value = override_value;
+            continue;
+        }
         if (file_count >= MAX_INPUT_FILES) {
             console_line(2, "decode: too many input files");
             return 1;
         }
         input_files[file_count++] = arg;
+    }
+    u64 provided_page_count = (file_count > 0u) ? (u64)file_count : 1u;
+    u64 expected_page_count = provided_page_count;
+    if (has_page_count_override) {
+        if (page_count_override_value < provided_page_count) {
+            console_line(2, "decode: --page-count cannot be less than the number of input pages");
+            return 1;
+        }
+        expected_page_count = page_count_override_value;
+        if (page_count_override_value > provided_page_count) {
+            char expected_digits[32];
+            char provided_digits[32];
+            u64_to_ascii(page_count_override_value, expected_digits, sizeof(expected_digits));
+            u64_to_ascii(provided_page_count, provided_digits, sizeof(provided_digits));
+            console_write(1, "decode: warning: --page-count=");
+            console_write(1, expected_digits);
+            console_write(1, " but only ");
+            console_write(1, provided_digits);
+            console_line(1, (provided_page_count == 1u) ? " input page provided" : " input pages provided");
+        }
     }
     makocode::ByteBuffer bitstream;
     u64 bit_count = 0u;
@@ -12011,6 +12020,8 @@ retry_decode:
             return 1;
         }
         aggregate_state = single_state;
+        aggregate_state.has_page_count = true;
+        aggregate_state.page_count_value = expected_page_count;
     } else {
         makocode::BitWriter frame_aggregator;
         frame_aggregator.reset();
@@ -12086,10 +12097,8 @@ retry_decode:
             }
             ++expected_page_index;
         }
-        if (aggregate_state.has_page_count && aggregate_state.page_count_value != (u64)file_count) {
-            console_line(2, "decode: page count metadata mismatch");
-            return 1;
-        }
+        aggregate_state.has_page_count = true;
+        aggregate_state.page_count_value = expected_page_count;
         const u8* frame_data = frame_aggregator.data();
         u64 frame_bit_total = frame_aggregator.bit_size();
         if (!frame_bits_to_payload(frame_data, frame_bit_total, bitstream, bit_count)) {
@@ -13778,7 +13787,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
                             width_pixels,
                             height_pixels,
                             1u,
-                            page_count,
                             bits_per_page,
                             payload_bit_count,
                             &encoder.ecc_info(),
@@ -13947,8 +13955,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
         if (!ppm.append_ascii("P3\n")) {
             return false;
         }
-        if (!append_comment_number(ppm, "MAKOCODE_PAGE_COUNT", page_count) ||
-            !append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
+        if (!append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_BITS", bits_per_page) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
@@ -14456,7 +14463,6 @@ static int command_test_low_ecc_fiducial(int arg_count, char** args) {
                             width_pixels,
                             height_pixels,
                             1u,
-                            1u,
                             bits_per_page,
                             payload_bit_count,
                             &encoder.ecc_info(),
@@ -14785,7 +14791,6 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
                             width_pixels,
                             height_pixels,
                             1u,
-                            1u,
                             bits_per_page,
                             payload_bit_count,
                             &ecc_summary,
@@ -14954,7 +14959,6 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
                             0u,
                             capacity.width_pixels,
                             capacity.height_pixels,
-                            1u,
                             1u,
                             capacity.bits_per_page,
                             payload_bit_count,
@@ -15154,7 +15158,6 @@ static int run_test_payload_100k_wavy(u8 color_channels,
                              capacity.width_pixels,
                              capacity.height_pixels,
                              0u,
-                             1u,
                              capacity.bits_per_page,
                              payload_bit_count,
                              &ecc_summary,
@@ -15519,7 +15522,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
                              capacity.width_pixels,
                              capacity.height_pixels,
                              0u,
-                             1u,
                              capacity.bits_per_page,
                              payload_bit_count,
                              &ecc_summary,
@@ -16457,7 +16459,6 @@ static int command_test_payload(int arg_count, char** args) {
                                     width_pixels,
                                     height_pixels,
                                     page + 1u,
-                                    page_count,
                                     bits_per_page,
                                     payload_bit_count,
                                     ecc_summary,
@@ -16624,6 +16625,12 @@ static int command_test_payload(int arg_count, char** args) {
                 scan_pages_present = true;
             }
         }
+        aggregate_state.has_page_count = true;
+        aggregate_state.page_count_value = page_count;
+        if (scan_pages_present) {
+            scan_state.has_page_count = true;
+            scan_state.page_count_value = page_count;
+        }
         if (aggregate_state.has_page_count && aggregate_state.page_count_value != page_count) {
             console_line(2, "test: page count metadata mismatch");
             return 1;
@@ -16750,7 +16757,6 @@ static int command_test_payload(int arg_count, char** args) {
                                             width_pixels,
                                             height_pixels,
                                             page + 1u,
-                                            page_count,
                                             bits_per_page,
                                             payload_bit_count,
                                             ecc_summary,
@@ -16923,6 +16929,12 @@ static int command_test_payload(int arg_count, char** args) {
                         console_line(2, "test: failed to assemble scaled bitstream");
                         return 1;
                     }
+                }
+                scaled_state.has_page_count = true;
+                scaled_state.page_count_value = page_count;
+                if (scan_scaled_pages_present) {
+                    scan_scaled_state.has_page_count = true;
+                    scan_scaled_state.page_count_value = page_count;
                 }
                 if (scaled_state.has_page_count && scaled_state.page_count_value != page_count) {
                     console_line(2, "test: scaled page count metadata mismatch");
