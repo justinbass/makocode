@@ -1,14 +1,28 @@
 TODO:
-- Decoding apparently depends on ppm headers, remove them and retest.
+- Remove all headers from encoding, one by one and fix decoding for each one.
+ - # MAKOCODE_PAGE_BITS
+ - # MAKOCODE_PAGE_WIDTH_PX
+ - # MAKOCODE_PAGE_HEIGHT_PX
+ - # MAKOCODE_FIDUCIAL_SIZE
+ - # MAKOCODE_FIDUCIAL_COLUMNS
+ - # MAKOCODE_FIDUCIAL_ROWS
+ - # MAKOCODE_FIDUCIAL_MARGIN
+ - # MAKOCODE_SUBGRID_COL_OFFSETS
+ - # MAKOCODE_SUBGRID_ROW_OFFSETS
 - Fix wavy distortion test
-- Overlay needs --color-channels arg, mask the overlay image first.
-- Overlay won't work well on final page, need option for ECC to fill up through last page
-- Remove white border, or make it optional (distortion tests probably need border space)
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - Coffee stain test, black marker test, page folded/cut test
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
+- Remove white border, or make it optional (distortion tests probably need border space)
+- Remove entire page test, with high ECC
 - Use LZMA rather than LZW compression
 - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel. Configurable colors and arbitrary bits?
+- Overlay needs --color-channels arg, mask the overlay image first.
+- Write no footer by default, make all options opt-it
+- Overlay won't work well on final page, need option for ECC to fill up through last page
+- Detect colors automatically in decoding, optionally write out color channel information in footer
+- Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+- Handle 15 column ppm (from convert), ignore newlines
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
 - Determine proper defaults
