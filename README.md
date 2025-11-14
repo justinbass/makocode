@@ -16,6 +16,8 @@ make test
 ./makocode decode scan.ppm
 ```
 
+Pass `--debug` (e.g., `./makocode --debug encode ...`) if you need the verbose diagnostic logs that were previously always emitted.
+
 ### Converting Scans
 
 To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png scan.ppm`.

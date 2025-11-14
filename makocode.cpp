@@ -376,6 +376,28 @@ static void test_log_line(TestLogLevel level, const char* text) {
     }
 }
 
+static bool g_debug_enabled = false;
+
+static bool argument_is_debug_flag(const char* arg) {
+    if (!arg) {
+        return false;
+    }
+    usize length = ascii_length(arg);
+    return ascii_equals_token(arg, length, "--debug");
+}
+
+static bool consume_debug_flag(const char* arg) {
+    if (argument_is_debug_flag(arg)) {
+        g_debug_enabled = true;
+        return true;
+    }
+    return false;
+}
+
+static bool debug_logging_enabled() {
+    return g_debug_enabled;
+}
+
 static void u64_to_ascii(u64 value, char* buffer, usize capacity) {
     if (!buffer || capacity == 0) {
         return;
@@ -3696,27 +3718,29 @@ struct DecoderContext {
             const u8* encoded = data + ECC_HEADER_BYTES;
             ByteBuffer compressed;
             if (!decode_ecc_payload(encoded, header, compressed, &ecc_stats)) {
-                char debug_buffer[128];
-                console_line(2, "debug parse: decode_ecc_payload failure");
-                if (header.block_data || header.parity || header.block_count) {
-                    console_write(2, "debug parse: block_data=");
-                    u64_to_ascii((u64)header.block_data, debug_buffer, sizeof(debug_buffer));
-                    console_line(2, debug_buffer);
-                    console_write(2, "debug parse: parity=");
-                    u64_to_ascii((u64)header.parity, debug_buffer, sizeof(debug_buffer));
-                    console_line(2, debug_buffer);
-                    console_write(2, "debug parse: block_count=");
-                    u64_to_ascii(header.block_count, debug_buffer, sizeof(debug_buffer));
-                    console_line(2, debug_buffer);
-                    console_write(2, "debug parse: original_bytes=");
-                    u64_to_ascii(header.original_bytes, debug_buffer, sizeof(debug_buffer));
-                    console_line(2, debug_buffer);
-                    console_write(2, "debug parse: byte_count=");
-                    u64_to_ascii((u64)byte_count, debug_buffer, sizeof(debug_buffer));
-                    console_line(2, debug_buffer);
-                    console_write(2, "debug parse: expected_bytes=");
-                    u64_to_ascii((u64)((u64)(header.block_data + header.parity) * header.block_count), debug_buffer, sizeof(debug_buffer));
-                    console_line(2, debug_buffer);
+                if (debug_logging_enabled()) {
+                    char debug_buffer[128];
+                    console_line(2, "debug parse: decode_ecc_payload failure");
+                    if (header.block_data || header.parity || header.block_count) {
+                        console_write(2, "debug parse: block_data=");
+                        u64_to_ascii((u64)header.block_data, debug_buffer, sizeof(debug_buffer));
+                        console_line(2, debug_buffer);
+                        console_write(2, "debug parse: parity=");
+                        u64_to_ascii((u64)header.parity, debug_buffer, sizeof(debug_buffer));
+                        console_line(2, debug_buffer);
+                        console_write(2, "debug parse: block_count=");
+                        u64_to_ascii(header.block_count, debug_buffer, sizeof(debug_buffer));
+                        console_line(2, debug_buffer);
+                        console_write(2, "debug parse: original_bytes=");
+                        u64_to_ascii(header.original_bytes, debug_buffer, sizeof(debug_buffer));
+                        console_line(2, debug_buffer);
+                        console_write(2, "debug parse: byte_count=");
+                        u64_to_ascii((u64)byte_count, debug_buffer, sizeof(debug_buffer));
+                        console_line(2, debug_buffer);
+                        console_write(2, "debug parse: expected_bytes=");
+                        u64_to_ascii((u64)((u64)(header.block_data + header.parity) * header.block_count), debug_buffer, sizeof(debug_buffer));
+                        console_line(2, debug_buffer);
+                    }
                 }
                 ecc_failed = true;
                 return false;
@@ -6397,74 +6421,92 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return false;
     }
     PpmParserState state;
-    state.data = input.data;
-    state.size = input.size;
-    char cursor_buffer[32];
-    u64_to_ascii((u64)state.cursor, cursor_buffer, sizeof(cursor_buffer));
-    console_write(2, "debug initial cursor: ");
-    console_line(2, cursor_buffer);
-    console_write(2, "debug first bytes: ");
-    for (int i = 0; i < 8 && i < (int)state.size; ++i) {
-        char value_buffer[32];
-        u64_to_ascii((u64)(unsigned char)state.data[i], value_buffer, sizeof(value_buffer));
-        console_write(2, value_buffer);
-        if (i < 7 && (i + 1) < (int)state.size) {
-            console_write(2, " ");
+   state.data = input.data;
+   state.size = input.size;
+    if (debug_logging_enabled()) {
+        char cursor_buffer[32];
+        u64_to_ascii((u64)state.cursor, cursor_buffer, sizeof(cursor_buffer));
+        console_write(2, "debug initial cursor: ");
+        console_line(2, cursor_buffer);
+        console_write(2, "debug first bytes: ");
+        for (int i = 0; i < 8 && i < (int)state.size; ++i) {
+            char value_buffer[32];
+            u64_to_ascii((u64)(unsigned char)state.data[i], value_buffer, sizeof(value_buffer));
+            console_write(2, value_buffer);
+            if (i < 7 && (i + 1) < (int)state.size) {
+                console_write(2, " ");
+            }
         }
+        console_line(2, "");
     }
-    console_line(2, "");
     const char* token = 0;
     usize token_length = 0u;
     if (!ppm_next_token(state, &token, &token_length)) {
-        console_line(2, "debug: missing magic token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: missing magic token");
+        }
         return false;
     }
     if (!ascii_equals_token(token, token_length, "P3")) {
-        char debug_token[32];
-        usize debug_count = (token_length < (usize)(sizeof(debug_token) - 1u)) ? token_length : (sizeof(debug_token) - 1u);
-        for (usize i = 0u; i < debug_count; ++i) {
-            debug_token[i] = token[i];
+        if (debug_logging_enabled()) {
+            char debug_token[32];
+            usize debug_count = (token_length < (usize)(sizeof(debug_token) - 1u)) ? token_length : (sizeof(debug_token) - 1u);
+            for (usize i = 0u; i < debug_count; ++i) {
+                debug_token[i] = token[i];
+            }
+            debug_token[debug_count] = '\0';
+            console_line(2, "debug: magic token not P3");
+            console_write(2, "debug token: ");
+            console_line(2, debug_token);
+            char length_buffer[32];
+            u64_to_ascii((u64)token_length, length_buffer, sizeof(length_buffer));
+            console_write(2, "debug length: ");
+            console_line(2, length_buffer);
+            usize offset = (usize)(token - (const char*)state.data);
+            char offset_buffer[32];
+            u64_to_ascii((u64)offset, offset_buffer, sizeof(offset_buffer));
+            console_write(2, "debug offset: ");
+            console_line(2, offset_buffer);
         }
-        debug_token[debug_count] = '\0';
-        console_line(2, "debug: magic token not P3");
-        console_write(2, "debug token: ");
-        console_line(2, debug_token);
-        char length_buffer[32];
-        u64_to_ascii((u64)token_length, length_buffer, sizeof(length_buffer));
-        console_write(2, "debug length: ");
-        console_line(2, length_buffer);
-        usize offset = (usize)(token - (const char*)state.data);
-        char offset_buffer[32];
-        u64_to_ascii((u64)offset, offset_buffer, sizeof(offset_buffer));
-        console_write(2, "debug offset: ");
-        console_line(2, offset_buffer);
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
-        console_line(2, "debug: missing width token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: missing width token");
+        }
         return false;
     }
     u64 width = 0u;
     if (!ascii_to_u64(token, token_length, &width) || width == 0u) {
-        console_line(2, "debug: invalid width token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: invalid width token");
+        }
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
-        console_line(2, "debug: missing height token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: missing height token");
+        }
         return false;
     }
     u64 height = 0u;
     if (!ascii_to_u64(token, token_length, &height) || height == 0u) {
-        console_line(2, "debug: invalid height token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: invalid height token");
+        }
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
-        console_line(2, "debug: missing max value token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: missing max value token");
+        }
         return false;
     }
     u64 max_value = 0u;
     if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u) {
-        console_line(2, "debug: invalid max value token");
+        if (debug_logging_enabled()) {
+            console_line(2, "debug: invalid max value token");
+        }
         return false;
     }
     u64 raw_pixel_count = width * height;
@@ -10158,7 +10200,7 @@ static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
             close(fd);
             return false;
         }
-        if (read_result > 0 && total == 0u) {
+        if (read_result > 0 && total == 0u && debug_logging_enabled()) {
             char debug_msg[64];
             u64_to_ascii((u64)read_result, debug_msg, sizeof(debug_msg));
             console_write(2, "debug read chunk size: ");
@@ -10172,7 +10214,7 @@ static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
     }
     buffer.size = total;
     close(fd);
-    if (buffer.size >= 8u && buffer.data) {
+    if (debug_logging_enabled() && buffer.size >= 8u && buffer.data) {
         console_write(2, "debug file first bytes: ");
         for (usize debug_i = 0u; debug_i < 8u && debug_i < buffer.size; ++debug_i) {
             char value_buffer[32];
@@ -11013,6 +11055,7 @@ static void write_usage() {
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
     console_line(1, "  --title TEXT       (optional footer title; letters, digits, common symbols)");
     console_line(1, "  --font-size PX     (footer font scale in pixels; default 1)");
+    console_line(1, "  --debug            (emit verbose diagnostic logs; default off)");
     console_line(1, "");
     console_line(1, "Run 'makocode <command> --help' (or -h) for command-specific details.");
 }
@@ -11057,6 +11100,7 @@ static void write_encode_help() {
     console_line(1, "  --no-page-count      Remove page index/total from footer text.");
     console_line(1, "");
     console_line(1, "General:");
+    console_line(1, "  --debug              Emit verbose diagnostic logs to stderr.");
     console_line(1, "  --help               Show this message.");
     console_line(1, "All options accept either --flag=value or --flag value forms where supported.");
 }
@@ -11077,6 +11121,7 @@ static void write_decode_help() {
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
     console_line(1, "");
     console_line(1, "General:");
+    console_line(1, "  --debug              Emit verbose diagnostic logs to stderr.");
     console_line(1, "  --help               Show this message.");
     console_line(1, "Provide one or more PPM files, or pipe pages via stdin.");
 }
@@ -11322,6 +11367,9 @@ static int command_encode(int arg_count, char** args) {
         }
         const char* arg = args[i];
         if (!arg) {
+            continue;
+        }
+        if (consume_debug_flag(arg)) {
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
@@ -12521,6 +12569,9 @@ static int command_decode(int arg_count, char** args) {
         if (!arg) {
             continue;
         }
+        if (consume_debug_flag(arg)) {
+            continue;
+        }
         const char output_prefix[] = "--output-dir=";
         const char* output_value = 0;
         usize output_length = 0u;
@@ -12654,14 +12705,16 @@ retry_decode:
         u64 expected_page_index = 1u;
         for (usize file_index = 0u; file_index < file_count; ++file_index) {
             makocode::ByteBuffer ppm_stream;
-            console_write(2, "debug reading file: ");
-            console_line(2, input_files[file_index]);
+            if (debug_logging_enabled()) {
+                console_write(2, "debug reading file: ");
+                console_line(2, input_files[file_index]);
+            }
             if (!read_entire_file(input_files[file_index], ppm_stream)) {
                 console_write(2, "decode: failed to read ");
                 console_line(2, input_files[file_index]);
                 return 1;
             }
-            if (ppm_stream.size >= 8u && ppm_stream.data) {
+            if (debug_logging_enabled() && ppm_stream.size >= 8u && ppm_stream.data) {
                 console_write(2, "debug read bytes: ");
                 for (usize debug_i = 0u; debug_i < 8u && debug_i < ppm_stream.size; ++debug_i) {
                     char value_buffer[32];
@@ -16821,6 +16874,9 @@ static int command_test_payload(int arg_count, char** args) {
         if (!arg) {
             continue;
         }
+        if (consume_debug_flag(arg)) {
+            continue;
+        }
         const char ecc_prefix[] = "--ecc=";
         const char* ecc_value = 0;
         usize ecc_length = 0u;
@@ -18035,6 +18091,7 @@ static void write_test_help() {
     console_line(1, "  --summary           Show minimal suite start/completion messages.");
     console_line(1, "  --quiet             Silence suite logs (only failures emit details).");
     console_line(1, "  --verbose           Force verbose logging (default).");
+    console_line(1, "  --debug             Emit verbose diagnostic logs to stderr.");
     console_line(1, "  --only a,b,c        Comma-separated suite list to run.");
     console_line(1, "  suite tokens        Positional suite names also select runs.");
     console_line(1, "  --help              Show this message.");
@@ -18062,6 +18119,9 @@ static int command_test(int arg_count, char** args) {
     for (int i = 0; i < arg_count; ++i) {
         char* arg = args[i];
         if (!arg) {
+            continue;
+        }
+        if (consume_debug_flag(arg)) {
             continue;
         }
         usize length = ascii_length(arg);
@@ -18442,31 +18502,52 @@ int main(int argc, char** argv) {
         write_usage();
         return 0;
     }
-    if (ascii_equals_token(argv[1], ascii_length(argv[1]), "--help") ||
-        ascii_equals_token(argv[1], ascii_length(argv[1]), "-h")) {
+    int arg_index = 1;
+    while (arg_index < argc) {
+        char* arg = argv[arg_index];
+        if (!arg) {
+            ++arg_index;
+            continue;
+        }
+        if (consume_debug_flag(arg)) {
+            ++arg_index;
+            continue;
+        }
+        usize length = ascii_length(arg);
+        if (ascii_equals_token(arg, length, "--help") ||
+            ascii_equals_token(arg, length, "-h")) {
+            write_usage();
+            return 0;
+        }
+        break;
+    }
+    if (arg_index >= argc) {
         write_usage();
         return 0;
     }
-    if (ascii_compare(argv[1], "encode") == 0) {
-        return command_encode(argc - 2, argv + 2);
+    const char* command = argv[arg_index];
+    int command_argc = argc - arg_index - 1;
+    char** command_argv = argv + arg_index + 1;
+    if (ascii_compare(command, "encode") == 0) {
+        return command_encode(command_argc, command_argv);
     }
-    if (ascii_compare(argv[1], "decode") == 0) {
-        return command_decode(argc - 2, argv + 2);
+    if (ascii_compare(command, "decode") == 0) {
+        return command_decode(command_argc, command_argv);
     }
-    if (ascii_compare(argv[1], "overlay") == 0) {
-        return command_overlay(argc - 2, argv + 2);
+    if (ascii_compare(command, "overlay") == 0) {
+        return command_overlay(command_argc, command_argv);
     }
-    if (ascii_compare(argv[1], "test-scan-basic") == 0) {
-        return command_test_scan_basic(argc - 2, argv + 2);
+    if (ascii_compare(command, "test-scan-basic") == 0) {
+        return command_test_scan_basic(command_argc, command_argv);
     }
-    if (ascii_compare(argv[1], "test-border-dirt") == 0) {
-        return command_test_border_dirt(argc - 2, argv + 2);
+    if (ascii_compare(command, "test-border-dirt") == 0) {
+        return command_test_border_dirt(command_argc, command_argv);
     }
-    if (ascii_compare(argv[1], "test") == 0) {
-        return command_test(argc - 2, argv + 2);
+    if (ascii_compare(command, "test") == 0) {
+        return command_test(command_argc, command_argv);
     }
-    if (ascii_compare(argv[1], "minify") == 0) {
-        return command_minify(argc - 2, argv + 2);
+    if (ascii_compare(command, "minify") == 0) {
+        return command_minify(command_argc, command_argv);
     }
     write_usage();
     return 0;
