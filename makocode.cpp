@@ -17081,6 +17081,57 @@ static int command_test_payload(int arg_count, char** args) {
                 console_line(2, "test: two-page payload confirmation failed");
                 return 1;
             }
+            if (target_pages > 1u && best_size < max_payload_size) {
+                usize grow_left = best_size + 1u;
+                usize grow_right = max_payload_size;
+                usize densest_size = best_size;
+                u64 densest_bits = confirm_bits;
+                while (grow_left <= grow_right) {
+                    usize mid = grow_left + (grow_right - grow_left) / 2u;
+                    u64 mid_seed = ((u64)run_mapping.color_channels << 32u) | (u64)mid;
+                    u64 mid_bits = 0u;
+                    if (!compute_frame_bit_count(run_mapping,
+                                                 mid,
+                                                 mid_seed,
+                                                 scenario.ecc_redundancy,
+                                                 password_ptr,
+                                                 password_length,
+                                                 mid_bits)) {
+                        console_line(2, "test: failed to grow multi-page payload");
+                        return 1;
+                    }
+                    u64 mid_pages = (mid_bits + bits_per_page - 1u) / bits_per_page;
+                    if (mid_pages == target_pages) {
+                        densest_size = mid;
+                        densest_bits = mid_bits;
+                        if (mid == grow_right) {
+                            break;
+                        }
+                        grow_left = mid + 1u;
+                    } else if (mid_pages < target_pages) {
+                        if (mid == grow_right) {
+                            break;
+                        }
+                        grow_left = mid + 1u;
+                    } else {
+                        if (mid == 0u) {
+                            break;
+                        }
+                        if (mid <= grow_right) {
+                            grow_right = mid - 1u;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                best_size = densest_size;
+                confirm_bits = densest_bits;
+                u64 confirm_pages_after_growth = (confirm_bits + bits_per_page - 1u) / bits_per_page;
+                if (confirm_pages_after_growth != target_pages) {
+                    console_line(2, "test: multi-page payload growth overflowed target pages");
+                    return 1;
+                }
+            }
         }
         makocode::ByteBuffer payload;
         makocode::EncoderContext encoder;
