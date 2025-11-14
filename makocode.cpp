@@ -4444,8 +4444,6 @@ struct PpmParserState {
     u64 page_width_pixels_value;
     bool has_page_height_pixels;
     u64 page_height_pixels_value;
-    bool has_page_index;
-    u64 page_index_value;
     bool has_page_count;
     u64 page_count_value;
     bool has_page_bits;
@@ -4497,8 +4495,6 @@ struct PpmParserState {
           page_width_pixels_value(0u),
           has_page_height_pixels(false),
           page_height_pixels_value(0u),
-          has_page_index(false),
-          page_index_value(0u),
           has_page_count(false),
           page_count_value(0u),
           has_page_bits(false),
@@ -4599,14 +4595,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             }
             return;
         }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
     }
     index = 0u;
     while (index < length) {
@@ -4957,48 +4945,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_page_height_pixels = true;
                     state.page_height_pixels_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
-    const char page_index_tag[] = "MAKOCODE_PAGE_INDEX";
-    const usize page_index_tag_len = (usize)sizeof(page_index_tag) - 1u;
-    if ((length - index) >= page_index_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < page_index_tag_len; ++i) {
-            if (comment[index + i] != page_index_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += page_index_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_index = true;
-                    state.page_index_value = value;
                 }
             }
             return;
@@ -7614,11 +7560,6 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_page_index) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
-            return false;
-        }
-    }
     if (state.has_page_bits) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", state.page_bits_value)) {
             return false;
@@ -7819,11 +7760,6 @@ static bool ppm_scale_fractional_axes(const makocode::ByteBuffer& input,
             return false;
         }
     }
-    if (state.has_page_index) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
-            return false;
-        }
-    }
     if (state.has_page_bits) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", state.page_bits_value)) {
             return false;
@@ -7959,11 +7895,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_bytes) {
         if (!append_comment_number(output, "MAKOCODE_BYTES", state.bytes_value)) {
-            return false;
-        }
-    }
-    if (state.has_page_index) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
             return false;
         }
     }
@@ -9092,6 +9023,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                bool emit_metadata_comments = true) {
     (void)payload_bit_count;
     (void)ecc_summary;
+    (void)page_index;
     if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
         return false;
     }
@@ -9157,9 +9089,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     if (emit_metadata_comments) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
-            return false;
-        }
         if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
             return false;
         }
@@ -12026,8 +11955,6 @@ retry_decode:
         makocode::BitWriter frame_aggregator;
         frame_aggregator.reset();
         bool aggregate_initialized = false;
-        bool enforce_page_index = true;
-        u64 expected_page_index = 1u;
         for (usize file_index = 0u; file_index < file_count; ++file_index) {
             makocode::ByteBuffer ppm_stream;
             console_write(2, "debug reading file: ");
@@ -12069,24 +11996,6 @@ retry_decode:
                     return 1;
                 }
             }
-            if (enforce_page_index) {
-                if (page_state.has_page_index) {
-                    if (page_state.page_index_value != expected_page_index) {
-                        char expected_buffer[32];
-                        char actual_buffer[32];
-                        u64_to_ascii(expected_page_index, expected_buffer, sizeof(expected_buffer));
-                        u64_to_ascii(page_state.page_index_value, actual_buffer, sizeof(actual_buffer));
-                        console_write(2, "decode: unexpected page order (expected: ");
-                        console_write(2, expected_buffer);
-                        console_write(2, ", actual: ");
-                        console_write(2, actual_buffer);
-                        console_line(2, ")");
-                        return 1;
-                    }
-                } else {
-                    enforce_page_index = false;
-                }
-            }
             u64 effective_bits = page_bit_count;
             if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
                 effective_bits = page_state.page_bits_value;
@@ -12095,7 +12004,6 @@ retry_decode:
                 console_line(2, "decode: failed to assemble bitstream");
                 return 1;
             }
-            ++expected_page_index;
         }
         aggregate_state.has_page_count = true;
         aggregate_state.page_count_value = expected_page_count;
@@ -13955,8 +13863,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
         if (!ppm.append_ascii("P3\n")) {
             return false;
         }
-        if (!append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
-            !append_comment_number(ppm, "MAKOCODE_PAGE_BITS", bits_per_page) ||
+        if (!append_comment_number(ppm, "MAKOCODE_PAGE_BITS", bits_per_page) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
             return false;
@@ -14026,8 +13933,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
     if (dirty_frame_ok) {
         dirty_state.has_page_count = true;
         dirty_state.page_count_value = 1u;
-        dirty_state.has_page_index = true;
-        dirty_state.page_index_value = 1u;
         u64 dirty_effective_bits = frame_bit_count;
         if (dirty_effective_bits == 0u || dirty_effective_bits > dirty_frame_bit_count) {
             dirty_effective_bits = dirty_frame_bit_count;
@@ -14071,8 +13976,6 @@ static int command_test_border_dirt(int arg_count, char** args) {
     }
     clean_state.has_page_count = true;
     clean_state.page_count_value = 1u;
-    clean_state.has_page_index = true;
-    clean_state.page_index_value = 1u;
     u64 clean_effective_bits = frame_bit_count;
     if (clean_effective_bits == 0u || clean_effective_bits > clean_frame_bit_count) {
         clean_effective_bits = clean_frame_bit_count;
@@ -14812,10 +14715,6 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
         page_state.has_page_count = true;
         page_state.page_count_value = 1u;
     }
-    if (!page_state.has_page_index) {
-        page_state.has_page_index = true;
-        page_state.page_index_value = 1u;
-    }
     u64 effective_bits = extracted_bit_count;
     if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
         effective_bits = page_state.page_bits_value;
@@ -14986,11 +14885,6 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
         page_state.has_page_count = true;
         page_state.page_count_value = 1u;
     }
-    if (!page_state.has_page_index) {
-        page_state.has_page_index = true;
-        page_state.page_index_value = 1u;
-    }
-
     u64 effective_bits = extracted_bit_count;
     if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
         effective_bits = page_state.page_bits_value;
@@ -15265,11 +15159,6 @@ static int run_test_payload_100k_wavy(u8 color_channels,
         ripple_state.has_page_count = true;
         ripple_state.page_count_value = 1u;
     }
-    if (!ripple_state.has_page_index) {
-        ripple_state.has_page_index = true;
-        ripple_state.page_index_value = 1u;
-    }
-
     u64 ripple_effective_bits = ripple_bit_count;
     if (ripple_state.has_page_bits && ripple_state.page_bits_value <= ripple_effective_bits) {
         ripple_effective_bits = ripple_state.page_bits_value;
@@ -15549,10 +15438,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         page_state.has_page_count = true;
         page_state.page_count_value = 1u;
     }
-    if (!page_state.has_page_index) {
-        page_state.has_page_index = true;
-        page_state.page_index_value = 1u;
-    }
     u64 effective_bits = extracted_bit_count;
     if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
         effective_bits = page_state.page_bits_value;
@@ -15632,10 +15517,6 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     if (!scaled_state.has_page_count) {
         scaled_state.has_page_count = true;
         scaled_state.page_count_value = 1u;
-    }
-    if (!scaled_state.has_page_index) {
-        scaled_state.has_page_index = true;
-        scaled_state.page_index_value = 1u;
     }
     u64 scaled_effective_bits = scaled_bit_count;
     if (scaled_state.has_page_bits && scaled_state.page_bits_value <= scaled_effective_bits) {
