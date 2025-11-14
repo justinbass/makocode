@@ -334,6 +334,48 @@ static void console_line(int fd, const char* text) {
     write(fd, "\n", 1u);
 }
 
+enum TestLogLevel {
+    TestLogSilent = 0,
+    TestLogSummary = 1,
+    TestLogVerbose = 2
+};
+
+static TestLogLevel g_test_log_level = TestLogVerbose;
+static bool g_test_logging_enabled = false;
+
+static void test_log_enable() {
+    g_test_logging_enabled = true;
+}
+
+static void test_log_set_level(TestLogLevel level) {
+    g_test_log_level = level;
+}
+
+static bool test_should_log(TestLogLevel level) {
+    if (!g_test_logging_enabled) {
+        return true;
+    }
+    return g_test_log_level >= level;
+}
+
+static void test_log_write(TestLogLevel level, const char* text) {
+    if (!text) {
+        return;
+    }
+    if (test_should_log(level)) {
+        console_write(1, text);
+    }
+}
+
+static void test_log_line(TestLogLevel level, const char* text) {
+    if (!text) {
+        return;
+    }
+    if (test_should_log(level)) {
+        console_line(1, text);
+    }
+}
+
 static void u64_to_ascii(u64 value, char* buffer, usize capacity) {
     if (!buffer || capacity == 0) {
         return;
@@ -14036,8 +14078,8 @@ static bool verify_corner_detection_case(const char* name,
         return false;
     }
 
-    console_write(1, "test-scan-basic: corner detection ");
-    console_line(1, name);
+    test_log_write(TestLogVerbose, "test-scan-basic: corner detection ");
+    test_log_line(TestLogVerbose, name);
     return true;
 }
 
@@ -14302,10 +14344,9 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to write payload artifact");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 1013.1 payload -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1013_border_payload.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-border-dirt:   artifact 1013.1 payload -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1013_border_payload.bin");
 
     makocode::ByteBuffer page_output;
     if (!encode_page_to_ppm(mapping,
@@ -14330,10 +14371,9 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to write encoded artifact");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 1013.2 encoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1013_border_encoded.ppm");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-border-dirt:   artifact 1013.2 encoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1013_border_encoded.ppm");
 
     unsigned ppm_width = 0;
     unsigned ppm_height = 0;
@@ -14629,14 +14669,12 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to write scan artifacts");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 1013.3 dirty -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1013_border_dirty.ppm");
-    console_line(1, "");
-    console_write(1, "test-border-dirt:   artifact 1013.4 cleaned -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1013_border_clean.ppm");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-border-dirt:   artifact 1013.3 dirty -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1013_border_dirty.ppm");
+    test_log_write(TestLogVerbose, "test-border-dirt:   artifact 1013.4 cleaned -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1013_border_clean.ppm");
 
     makocode::ByteBuffer dirty_frame_bits;
     u64 dirty_frame_bit_count = 0u;
@@ -14680,7 +14718,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
             }
         }
         if (dirty_payload_match) {
-            console_line(1, "test-border-dirt: dirty image decoded without cleanup");
+            test_log_line(TestLogSummary, "test-border-dirt: dirty image decoded without cleanup");
         }
     }
 
@@ -14766,7 +14804,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
             }
         }
         if (!frame_differs) {
-            console_line(1, "test-border-dirt: frame bits match after cleaning");
+            test_log_line(TestLogSummary, "test-border-dirt: frame bits match after cleaning");
         }
     }
     makocode::ByteBuffer clean_payload_bits;
@@ -14809,10 +14847,9 @@ static int command_test_border_dirt(int arg_count, char** args) {
         console_line(2, "test-border-dirt: failed to write decoded payload artifact");
         return 1;
     }
-    console_write(1, "test-border-dirt:   artifact 1013.5 decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1013_border_payload_decoded.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-border-dirt:   artifact 1013.5 decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1013_border_payload_decoded.bin");
 
     const u64 expected_checksum = 1530u;
     u64 checksum = 0u;
@@ -14836,7 +14873,7 @@ static int command_test_border_dirt(int arg_count, char** args) {
         return 1;
     }
 
-    console_line(1, "test-border-dirt: cleanup verified");
+    test_log_line(TestLogSummary, "test-border-dirt: cleanup verified");
     return 0;
 }
 
@@ -14877,15 +14914,15 @@ static int command_test_scan_basic(int arg_count, char** args) {
     if (!verify_fixture("clean_gray", clean_path, 112, 17, 86, sync_white_cut)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: fixture clean_gray");
+    test_log_line(TestLogVerbose, "test-scan-basic: fixture clean_gray");
     if (!verify_fixture("noisy_gray", noisy_path, 113, 32, 94, sync_white_cut)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: fixture noisy_gray");
+    test_log_line(TestLogVerbose, "test-scan-basic: fixture noisy_gray");
     if (!verify_invalid_fixture(invalid_path)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: fixture wrong_depth");
+    test_log_line(TestLogVerbose, "test-scan-basic: fixture wrong_depth");
 
     const SyntheticEntry bimodal_entries[] = {
         {64, 500},
@@ -14897,7 +14934,7 @@ static int command_test_scan_basic(int arg_count, char** args) {
                                128, 77, 128, sync_white_cut)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: synthetic bimodal");
+    test_log_line(TestLogVerbose, "test-scan-basic: synthetic bimodal");
     const SyntheticEntry skewed_entries[] = {
         {30, 800},
         {200, 200}
@@ -14908,7 +14945,7 @@ static int command_test_scan_basic(int arg_count, char** args) {
                                64, 47, 115, sync_white_cut)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: synthetic skewed");
+    test_log_line(TestLogVerbose, "test-scan-basic: synthetic skewed");
     const SyntheticEntry low_contrast_entries[] = {
         {118, 2},
         {119, 2},
@@ -14923,7 +14960,7 @@ static int command_test_scan_basic(int arg_count, char** args) {
                                120, 118, 120, sync_white_cut)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: synthetic low_contrast");
+    test_log_line(TestLogVerbose, "test-scan-basic: synthetic low_contrast");
 
     if (!verify_corner_detection_case("corner-rotation-scale-a",
                                       160u,
@@ -14962,9 +14999,9 @@ static int command_test_scan_basic(int arg_count, char** args) {
     if (!verify_border_dirt_cleanup(fixture_dir)) {
         return 1;
     }
-    console_line(1, "test-scan-basic: border dirt removal");
+    test_log_line(TestLogVerbose, "test-scan-basic: border dirt removal");
 
-    console_line(1, "test-scan-basic: all fixtures passed");
+    test_log_line(TestLogSummary, "test-scan-basic: all fixtures passed");
     return 0;
 }
 
@@ -15090,10 +15127,9 @@ static int command_test_low_ecc_fiducial(int arg_count, char** args) {
         console_line(2, "test-low-ecc: failed to write payload artifact");
         return 1;
     }
-    console_write(1, "test-low-ecc:   artifact 1023.1 payload -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1023_low_ecc_payload.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-low-ecc:   artifact 1023.1 payload -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1023_low_ecc_payload.bin");
     makocode::ByteBuffer page_base;
     if (!encode_page_to_ppm(mapping,
                             frame_bits,
@@ -15165,10 +15201,9 @@ static int command_test_low_ecc_fiducial(int arg_count, char** args) {
         console_line(2, "test-low-ecc: failed to write encoded artifact");
         return 1;
     }
-    console_write(1, "test-low-ecc:   artifact 1023.2 encoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1023_low_ecc_encoded.ppm");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-low-ecc:   artifact 1023.2 encoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1023_low_ecc_encoded.ppm");
 
     makocode::ByteBuffer extracted_bits;
     u64 extracted_bit_count = 0u;
@@ -15217,17 +15252,16 @@ static int command_test_low_ecc_fiducial(int arg_count, char** args) {
         console_line(2, "test-low-ecc: failed to write decoded artifact");
         return 1;
     }
-    console_write(1, "test-low-ecc:   artifact 1023.3 decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1023_low_ecc_decoded.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-low-ecc:   artifact 1023.3 decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1023_low_ecc_decoded.bin");
 
-    console_line(1, "test-low-ecc: fiducial reservation roundtrip ok");
+    test_log_line(TestLogSummary, "test-low-ecc: fiducial reservation roundtrip ok");
     return 0;
 }
 
 static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping) {
-    console_line(1, "test: footer title roundtrip");
+    test_log_line(TestLogSummary, "test: footer title roundtrip");
     ImageMappingConfig mapping = base_mapping;
     if (!mapping.color_set) {
         mapping.color_channels = 1u;
@@ -15494,27 +15528,24 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
         console_line(2, "test: footer title roundtrip failed to write payload artifact");
         return false;
     }
-    console_write(1, "test:   footer payload -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1022_footer_title_payload.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test:   footer payload -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1022_footer_title_payload.bin");
     if (!write_artifact("1022_footer_title_encoded.ppm", ppm_buffer)) {
         console_line(2, "test: footer title roundtrip failed to write encoded artifact");
         return false;
     }
-    console_write(1, "test:   footer encoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1022_footer_title_encoded.ppm");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test:   footer encoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1022_footer_title_encoded.ppm");
     if (!write_artifact("1022_footer_title_decoded.bin", decoder.payload)) {
         console_line(2, "test: footer title roundtrip failed to write decoded artifact");
         return false;
     }
-    console_write(1, "test:   footer decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/1022_footer_title_decoded.bin");
-    console_line(1, "");
-    console_line(1, "test: footer title roundtrip ok");
+    test_log_write(TestLogVerbose, "test:   footer decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/1022_footer_title_decoded.bin");
+    test_log_line(TestLogSummary, "test: footer title roundtrip ok");
     return true;
 }
 
@@ -15538,7 +15569,7 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
         original_payload.data[i] = (u8)(i & 0xFFu);
     }
     original_payload.size = payload_size;
-    console_line(1, "test-100kb: generated 100 KiB grayscale payload");
+    test_log_line(TestLogSummary, "test-100kb: generated 100 KiB grayscale payload");
 
     ImageMappingConfig mapping;
     mapping.color_channels = 1u;
@@ -15590,15 +15621,14 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
     u64_to_ascii((u64)capacity.width_pixels, width_digits, sizeof(width_digits));
     u64_to_ascii((u64)capacity.height_pixels, height_digits, sizeof(height_digits));
     u64_to_ascii(capacity.bits_per_page, capacity_digits, sizeof(capacity_digits));
-    console_write(1, "test-100kb: frame_bits=");
-    console_write(1, frame_bits_digits);
-    console_write(1, " width=");
-    console_write(1, width_digits);
-    console_write(1, " height=");
-    console_write(1, height_digits);
-    console_write(1, " capacity=");
-    console_write(1, capacity_digits);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-100kb: frame_bits=");
+    test_log_write(TestLogVerbose, frame_bits_digits);
+    test_log_write(TestLogVerbose, " width=");
+    test_log_write(TestLogVerbose, width_digits);
+    test_log_write(TestLogVerbose, " height=");
+    test_log_write(TestLogVerbose, height_digits);
+    test_log_write(TestLogVerbose, " capacity=");
+    test_log_line(TestLogVerbose, capacity_digits);
 
     const makocode::EccSummary& ecc_summary = encoder.ecc_info();
     makocode::ByteBuffer ppm_buffer;
@@ -15696,30 +15726,27 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
         console_line(2, "test-100kb: failed to write payload artifact");
         return 1;
     }
-    console_write(1, "test-100kb:   payload -> ");
-    console_write(1, base_dir);
-    console_write(1, "/2001_payload_gray_100k.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-100kb:   payload -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/2001_payload_gray_100k.bin");
 
     if (!write_artifact("2001_payload_gray_100k_encoded.ppm", ppm_buffer)) {
         console_line(2, "test-100kb: failed to write encoded artifact");
         return 1;
     }
-    console_write(1, "test-100kb:   encoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/2001_payload_gray_100k_encoded.ppm");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-100kb:   encoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/2001_payload_gray_100k_encoded.ppm");
 
     if (!write_artifact("2001_payload_gray_100k_decoded.bin", decoder.payload)) {
         console_line(2, "test-100kb: failed to write decoded artifact");
         return 1;
     }
-    console_write(1, "test-100kb:   decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/2001_payload_gray_100k_decoded.bin");
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "test-100kb:   decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_line(TestLogVerbose, "/2001_payload_gray_100k_decoded.bin");
 
-    console_line(1, "test-100kb: roundtrip ok");
+    test_log_line(TestLogSummary, "test-100kb: roundtrip ok");
     return 0;
 }
 
@@ -15730,12 +15757,23 @@ static int run_test_payload_100k_wavy(u8 color_channels,
                                       const char* ripple_ppm_name,
                                       const char* decoded_bin_name) {
     auto log_prefix = [&](int fd) {
-        console_write(fd, test_label);
-        console_write(fd, ": ");
+        if (fd == 1) {
+            test_log_write(TestLogVerbose, test_label);
+            test_log_write(TestLogVerbose, ": ");
+        } else {
+            console_write(fd, test_label);
+            console_write(fd, ": ");
+        }
     };
     auto log_line = [&](int fd, const char* message) {
-        log_prefix(fd);
-        console_line(fd, message);
+        if (fd == 1) {
+            test_log_write(TestLogVerbose, test_label);
+            test_log_write(TestLogVerbose, ": ");
+            test_log_line(TestLogVerbose, message);
+        } else {
+            log_prefix(fd);
+            console_line(fd, message);
+        }
     };
 
     const char* base_dir = "test";
@@ -15758,8 +15796,8 @@ static int run_test_payload_100k_wavy(u8 color_channels,
     u64_to_ascii((u64)color_channels, color_digits, sizeof(color_digits));
     log_line(1, "generated 100 KiB payload");
     log_prefix(1);
-    console_write(1, "color=");
-    console_line(1, color_digits);
+    test_log_write(TestLogVerbose, "color=");
+    test_log_line(TestLogVerbose, color_digits);
 
     ImageMappingConfig mapping;
     mapping.color_channels = color_channels;
@@ -15877,33 +15915,30 @@ static int run_test_payload_100k_wavy(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  payload -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_write(1, payload_bin_name);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "  payload -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, payload_bin_name);
 
     if (!write_artifact(encoded_ppm_name, fiducial_ppm)) {
         log_line(2, "failed to write fiducial artifact");
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  fiducial -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_write(1, encoded_ppm_name);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "  fiducial -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, encoded_ppm_name);
 
     if (!write_artifact(ripple_ppm_name, ripple_ppm)) {
         log_line(2, "failed to write ripple artifact");
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  ripple -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_write(1, ripple_ppm_name);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "  ripple -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, ripple_ppm_name);
 
     makocode::ByteBuffer ripple_bits;
     u64 ripple_bit_count = 0u;
@@ -15970,18 +16005,18 @@ static int run_test_payload_100k_wavy(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_write(1, decoded_bin_name);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "  decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, decoded_bin_name);
 
     if (!payload_matches) {
         log_line(2, "decoded payload mismatch under ripple distortion");
         return 1;
     }
 
-    log_line(1, "ripple roundtrip ok");
+    test_log_write(TestLogSummary, test_label);
+    test_log_line(TestLogSummary, ": ripple roundtrip ok");
     return 0;
 }
 
@@ -16025,12 +16060,23 @@ static int run_test_payload_100k_scaled(u8 color_channels,
                                         double scale_factor_y) {
     const char* base_dir = "test";
     auto log_prefix = [&](int fd) {
-        console_write(fd, test_label);
-        console_write(fd, ": ");
+        if (fd == 1) {
+            test_log_write(TestLogVerbose, test_label);
+            test_log_write(TestLogVerbose, ": ");
+        } else {
+            console_write(fd, test_label);
+            console_write(fd, ": ");
+        }
     };
     auto log_line = [&](int fd, const char* message) {
-        log_prefix(fd);
-        console_line(fd, message);
+        if (fd == 1) {
+            test_log_write(TestLogVerbose, test_label);
+            test_log_write(TestLogVerbose, ": ");
+            test_log_line(TestLogVerbose, message);
+        } else {
+            log_prefix(fd);
+            console_line(fd, message);
+        }
     };
 
     if (!ensure_directory(base_dir)) {
@@ -16108,9 +16154,9 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     char channel_digits[8];
     u64_to_ascii((u64)color_channels, channel_digits, sizeof(channel_digits));
     log_prefix(1);
-    console_write(1, "generated 100 KiB payload (color channel ");
-    console_write(1, channel_digits);
-    console_line(1, ")");
+    test_log_write(TestLogVerbose, "generated 100 KiB payload (color channel ");
+    test_log_write(TestLogVerbose, channel_digits);
+    test_log_line(TestLogVerbose, ")");
 
     ImageMappingConfig mapping;
     mapping.color_channels = color_channels;
@@ -16163,15 +16209,14 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     u64_to_ascii((u64)capacity.height_pixels, height_digits, sizeof(height_digits));
     u64_to_ascii(capacity.bits_per_page, capacity_digits, sizeof(capacity_digits));
     log_prefix(1);
-    console_write(1, "frame_bits=");
-    console_write(1, frame_bits_digits);
-    console_write(1, " width=");
-    console_write(1, width_digits);
-    console_write(1, " height=");
-    console_write(1, height_digits);
-    console_write(1, " capacity=");
-    console_write(1, capacity_digits);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "frame_bits=");
+    test_log_write(TestLogVerbose, frame_bits_digits);
+    test_log_write(TestLogVerbose, " width=");
+    test_log_write(TestLogVerbose, width_digits);
+    test_log_write(TestLogVerbose, " height=");
+    test_log_write(TestLogVerbose, height_digits);
+    test_log_write(TestLogVerbose, " capacity=");
+    test_log_line(TestLogVerbose, capacity_digits);
 
     const makocode::EccSummary& ecc_summary = encoder.ecc_info();
     makocode::ByteBuffer ppm_buffer;
@@ -16278,11 +16323,10 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "scaled page with fractional factors x=");
-    console_write(1, scale_x_display);
-    console_write(1, " y=");
-    console_write(1, scale_y_display);
-    console_line(1, "");
+    test_log_write(TestLogVerbose, "scaled page with fractional factors x=");
+    test_log_write(TestLogVerbose, scale_x_display);
+    test_log_write(TestLogVerbose, " y=");
+    test_log_line(TestLogVerbose, scale_y_display);
 
     makocode::ByteBuffer scaled_bits;
     u64 scaled_bit_count = 0u;
@@ -16369,10 +16413,10 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  payload -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_line(1, (const char*)payload_name.data);
+    test_log_write(TestLogVerbose, "  payload -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, (const char*)payload_name.data);
 
     makocode::ByteBuffer encoded_name;
     if (!encoded_name.append_ascii(artifact_prefix) ||
@@ -16386,10 +16430,10 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  encoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_line(1, (const char*)encoded_name.data);
+    test_log_write(TestLogVerbose, "  encoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, (const char*)encoded_name.data);
 
     makocode::ByteBuffer decoded_name;
     if (!decoded_name.append_ascii(artifact_prefix) ||
@@ -16403,10 +16447,10 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_line(1, (const char*)decoded_name.data);
+    test_log_write(TestLogVerbose, "  decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, (const char*)decoded_name.data);
 
     makocode::ByteBuffer scaled_encoded_name;
     if (!scaled_encoded_name.append_ascii(artifact_prefix) ||
@@ -16422,10 +16466,10 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  scaled encoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_line(1, (const char*)scaled_encoded_name.data);
+    test_log_write(TestLogVerbose, "  scaled encoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, (const char*)scaled_encoded_name.data);
 
     makocode::ByteBuffer scaled_decoded_name;
     if (!scaled_decoded_name.append_ascii(artifact_prefix) ||
@@ -16441,12 +16485,13 @@ static int run_test_payload_100k_scaled(u8 color_channels,
         return 1;
     }
     log_prefix(1);
-    console_write(1, "  scaled decoded -> ");
-    console_write(1, base_dir);
-    console_write(1, "/");
-    console_line(1, (const char*)scaled_decoded_name.data);
+    test_log_write(TestLogVerbose, "  scaled decoded -> ");
+    test_log_write(TestLogVerbose, base_dir);
+    test_log_write(TestLogVerbose, "/");
+    test_log_line(TestLogVerbose, (const char*)scaled_decoded_name.data);
 
-    log_line(1, "baseline and scaled roundtrips ok");
+    test_log_write(TestLogSummary, test_label);
+    test_log_line(TestLogSummary, ": baseline and scaled roundtrips ok");
     return 0;
 }
 
@@ -16829,24 +16874,24 @@ static int command_test_payload(int arg_count, char** args) {
         usize scenario_password_length = scenario.use_password ? base_password_length : 0u;
         char digits_scenario[8];
         u64_to_ascii((u64)(scenario_index + 1u), digits_scenario, sizeof(digits_scenario));
-        console_write(1, "test: scenario ");
-        console_write(1, digits_scenario);
-        console_write(1, " password=");
-        console_write(1, scenario.use_password ? "yes" : "no");
-        console_write(1, " ecc=");
-        console_write(1, scenario.use_ecc ? "yes" : "no");
-        console_write(1, " redundancy=");
+        test_log_write(TestLogVerbose, "test: scenario ");
+        test_log_write(TestLogVerbose, digits_scenario);
+        test_log_write(TestLogVerbose, " password=");
+        test_log_write(TestLogVerbose, scenario.use_password ? "yes" : "no");
+        test_log_write(TestLogVerbose, " ecc=");
+        test_log_write(TestLogVerbose, scenario.use_ecc ? "yes" : "no");
+        test_log_write(TestLogVerbose, " redundancy=");
         char redundancy_digits[32];
         format_fixed_3(scenario.ecc_redundancy, redundancy_digits, sizeof(redundancy_digits));
-        console_write(1, redundancy_digits);
-        console_write(1, " rotation=");
+        test_log_write(TestLogVerbose, redundancy_digits);
+        test_log_write(TestLogVerbose, " rotation=");
         char rotation_digits[32];
         format_fixed_3(scenario.rotation_degrees, rotation_digits, sizeof(rotation_digits));
-        console_write(1, rotation_digits);
-        console_write(1, " skew_x=");
+        test_log_write(TestLogVerbose, rotation_digits);
+        test_log_write(TestLogVerbose, " skew_x=");
         char skew_x_digits[32];
         format_fixed_3(scenario.skew_pixels_x, skew_x_digits, sizeof(skew_x_digits));
-        console_line(1, skew_x_digits);
+        test_log_line(TestLogVerbose, skew_x_digits);
         for (usize color_index = 0; color_index < 3u; ++color_index) {
             ImageMappingConfig run_mapping = mapping;
             if (run_mapping.color_set) {
@@ -16866,8 +16911,8 @@ static int command_test_payload(int arg_count, char** args) {
             }
             char digits_color[8];
             u64_to_ascii((u64)run_mapping.color_channels, digits_color, sizeof(digits_color));
-            console_write(1, "test:  color=");
-            console_line(1, digits_color);
+            test_log_write(TestLogVerbose, "test:  color=");
+            test_log_line(TestLogVerbose, digits_color);
         u32 width_pixels = 0u;
         u32 height_pixels = 0u;
         if (!compute_page_dimensions(run_mapping, width_pixels, height_pixels)) {
@@ -17243,16 +17288,16 @@ static int command_test_payload(int arg_count, char** args) {
                 console_line(2, "test: failed to write original data bits");
                 return 1;
             }
-            console_write(1, "test:   data bits ");
-            console_line(1, (const char*)data_bin_name.data);
+            test_log_write(TestLogVerbose, "test:   data bits ");
+            test_log_line(TestLogVerbose, (const char*)data_bin_name.data);
             makocode::ByteBuffer encoded_name;
             if (!buffer_clone_with_suffix(data_base, "_encoded", ".ppm", encoded_name) ||
                 !write_buffer_to_directory(test_output_dir, encoded_name, page_output)) {
                 console_line(2, "test: failed to write encoded page");
                 return 1;
             }
-            console_write(1, "test:   data encoded ");
-            console_line(1, (const char*)encoded_name.data);
+            test_log_write(TestLogVerbose, "test:   data encoded ");
+            test_log_line(TestLogVerbose, (const char*)encoded_name.data);
             double page_rotation = scenario.rotate_scaled_only ? 0.0 : scenario.rotation_degrees;
             makocode::ByteBuffer scan_output;
             if (simulate_scan_distortion(page_output,
@@ -17278,8 +17323,8 @@ static int command_test_payload(int arg_count, char** args) {
                     console_line(2, "test: failed to write simulated scan");
                     return 1;
                 }
-                console_write(1, "test:   scan observed ");
-                console_line(1, (const char*)scan_name.data);
+                test_log_write(TestLogVerbose, "test:   scan observed ");
+                test_log_line(TestLogVerbose, (const char*)scan_name.data);
                 makocode::ByteBuffer scan_bits;
                 u64 scan_bit_count = 0u;
                 PpmParserState scan_page_state;
@@ -17339,8 +17384,8 @@ static int command_test_payload(int arg_count, char** args) {
                     console_line(2, "test: failed to write decoded data bits");
                     return 1;
                 }
-                console_write(1, "test:   data decoded ");
-                console_line(1, (const char*)decoded_bin_name.data);
+                test_log_write(TestLogVerbose, "test:   data decoded ");
+                test_log_line(TestLogVerbose, (const char*)decoded_bin_name.data);
                 if (!append_bits_from_buffer(scan_writer, scan_bits.data, scan_effective_bits)) {
                     console_line(2, "test: failed to combine simulated scan bits");
                     return 1;
@@ -17547,16 +17592,16 @@ static int command_test_payload(int arg_count, char** args) {
                         console_line(2, "test: failed to write scaled original bits");
                         return 1;
                     }
-                    console_write(1, "test:   scaled bits ");
-                    console_line(1, (const char*)scaled_bin_name.data);
+                    test_log_write(TestLogVerbose, "test:   scaled bits ");
+                    test_log_line(TestLogVerbose, (const char*)scaled_bin_name.data);
                     makocode::ByteBuffer scaled_encoded_name;
                     if (!buffer_clone_with_suffix(scaled_base, "_encoded", ".ppm", scaled_encoded_name) ||
                         !write_buffer_to_directory(test_output_dir, scaled_encoded_name, scaled_page_for_artifact)) {
                         console_line(2, "test: failed to write scaled scan page");
                         return 1;
                     }
-                    console_write(1, "test:   scaled encoded ");
-                    console_line(1, (const char*)scaled_encoded_name.data);
+                    test_log_write(TestLogVerbose, "test:   scaled encoded ");
+                    test_log_line(TestLogVerbose, (const char*)scaled_encoded_name.data);
                     double scaled_rotation = (scenario.rotate_scaled_only && use_integer_scaler && integer_factor == 3u) ? scenario.rotation_degrees : 0.0;
                     makocode::ByteBuffer scan_scaled;
                     if (simulate_scan_distortion(scaled_page,
@@ -17571,8 +17616,8 @@ static int command_test_payload(int arg_count, char** args) {
                             console_line(2, "test: failed to write simulated scan for scaled page");
                             return 1;
                         }
-                        console_write(1, "test:   scan observed ");
-                        console_line(1, (const char*)scan_scaled_name.data);
+                        test_log_write(TestLogVerbose, "test:   scan observed ");
+                        test_log_line(TestLogVerbose, (const char*)scan_scaled_name.data);
                         makocode::ByteBuffer scan_scaled_bits;
                         u64 scan_scaled_bit_count = 0u;
                         PpmParserState scan_scaled_page_state;
@@ -17623,8 +17668,8 @@ static int command_test_payload(int arg_count, char** args) {
                             console_line(2, "test: failed to write scaled decoded bits");
                             return 1;
                         }
-                        console_write(1, "test:   scaled decoded ");
-                        console_line(1, (const char*)scan_scaled_bin_name.data);
+                        test_log_write(TestLogVerbose, "test:   scaled decoded ");
+                        test_log_line(TestLogVerbose, (const char*)scan_scaled_bin_name.data);
                         if (!append_bits_from_buffer(scan_scaled_writer, scan_scaled_bits.data, scan_scaled_effective)) {
                             console_line(2, "test: failed to combine scaled simulated scan bits");
                             return 1;
@@ -17743,8 +17788,8 @@ static int command_test_payload(int arg_count, char** args) {
             console_line(2, "test: failed to write payload file");
             return 1;
         }
-        console_write(1, "test:   payload ");
-        console_line(1, (const char*)name_buffer.data);
+        test_log_write(TestLogVerbose, "test:   payload ");
+        test_log_line(TestLogVerbose, (const char*)name_buffer.data);
         name_buffer.release();
         if (!buffer_append_zero_padded(name_buffer, payload_serial, 4u) ||
             !name_buffer.append_ascii("_payload_s") ||
@@ -17760,8 +17805,8 @@ static int command_test_payload(int arg_count, char** args) {
             console_line(2, "test: failed to write decoded payload");
             return 1;
         }
-        console_write(1, "test:   payload decoded ");
-        console_line(1, (const char*)name_buffer.data);
+        test_log_write(TestLogVerbose, "test:   payload decoded ");
+        test_log_line(TestLogVerbose, (const char*)name_buffer.data);
         ++total_runs;
         if (mapping.color_set) {
             break;
@@ -17770,56 +17815,211 @@ static int command_test_payload(int arg_count, char** args) {
     }
     char digits_runs[16];
     u64_to_ascii((u64)total_runs, digits_runs, sizeof(digits_runs));
-    console_write(1, "test: completed runs=");
-    console_write(1, digits_runs);
-    console_line(1, "");
-    console_line(1, "test: artifacts saved for all combinations");
+    test_log_write(TestLogSummary, "test: completed runs=");
+    test_log_line(TestLogSummary, digits_runs);
+    test_log_line(TestLogSummary, "test: artifacts saved for all combinations");
     return 0;
 }
 
-static int command_test(int arg_count, char** args) {
-    struct TestSuiteEntry {
-        const char* name;
-        int (*fn)(int, char**);
-        bool forward_args;
-    };
-    /* Test suite summary:
-       1) scan-basic                      - validates histogram analytics and dirt removal on small fixtures.
-       2) border-dirt                     - exercises case 13 border speck encode -> dirty -> clean -> decode roundtrip.
-       3) low-ecc-fiducial                - verifies fiducial reservation with 0% ECC on a compact page.
-       4) payload-100kb                   - performs a 100 KiB encode/ppm/decode roundtrip without distortions.
-       5) payload-100kb-wavy (commented)  - runs a 100 KiB encode with fiducials, ripple distortion, and decode comparison.
-       6) payload-100kb-wavy-c2 (commented) - extends the ripple distortion roundtrip to color channel 2.
-       7) payload-100kb-wavy-c3 (commented) - extends the ripple distortion roundtrip to color channel 3.
-       8) payload-100kb-scaled            - expands the 100 KiB roundtrip with a 2.5x fractional scale decode validation for color channel 1.
-       9) payload-100kb-scaled-c2         - repeats the scaled roundtrip for color channel 2.
-      10) payload-100kb-scaled-c3         - repeats the scaled roundtrip for color channel 3.
-      11) payload-100kb-stretch-h26-v24   - validates fractional scaling with horizontal 2.6x and vertical 2.4x for grayscale pages.
-      12) payload-100kb-stretch-h24-v26   - validates fractional scaling with horizontal 2.4x and vertical 2.6x for grayscale pages.
-      13) payload-suite                   - runs exhaustive payload encode/decode scenarios across colors/password/ECC.
-      14) encode-decode-cli               - mimics the encode/decode CLI flow with fiducials and ensures roundtrip integrity. */
-    const TestSuiteEntry suites[] = {
-        {"low-ecc-fiducial", command_test_low_ecc_fiducial, false},
-        {"scan-basic", command_test_scan_basic, false},
-        {"border-dirt", command_test_border_dirt, false},
-        {"encode-decode-cli", command_test_encode_decode_cli, false},
-        {"payload-100kb", command_test_payload_gray_100k, false},
-        // {"payload-100kb-wavy", command_test_payload_gray_100k_wavy, false},
-        // {"payload-100kb-wavy-c2", command_test_payload_color2_100k_wavy, false},
-        // {"payload-100kb-wavy-c3", command_test_payload_color3_100k_wavy, false},
-        {"payload-100kb-scaled", command_test_payload_gray_100k_scaled, false},
-        {"payload-100kb-scaled-c2", command_test_payload_color2_100k_scaled, false},
-        {"payload-100kb-scaled-c3", command_test_payload_color3_100k_scaled, false},
-        {"payload-100kb-stretch-h26-v24", command_test_payload_gray_100k_stretch_h26_v24, false},
-        {"payload-100kb-stretch-h24-v26", command_test_payload_gray_100k_stretch_h24_v26, false},
-        {"payload-suite", command_test_payload, true}
-    };
-    usize suite_count = sizeof(suites) / sizeof(suites[0]);
+struct TestSuiteEntry {
+    const char* name;
+    const char* description;
+    int (*fn)(int, char**);
+    bool forward_args;
+};
+
+static bool test_mark_suite_token(const char* token,
+                                  usize token_length,
+                                  const TestSuiteEntry* suites,
+                                  usize suite_count,
+                                  bool* run_mask) {
+    if (!token || token_length == 0u || !suites || !run_mask) {
+        return false;
+    }
     for (usize i = 0u; i < suite_count; ++i) {
+        if (ascii_equals_token(token, token_length, suites[i].name)) {
+            run_mask[i] = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool test_mark_suite_list(const char* csv,
+                                 const TestSuiteEntry* suites,
+                                 usize suite_count,
+                                 bool* run_mask) {
+    if (!csv || !suites || !run_mask) {
+        return false;
+    }
+    const char* token_start = csv;
+    const char* cursor = csv;
+    bool matched = false;
+    while (1) {
+        if (*cursor == ',' || *cursor == '\0') {
+            usize token_length = (usize)(cursor - token_start);
+            if (token_length == 0u) {
+                return false;
+            }
+            if (!test_mark_suite_token(token_start, token_length, suites, suite_count, run_mask)) {
+                return false;
+            }
+            matched = true;
+            if (*cursor == '\0') {
+                break;
+            }
+            token_start = cursor + 1;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        cursor += 1;
+    }
+    return matched;
+}
+
+static void test_print_suite_list(const TestSuiteEntry* suites, usize suite_count) {
+    if (!suites) {
+        return;
+    }
+    console_line(1, "Available test suites:");
+    for (usize i = 0u; i < suite_count; ++i) {
+        console_write(1, "  ");
+        console_write(1, suites[i].name);
+        if (suites[i].description) {
+            console_write(1, " - ");
+            console_line(1, suites[i].description);
+        } else {
+            console_line(1, "");
+        }
+    }
+}
+
+static int command_test(int arg_count, char** args) {
+    test_log_enable();
+    /* Test suite summary mirrors descriptions below. */
+    const TestSuiteEntry suites[] = {
+        {"low-ecc-fiducial", "Validates fiducial reservation with 0% ECC on a compact page.", command_test_low_ecc_fiducial, false},
+        {"scan-basic", "Exercises histogram analytics and dirt removal fixtures.", command_test_scan_basic, false},
+        {"border-dirt", "Ensures dirty border cleanup recovers frame bits.", command_test_border_dirt, false},
+        {"encode-decode-cli", "Smoke test for the public encode/decode CLI workflow.", command_test_encode_decode_cli, false},
+        {"payload-100kb", "100 KiB grayscale payload roundtrip without distortions.", command_test_payload_gray_100k, false},
+        // {"payload-100kb-wavy", "100 KiB grayscale roundtrip under ripple distortion.", command_test_payload_gray_100k_wavy, false},
+        // {"payload-100kb-wavy-c2", "100 KiB color channel 2 roundtrip with distortion.", command_test_payload_color2_100k_wavy, false},
+        // {"payload-100kb-wavy-c3", "100 KiB color channel 3 roundtrip with distortion.", command_test_payload_color3_100k_wavy, false},
+        {"payload-100kb-scaled", "100 KiB grayscale roundtrip validated at 2.5x fractional scaling.", command_test_payload_gray_100k_scaled, false},
+        {"payload-100kb-scaled-c2", "Color channel 2 scaled roundtrip validation.", command_test_payload_color2_100k_scaled, false},
+        {"payload-100kb-scaled-c3", "Color channel 3 scaled roundtrip validation.", command_test_payload_color3_100k_scaled, false},
+        {"payload-100kb-stretch-h26-v24", "Grayscale fractional scaling with horizontal 2.6x and vertical 2.4x.", command_test_payload_gray_100k_stretch_h26_v24, false},
+        {"payload-100kb-stretch-h24-v26", "Grayscale fractional scaling with horizontal 2.4x and vertical 2.6x.", command_test_payload_gray_100k_stretch_h24_v26, false},
+        {"payload-suite", "Exhaustive payload/ECC/password combinations.", command_test_payload, true}
+    };
+    enum { TestSuiteCount = sizeof(suites) / sizeof(suites[0]) };
+    const usize suite_count = (usize)TestSuiteCount;
+    bool run_mask[TestSuiteCount];
+    for (usize i = 0u; i < suite_count; ++i) {
+        run_mask[i] = false;
+    }
+    bool have_selection = false;
+    bool list_only = false;
+    int forwarded_index = arg_count;
+    for (int i = 0; i < arg_count; ++i) {
+        char* arg = args[i];
+        if (!arg) {
+            continue;
+        }
+        usize length = ascii_length(arg);
+        if (length == 0u) {
+            continue;
+        }
+        if (ascii_equals_token(arg, length, "--")) {
+            forwarded_index = i + 1;
+            break;
+        }
+        bool handled = false;
+        if (ascii_equals_token(arg, length, "--list")) {
+            list_only = true;
+            handled = true;
+        } else if (ascii_equals_token(arg, length, "--summary")) {
+            test_log_set_level(TestLogSummary);
+            handled = true;
+        } else if (ascii_equals_token(arg, length, "--quiet")) {
+            test_log_set_level(TestLogSilent);
+            handled = true;
+        } else if (ascii_equals_token(arg, length, "--verbose")) {
+            test_log_set_level(TestLogVerbose);
+            handled = true;
+        } else {
+            const char only_prefix[] = "--only=";
+            if (ascii_equals_token(arg, length, "--only")) {
+                if ((i + 1) >= arg_count) {
+                    console_line(2, "test: --only requires a comma-separated list of suite names");
+                    return 1;
+                }
+                const char* value = args[i + 1];
+                if (!value) {
+                    console_line(2, "test: --only requires a comma-separated list of suite names");
+                    return 1;
+                }
+                if (!test_mark_suite_list(value, suites, suite_count, run_mask)) {
+                    console_line(2, "test: --only list contains an unknown suite");
+                    return 1;
+                }
+                have_selection = true;
+                i += 1;
+                handled = true;
+            } else if (ascii_starts_with(arg, only_prefix)) {
+                const char* value = arg + (sizeof(only_prefix) - 1u);
+                if (!test_mark_suite_list(value, suites, suite_count, run_mask)) {
+                    console_line(2, "test: --only list contains an unknown suite");
+                    return 1;
+                }
+                have_selection = true;
+                handled = true;
+            }
+        }
+        if (handled) {
+            continue;
+        }
+        if (length >= 2u && arg[0] == '-' && arg[1] == '-') {
+            forwarded_index = i;
+            break;
+        }
+        if (!test_mark_suite_token(arg, length, suites, suite_count, run_mask)) {
+            console_write(2, "test: unknown option or suite '");
+            console_write(2, arg);
+            console_line(2, "'");
+            return 1;
+        }
+        have_selection = true;
+    }
+
+    if (list_only) {
+        test_print_suite_list(suites, suite_count);
+        return 0;
+    }
+
+    if (!have_selection) {
+        for (usize i = 0u; i < suite_count; ++i) {
+            run_mask[i] = true;
+        }
+    }
+
+    int forwarded_argc = 0;
+    char** forwarded_argv = (char**)0;
+    if (forwarded_index < arg_count) {
+        forwarded_argc = arg_count - forwarded_index;
+        forwarded_argv = (forwarded_argc > 0) ? (args + forwarded_index) : (char**)0;
+    }
+
+    for (usize i = 0u; i < suite_count; ++i) {
+        if (!run_mask[i]) {
+            continue;
+        }
         const TestSuiteEntry& entry = suites[i];
-        console_write(1, "test-suite: ");
-        console_line(1, entry.name);
-        int result = entry.forward_args ? entry.fn(arg_count, args)
+        test_log_write(TestLogSummary, "test-suite: ");
+        test_log_line(TestLogSummary, entry.name);
+        int result = entry.forward_args ? entry.fn(forwarded_argc, forwarded_argv)
                                         : entry.fn(0, (char**)0);
         if (result != 0) {
             console_write(2, "test-suite: failure in ");
@@ -17827,7 +18027,7 @@ static int command_test(int arg_count, char** args) {
             return result;
         }
     }
-    console_line(1, "test-suite: complete");
+    test_log_line(TestLogSummary, "test-suite: complete");
     return 0;
 }
 
