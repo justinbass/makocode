@@ -14,6 +14,7 @@ test: makocode
 	./scripts/run_roundtrip.sh --label 3001 --size 8192 --ecc 0.5 --width 500 --height 500
 	./scripts/run_roundtrip.sh --label 3002 --size 8192 --ecc 0 --width 500 --height 500
 	./scripts/run_roundtrip.sh --label 3003 --size 131072 --ecc 1.0 --width 700 --height 700 --multi-page
+	./scripts/run_roundtrip.sh --label 3005 --size 4096 --ecc 0.25 --width 480 --height 480 --palette "White Cyan Magenta Yellow Black"
 	#./scripts/test_overlay_e2e.sh 3004
 
 clean:

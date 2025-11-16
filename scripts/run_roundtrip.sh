@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 Usage: run_roundtrip.sh --label NAME --size BYTES --ecc VALUE --width PX --height PX [--multi-page]
+                            [--palette "White ... Black"]
 
 Environment:
   MAKOCODE_BIN   Path to the makocode binary (default: ./makocode)
@@ -16,6 +17,7 @@ ecc=""
 width=""
 height=""
 multi_page=0
+palette=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
         --multi-page)
             multi_page=1
             shift
+            ;;
+        --palette)
+            palette=${2:-}
+            shift 2
             ;;
         --help)
             usage
@@ -80,17 +86,25 @@ trap 'rm -rf "$tmp_dir"' EXIT
 head -c "$size" /dev/urandom > "$tmp_dir/random.bin"
 
 encode_args=("$makocode_bin" encode --input=random.bin --ecc="$ecc" --page-width="$width" --page-height="$height")
+if [[ -n $palette ]]; then
+    encode_args+=("--palette" "$palette")
+fi
 ( cd "$tmp_dir" && "${encode_args[@]}" )
 
+decode_args=("$makocode_bin" decode)
+if [[ -n $palette ]]; then
+    decode_args+=("--palette" "$palette")
+fi
+
 if [[ $multi_page -eq 1 ]]; then
-    ( cd "$tmp_dir" && "$makocode_bin" decode ./*.ppm --output-dir decoded )
+    ( cd "$tmp_dir" && "${decode_args[@]}" ./*.ppm --output-dir decoded )
 else
     ppm_file=$(cd "$tmp_dir" && ls -1 -- *.ppm | head -n1)
     if [[ -z $ppm_file ]]; then
         echo "No PPM output produced for $label" >&2
         exit 1
     fi
-    ( cd "$tmp_dir" && "$makocode_bin" decode "$ppm_file" --output-dir decoded )
+    ( cd "$tmp_dir" && "${decode_args[@]}" "$ppm_file" --output-dir decoded )
 fi
 
 origin_payload="test/${label}_random_payload.bin"

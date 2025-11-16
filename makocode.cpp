@@ -86,6 +86,8 @@ extern "C" double fabs(double value);
 extern "C" double sin(double value);
 extern "C" double cos(double value);
 extern "C" double atan2(double y, double x);
+extern "C" double log(double value);
+extern "C" long double ceill(long double value);
 struct tm;
 extern "C" long  time(long* tloc);
 extern "C" struct tm* gmtime(const long* timep);
@@ -183,6 +185,34 @@ static bool ascii_equals_token(const char* text, usize length, const char* keywo
     usize index = 0u;
     while (keyword[index]) {
         if (index >= length || text[index] != keyword[index]) {
+            return false;
+        }
+        ++index;
+    }
+    return (index == length);
+}
+
+static char ascii_lower_char(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c + 32);
+    }
+    return c;
+}
+
+static bool ascii_equals_token_ignore_case(const char* text,
+                                           usize length,
+                                           const char* keyword) {
+    if (!text || !keyword) {
+        return false;
+    }
+    usize index = 0u;
+    while (keyword[index]) {
+        if (index >= length) {
+            return false;
+        }
+        char lhs = ascii_lower_char(text[index]);
+        char rhs = ascii_lower_char(keyword[index]);
+        if (lhs != rhs) {
             return false;
         }
         ++index;
@@ -3855,6 +3885,15 @@ static void byte_buffer_move(makocode::ByteBuffer& dest, makocode::ByteBuffer& s
     src.capacity = 0;
 }
 
+struct PaletteColor {
+    u8 r;
+    u8 g;
+    u8 b;
+};
+
+static const u32 MAX_CUSTOM_PALETTE_COLORS = 16u;
+static const usize MAX_CUSTOM_PALETTE_TEXT = 256u;
+
 struct ImageMappingConfig {
     u8  color_channels;
     bool color_set;
@@ -3862,6 +3901,13 @@ struct ImageMappingConfig {
     bool page_width_set;
     u32 page_height_pixels;
     bool page_height_set;
+    char palette_text[MAX_CUSTOM_PALETTE_TEXT];
+    usize palette_text_length;
+    bool palette_set;
+    PaletteColor custom_palette[MAX_CUSTOM_PALETTE_COLORS];
+    u8 custom_palette_ids[MAX_CUSTOM_PALETTE_COLORS];
+    u32 custom_palette_count;
+    bool custom_palette_valid;
 
     ImageMappingConfig()
         : color_channels(1u),
@@ -3869,7 +3915,19 @@ struct ImageMappingConfig {
           page_width_pixels(DEFAULT_PAGE_WIDTH_PIXELS),
           page_width_set(false),
           page_height_pixels(DEFAULT_PAGE_HEIGHT_PIXELS),
-          page_height_set(false) {}
+          page_height_set(false),
+          palette_text_length(0u),
+          palette_set(false),
+          custom_palette_count(0u),
+          custom_palette_valid(false) {
+        palette_text[0] = '\0';
+        for (u32 i = 0u; i < MAX_CUSTOM_PALETTE_COLORS; ++i) {
+            custom_palette[i].r = 0u;
+            custom_palette[i].g = 0u;
+            custom_palette[i].b = 0u;
+            custom_palette_ids[i] = 0u;
+        }
+    }
 };
 
 static bool compute_page_dimensions(const ImageMappingConfig& config,
@@ -4208,12 +4266,6 @@ static u8 color_mode_samples_per_pixel(u8 mode) {
     return 0u;
 }
 
-struct PaletteColor {
-    u8 r;
-    u8 g;
-    u8 b;
-};
-
 static const PaletteColor PALETTE_GRAY[2] = {
     {0u, 0u, 0u},     // black
     {255u, 255u, 255u} // white
@@ -4258,8 +4310,442 @@ static bool palette_for_mode(u8 mode, const PaletteColor*& colors, u32& count) {
     return false;
 }
 
-static void footer_select_colors(u8 color_mode, u8* text_rgb, u8* background_rgb) {
+enum NamedPaletteColorId {
+    NAMED_COLOR_WHITE = 0u,
+    NAMED_COLOR_CYAN = 1u,
+    NAMED_COLOR_MAGENTA = 2u,
+    NAMED_COLOR_YELLOW = 3u,
+    NAMED_COLOR_BLACK = 4u,
+    NAMED_COLOR_INVALID = 0xFFu
+};
+
+static const char* NAMED_COLOR_LABELS[] = {
+    "White",
+    "Cyan",
+    "Magenta",
+    "Yellow",
+    "Black"
+};
+
+static const PaletteColor NAMED_COLOR_VALUES[] = {
+    {255u, 255u, 255u},
+    {0u, 255u, 255u},
+    {255u, 0u, 255u},
+    {255u, 255u, 0u},
+    {0u, 0u, 0u}
+};
+
+static bool decode_named_palette_color(const char* token,
+                                       usize length,
+                                       u8& color_id,
+                                       PaletteColor& color) {
+    for (u8 idx = 0u; idx < (u8)(sizeof(NAMED_COLOR_LABELS) / sizeof(NAMED_COLOR_LABELS[0])); ++idx) {
+        const char* label = NAMED_COLOR_LABELS[idx];
+        if (ascii_equals_token_ignore_case(token, length, label)) {
+            color_id = idx;
+            color = NAMED_COLOR_VALUES[idx];
+            return true;
+        }
+    }
+    color_id = NAMED_COLOR_INVALID;
+    return false;
+}
+
+static bool image_mapping_set_palette_text(ImageMappingConfig& config,
+                                           const char* text,
+                                           usize length,
+                                           const char* command_name) {
+    const char* prefix = command_name ? command_name : "makocode";
+    if (!text || length == 0u) {
+        console_write(2, prefix);
+        console_line(2, ": --palette requires a non-empty list of colors");
+        return false;
+    }
+    if (length >= MAX_CUSTOM_PALETTE_TEXT) {
+        console_write(2, prefix);
+        console_line(2, ": --palette text is too long");
+        return false;
+    }
+    for (usize i = 0u; i < length; ++i) {
+        config.palette_text[i] = text[i];
+    }
+    config.palette_text[length] = '\0';
+    config.palette_text_length = length;
+    config.palette_set = true;
+    config.custom_palette_valid = false;
+    config.custom_palette_count = 0u;
+    return true;
+}
+
+static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
+                                               const char* command_name) {
+    if (!config.palette_set) {
+        config.custom_palette_valid = false;
+        config.custom_palette_count = 0u;
+        return true;
+    }
+    if (config.custom_palette_valid) {
+        return true;
+    }
+    const char* prefix = command_name ? command_name : "makocode";
+    if (config.palette_text_length == 0u) {
+        console_write(2, prefix);
+        console_line(2, ": --palette requires a non-empty list of colors");
+        return false;
+    }
+    const char* text = config.palette_text;
+    usize length = config.palette_text_length;
+    u32 count = 0u;
+    u8 token_ids[MAX_CUSTOM_PALETTE_COLORS];
+    PaletteColor token_colors[MAX_CUSTOM_PALETTE_COLORS];
+    usize cursor = 0u;
+    while (cursor < length) {
+        while (cursor < length) {
+            char c = text[cursor];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' || c == ';') {
+                ++cursor;
+                continue;
+            }
+            break;
+        }
+        if (cursor >= length) {
+            break;
+        }
+        usize start = cursor;
+        while (cursor < length) {
+            char c = text[cursor];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' || c == ';') {
+                break;
+            }
+            ++cursor;
+        }
+        usize token_length = cursor - start;
+        if (token_length == 0u) {
+            continue;
+        }
+        if (count >= MAX_CUSTOM_PALETTE_COLORS) {
+            console_write(2, prefix);
+            console_line(2, ": --palette supports at most 16 colors");
+            return false;
+        }
+        PaletteColor decoded_color;
+        u8 decoded_id = NAMED_COLOR_INVALID;
+        if (!decode_named_palette_color(text + start, token_length, decoded_id, decoded_color)) {
+            console_write(2, prefix);
+            console_line(2, ": --palette contains an unsupported color name");
+            return false;
+        }
+        token_colors[count] = decoded_color;
+        token_ids[count] = decoded_id;
+        ++count;
+    }
+    if (count == 0u) {
+        console_write(2, prefix);
+        console_line(2, ": --palette requires at least one color");
+        return false;
+    }
+    if (count != 5u) {
+        console_write(2, prefix);
+        console_line(2, ": --palette currently requires exactly 5 colors (White ... Black)");
+        return false;
+    }
+    if (token_ids[0] != NAMED_COLOR_WHITE) {
+        console_write(2, prefix);
+        console_line(2, ": --palette must begin with White");
+        return false;
+    }
+    if (token_ids[count - 1u] != NAMED_COLOR_BLACK) {
+        console_write(2, prefix);
+        console_line(2, ": --palette must end with Black");
+        return false;
+    }
+    for (u32 i = 0u; i < count; ++i) {
+        for (u32 j = i + 1u; j < count; ++j) {
+            if (token_ids[i] == token_ids[j]) {
+                console_write(2, prefix);
+                console_line(2, ": --palette cannot repeat colors");
+                return false;
+            }
+        }
+    }
+    for (u32 i = 1u; i + 1u < count; ++i) {
+        u8 id = token_ids[i];
+        if (id != NAMED_COLOR_CYAN &&
+            id != NAMED_COLOR_MAGENTA &&
+            id != NAMED_COLOR_YELLOW) {
+            console_write(2, prefix);
+            console_line(2, ": --palette middle entries must be Cyan/Magenta/Yellow");
+            return false;
+        }
+    }
+    for (u32 i = 0u; i < count; ++i) {
+        config.custom_palette[i] = token_colors[i];
+        config.custom_palette_ids[i] = token_ids[i];
+    }
+    config.custom_palette_count = count;
+    config.custom_palette_valid = true;
+    config.color_channels = 3u;
+    config.color_set = true;
+    return true;
+}
+
+static bool mapping_has_custom_palette(const ImageMappingConfig& mapping) {
+    return mapping.palette_set &&
+           mapping.custom_palette_valid &&
+           mapping.custom_palette_count >= 2u;
+}
+
+static double palette_bits_per_symbol(const ImageMappingConfig& mapping) {
+    if (!mapping_has_custom_palette(mapping)) {
+        return 0.0;
+    }
+    double base = (double)mapping.custom_palette_count;
+    if (base <= 1.0) {
+        return 0.0;
+    }
+    return log(base) / log(2.0);
+}
+
+static u64 compute_min_symbols_for_bits(u64 bit_count, double bits_per_symbol) {
+    if (bits_per_symbol <= 0.0) {
+        return 0u;
+    }
+    if (bit_count == 0u) {
+        return 1u;
+    }
+    long double ratio = (long double)bit_count / (long double)bits_per_symbol;
+    long double epsilon = 1e-12L;
+    long double adjusted = ratio - epsilon;
+    u64 symbols = (u64)ceill(adjusted);
+    if ((long double)symbols < ratio) {
+        ++symbols;
+    }
+    if (symbols == 0u) {
+        symbols = 1u;
+    }
+    return symbols;
+}
+
+static usize divide_le_bytes_by_base(u8* data, usize length, u32 base, u32& remainder) {
+    remainder = 0u;
+    if (!data || length == 0u || base < 2u) {
+        return 0u;
+    }
+    for (ssize_t index = (ssize_t)length - 1; index >= 0; --index) {
+        u32 value = ((u32)remainder << 8u) | (u32)data[index];
+        u32 quotient = value / base;
+        remainder = value % base;
+        data[index] = (u8)quotient;
+    }
+    while (length > 0u && data[length - 1u] == 0u) {
+        --length;
+    }
+    return length;
+}
+
+static bool bits_to_base_digits(const u8* bit_data,
+                                u64 bit_count,
+                                u32 base,
+                                makocode::ByteBuffer& digits_out,
+                                u64& digit_count_out) {
+    digit_count_out = 0u;
+    digits_out.release();
+    if (base < 2u) {
+        return false;
+    }
+    if (bit_count == 0u || !bit_data) {
+        return true;
+    }
+    usize byte_count = (usize)((bit_count + 7u) / 8u);
+    makocode::ByteBuffer work;
+    if (!work.ensure(byte_count)) {
+        return false;
+    }
+    work.size = byte_count;
+    for (usize i = 0u; i < byte_count; ++i) {
+        work.data[i] = bit_data[i];
+    }
+    u64 used_bits_last_byte = bit_count - ((u64)(byte_count - 1u) * 8u);
+    if (used_bits_last_byte > 0u && used_bits_last_byte < 8u) {
+        u8 mask = (u8)((1u << used_bits_last_byte) - 1u);
+        work.data[byte_count - 1u] &= mask;
+    }
+    while (byte_count > 0u) {
+        u32 remainder = 0u;
+        byte_count = divide_le_bytes_by_base(work.data, byte_count, base, remainder);
+        if (!digits_out.ensure(digits_out.size + 1u)) {
+            return false;
+        }
+        digits_out.data[digits_out.size++] = (u8)remainder;
+    }
+    if (digits_out.size == 0u) {
+        if (!digits_out.ensure(1u)) {
+            return false;
+        }
+        digits_out.data[0] = 0u;
+        digits_out.size = 1u;
+    }
+    digit_count_out = (u64)digits_out.size;
+    return true;
+}
+
+static bool base_digits_to_bits(const u8* digits,
+                                u64 digit_count,
+                                u32 base,
+                                u64 bit_count_target,
+                                makocode::ByteBuffer& bits_out) {
+    bits_out.release();
+    if (base < 2u) {
+        return false;
+    }
+    makocode::ByteBuffer value;
+    if (!value.ensure(1u)) {
+        return false;
+    }
+    value.data[0] = 0u;
+    value.size = 1u;
+    for (u64 idx = digit_count; idx > 0u; --idx) {
+        u32 digit = digits ? (u32)digits[idx - 1u] : 0u;
+        if (digit >= base) {
+            return false;
+        }
+        u32 carry = digit;
+        for (usize byte_index = 0u; byte_index < value.size; ++byte_index) {
+            u64 accum = (u64)value.data[byte_index] * (u64)base + (u64)carry;
+            value.data[byte_index] = (u8)(accum & 0xFFu);
+            carry = (u32)(accum >> 8u);
+        }
+        while (carry) {
+            if (!value.ensure(value.size + 1u)) {
+                return false;
+            }
+            value.data[value.size++] = (u8)(carry & 0xFFu);
+            carry >>= 8u;
+        }
+    }
+    u64 target_bytes_u64 = (bit_count_target + 7u) / 8u;
+    usize target_bytes = (usize)target_bytes_u64;
+    if (bit_count_target == 0u) {
+        target_bytes = value.size;
+    }
+    usize alloc_size = target_bytes > 0u ? target_bytes : value.size;
+    if (alloc_size == 0u) {
+        alloc_size = 1u;
+    }
+    if (!bits_out.ensure(alloc_size)) {
+        return false;
+    }
+    bits_out.size = alloc_size;
+    usize copy_bytes = value.size;
+    if (copy_bytes > alloc_size) {
+        copy_bytes = alloc_size;
+    }
+    for (usize i = 0u; i < copy_bytes; ++i) {
+        bits_out.data[i] = value.data[i];
+    }
+    if (copy_bytes < alloc_size) {
+        for (usize i = copy_bytes; i < alloc_size; ++i) {
+            bits_out.data[i] = 0u;
+        }
+    }
+    if (bit_count_target > 0u) {
+        usize required_bytes = (usize)((bit_count_target + 7u) / 8u);
+        if (value.size > required_bytes) {
+            for (usize i = required_bytes; i < value.size; ++i) {
+                if (value.data[i] != 0u) {
+                    return false;
+                }
+            }
+        }
+        u32 bits_in_last_byte = (u32)(bit_count_target - ((u64)(required_bytes - 1u) * 8u));
+        if (bits_in_last_byte > 0u && bits_in_last_byte < 8u) {
+            u8 mask = (u8)((1u << bits_in_last_byte) - 1u);
+            bits_out.data[required_bytes - 1u] &= mask;
+        }
+        bits_out.size = required_bytes;
+    }
+    return true;
+}
+
+static bool copy_bits_segment(const u8* source_bits,
+                              u64 source_bit_count,
+                              u64 bit_offset,
+                              u64 bits_to_copy,
+                              makocode::ByteBuffer& dest_bits) {
+    dest_bits.release();
+    if (bits_to_copy == 0u) {
+        return true;
+    }
+    if (!source_bits && source_bit_count) {
+        return false;
+    }
+    usize bytes_needed = (usize)((bits_to_copy + 7u) / 8u);
+    if (!dest_bits.ensure(bytes_needed)) {
+        return false;
+    }
+    dest_bits.size = bytes_needed;
+    for (usize i = 0u; i < bytes_needed; ++i) {
+        dest_bits.data[i] = 0u;
+    }
+    for (u64 bit_index = 0u; bit_index < bits_to_copy; ++bit_index) {
+        u64 global_bit = bit_offset + bit_index;
+        if (global_bit >= source_bit_count) {
+            continue;
+        }
+        usize byte_index = (usize)(global_bit >> 3u);
+        u8 mask = (u8)(1u << (global_bit & 7u));
+        bool bit_value = (source_bits[byte_index] & mask) != 0u;
+        if (bit_value) {
+            usize dest_byte = (usize)(bit_index >> 3u);
+            u8 dest_mask = (u8)(1u << (bit_index & 7u));
+            dest_bits.data[dest_byte] = (u8)(dest_bits.data[dest_byte] | dest_mask);
+        }
+    }
+    return true;
+}
+
+static bool map_rgb_to_custom_symbol(const ImageMappingConfig& mapping,
+                                     const u8* rgb,
+                                     u32& symbol_out) {
+    symbol_out = 0u;
+    if (!mapping_has_custom_palette(mapping) || !rgb) {
+        return false;
+    }
+    u64 best_score = (u64)USIZE_MAX_VALUE;
+    u32 best_index = 0u;
+    for (u32 i = 0u; i < mapping.custom_palette_count; ++i) {
+        const PaletteColor& color = mapping.custom_palette[i];
+        i64 dr = (i64)color.r - (i64)rgb[0];
+        i64 dg = (i64)color.g - (i64)rgb[1];
+        i64 db = (i64)color.b - (i64)rgb[2];
+        u64 score = (u64)(dr * dr + dg * dg + db * db);
+        if (i == 0u || score < best_score) {
+            best_score = score;
+            best_index = i;
+            if (score == 0u) {
+                break;
+            }
+        }
+    }
+    symbol_out = best_index;
+    return true;
+}
+
+static void footer_select_colors(const ImageMappingConfig& mapping,
+                                 u8* text_rgb,
+                                 u8* background_rgb) {
     if (!text_rgb || !background_rgb) {
+        return;
+    }
+    if (mapping.palette_set && mapping.custom_palette_valid && mapping.custom_palette_count >= 2u) {
+        const PaletteColor& background = mapping.custom_palette[0];
+        const PaletteColor& text = mapping.custom_palette[mapping.custom_palette_count - 1u];
+        background_rgb[0] = background.r;
+        background_rgb[1] = background.g;
+        background_rgb[2] = background.b;
+        text_rgb[0] = text.r;
+        text_rgb[1] = text.g;
+        text_rgb[2] = text.b;
         return;
     }
     background_rgb[0] = 255u;
@@ -4268,6 +4754,7 @@ static void footer_select_colors(u8 color_mode, u8* text_rgb, u8* background_rgb
     text_rgb[0] = 0u;
     text_rgb[1] = 0u;
     text_rgb[2] = 0u;
+    u8 color_mode = mapping.color_channels;
     if (color_mode == 1u) {
         background_rgb[0] = PALETTE_GRAY[1].r;
         background_rgb[1] = PALETTE_GRAY[1].g;
@@ -4520,6 +5007,11 @@ struct PpmParserState {
     u64 ecc_original_bytes_value;
     bool has_color_channels;
     u64 color_channels_value;
+    bool has_palette_text;
+    char palette_text[MAX_CUSTOM_PALETTE_TEXT];
+    usize palette_text_length;
+    bool has_page_symbols;
+    u64 page_symbols_value;
     bool has_page_width_pixels;
     u64 page_width_pixels_value;
     bool has_page_height_pixels;
@@ -4587,6 +5079,10 @@ struct PpmParserState {
           ecc_original_bytes_value(0u),
           has_color_channels(false),
           color_channels_value(0u),
+          has_palette_text(false),
+          palette_text_length(0u),
+          has_page_symbols(false),
+          page_symbols_value(0u),
           has_page_width_pixels(false),
           page_width_pixels_value(0u),
           has_page_height_pixels(false),
@@ -4631,12 +5127,16 @@ struct PpmParserState {
           fiducial_col_offset_count(0u),
           has_fiducial_row_offsets(false),
           fiducial_row_offset_count(0u) {
+        palette_text[0] = '\0';
         for (u32 i = 0u; i < MAX_FIDUCIAL_SUBGRID_ENTRIES; ++i) {
             fiducial_col_offsets[i] = 0u;
             fiducial_row_offsets[i] = 0u;
         }
     }
 };
+
+static bool ppm_append_extended_metadata(const PpmParserState& state,
+                                         makocode::ByteBuffer& output);
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
     const char* comment = (const char*)(state.data + start);
@@ -4656,6 +5156,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char ecc_block_count_tag[] = "MAKOCODE_ECC_BLOCK_COUNT";
     const char ecc_original_tag[] = "MAKOCODE_ECC_ORIGINAL_BYTES";
     const char color_tag[] = "MAKOCODE_COLOR_CHANNELS";
+    const char palette_tag[] = "MAKOCODE_PALETTE";
+    const char page_symbols_tag[] = "MAKOCODE_PAGE_SYMBOLS";
     const char fiducial_size_tag[] = "MAKOCODE_FIDUCIAL_SIZE";
     const char fiducial_columns_tag[] = "MAKOCODE_FIDUCIAL_COLUMNS";
     const char fiducial_rows_tag[] = "MAKOCODE_FIDUCIAL_ROWS";
@@ -4670,6 +5172,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const usize ecc_block_count_tag_len = (usize)sizeof(ecc_block_count_tag) - 1u;
     const usize ecc_original_tag_len = (usize)sizeof(ecc_original_tag) - 1u;
     const usize color_tag_len = (usize)sizeof(color_tag) - 1u;
+    const usize palette_tag_len = (usize)sizeof(palette_tag) - 1u;
+    const usize page_symbols_tag_len = (usize)sizeof(page_symbols_tag) - 1u;
     const usize fiducial_size_tag_len = (usize)sizeof(fiducial_size_tag) - 1u;
     const usize fiducial_columns_tag_len = (usize)sizeof(fiducial_columns_tag) - 1u;
     const usize fiducial_rows_tag_len = (usize)sizeof(fiducial_rows_tag) - 1u;
@@ -5020,6 +5524,110 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_color_channels = true;
                     state.color_channels_value = value;
+                }
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= palette_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < palette_tag_len; ++i) {
+            if (comment[index + i] != palette_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            usize next = index + palette_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
+            }
+        }
+        if (match) {
+            index += palette_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize text_start = index;
+            usize text_end = length;
+            while (text_end > text_start) {
+                char tail = comment[text_end - 1u];
+                if (tail == ' ' || tail == '\t' || tail == '\r' || tail == '\n') {
+                    --text_end;
+                } else {
+                    break;
+                }
+            }
+            if (text_end > text_start) {
+                usize text_length = text_end - text_start;
+                if (text_length >= MAX_CUSTOM_PALETTE_TEXT) {
+                    text_length = MAX_CUSTOM_PALETTE_TEXT - 1u;
+                }
+                for (usize i = 0u; i < text_length; ++i) {
+                    state.palette_text[i] = comment[text_start + i];
+                }
+                state.palette_text[text_length] = '\0';
+                state.palette_text_length = text_length;
+                state.has_palette_text = true;
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= page_symbols_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < page_symbols_tag_len; ++i) {
+            if (comment[index + i] != page_symbols_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            usize next = index + page_symbols_tag_len;
+            if (next < length) {
+                char next_char = comment[next];
+                if (next_char != ' ' && next_char != '\t') {
+                    match = false;
+                }
+            }
+        }
+        if (match) {
+            index += page_symbols_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_page_symbols = true;
+                    state.page_symbols_value = value;
                 }
             }
             return;
@@ -6758,6 +7366,23 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                       &fiducial_mask)) {
         return false;
     }
+    ImageMappingConfig active_mapping = overrides;
+    if (active_mapping.palette_set) {
+        if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
+            return false;
+        }
+    } else if (state.has_palette_text && state.palette_text_length) {
+        if (!image_mapping_set_palette_text(active_mapping,
+                                            state.palette_text,
+                                            state.palette_text_length,
+                                            "decode")) {
+            return false;
+        }
+        if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
+            return false;
+        }
+    }
+    bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u8 color_mode = overrides.color_channels;
     if (overrides.color_set) {
         color_mode = overrides.color_channels;
@@ -6768,7 +7393,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         color_mode = (u8)state.color_channels_value;
     }
     if (color_mode == 0u || color_mode > 3u) {
-        return false;
+        color_mode = 1u;
+    }
+    if (use_custom_palette) {
+        color_mode = active_mapping.color_channels;
     }
     const u8 sample_bits = bits_per_sample(color_mode);
     if (sample_bits == 0u) {
@@ -6802,6 +7430,24 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (reserved_data_pixels > 0u && state.has_page_bits) {
         if (capacity_with_reserve > 0u && state.page_bits_value <= capacity_with_reserve) {
             skip_reserved_pixels = true;
+        }
+    }
+    makocode::ByteBuffer custom_digits;
+    u64 digits_target = 0u;
+    if (use_custom_palette) {
+        u64 usable_pixels = total_data_pixels - reserved_data_pixels;
+        digits_target = usable_pixels;
+        if (state.has_page_symbols) {
+            if (state.page_symbols_value > usable_pixels) {
+                return false;
+            }
+            digits_target = state.page_symbols_value;
+        }
+        if (digits_target > 0u) {
+            if (!custom_digits.ensure((usize)digits_target)) {
+                return false;
+            }
+            custom_digits.size = 0u;
         }
     }
     makocode::BitWriter writer;
@@ -7543,6 +8189,19 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 }
             }
 
+            if (use_custom_palette) {
+                if (digits_target > 0u && custom_digits.size >= (usize)digits_target) {
+                    continue;
+                }
+                u32 symbol = 0u;
+                if (!map_rgb_to_custom_symbol(active_mapping, rgb, symbol)) {
+                    return false;
+                }
+                if (digits_target > 0u) {
+                    custom_digits.data[custom_digits.size++] = (u8)symbol;
+                }
+                continue;
+            }
             u32 samples_raw[3] = {0u, 0u, 0u};
             if (!map_rgb_to_samples(color_mode, rgb, samples_raw)) {
                 return false;
@@ -7554,6 +8213,36 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 }
             }
         }
+    }
+    if (use_custom_palette) {
+        const u8* digit_data_ptr = (digits_target > 0u && custom_digits.size)
+                                       ? custom_digits.data
+                                       : (const u8*)0;
+        makocode::ByteBuffer custom_bits_buffer;
+        u64 bit_target = capacity_with_reserve;
+        if (state.has_page_bits && state.page_bits_value > 0u && state.page_bits_value <= bit_target) {
+            bit_target = state.page_bits_value;
+        }
+        if (!base_digits_to_bits(digit_data_ptr,
+                                 digits_target,
+                                 active_mapping.custom_palette_count,
+                                 bit_target,
+                                 custom_bits_buffer)) {
+            return false;
+        }
+        frame_bit_count = bit_target;
+        byte_buffer_move(frame_bits, custom_bits_buffer);
+        if (color_mode == 3u && frame_bits.size) {
+            for (usize i = 0u; i < frame_bits.size; ++i) {
+                u8 rotate = (u8)((i % 3u) + 1u);
+                frame_bits.data[i] = rotate_right_u8(frame_bits.data[i], rotate);
+            }
+        }
+        metadata_out = state;
+        metadata_out.data = 0;
+        metadata_out.size = 0u;
+        metadata_out.cursor = 0u;
+        return true;
     }
     if (!writer.align_to_byte()) {
         return false;
@@ -7662,6 +8351,36 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_color_channels = true;
         dest.color_channels_value = src.color_channels_value;
+    }
+    if (src.has_palette_text) {
+        if (dest.has_palette_text) {
+            if (dest.palette_text_length != src.palette_text_length) {
+                return false;
+            }
+            for (usize i = 0u; i < dest.palette_text_length; ++i) {
+                if (dest.palette_text[i] != src.palette_text[i]) {
+                    return false;
+                }
+            }
+        } else {
+            dest.has_palette_text = true;
+            usize copy_length = src.palette_text_length;
+            if (copy_length >= MAX_CUSTOM_PALETTE_TEXT) {
+                copy_length = MAX_CUSTOM_PALETTE_TEXT - 1u;
+            }
+            for (usize i = 0u; i < copy_length; ++i) {
+                dest.palette_text[i] = src.palette_text[i];
+            }
+            dest.palette_text[copy_length] = '\0';
+            dest.palette_text_length = copy_length;
+        }
+    }
+    if (src.has_page_symbols) {
+        if (dest.has_page_symbols && dest.page_symbols_value != src.page_symbols_value) {
+            return false;
+        }
+        dest.has_page_symbols = true;
+        dest.page_symbols_value = src.page_symbols_value;
     }
     if (src.has_fiducial_size) {
         if (dest.has_fiducial_size && dest.fiducial_size_value != src.fiducial_size_value) {
@@ -7913,6 +8632,31 @@ static bool append_comment_list(makocode::ByteBuffer& buffer,
             return false;
         }
         if (!buffer_append_number(buffer, values[i])) {
+            return false;
+        }
+    }
+    return buffer.append_char('\n');
+}
+
+static bool append_comment_text(makocode::ByteBuffer& buffer,
+                                const char* tag,
+                                const char* text,
+                                usize length) {
+    if (!tag || !text || length == 0u) {
+        return false;
+    }
+    if (!buffer.append_char('#') ||
+        !buffer.append_char(' ') ||
+        !buffer.append_ascii(tag) ||
+        !buffer.append_char(' ')) {
+        return false;
+    }
+    for (usize i = 0u; i < length; ++i) {
+        char c = text[i];
+        if (c == '\r' || c == '\n') {
+            return false;
+        }
+        if (!buffer.append_char(c)) {
             return false;
         }
     }
@@ -8214,6 +8958,9 @@ static bool ppm_scale_integer(const makocode::ByteBuffer& input,
         if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", state.page_height_pixels_value)) {
             return false;
         }
+    }
+    if (!ppm_append_extended_metadata(state, output)) {
+        return false;
     }
     if (state.has_footer_rows) {
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", state.footer_rows_value)) {
@@ -8643,11 +9390,11 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", state.footer_rows_value)) {
             return false;
         }
-        if (state.has_font_size) {
-            if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
-                return false;
-            }
+    if (state.has_font_size) {
+        if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
+            return false;
         }
+    }
     } else if (state.has_font_size) {
         if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
             return false;
@@ -8667,6 +9414,24 @@ static bool ppm_write_dimensions(u64 width,
     }
     if (!output.append_ascii("255\n")) {
         return false;
+    }
+    return true;
+}
+
+static bool ppm_append_extended_metadata(const PpmParserState& state,
+                                         makocode::ByteBuffer& output) {
+    if (state.has_page_symbols) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_SYMBOLS", state.page_symbols_value)) {
+            return false;
+        }
+    }
+    if (state.has_palette_text && state.palette_text_length) {
+        if (!append_comment_text(output,
+                                 "MAKOCODE_PALETTE",
+                                 state.palette_text,
+                                 state.palette_text_length)) {
+            return false;
+        }
     }
     return true;
 }
@@ -8912,6 +9677,9 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     }
     output.release();
     if (!ppm_write_metadata_header(state, output)) {
+        return false;
+    }
+    if (!ppm_append_extended_metadata(state, output)) {
         return false;
     }
     if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_SIZE", (u64)marker_size)) {
@@ -9285,6 +10053,7 @@ struct PageCapacityResult {
     u32 height_pixels;
     u32 data_height_pixels;
     u64 bits_per_page;
+    u64 usable_data_pixels;
     FooterLayout footer_layout;
 
     PageCapacityResult()
@@ -9292,6 +10061,7 @@ struct PageCapacityResult {
           height_pixels(0u),
           data_height_pixels(0u),
           bits_per_page(0u),
+          usable_data_pixels(0u),
           footer_layout() {}
 };
 
@@ -9301,17 +10071,34 @@ static bool ensure_frame_bits_fit_single_page(ImageMappingConfig& mapping,
                                               u8 samples_per_pixel,
                                               u64 frame_bit_count,
                                               PageCapacityResult& out_capacity) {
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return false;
+    bool use_custom_palette = mapping_has_custom_palette(mapping);
+    if (!use_custom_palette) {
+        if (sample_bits == 0u || samples_per_pixel == 0u) {
+            return false;
+        }
     }
     if (frame_bit_count == 0u) {
         frame_bit_count = 1u;
     }
-    u64 bits_per_symbol = (u64)sample_bits * (u64)samples_per_pixel;
-    if (bits_per_symbol == 0u) {
-        return false;
+    double custom_bits_per_symbol = 0.0;
+    u64 bits_per_symbol = 0u;
+    if (use_custom_palette) {
+        custom_bits_per_symbol = palette_bits_per_symbol(mapping);
+        if (custom_bits_per_symbol <= 0.0) {
+            return false;
+        }
+    } else {
+        bits_per_symbol = (u64)sample_bits * (u64)samples_per_pixel;
+        if (bits_per_symbol == 0u) {
+            return false;
+        }
     }
-    u64 min_data_pixels = (frame_bit_count + bits_per_symbol - 1u) / bits_per_symbol;
+    u64 min_data_pixels = 0u;
+    if (use_custom_palette) {
+        min_data_pixels = compute_min_symbols_for_bits(frame_bit_count, custom_bits_per_symbol);
+    } else {
+        min_data_pixels = (frame_bit_count + bits_per_symbol - 1u) / bits_per_symbol;
+    }
     if (min_data_pixels == 0u) {
         min_data_pixels = 1u;
     }
@@ -9327,7 +10114,7 @@ static bool ensure_frame_bits_fit_single_page(ImageMappingConfig& mapping,
     if (width_limit > 0xFFFFFFFFu) {
         width_limit = 0xFFFFFFFFu;
     }
-    bool prefer_even_width = (sample_bits > 1u);
+    bool prefer_even_width = (!use_custom_palette && sample_bits > 1u);
     bool found = false;
     PageCapacityResult best_capacity;
     u64 best_area = 0u;
@@ -9372,16 +10159,37 @@ static bool ensure_frame_bits_fit_single_page(ImageMappingConfig& mapping,
             if (data_height_pixels == 0u || data_height_pixels > capacity.height_pixels) {
                 break;
             }
+            u64 reserved_pixels = 0u;
+            u64 raw_bits = 0u;
+            u8 effective_sample_bits = use_custom_palette ? 1u : sample_bits;
+            u8 effective_samples_per_pixel = use_custom_palette ? 1u : samples_per_pixel;
             if (!compute_bits_per_page(capacity.width_pixels,
                                        capacity.height_pixels,
                                        data_height_pixels,
-                                       sample_bits,
-                                       samples_per_pixel,
-                                       capacity.bits_per_page,
-                                       0)) {
+                                       effective_sample_bits,
+                                       effective_samples_per_pixel,
+                                       raw_bits,
+                                       &reserved_pixels)) {
                 break;
             }
-            if (capacity.bits_per_page >= frame_bit_count) {
+            u64 usable_pixels = 0u;
+            if (use_custom_palette) {
+                usable_pixels = raw_bits;
+            } else {
+                u64 bits_per_sym = (u64)sample_bits * (u64)samples_per_pixel;
+                usable_pixels = bits_per_sym ? (raw_bits / bits_per_sym) : 0u;
+            }
+            capacity.usable_data_pixels = usable_pixels;
+            u64 bit_capacity = raw_bits;
+            if (use_custom_palette) {
+                long double value = (long double)usable_pixels * (long double)custom_bits_per_symbol;
+                if (value < 0.0L) {
+                    value = 0.0L;
+                }
+                bit_capacity = (u64)floor(value + 1e-9L);
+            }
+            capacity.bits_per_page = bit_capacity;
+            if (bit_capacity >= frame_bit_count) {
                 capacity.data_height_pixels = data_height_pixels;
                 u64 area = (u64)capacity.width_pixels * (u64)capacity.height_pixels;
                 bool accept = false;
@@ -9757,30 +10565,79 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (reserved_data_pixels > total_data_pixels) {
         return false;
     }
-    u64 expected_bits_per_page = (total_data_pixels - reserved_data_pixels) *
-                                 (u64)sample_bits *
-                                 (u64)samples_per_pixel;
-    if (expected_bits_per_page != bits_per_page) {
-        char exp_digits[32];
-        char bits_digits[32];
-        u64_to_ascii(expected_bits_per_page, exp_digits, sizeof(exp_digits));
-        u64_to_ascii(bits_per_page, bits_digits, sizeof(bits_digits));
-        console_write(2, "encode_page_to_ppm: expected bits=");
-        console_write(2, exp_digits);
-        console_write(2, " provided bits=");
-        console_line(2, bits_digits);
-        return false;
+    u64 usable_data_pixels = total_data_pixels - reserved_data_pixels;
+    bool use_custom_palette = mapping_has_custom_palette(mapping);
+    u32 custom_base = use_custom_palette ? mapping.custom_palette_count : 0u;
+    if (!use_custom_palette) {
+        u64 expected_bits_per_page = usable_data_pixels *
+                                     (u64)sample_bits *
+                                     (u64)samples_per_pixel;
+        if (expected_bits_per_page != bits_per_page) {
+            char exp_digits[32];
+            char bits_digits[32];
+            u64_to_ascii(expected_bits_per_page, exp_digits, sizeof(exp_digits));
+            u64_to_ascii(bits_per_page, bits_digits, sizeof(bits_digits));
+            console_write(2, "encode_page_to_ppm: expected bits=");
+            console_write(2, exp_digits);
+            console_write(2, " provided bits=");
+            console_line(2, bits_digits);
+            return false;
+        }
+    }
+    makocode::ByteBuffer page_bits_chunk;
+    makocode::ByteBuffer base_digits;
+    u64 digits_used = 0u;
+    if (use_custom_palette) {
+        if (custom_base < 2u) {
+            return false;
+        }
+        if (!copy_bits_segment(frame_bits.data,
+                               frame_bit_count,
+                               bit_offset,
+                               bits_per_page,
+                               page_bits_chunk)) {
+            return false;
+        }
+        if (!bits_to_base_digits(page_bits_chunk.data,
+                                 bits_per_page,
+                                 custom_base,
+                                 base_digits,
+                                 digits_used)) {
+            return false;
+        }
+        if (debug_logging_enabled()) {
+            char bits_buf[64];
+            char digits_buf[64];
+            u64_to_ascii(bits_per_page, bits_buf, sizeof(bits_buf));
+            u64_to_ascii(digits_used, digits_buf, sizeof(digits_buf));
+            console_write(2, "debug bits_per_page=");
+            console_write(2, bits_buf);
+            console_write(2, " digits_used=");
+            console_line(2, digits_buf);
+        }
+        if (digits_used > usable_data_pixels) {
+            console_line(2, "encode_page_to_ppm: insufficient data pixels for palette digits");
+            return false;
+        }
     }
     u32 footer_rows = height_pixels - data_height_pixels;
     u8 footer_text_rgb[3] = {0u, 0u, 0u};
     u8 footer_background_rgb[3] = {255u, 255u, 255u};
-    footer_select_colors(mapping.color_channels, footer_text_rgb, footer_background_rgb);
+    footer_select_colors(mapping, footer_text_rgb, footer_background_rgb);
     output.release();
     if (!output.append_ascii("P3\n")) {
         return false;
     }
     if (!append_comment_number(output, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
         return false;
+    }
+    if (mapping.palette_set && mapping.palette_text_length) {
+        if (!append_comment_text(output,
+                                 "MAKOCODE_PALETTE",
+                                 mapping.palette_text,
+                                 mapping.palette_text_length)) {
+            return false;
+        }
     }
     if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
         return false;
@@ -9821,6 +10678,11 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
         return false;
     }
+    if (use_custom_palette) {
+        if (!append_comment_number(output, "MAKOCODE_PAGE_SYMBOLS", digits_used)) {
+            return false;
+        }
+    }
     if (footer_rows) {
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
             return false;
@@ -9844,6 +10706,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     const u8* mask_data = fiducial_mask.data;
     usize mask_size = fiducial_mask.size;
     u64 bit_cursor = bit_offset;
+    u64 digit_index = 0u;
     for (u32 row = 0u; row < height_pixels; ++row) {
         bool is_footer_row = (row >= data_height_pixels);
         for (u32 column = 0u; column < width_pixels; ++column) {
@@ -9854,23 +10717,38 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                    mask_index < mask_size &&
                                    mask_data[mask_index] != 0u);
             if (!is_footer_row && !reserved_pixel) {
-                u32 samples_raw[3] = {0u, 0u, 0u};
-                for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
-                    u32 sample = 0u;
-                    for (u8 bit = 0u; bit < sample_bits; ++bit) {
-                        u8 bit_value = 0u;
-                        if (bit_cursor < frame_bit_count && frame_data) {
-                            usize byte_index = (usize)(bit_cursor >> 3u);
-                            u8 mask = (u8)(1u << (bit_cursor & 7u));
-                            bit_value = (frame_data[byte_index] & mask) ? 1u : 0u;
-                        }
-                        sample |= ((u32)bit_value) << bit;
-                        ++bit_cursor;
+                if (use_custom_palette) {
+                    u8 symbol = 0u;
+                    if (digit_index < digits_used && digit_index < (u64)base_digits.size) {
+                        symbol = base_digits.data[digit_index];
+                        ++digit_index;
                     }
-                    samples_raw[sample_index] = sample;
-                }
-                if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
-                    return false;
+                    if (symbol >= mapping.custom_palette_count) {
+                        return false;
+                    }
+                    const PaletteColor& color = mapping.custom_palette[symbol];
+                    rgb[0] = color.r;
+                    rgb[1] = color.g;
+                    rgb[2] = color.b;
+                } else {
+                    u32 samples_raw[3] = {0u, 0u, 0u};
+                    for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
+                        u32 sample = 0u;
+                        for (u8 bit = 0u; bit < sample_bits; ++bit) {
+                            u8 bit_value = 0u;
+                            if (bit_cursor < frame_bit_count && frame_data) {
+                                usize byte_index = (usize)(bit_cursor >> 3u);
+                                u8 mask = (u8)(1u << (bit_cursor & 7u));
+                                bit_value = (frame_data[byte_index] & mask) ? 1u : 0u;
+                            }
+                            sample |= ((u32)bit_value) << bit;
+                            ++bit_cursor;
+                        }
+                        samples_raw[sample_index] = sample;
+                    }
+                    if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
+                        return false;
+                    }
                 }
             } else if (!is_footer_row) {
                 rgb[0] = 255u;
@@ -10036,6 +10914,35 @@ static bool process_image_mapping_option(int arg_count,
     }
     const char* arg = args[index];
     if (!arg) {
+        return true;
+    }
+
+    const char palette_prefix[] = "--palette=";
+    const char* palette_value = 0;
+    usize palette_length = 0u;
+    if (ascii_equals_token(arg, ascii_length(arg), "--palette")) {
+        if ((index + 1) >= arg_count) {
+            console_write(2, command_name);
+            console_line(2, ": --palette requires a quoted list of colors");
+            return false;
+        }
+        palette_value = args[index + 1];
+        if (!palette_value) {
+            console_write(2, command_name);
+            console_line(2, ": --palette requires a quoted list of colors");
+            return false;
+        }
+        palette_length = ascii_length(palette_value);
+        *arg_index = index + 1;
+    } else if (ascii_starts_with(arg, palette_prefix)) {
+        palette_value = arg + (sizeof(palette_prefix) - 1u);
+        palette_length = ascii_length(palette_value);
+    }
+    if (palette_value) {
+        if (!image_mapping_set_palette_text(config, palette_value, palette_length, command_name)) {
+            return false;
+        }
+        *handled = true;
         return true;
     }
 
@@ -11049,6 +11956,7 @@ static void write_usage() {
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels N (1=Gray, 2=CMY, 3=RGB; default 1)");
+    console_line(1, "  --palette \"White ... Black\" (White must be first, Black last; quote lists)");
     console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height PX   (page height in pixels; default 3508)");
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
@@ -11090,6 +11998,7 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "Layout:");
     console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
+    console_line(1, "  --palette \"White ... Black\"   Custom palette (White first, Black last; quote lists).");
     console_line(1, "  --page-width PX      Override page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
@@ -11121,6 +12030,7 @@ static void write_decode_help() {
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
     console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
+    console_line(1, "  --palette \"White ... Black\"   Custom palette (White first, Black last; quote lists).");
     console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
@@ -11571,6 +12481,11 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, arg);
         return 1;
     }
+    if (mapping.palette_set) {
+        if (!image_mapping_build_custom_palette(mapping, "encode")) {
+            return 1;
+        }
+    }
     if (input_count == 0u) {
         console_line(2, "encode: at least one --input PATH is required");
         return 1;
@@ -11806,9 +12721,9 @@ static int command_encode(int arg_count, char** args) {
                                 footer_length,
                                 footer_layout,
                                 page_output)) {
-            console_line(2, "encode: failed to format ppm");
-            return 1;
-        }
+           console_line(2, "encode: failed to format ppm");
+           return 1;
+       }
         makocode::ByteBuffer fiducial_page;
         if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
             console_line(2, "encode: failed to embed fiducial grid");
@@ -12369,6 +13284,9 @@ static bool serialize_overlay_page(const OverlayPage& page,
     if (!ppm_write_metadata_header(page.metadata, output)) {
         return false;
     }
+    if (!ppm_append_extended_metadata(page.metadata, output)) {
+        return false;
+    }
     if (!ppm_write_dimensions((u64)page.width, (u64)page.height, output)) {
         return false;
     }
@@ -12609,10 +13527,10 @@ static int command_decode(int arg_count, char** args) {
                 console_line(2, "decode: --output-dir requires a non-empty path");
                 return 1;
             }
-            if (!output_dir_buffer.ensure(output_length + 1u)) {
-                console_line(2, "decode: failed to allocate output directory buffer");
-                return 1;
-            }
+    if (!output_dir_buffer.ensure(output_length + 1u)) {
+        console_line(2, "decode: failed to allocate output directory buffer");
+        return 1;
+    }
             for (usize j = 0u; j < output_length; ++j) {
                 output_dir_buffer.data[j] = (u8)output_value[j];
             }
@@ -12665,11 +13583,16 @@ static int command_decode(int arg_count, char** args) {
             have_password = true;
             continue;
         }
-        if (file_count >= MAX_INPUT_FILES) {
-            console_line(2, "decode: too many input files");
+    if (file_count >= MAX_INPUT_FILES) {
+        console_line(2, "decode: too many input files");
+        return 1;
+    }
+    input_files[file_count++] = arg;
+}
+    if (mapping.palette_set) {
+        if (!image_mapping_build_custom_palette(mapping, "decode")) {
             return 1;
         }
-        input_files[file_count++] = arg;
     }
     makocode::ByteBuffer bitstream;
     u64 bit_count = 0u;
@@ -12790,6 +13713,20 @@ retry_decode:
             return 1;
         }
         have_metadata = true;
+    }
+    if (have_metadata &&
+        aggregate_state.has_palette_text &&
+        aggregate_state.palette_text_length &&
+        !mapping.palette_set) {
+        if (!image_mapping_set_palette_text(mapping,
+                                            aggregate_state.palette_text,
+                                            aggregate_state.palette_text_length,
+                                            "decode")) {
+            return 1;
+        }
+        if (!image_mapping_build_custom_palette(mapping, "decode")) {
+            return 1;
+        }
     }
     bool ecc_header_repaired = false;
     makocode::EccHeaderInfo bitstream_header;
@@ -14736,8 +15673,18 @@ static int command_test_border_dirt(int arg_count, char** args) {
         if (!ppm.append_ascii("P3\n")) {
             return false;
         }
-        if (!append_comment_number(ppm, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels) ||
-            !append_comment_number(ppm, "MAKOCODE_BITS", payload_bit_count) ||
+        if (!append_comment_number(ppm, "MAKOCODE_COLOR_CHANNELS", (u64)mapping.color_channels)) {
+            return false;
+        }
+        if (mapping.palette_set && mapping.palette_text_length) {
+            if (!append_comment_text(ppm,
+                                     "MAKOCODE_PALETTE",
+                                     mapping.palette_text,
+                                     mapping.palette_text_length)) {
+                return false;
+            }
+        }
+        if (!append_comment_number(ppm, "MAKOCODE_BITS", payload_bit_count) ||
             !append_comment_number(ppm, "MAKOCODE_ECC", 0u) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_COUNT", page_count) ||
             !append_comment_number(ppm, "MAKOCODE_PAGE_INDEX", 1u) ||
@@ -15715,6 +16662,37 @@ static bool verify_footer_title_roundtrip(const ImageMappingConfig& base_mapping
     test_log_write(TestLogVerbose, base_dir);
     test_log_line(TestLogVerbose, "/1022_footer_title_decoded.bin");
     test_log_line(TestLogSummary, "test: footer title roundtrip ok");
+    return true;
+}
+
+static bool verify_custom_palette_footer_colors() {
+    ImageMappingConfig mapping;
+    const char palette_spec[] = "White Cyan Magenta Yellow Black";
+    usize palette_length = ascii_length(palette_spec);
+    if (!image_mapping_set_palette_text(mapping, palette_spec, palette_length, "test")) {
+        return false;
+    }
+    if (!image_mapping_build_custom_palette(mapping, "test")) {
+        return false;
+    }
+    u8 text_rgb[3] = {0u, 0u, 0u};
+    u8 background_rgb[3] = {0u, 0u, 0u};
+    footer_select_colors(mapping, text_rgb, background_rgb);
+    const PaletteColor& expected_background = mapping.custom_palette[0];
+    const PaletteColor& expected_text = mapping.custom_palette[mapping.custom_palette_count - 1u];
+    if (background_rgb[0] != expected_background.r ||
+        background_rgb[1] != expected_background.g ||
+        background_rgb[2] != expected_background.b) {
+        console_line(2, "test: custom palette footer background mismatch");
+        return false;
+    }
+    if (text_rgb[0] != expected_text.r ||
+        text_rgb[1] != expected_text.g ||
+        text_rgb[2] != expected_text.b) {
+        console_line(2, "test: custom palette footer text mismatch");
+        return false;
+    }
+    test_log_line(TestLogSummary, "test: custom palette footer colors ok");
     return true;
 }
 
@@ -16974,6 +17952,9 @@ static int command_test_payload(int arg_count, char** args) {
         mapping.page_height_set = true;
     }
     if (!verify_footer_title_roundtrip(mapping)) {
+        return 1;
+    }
+    if (!verify_custom_palette_footer_colors()) {
         return 1;
     }
     makocode::ByteBuffer default_password_buffer;
