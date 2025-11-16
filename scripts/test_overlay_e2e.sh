@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+move_artifact() {
+    local src="$1"
+    local dst="$2"
+    if [[ -f "$src" ]]; then
+        rm -f "$dst"
+        mv "$src" "$dst"
+    fi
+}
+
+cleanup_and_archive() {
+    local exit_code="$1"
+    trap - EXIT
+    set +e
+    if [[ -d "$tmp_dir" ]]; then
+        mkdir -p "$repo_root/test"
+        move_artifact "$payload" "$payload_dst"
+        if [[ -n "$base_ppm" ]]; then
+            move_artifact "$tmp_dir/$base_ppm" "$encoded_dst"
+        fi
+        move_artifact "$overlay" "$overlay_dst"
+        move_artifact "$merged" "$merged_dst"
+        move_artifact "$decoded_payload" "$decoded_dst"
+        rm -rf "$tmp_dir"
+    fi
+    if [[ "$exit_code" -ne 0 ]]; then
+        echo "test_overlay_e2e: saved artifacts under $repo_root/test for debugging" >&2
+    fi
+    exit "$exit_code"
+}
+
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 makocode_bin="$repo_root/makocode"
 
@@ -17,9 +47,21 @@ fi
 
 mkdir -p "$repo_root/test"
 tmp_dir=$(mktemp -d "$repo_root/test/${label}_overlay_tmp.XXXXXX")
-trap 'rm -rf "$tmp_dir"' EXIT
 
 payload="$tmp_dir/payload.bin"
+overlay="$tmp_dir/circle_overlay.ppm"
+merged="$tmp_dir/merged.ppm"
+decoded_payload="$tmp_dir/decoded/payload.bin"
+base_ppm=""
+
+payload_dst="$repo_root/test/${label}_overlay_payload.bin"
+encoded_dst="$repo_root/test/${label}_overlay_encoded.ppm"
+overlay_dst="$repo_root/test/${label}_overlay_mask.ppm"
+merged_dst="$repo_root/test/${label}_overlay_merged.ppm"
+decoded_dst="$repo_root/test/${label}_overlay_decoded.bin"
+
+trap 'cleanup_and_archive "$?"' EXIT
+
 head -c 32768 /dev/urandom > "$payload"
 
 (
@@ -33,7 +75,6 @@ if [[ -z "$base_ppm" ]]; then
     exit 1
 fi
 
-overlay="$tmp_dir/circle_overlay.ppm"
 OVERLAY_PPM="$overlay" python3 - <<'PY'
 import math
 import os
@@ -46,7 +87,6 @@ white = "255 255 255"
 black = "0 0 0"
 with open(path, "w", encoding="ascii", newline="\n") as f:
     f.write("P3\n")
-    f.write("# MAKOCODE_COLOR_CHANNELS 3\n")
     f.write(f"{w} {h}\n")
     f.write("255\n")
     for y in range(h):
@@ -61,26 +101,12 @@ with open(path, "w", encoding="ascii", newline="\n") as f:
 PY
 
 fraction=0.2
-merged="$tmp_dir/merged.ppm"
 "$makocode_bin" overlay "$tmp_dir/$base_ppm" "$overlay" "$fraction" > "$merged"
 
 "$makocode_bin" decode "$merged" --output-dir "$tmp_dir/decoded"
-cmp --silent "$payload" "$tmp_dir/decoded/payload.bin"
+cmp --silent "$payload" "$decoded_payload"
 
-payload_dst="$repo_root/test/${label}_overlay_payload.bin"
-encoded_dst="$repo_root/test/${label}_overlay_encoded.ppm"
-overlay_dst="$repo_root/test/${label}_overlay_mask.ppm"
-merged_dst="$repo_root/test/${label}_overlay_merged.ppm"
-decoded_dst="$repo_root/test/${label}_overlay_decoded.bin"
-
-rm -f "$payload_dst" "$encoded_dst" "$overlay_dst" "$merged_dst" "$decoded_dst"
-mv "$payload" "$payload_dst"
-mv "$tmp_dir/$base_ppm" "$encoded_dst"
-mv "$overlay" "$overlay_dst"
-mv "$merged" "$merged_dst"
-mv "$tmp_dir/decoded/payload.bin" "$decoded_dst"
-
-python3 - "$encoded_dst" "$merged_dst" <<'PY'
+python3 - "$tmp_dir/$base_ppm" "$merged" <<'PY'
 import pathlib, sys
 
 base = pathlib.Path(sys.argv[1])
