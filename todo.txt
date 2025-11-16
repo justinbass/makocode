@@ -1,10 +1,48 @@
+- Palette
+ - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel. Configurable colors and arbitrary bits?
+• 1. Generalize Palette Parsing (makocode.cpp:4310–4490)
+      - Relax the parser to accept 2–16 colors, drop the fixed “exactly 5” rule, keep checks for duplicates/unknown names, and store the resulting base in
+        ImageMappingConfig.
+      - Leave the default --color-channels behavior untouched for now but make sure a custom palette forces color_set=true with a synthetic mode.
+      - Build makocode and run make test to confirm nothing regresses before moving on.
+  2. Rework Capacity Math for Variable Bases (makocode.cpp:4498–10190)
+      - Update palette_bits_per_symbol, compute_min_symbols_for_bits, and ensure_frame_bits_fit_single_page so they derive capacity solely from
+        custom_palette_count, allowing non-power-of-two bases.
+      - Remove assumptions like “prefer even widths when sample_bits>1” when a custom palette is active.
+      - Re-run make test to ensure layout search still converges.
+  3. Update Encoder Bit->Digit Flow (makocode.cpp:10560–10740)
+      - Ensure bits_to_base_digits fills every usable pixel with a digit (pad with zero symbols if needed) and emit new metadata such as MAKOCODE_PALETTE_BASE.
+      - Adjust footer color selection to handle palettes without Black by choosing the lightest/darkest entries dynamically.
+      - Verify ./makocode encode … works with 2-, 3-, and 5-color palettes; then make test.
+  4. Enhance Decoder Digit Handling (makocode.cpp:7360–8250, 5000–5600)
+      - Allow digits_target to default to available pixels when MAKOCODE_PAGE_SYMBOLS is missing, and update map_rgb_to_custom_symbol to report the closest match
+        for troubleshooting.
+      - Ensure base_digits_to_bits honors the actual digit count so ECC stays in sync.
+      - Decode the new metadata tags and fallback gracefully if older files lack them.
+      - Run make test plus a manual decode of a mixed palette sample.
+  5. Strengthen Metadata & Logging
+      - Extend CLI help strings and README to document arbitrary palette lengths with concrete examples (“White Black”, “White Cyan Magenta”).
+      - Add optional debug logs (guarded by debug_logging_enabled()) that print palette size, base, and digits per page to aid future profiling.
+      - make test to ensure doc/test fixtures still pass.
+  6. Add Regression Coverage
+      - Update Makefile to add round-trip cases for 2-color and 3-color palettes, plus any new edge palettes you want guarded.
+      - If runtime is a concern, gate heavier cases behind an env flag but keep at least one small test always-on.
+      - Run the full make test suite to capture the new expectations.
+  7. Memory/Performance Follow-up
+      - Optimize bits_to_base_digits / base_digits_to_bits to reuse buffers or stream chunks so large pages don’t spike RAM.
+      - Confirm via instrumentation (e.g., time/Linux perf) that encode/decode for big palettes no longer hang.
+      - Rebuild and execute make test to ensure optimizations didn’t introduce regressions.
+  8. Remove --color-channels Argument
+      - Delete parsing/usage of --color-channels so palette selection (default or custom) solely determines the mode.
+      - Update help text and any tests or docs mentioning the flag.
+      - Final verification: make, make test, and a spot-check of existing grayscale/CMYW/RGB presets to ensure automatic channel inference still works.
+
 - Features
  - Overlay needs --color-channels arg, threshold the overlay image first.
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page, need option for ECC to fill up through last page
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Use LZMA rather than LZW compression
- - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel. Configurable colors and arbitrary bits?
 
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
