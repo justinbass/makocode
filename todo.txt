@@ -1,5 +1,6 @@
 - Features
- - Overlay needs --color-channels arg, mask the overlay image first.
+ - Overlay needs --color-channels arg, threshold the overlay image first.
+ - Overay needs --ignore-color arg
  - Overlay won't work well on final page, need option for ECC to fill up through last page
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Use LZMA rather than LZW compression
@@ -7,6 +8,7 @@
 
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
+ - Or encode header in image header in large dots? Or footer
   - # MAKOCODE_BITS
   - # MAKOCODE_PAGE_BITS
   - # MAKOCODE_PAGE_WIDTH_PX
