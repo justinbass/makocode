@@ -43,6 +43,11 @@
           round-trip artifacts
         * `output_dir` mostly tests the `--output-dir` case.
 
+    Data grid layout specification:
+        * Header section contains fiducials, calibration bars, and QR-like metadata blocks.
+        * Data section tiles LZW/ECC payload stripes with parity gutters and alignment rails.
+        * Footer section repeats checksums, color bars, and page/total counters.
+
     License: GNU AGPLv3 (intent inherited from the project notes).
 */
 
