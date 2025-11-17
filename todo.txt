@@ -1,4 +1,6 @@
 - Palette
+ - Allow arbitrary colors to be specified, e.g. 1 to (2^24 - 1)
+ - Remove c= paths internally, we can see them in the tests. Replace RBG tests with 8-channel tests.
  - Color channels non-base-2, works but slow
   - The power-of-two palette fast path is working, but non-power-of-two palettes still use the old quadratic bits_to_base_digits / base_digits_to_bits code. Please implement the Option 2 streaming base-conversion approach for arbitrary palette sizes:
   - Replace the existing non-power-of-two branches in both helpers with a linear-time, single-pass converter that keeps an accumulator (enough bits to cover
@@ -10,11 +12,12 @@
 
 - Features
 - Overlay needs explicit palette arg, threshold the overlay image first.
- - Overay needs --ignore-color arg
- - Overlay won't work well on final page, need option for ECC to fill up through last page
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Use LZMA rather than LZW compression
  - Imperfect decoding, return whatever we have after ECC applies even if it's lossy
+ - Need option for ECC to fill up through last page
+ - Overay needs --ignore-color arg
+ - Overlay won't work well on final page
 
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
@@ -52,4 +55,4 @@
  - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
  - Determine proper defaults
  - Attempt to optimize/shrink/minify/dedupe code, it still should be readable
- - Full test coverage
+ - Full test coverage, move out of makocode.cpp?
