@@ -1,4 +1,4 @@
-- Palette
+- Features
  - Color channels non-base-2, works but slow
   - The power-of-two palette fast path is working, but non-power-of-two palettes still use the old quadratic bits_to_base_digits / base_digits_to_bits code. Please implement the Option 2 streaming base-conversion approach for arbitrary palette sizes:
   - Replace the existing non-power-of-two branches in both helpers with a linear-time, single-pass converter that keeps an accumulator (enough bits to cover
@@ -7,9 +7,7 @@
   - Keep the current power-of-two branch untouched.
   - Add focused tests or round-trip checks to prove encode/decode symmetry for at least one awkward base (e.g., palette size 3 or 7) and show the runtime scaling is improved (a before/after timing note is fine if there’s no test harness).
   - Summarize what changed, how you validated it, and any follow-up ideas.
-
-- Features
-- Overlay needs explicit palette arg, threshold the overlay image first.
+ - Overlay needs explicit palette arg, threshold the overlay image first.
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Use LZMA rather than LZW compression
  - Imperfect decoding, return whatever we have after ECC applies even if it's lossy
