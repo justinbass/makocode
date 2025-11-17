@@ -200,6 +200,19 @@ static char ascii_lower_char(char c) {
     return c;
 }
 
+static bool is_power_of_two_u32(u32 value) {
+    return (value > 0u) && ((value & (value - 1u)) == 0u);
+}
+
+static u32 log2_u32(u32 value) {
+    u32 result = 0u;
+    while (value > 1u) {
+        value >>= 1u;
+        ++result;
+    }
+    return result;
+}
+
 static bool ascii_equals_token_ignore_case(const char* text,
                                            usize length,
                                            const char* keyword) {
@@ -4584,6 +4597,90 @@ static bool bits_to_base_digits(makocode::ByteBuffer& bit_scratch,
         u8 mask = (u8)((1u << used_bits_last_byte) - 1u);
         bit_scratch.data[byte_count - 1u] &= mask;
     }
+    if (is_power_of_two_u32(base)) {
+        u32 digit_bits = log2_u32(base);
+        if (digit_bits == 0u) {
+            if (!digits_out.ensure(1u)) {
+                return false;
+            }
+            digits_out.data[0] = 0u;
+            digits_out.size = 1u;
+            digit_count_out = 1u;
+            return true;
+        }
+        u64 effective_bits = bit_count;
+        if (byte_count == 0u) {
+            effective_bits = 0u;
+        } else {
+            ssize_t scan = (ssize_t)byte_count - 1;
+            while (scan >= 0) {
+                u8 value = bit_scratch.data[scan];
+                if (value != 0u) {
+                    u8 highest_bit = 7u;
+                    while (highest_bit > 0u && ((value >> highest_bit) & 1u) == 0u) {
+                        --highest_bit;
+                    }
+                    effective_bits = ((u64)scan * 8u) + (u64)highest_bit + 1u;
+                    break;
+                }
+                if (scan == 0) {
+                    effective_bits = 0u;
+                    break;
+                }
+                --scan;
+            }
+            if (scan < 0) {
+                effective_bits = 0u;
+            }
+        }
+        if (effective_bits == 0u) {
+            if (!digits_out.ensure(1u)) {
+                return false;
+            }
+            digits_out.data[0] = 0u;
+            digits_out.size = 1u;
+            digit_count_out = 1u;
+            return true;
+        }
+        u64 total_digits = (effective_bits + (u64)digit_bits - 1u) / (u64)digit_bits;
+        if (total_digits == 0u) {
+            if (!digits_out.ensure(1u)) {
+                return false;
+            }
+            digits_out.data[0] = 0u;
+            digits_out.size = 1u;
+            digit_count_out = 1u;
+            return true;
+        }
+        if (total_digits > (u64)USIZE_MAX_VALUE) {
+            return false;
+        }
+        usize required = (usize)total_digits;
+        if (!digits_out.ensure(required)) {
+            return false;
+        }
+        digits_out.size = required;
+        u64 bit_cursor = 0u;
+        u64 bit_limit = effective_bits;
+        for (usize digit_index = 0u; digit_index < required; ++digit_index) {
+            u32 symbol = 0u;
+            for (u32 local_bit = 0u; local_bit < digit_bits; ++local_bit) {
+                u8 bit_value = 0u;
+                if (bit_cursor < bit_limit) {
+                    usize byte_index = (usize)(bit_cursor >> 3u);
+                    if (byte_index < bit_scratch.size) {
+                        u8 mask = (u8)(1u << (bit_cursor & 7u));
+                        bit_value = (bit_scratch.data[byte_index] & mask) ? 1u : 0u;
+                    }
+                }
+                symbol |= ((u32)bit_value) << local_bit;
+                ++bit_cursor;
+            }
+            digits_out.data[digit_index] = (u8)symbol;
+        }
+        digit_count_out = total_digits;
+        return true;
+    }
     while (byte_count > 0u) {
         u32 remainder = 0u;
         byte_count = divide_le_bytes_by_base(bit_scratch.data, byte_count, base, remainder);
@@ -4611,6 +4708,70 @@ static bool base_digits_to_bits(const u8* digits,
     bits_out.release();
     if (base < 2u) {
         return false;
+    }
+    if (is_power_of_two_u32(base)) {
+        u32 digit_bits = log2_u32(base);
+        u64 digit_capacity_bits = digit_count * (u64)digit_bits;
+        if (digit_count && digit_bits && (digit_capacity_bits / digit_count) != (u64)digit_bits) {
+            return false;
+        }
+        u64 total_bits = bit_count_target ? bit_count_target : digit_capacity_bits;
+        if (digit_bits == 0u || total_bits == 0u) {
+            if (!bits_out.ensure(1u)) {
+                return false;
+            }
+            bits_out.data[0] = 0u;
+            bits_out.size = 1u;
+            return true;
+        }
+        u64 bytes_u64 = (total_bits + 7u) / 8u;
+        if (bytes_u64 == 0u || bytes_u64 > (u64)USIZE_MAX_VALUE) {
+            return false;
+        }
+        usize bytes_needed = (usize)bytes_u64;
+        if (!bits_out.ensure(bytes_needed)) {
+            return false;
+        }
+        for (usize i = 0u; i < bytes_needed; ++i) {
+            bits_out.data[i] = 0u;
+        }
+        bits_out.size = bytes_needed;
+        u64 bit_cursor = 0u;
+        u64 bits_to_emit = digit_capacity_bits;
+        if (bits_to_emit > total_bits) {
+            bits_to_emit = total_bits;
+        }
+        for (u64 idx = 0u; idx < digit_count; ++idx) {
+            u32 digit = digits ? (u32)digits[idx] : 0u;
+            if (digit >= base) {
+                return false;
+            }
+            if (bit_cursor >= bits_to_emit) {
+                if (bit_count_target > 0u && digit != 0u) {
+                    return false;
+                }
+                continue;
+            }
+            for (u32 local_bit = 0u; local_bit < digit_bits && bit_cursor < bits_to_emit; ++local_bit) {
+                if ((digit >> local_bit) & 1u) {
+                    usize byte_index = (usize)(bit_cursor >> 3u);
+                    u8 mask = (u8)(1u << (bit_cursor & 7u));
+                    bits_out.data[byte_index] = (u8)(bits_out.data[byte_index] | mask);
+                }
+                ++bit_cursor;
+            }
+        }
+        if (bit_count_target == 0u && bit_cursor < total_bits) {
+            return false;
+        }
+        if (bit_count_target == 0u) {
+            usize used_bytes = (usize)((bit_cursor + 7u) / 8u);
+            if (used_bytes == 0u) {
+                used_bytes = 1u;
+            }
+            bits_out.size = used_bytes;
+        }
+        return true;
     }
     if (!bits_out.ensure(1u)) {
         return false;
