@@ -11191,53 +11191,9 @@ static bool process_image_mapping_option(int arg_count,
         return true;
     }
 
-    const char color_prefix[] = "--color-channels=";
+    const char width_prefix[] = "--page-width=";
     const char* value_text = 0;
     usize length = 0u;
-    if (ascii_equals_token(arg, ascii_length(arg), "--color-channels")) {
-        if ((index + 1) >= arg_count) {
-            console_write(2, command_name);
-            console_line(2, ": --color-channels requires a value");
-            return false;
-        }
-        value_text = args[index + 1];
-        if (!value_text) {
-            console_write(2, command_name);
-            console_line(2, ": --color-channels requires a value");
-            return false;
-        }
-        length = ascii_length(value_text);
-        *arg_index = index + 1;
-    } else if (ascii_starts_with(arg, color_prefix)) {
-        value_text = arg + (sizeof(color_prefix) - 1u);
-        length = ascii_length(value_text);
-    }
-    if (value_text) {
-        if (length == 0u) {
-            console_write(2, command_name);
-            console_line(2, ": --color-channels requires a value");
-            return false;
-        }
-        u64 value = 0u;
-        if (!ascii_to_u64(value_text, length, &value)) {
-            console_write(2, command_name);
-            console_line(2, ": --color-channels value is not numeric");
-            return false;
-        }
-        if (value == 0u || value > 3u) {
-            console_write(2, command_name);
-            console_line(2, ": --color-channels must be between 1 and 3");
-            return false;
-        }
-        config.color_channels = (u8)value;
-        config.color_set = true;
-        *handled = true;
-        return true;
-    }
-
-    const char width_prefix[] = "--page-width=";
-    value_text = 0;
-    length = 0u;
     if (ascii_equals_token(arg, ascii_length(arg), "--page-width")) {
         if ((index + 1) >= arg_count) {
             console_write(2, command_name);
@@ -12200,8 +12156,7 @@ static void write_usage() {
     console_line(1, "  makocode test   [options]   (verifies two-page encode/decode per color)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
     console_line(1, "Options:");
-    console_line(1, "  --color-channels N (1=Gray, 2=CMY, 3=RGB; default 1)");
-    console_line(1, "  --palette \"Color ...\" (2-16 unique names from White/Cyan/Magenta/Yellow/Black)");
+    console_line(1, "  --palette \"Color ...\" (2-16 unique names from White/Cyan/Magenta/Yellow/Black; default palette is White Black)");
     console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height PX   (page height in pixels; default 3508)");
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
@@ -12242,8 +12197,7 @@ static void write_encode_help() {
     console_line(1, "  --input PATH         Add a file or directory to the archive (repeatable).");
     console_line(1, "");
     console_line(1, "Layout:");
-    console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
-    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black).");
+    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
     console_line(1, "  --page-width PX      Override page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
@@ -12274,8 +12228,7 @@ static void write_decode_help() {
     console_line(1, "  --password TEXT      Supply the decryption password for protected payloads.");
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
-    console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
-    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black).");
+    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
     console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
@@ -17142,7 +17095,27 @@ static int command_test_payload_gray_100k(int arg_count, char** args) {
     return 0;
 }
 
+static bool test_apply_palette(ImageMappingConfig& mapping,
+                               const char* palette_text,
+                               const char* context_label) {
+    if (!palette_text || palette_text[0] == '\0') {
+        return true;
+    }
+    const char* prefix = context_label ? context_label : "test";
+    usize palette_length = ascii_length(palette_text);
+    if (!image_mapping_set_palette_text(mapping, palette_text, palette_length, prefix)) {
+        return false;
+    }
+    if (!image_mapping_build_custom_palette(mapping, prefix)) {
+        return false;
+    }
+    return true;
+}
+
+static const char TEST_PALETTE_CMYWB[] = "White Cyan Magenta Yellow Black";
+
 static int run_test_payload_100k_wavy(u8 color_channels,
+                                      const char* palette_override,
                                       const char* test_label,
                                       const char* payload_bin_name,
                                       const char* encoded_ppm_name,
@@ -17194,6 +17167,15 @@ static int run_test_payload_100k_wavy(u8 color_channels,
     ImageMappingConfig mapping;
     mapping.color_channels = color_channels;
     mapping.color_set = true;
+    if (!test_apply_palette(mapping, palette_override, test_label)) {
+        log_line(2, "failed to configure palette");
+        return 1;
+    }
+    if (palette_override && palette_override[0]) {
+        log_prefix(1);
+        test_log_write(TestLogVerbose, "palette=");
+        test_log_line(TestLogVerbose, palette_override);
+    }
 
     PageFooterConfig footer_config;
     u8 sample_bits = bits_per_sample(mapping.color_channels);
@@ -17416,6 +17398,7 @@ static int command_test_payload_gray_100k_wavy(int arg_count, char** args) {
     (void)arg_count;
     (void)args;
     return run_test_payload_100k_wavy(1u,
+                                      (const char*)0,
                                       "test-100kb-wavy",
                                       "2006_payload_gray_100k_wavy.bin",
                                       "2006_payload_gray_100k_wavy_encoded.ppm",
@@ -17427,6 +17410,7 @@ static int command_test_payload_color2_100k_wavy(int arg_count, char** args) {
     (void)arg_count;
     (void)args;
     return run_test_payload_100k_wavy(2u,
+                                      TEST_PALETTE_CMYWB,
                                       "test-100kb-wavy-c2",
                                       "2007_payload_color2_100k_wavy.bin",
                                       "2007_payload_color2_100k_wavy_encoded.ppm",
@@ -17434,18 +17418,8 @@ static int command_test_payload_color2_100k_wavy(int arg_count, char** args) {
                                       "2007_payload_color2_100k_wavy_decoded.bin");
 }
 
-static int command_test_payload_color3_100k_wavy(int arg_count, char** args) {
-    (void)arg_count;
-    (void)args;
-    return run_test_payload_100k_wavy(3u,
-                                      "test-100kb-wavy-c3",
-                                      "2008_payload_color3_100k_wavy.bin",
-                                      "2008_payload_color3_100k_wavy_encoded.ppm",
-                                      "2008_payload_color3_100k_wavy_scan.ppm",
-                                      "2008_payload_color3_100k_wavy_decoded.bin");
-}
-
 static int run_test_payload_100k_scaled(u8 color_channels,
+                                        const char* palette_override,
                                         const char* artifact_prefix,
                                         const char* test_label,
                                         double scale_factor_x,
@@ -17553,6 +17527,15 @@ static int run_test_payload_100k_scaled(u8 color_channels,
     ImageMappingConfig mapping;
     mapping.color_channels = color_channels;
     mapping.color_set = true;
+    if (!test_apply_palette(mapping, palette_override, test_label)) {
+        log_line(2, "failed to configure palette");
+        return 1;
+    }
+    if (palette_override && palette_override[0]) {
+        log_prefix(1);
+        test_log_write(TestLogVerbose, "palette=");
+        test_log_line(TestLogVerbose, palette_override);
+    }
 
     PageFooterConfig footer_config;
     u8 sample_bits = bits_per_sample(mapping.color_channels);
@@ -17891,6 +17874,7 @@ static int command_test_payload_gray_100k_scaled(int arg_count, char** args) {
     (void)arg_count;
     (void)args;
     return run_test_payload_100k_scaled(1u,
+                                        (const char*)0,
                                         "2002_payload_gray_100k_scaled",
                                         "test-100kb-scale",
                                         2.5,
@@ -17901,18 +17885,9 @@ static int command_test_payload_color2_100k_scaled(int arg_count, char** args) {
     (void)arg_count;
     (void)args;
     return run_test_payload_100k_scaled(2u,
+                                        TEST_PALETTE_CMYWB,
                                         "2003_payload_color2_100k_scaled",
                                         "test-100kb-scale-c2",
-                                        2.5,
-                                        2.5);
-}
-
-static int command_test_payload_color3_100k_scaled(int arg_count, char** args) {
-    (void)arg_count;
-    (void)args;
-    return run_test_payload_100k_scaled(3u,
-                                        "2004_payload_color3_100k_scaled",
-                                        "test-100kb-scale-c3",
                                         2.5,
                                         2.5);
 }
@@ -17921,6 +17896,7 @@ static int command_test_payload_gray_100k_stretch_h26_v24(int arg_count, char** 
     (void)arg_count;
     (void)args;
     return run_test_payload_100k_scaled(1u,
+                                        (const char*)0,
                                         "2005_payload_gray_100k_stretch_h26_v24",
                                         "test-100kb-stretch-h26-v24",
                                         2.6,
@@ -17931,6 +17907,7 @@ static int command_test_payload_gray_100k_stretch_h24_v26(int arg_count, char** 
     (void)arg_count;
     (void)args;
     return run_test_payload_100k_scaled(1u,
+                                        (const char*)0,
                                         "2006_payload_gray_100k_stretch_h24_v26",
                                         "test-100kb-stretch-h24-v26",
                                         2.4,
@@ -19234,10 +19211,8 @@ static const TestSuiteEntry g_test_suites[] = {
     {"payload-100kb", "100 KiB grayscale payload roundtrip without distortions.", command_test_payload_gray_100k, false},
     // {"payload-100kb-wavy", "100 KiB grayscale roundtrip under ripple distortion.", command_test_payload_gray_100k_wavy, false},
     // {"payload-100kb-wavy-c2", "100 KiB color channel 2 roundtrip with distortion.", command_test_payload_color2_100k_wavy, false},
-    // {"payload-100kb-wavy-c3", "100 KiB color channel 3 roundtrip with distortion.", command_test_payload_color3_100k_wavy, false},
     {"payload-100kb-scaled", "100 KiB grayscale roundtrip validated at 2.5x fractional scaling.", command_test_payload_gray_100k_scaled, false},
     {"payload-100kb-scaled-c2", "Color channel 2 scaled roundtrip validation.", command_test_payload_color2_100k_scaled, false},
-    {"payload-100kb-scaled-c3", "Color channel 3 scaled roundtrip validation.", command_test_payload_color3_100k_scaled, false},
     {"payload-100kb-stretch-h26-v24", "Grayscale fractional scaling with horizontal 2.6x and vertical 2.4x.", command_test_payload_gray_100k_stretch_h26_v24, false},
     {"payload-100kb-stretch-h24-v26", "Grayscale fractional scaling with horizontal 2.4x and vertical 2.6x.", command_test_payload_gray_100k_stretch_h24_v26, false},
     {"payload-suite", "Exhaustive payload/ECC/password combinations.", command_test_payload, true}
