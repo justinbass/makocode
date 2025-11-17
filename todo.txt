@@ -1,5 +1,4 @@
 - Features
- - Use LZMA rather than LZW compression
  - Overlay needs explicit palette arg, threshold the overlay image first.
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Color channels non-base-2, works but slow
