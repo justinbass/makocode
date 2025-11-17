@@ -1,11 +1,11 @@
 - Features
  - Overlay needs explicit palette arg, threshold the overlay image first.
- - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Color channels non-base-2, works but slow
  - Imperfect decoding, return whatever we have after ECC applies even if it's lossy
  - Need option for ECC to fill up through last page
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page
+ - 15 column ppm (from convert) in overlay, ignore newlines
 
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
