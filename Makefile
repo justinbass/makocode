@@ -19,7 +19,8 @@ test: makocode
 	./scripts/run_roundtrip.sh --label 3006 --size 8192 --ecc 0.25 --width 480 --height 480 --palette "White Cyan Magenta Yellow"
 	./scripts/run_roundtrip.sh --label 3007 --size 8192 --ecc 0.25 --width 480 --height 480 --palette "White Cyan Magenta Yellow Black"
 	./scripts/run_roundtrip.sh --label 3008 --size 8192 --ecc 0.25 --width 480 --height 480 --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"
-	#./scripts/test_overlay_e2e.sh 3009
+	./scripts/run_roundtrip.sh --label 3009 --size 32768 --ecc 0.25 --width 1000 --height 1000 --palette "White Cyan Magenta Yellow Black"
+	#./scripts/test_overlay_e2e.sh 3010
 
 clean:
 	rm -f makocode
