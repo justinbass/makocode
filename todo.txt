@@ -33,6 +33,7 @@
  - Overlay won't work well on final page, need option for ECC to fill up through last page
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Use LZMA rather than LZW compression
+ - Imperfect decoding, return whatever we have after ECC applies even if it's lossy
 
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
