@@ -200,6 +200,22 @@ static char ascii_lower_char(char c) {
     return c;
 }
 
+static bool ascii_hex_value(char c, u8& value) {
+    if (c >= '0' && c <= '9') {
+        value = (u8)(c - '0');
+        return true;
+    }
+    if (c >= 'A' && c <= 'F') {
+        value = (u8)(10 + (c - 'A'));
+        return true;
+    }
+    if (c >= 'a' && c <= 'f') {
+        value = (u8)(10 + (c - 'a'));
+        return true;
+    }
+    return false;
+}
+
 static bool is_power_of_two_u32(u32 value) {
     return (value > 0u) && ((value & (value - 1u)) == 0u);
 }
@@ -3905,6 +3921,10 @@ struct PaletteColor {
     u8 b;
 };
 
+static bool palette_colors_equal(const PaletteColor& a, const PaletteColor& b) {
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
 static const u32 MAX_CUSTOM_PALETTE_COLORS = 16u;
 static const usize MAX_CUSTOM_PALETTE_TEXT = 256u;
 static const u8 CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE = 3u;
@@ -4352,6 +4372,36 @@ static const PaletteColor NAMED_COLOR_VALUES[] = {
     {0u, 0u, 0u}
 };
 
+static bool decode_hex_palette_color(const char* token,
+                                     usize length,
+                                     PaletteColor& color) {
+    if (!token || length == 0u) {
+        return false;
+    }
+    const char* cursor = token;
+    if (length == 7u && cursor[0] == '#') {
+        ++cursor;
+        length = 6u;
+    } else if (length != 6u) {
+        return false;
+    }
+    u8 components[3];
+    for (u32 i = 0u; i < 3u; ++i) {
+        usize pair_index = i * 2u;
+        u8 high = 0u;
+        u8 low = 0u;
+        if (!ascii_hex_value(cursor[pair_index], high) ||
+            !ascii_hex_value(cursor[pair_index + 1u], low)) {
+            return false;
+        }
+        components[i] = (u8)((high << 4u) | low);
+    }
+    color.r = components[0];
+    color.g = components[1];
+    color.b = components[2];
+    return true;
+}
+
 static bool decode_named_palette_color(const char* token,
                                        usize length,
                                        u8& color_id,
@@ -4363,6 +4413,10 @@ static bool decode_named_palette_color(const char* token,
             color = NAMED_COLOR_VALUES[idx];
             return true;
         }
+    }
+    if (decode_hex_palette_color(token, length, color)) {
+        color_id = NAMED_COLOR_INVALID;
+        return true;
     }
     color_id = NAMED_COLOR_INVALID;
     return false;
@@ -4465,7 +4519,7 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
         u8 decoded_id = NAMED_COLOR_INVALID;
         if (!decode_named_palette_color(text + start, token_length, decoded_id, decoded_color)) {
             console_write(2, prefix);
-            console_line(2, ": --palette contains an unsupported color name");
+            console_line(2, ": --palette contains an unsupported color name or hex code");
             return false;
         }
         token_colors[count] = decoded_color;
@@ -4479,7 +4533,14 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
     }
     for (u32 i = 0u; i < count; ++i) {
         for (u32 j = i + 1u; j < count; ++j) {
-            if (token_ids[i] == token_ids[j]) {
+            bool both_named = (token_ids[i] != NAMED_COLOR_INVALID) &&
+                               (token_ids[j] != NAMED_COLOR_INVALID);
+            if (both_named && token_ids[i] == token_ids[j]) {
+                console_write(2, prefix);
+                console_line(2, ": --palette cannot repeat colors");
+                return false;
+            }
+            if (palette_colors_equal(token_colors[i], token_colors[j])) {
                 console_write(2, prefix);
                 console_line(2, ": --palette cannot repeat colors");
                 return false;
