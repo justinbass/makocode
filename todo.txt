@@ -1,12 +1,28 @@
 - Features
  - Color channels non-base-2, works but slow
-  - The power-of-two palette fast path is working, but non-power-of-two palettes still use the old quadratic bits_to_base_digits / base_digits_to_bits code. Please implement the Option 2 streaming base-conversion approach for arbitrary palette sizes:
-  - Replace the existing non-power-of-two branches in both helpers with a linear-time, single-pass converter that keeps an accumulator (enough bits to cover
-    log2(base) plus headroom), emits digits via acc % base, and mirrors that logic on decode.
-  - Make sure the new logic exactly preserves bit counts, padding, and metadata expectations (e.g., MAKOCODE_PAGE_SYMBOLS, MAKOCODE_PAGE_BITS).
-  - Keep the current power-of-two branch untouched.
-  - Add focused tests or round-trip checks to prove encode/decode symmetry for at least one awkward base (e.g., palette size 3 or 7) and show the runtime scaling is improved (a before/after timing note is fine if there’s no test harness).
-  - Summarize what changed, how you validated it, and any follow-up ideas.
+  - Execution Plan
+    1. Design Streaming Converter
+        - Re-read bits_to_base_digits / base_digits_to_bits to catalog every assumption about padding, digit order, and metadata (MAKOCODE_PAGE_SYMBOLS, MAKOCODE_PAGE_BITS).
+        - Choose accumulator width (likely __uint128_t) and define helper routines (push_bits, emit_digit, emit_byte) so encode/decode share identical semantics.
+        - Prove the accumulator never overflows for the largest supported palette; document constraints inline.
+    2. Implement Encode-Side Streaming Path
+        - In bits_to_base_digits, keep the power-of-two branch unchanged.
+        - Replace the arbitrary-base fallback with a single-pass converter that walks page_bits_chunk once, fills the accumulator, and emits digits via acc % base.
+        - Ensure digit padding matches compute_min_symbols_for_bits so downstream layout logic sees the same symbol counts.
+    3. Implement Decode-Side Streaming Path
+        - Mirror the streaming logic inside base_digits_to_bits, again preserving the power-of-two fast path.
+        - Consume digits once, emitting bytes whenever the accumulator has ≥8 bits; mask the last byte to the requested bit count.
+        - Add sanity checks to catch base mismatches or unexpected leftover digits early.
+    4. Extend Tests & Benchmarks
+        - Add focused round-trip tests (e.g., new script invocations or test harness cases) that cover awkward bases like 3 and 5 at multiple payload sizes.
+        - Capture before/after timing notes for at least one test (e.g., run_roundtrip.sh --label 3009), checking that runtime now scales linearly.
+    5. Validate Continuously
+        - After each major code change (steps 2 and 3), build and run ./makocode test --summary plus targeted round-trip scripts to ensure we haven’t broken power-of-two palettes.
+        - When implementation and new tests are in place, run make test (which triggers the full suite of scripted round trips) and iterate until everything passes cleanly.
+    6. Wrap Up
+        - Summarize the code changes, cite timing improvements, list the tests run (with dates), and note any remaining follow-up ideas (e.g., future micro-optimizations or broader
+          palette stress tests).
+    This sequence keeps the suite green after every significant change while driving the encode/decode converters toward linear-time behavior.
  - Overlay needs explicit palette arg, threshold the overlay image first.
  - Handle 15 column ppm (from convert) in decode or overlay, ignore newlines
  - Use LZMA rather than LZW compression
