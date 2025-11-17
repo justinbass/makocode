@@ -87,6 +87,7 @@ extern "C" double sin(double value);
 extern "C" double cos(double value);
 extern "C" double atan2(double y, double x);
 extern "C" double log(double value);
+extern "C" long double logl(long double value);
 extern "C" long double ceill(long double value);
 struct tm;
 extern "C" long  time(long* tloc);
@@ -3893,6 +3894,7 @@ struct PaletteColor {
 
 static const u32 MAX_CUSTOM_PALETTE_COLORS = 16u;
 static const usize MAX_CUSTOM_PALETTE_TEXT = 256u;
+static const u8 CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE = 3u;
 
 struct ImageMappingConfig {
     u8  color_channels;
@@ -3907,6 +3909,7 @@ struct ImageMappingConfig {
     PaletteColor custom_palette[MAX_CUSTOM_PALETTE_COLORS];
     u8 custom_palette_ids[MAX_CUSTOM_PALETTE_COLORS];
     u32 custom_palette_count;
+    u32 custom_palette_base;
     bool custom_palette_valid;
 
     ImageMappingConfig()
@@ -3919,6 +3922,7 @@ struct ImageMappingConfig {
           palette_text_length(0u),
           palette_set(false),
           custom_palette_count(0u),
+          custom_palette_base(0u),
           custom_palette_valid(false) {
         palette_text[0] = '\0';
         for (u32 i = 0u; i < MAX_CUSTOM_PALETTE_COLORS; ++i) {
@@ -4374,6 +4378,9 @@ static bool image_mapping_set_palette_text(ImageMappingConfig& config,
     config.palette_set = true;
     config.custom_palette_valid = false;
     config.custom_palette_count = 0u;
+    config.custom_palette_base = 0u;
+    config.color_channels = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
+    config.color_set = true;
     return true;
 }
 
@@ -4382,17 +4389,30 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
     if (!config.palette_set) {
         config.custom_palette_valid = false;
         config.custom_palette_count = 0u;
+        config.custom_palette_base = 0u;
         return true;
     }
     if (config.custom_palette_valid) {
+        if (config.custom_palette_count >= 2u) {
+            config.custom_palette_base = config.custom_palette_count;
+        }
+        config.color_channels = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
+        config.color_set = true;
         return true;
     }
     const char* prefix = command_name ? command_name : "makocode";
     if (config.palette_text_length == 0u) {
         console_write(2, prefix);
         console_line(2, ": --palette requires a non-empty list of colors");
+        config.custom_palette_valid = false;
+        config.custom_palette_count = 0u;
+        config.custom_palette_base = 0u;
         return false;
     }
+    config.custom_palette_valid = false;
+    config.custom_palette_count = 0u;
+    config.custom_palette_base = 0u;
+
     const char* text = config.palette_text;
     usize length = config.palette_text_length;
     u32 count = 0u;
@@ -4439,24 +4459,9 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
         token_ids[count] = decoded_id;
         ++count;
     }
-    if (count == 0u) {
+    if (count < 2u) {
         console_write(2, prefix);
-        console_line(2, ": --palette requires at least one color");
-        return false;
-    }
-    if (count != 5u) {
-        console_write(2, prefix);
-        console_line(2, ": --palette currently requires exactly 5 colors (White ... Black)");
-        return false;
-    }
-    if (token_ids[0] != NAMED_COLOR_WHITE) {
-        console_write(2, prefix);
-        console_line(2, ": --palette must begin with White");
-        return false;
-    }
-    if (token_ids[count - 1u] != NAMED_COLOR_BLACK) {
-        console_write(2, prefix);
-        console_line(2, ": --palette must end with Black");
+        console_line(2, ": --palette requires at least two colors");
         return false;
     }
     for (u32 i = 0u; i < count; ++i) {
@@ -4468,23 +4473,14 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
             }
         }
     }
-    for (u32 i = 1u; i + 1u < count; ++i) {
-        u8 id = token_ids[i];
-        if (id != NAMED_COLOR_CYAN &&
-            id != NAMED_COLOR_MAGENTA &&
-            id != NAMED_COLOR_YELLOW) {
-            console_write(2, prefix);
-            console_line(2, ": --palette middle entries must be Cyan/Magenta/Yellow");
-            return false;
-        }
-    }
     for (u32 i = 0u; i < count; ++i) {
         config.custom_palette[i] = token_colors[i];
         config.custom_palette_ids[i] = token_ids[i];
     }
     config.custom_palette_count = count;
+    config.custom_palette_base = count;
     config.custom_palette_valid = true;
-    config.color_channels = 3u;
+    config.color_channels = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
     config.color_set = true;
     return true;
 }
@@ -4495,25 +4491,45 @@ static bool mapping_has_custom_palette(const ImageMappingConfig& mapping) {
            mapping.custom_palette_count >= 2u;
 }
 
-static double palette_bits_per_symbol(const ImageMappingConfig& mapping) {
+static u32 mapping_custom_palette_base(const ImageMappingConfig& mapping) {
     if (!mapping_has_custom_palette(mapping)) {
-        return 0.0;
+        return 0u;
     }
-    double base = (double)mapping.custom_palette_count;
-    if (base <= 1.0) {
-        return 0.0;
+    u32 base = mapping.custom_palette_base;
+    if (base < 2u) {
+        base = mapping.custom_palette_count;
     }
-    return log(base) / log(2.0);
+    if (base > mapping.custom_palette_count) {
+        base = mapping.custom_palette_count;
+    }
+    return base;
 }
 
-static u64 compute_min_symbols_for_bits(u64 bit_count, double bits_per_symbol) {
-    if (bits_per_symbol <= 0.0) {
+static double palette_bits_per_symbol(const ImageMappingConfig& mapping) {
+    u32 base = mapping_custom_palette_base(mapping);
+    if (base < 2u) {
+        return 0.0;
+    }
+    long double base_ld = (long double)base;
+    long double log2_base = logl(base_ld) / logl(2.0L);
+    if (log2_base <= 0.0L) {
+        return 0.0;
+    }
+    return (double)log2_base;
+}
+
+static u64 compute_min_symbols_for_bits(u64 bit_count, u32 base) {
+    if (base < 2u) {
         return 0u;
     }
     if (bit_count == 0u) {
         return 1u;
     }
-    long double ratio = (long double)bit_count / (long double)bits_per_symbol;
+    long double log2_base = logl((long double)base) / logl(2.0L);
+    if (log2_base <= 0.0L) {
+        return 0u;
+    }
+    long double ratio = (long double)bit_count / log2_base;
     long double epsilon = 1e-12L;
     long double adjusted = ratio - epsilon;
     u64 symbols = (u64)ceill(adjusted);
@@ -4543,7 +4559,7 @@ static usize divide_le_bytes_by_base(u8* data, usize length, u32 base, u32& rema
     return length;
 }
 
-static bool bits_to_base_digits(const u8* bit_data,
+static bool bits_to_base_digits(makocode::ByteBuffer& bit_scratch,
                                 u64 bit_count,
                                 u32 base,
                                 makocode::ByteBuffer& digits_out,
@@ -4553,26 +4569,24 @@ static bool bits_to_base_digits(const u8* bit_data,
     if (base < 2u) {
         return false;
     }
-    if (bit_count == 0u || !bit_data) {
+    if (bit_count == 0u) {
         return true;
     }
-    usize byte_count = (usize)((bit_count + 7u) / 8u);
-    makocode::ByteBuffer work;
-    if (!work.ensure(byte_count)) {
+    if (!bit_scratch.data) {
         return false;
     }
-    work.size = byte_count;
-    for (usize i = 0u; i < byte_count; ++i) {
-        work.data[i] = bit_data[i];
+    usize byte_count = (usize)((bit_count + 7u) / 8u);
+    if (bit_scratch.size < byte_count) {
+        return false;
     }
     u64 used_bits_last_byte = bit_count - ((u64)(byte_count - 1u) * 8u);
     if (used_bits_last_byte > 0u && used_bits_last_byte < 8u) {
         u8 mask = (u8)((1u << used_bits_last_byte) - 1u);
-        work.data[byte_count - 1u] &= mask;
+        bit_scratch.data[byte_count - 1u] &= mask;
     }
     while (byte_count > 0u) {
         u32 remainder = 0u;
-        byte_count = divide_le_bytes_by_base(work.data, byte_count, base, remainder);
+        byte_count = divide_le_bytes_by_base(bit_scratch.data, byte_count, base, remainder);
         if (!digits_out.ensure(digits_out.size + 1u)) {
             return false;
         }
@@ -4598,71 +4612,82 @@ static bool base_digits_to_bits(const u8* digits,
     if (base < 2u) {
         return false;
     }
-    makocode::ByteBuffer value;
-    if (!value.ensure(1u)) {
+    if (!bits_out.ensure(1u)) {
         return false;
     }
-    value.data[0] = 0u;
-    value.size = 1u;
+    bits_out.data[0] = 0u;
+    bits_out.size = 1u;
     for (u64 idx = digit_count; idx > 0u; --idx) {
         u32 digit = digits ? (u32)digits[idx - 1u] : 0u;
         if (digit >= base) {
             return false;
         }
         u32 carry = digit;
-        for (usize byte_index = 0u; byte_index < value.size; ++byte_index) {
-            u64 accum = (u64)value.data[byte_index] * (u64)base + (u64)carry;
-            value.data[byte_index] = (u8)(accum & 0xFFu);
+        for (usize byte_index = 0u; byte_index < bits_out.size; ++byte_index) {
+            u64 accum = (u64)bits_out.data[byte_index] * (u64)base + (u64)carry;
+            bits_out.data[byte_index] = (u8)(accum & 0xFFu);
             carry = (u32)(accum >> 8u);
         }
         while (carry) {
-            if (!value.ensure(value.size + 1u)) {
+            if (!bits_out.ensure(bits_out.size + 1u)) {
                 return false;
             }
-            value.data[value.size++] = (u8)(carry & 0xFFu);
+            bits_out.data[bits_out.size++] = (u8)(carry & 0xFFu);
             carry >>= 8u;
         }
     }
     u64 target_bytes_u64 = (bit_count_target + 7u) / 8u;
     usize target_bytes = (usize)target_bytes_u64;
     if (bit_count_target == 0u) {
-        target_bytes = value.size;
+        target_bytes = bits_out.size;
     }
-    usize alloc_size = target_bytes > 0u ? target_bytes : value.size;
+    usize alloc_size = target_bytes > 0u ? target_bytes : bits_out.size;
     if (alloc_size == 0u) {
         alloc_size = 1u;
     }
     if (!bits_out.ensure(alloc_size)) {
         return false;
     }
-    bits_out.size = alloc_size;
-    usize copy_bytes = value.size;
-    if (copy_bytes > alloc_size) {
-        copy_bytes = alloc_size;
-    }
-    for (usize i = 0u; i < copy_bytes; ++i) {
-        bits_out.data[i] = value.data[i];
-    }
-    if (copy_bytes < alloc_size) {
-        for (usize i = copy_bytes; i < alloc_size; ++i) {
+    if (bits_out.size < alloc_size) {
+        for (usize i = bits_out.size; i < alloc_size; ++i) {
             bits_out.data[i] = 0u;
         }
+        bits_out.size = alloc_size;
+    } else if (bits_out.size > alloc_size && alloc_size > 0u) {
+        for (usize i = alloc_size; i < bits_out.size; ++i) {
+            if (bits_out.data[i] != 0u) {
+                return false;
+            }
+        }
+        bits_out.size = alloc_size;
+    }
+    if (bits_out.size == 0u) {
+        bits_out.size = 1u;
+        bits_out.data[0] = 0u;
     }
     if (bit_count_target > 0u) {
         usize required_bytes = (usize)((bit_count_target + 7u) / 8u);
-        if (value.size > required_bytes) {
-            for (usize i = required_bytes; i < value.size; ++i) {
-                if (value.data[i] != 0u) {
+        if (bits_out.size > required_bytes) {
+            for (usize i = required_bytes; i < bits_out.size; ++i) {
+                if (bits_out.data[i] != 0u) {
                     return false;
                 }
             }
+            bits_out.size = required_bytes;
+        } else if (bits_out.size < required_bytes) {
+            if (!bits_out.ensure(required_bytes)) {
+                return false;
+            }
+            for (usize i = bits_out.size; i < required_bytes; ++i) {
+                bits_out.data[i] = 0u;
+            }
+            bits_out.size = required_bytes;
         }
         u32 bits_in_last_byte = (u32)(bit_count_target - ((u64)(required_bytes - 1u) * 8u));
         if (bits_in_last_byte > 0u && bits_in_last_byte < 8u) {
             u8 mask = (u8)((1u << bits_in_last_byte) - 1u);
             bits_out.data[required_bytes - 1u] &= mask;
         }
-        bits_out.size = required_bytes;
     }
     return true;
 }
@@ -4727,8 +4752,51 @@ static bool map_rgb_to_custom_symbol(const ImageMappingConfig& mapping,
             }
         }
     }
+    if (debug_logging_enabled() && best_score > 0u) {
+        static u32 palette_log_budget = 32u;
+        if (palette_log_budget) {
+            --palette_log_budget;
+            char index_buffer[32];
+            char score_buffer[32];
+            char sample_r[32];
+            char sample_g[32];
+            char sample_b[32];
+            char palette_r[32];
+            char palette_g[32];
+            char palette_b[32];
+            u64_to_ascii((u64)best_index, index_buffer, sizeof(index_buffer));
+            u64_to_ascii(best_score, score_buffer, sizeof(score_buffer));
+            u64_to_ascii((u64)rgb[0], sample_r, sizeof(sample_r));
+            u64_to_ascii((u64)rgb[1], sample_g, sizeof(sample_g));
+            u64_to_ascii((u64)rgb[2], sample_b, sizeof(sample_b));
+            const PaletteColor& chosen = mapping.custom_palette[best_index];
+            u64_to_ascii((u64)chosen.r, palette_r, sizeof(palette_r));
+            u64_to_ascii((u64)chosen.g, palette_g, sizeof(palette_g));
+            u64_to_ascii((u64)chosen.b, palette_b, sizeof(palette_b));
+            console_write(2, "decode: approximated custom symbol ");
+            console_line(2, index_buffer);
+            console_write(2, "decode: sample rgb = ");
+            console_write(2, sample_r);
+            console_write(2, ", ");
+            console_write(2, sample_g);
+            console_write(2, ", ");
+            console_line(2, sample_b);
+            console_write(2, "decode: palette rgb = ");
+            console_write(2, palette_r);
+            console_write(2, ", ");
+            console_write(2, palette_g);
+            console_write(2, ", ");
+            console_line(2, palette_b);
+            console_write(2, "decode: squared distance = ");
+            console_line(2, score_buffer);
+        }
+    }
     symbol_out = best_index;
     return true;
+}
+
+static u32 palette_color_luminance(const PaletteColor& color) {
+    return (u32)color.r * 299u + (u32)color.g * 587u + (u32)color.b * 114u;
 }
 
 static void footer_select_colors(const ImageMappingConfig& mapping,
@@ -4738,8 +4806,24 @@ static void footer_select_colors(const ImageMappingConfig& mapping,
         return;
     }
     if (mapping.palette_set && mapping.custom_palette_valid && mapping.custom_palette_count >= 2u) {
-        const PaletteColor& background = mapping.custom_palette[0];
-        const PaletteColor& text = mapping.custom_palette[mapping.custom_palette_count - 1u];
+        u32 darkest_index = 0u;
+        u32 lightest_index = 0u;
+        u32 darkest_luma = 0xFFFFFFFFu;
+        u32 lightest_luma = 0u;
+        for (u32 i = 0u; i < mapping.custom_palette_count; ++i) {
+            const PaletteColor& candidate = mapping.custom_palette[i];
+            u32 luma = palette_color_luminance(candidate);
+            if (luma < darkest_luma) {
+                darkest_luma = luma;
+                darkest_index = i;
+            }
+            if (luma >= lightest_luma) {
+                lightest_luma = luma;
+                lightest_index = i;
+            }
+        }
+        const PaletteColor& background = mapping.custom_palette[lightest_index];
+        const PaletteColor& text = mapping.custom_palette[darkest_index];
         background_rgb[0] = background.r;
         background_rgb[1] = background.g;
         background_rgb[2] = background.b;
@@ -5010,6 +5094,8 @@ struct PpmParserState {
     bool has_palette_text;
     char palette_text[MAX_CUSTOM_PALETTE_TEXT];
     usize palette_text_length;
+    bool has_palette_base;
+    u64 palette_base_value;
     bool has_page_symbols;
     u64 page_symbols_value;
     bool has_page_width_pixels;
@@ -5081,6 +5167,8 @@ struct PpmParserState {
           color_channels_value(0u),
           has_palette_text(false),
           palette_text_length(0u),
+          has_palette_base(false),
+          palette_base_value(0u),
           has_page_symbols(false),
           page_symbols_value(0u),
           has_page_width_pixels(false),
@@ -5157,6 +5245,7 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char ecc_original_tag[] = "MAKOCODE_ECC_ORIGINAL_BYTES";
     const char color_tag[] = "MAKOCODE_COLOR_CHANNELS";
     const char palette_tag[] = "MAKOCODE_PALETTE";
+    const char palette_base_tag[] = "MAKOCODE_PALETTE_BASE";
     const char page_symbols_tag[] = "MAKOCODE_PAGE_SYMBOLS";
     const char fiducial_size_tag[] = "MAKOCODE_FIDUCIAL_SIZE";
     const char fiducial_columns_tag[] = "MAKOCODE_FIDUCIAL_COLUMNS";
@@ -5173,6 +5262,7 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const usize ecc_original_tag_len = (usize)sizeof(ecc_original_tag) - 1u;
     const usize color_tag_len = (usize)sizeof(color_tag) - 1u;
     const usize palette_tag_len = (usize)sizeof(palette_tag) - 1u;
+    const usize palette_base_tag_len = (usize)sizeof(palette_base_tag) - 1u;
     const usize page_symbols_tag_len = (usize)sizeof(page_symbols_tag) - 1u;
     const usize fiducial_size_tag_len = (usize)sizeof(fiducial_size_tag) - 1u;
     const usize fiducial_columns_tag_len = (usize)sizeof(fiducial_columns_tag) - 1u;
@@ -5580,6 +5670,46 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 state.palette_text[text_length] = '\0';
                 state.palette_text_length = text_length;
                 state.has_palette_text = true;
+            }
+            return;
+        }
+    }
+    index = 0u;
+    while (index < length) {
+        char c = comment[index];
+        if (c != ' ' && c != '\t') {
+            break;
+        }
+        ++index;
+    }
+    if ((length - index) >= palette_base_tag_len) {
+        bool match = true;
+        for (usize i = 0u; i < palette_base_tag_len; ++i) {
+            if (comment[index + i] != palette_base_tag[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            index += palette_base_tag_len;
+            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
+                ++index;
+            }
+            usize number_start = index;
+            while (index < length) {
+                char c = comment[index];
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                ++index;
+            }
+            usize number_length = index - number_start;
+            if (number_length) {
+                u64 value = 0u;
+                if (ascii_to_u64(comment + number_start, number_length, &value)) {
+                    state.has_palette_base = true;
+                    state.palette_base_value = value;
+                }
             }
             return;
         }
@@ -7383,6 +7513,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
+    u32 custom_palette_base = 0u;
     u8 color_mode = overrides.color_channels;
     if (overrides.color_set) {
         color_mode = overrides.color_channels;
@@ -7397,6 +7528,34 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     if (use_custom_palette) {
         color_mode = active_mapping.color_channels;
+        custom_palette_base = mapping_custom_palette_base(active_mapping);
+        if (custom_palette_base < 2u) {
+            return false;
+        }
+        if (state.has_palette_base) {
+            u32 metadata_base = (u32)state.palette_base_value;
+            if (metadata_base < 2u || metadata_base > MAX_CUSTOM_PALETTE_COLORS) {
+                return false;
+            }
+            if (metadata_base != custom_palette_base) {
+                if (debug_logging_enabled()) {
+                    console_line(2, "decode: palette base mismatch between metadata and active palette");
+                    char expected_buffer[32];
+                    char actual_buffer[32];
+                    u64_to_ascii((u64)metadata_base, expected_buffer, sizeof(expected_buffer));
+                    u64_to_ascii((u64)custom_palette_base, actual_buffer, sizeof(actual_buffer));
+                    console_write(2, "decode: metadata base = ");
+                    console_line(2, expected_buffer);
+                    console_write(2, "decode: active base = ");
+                    console_line(2, actual_buffer);
+                }
+                return false;
+            }
+        }
+        if (!state.has_palette_base) {
+            state.has_palette_base = true;
+            state.palette_base_value = custom_palette_base;
+        }
     }
     const u8 sample_bits = bits_per_sample(color_mode);
     if (sample_bits == 0u) {
@@ -7442,6 +7601,25 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 return false;
             }
             digits_target = state.page_symbols_value;
+        }
+        if (debug_logging_enabled()) {
+            char palette_buf[32];
+            char base_buf[32];
+            char digits_buf[32];
+            char capacity_buf[32];
+            const u32 palette_count = active_mapping.custom_palette_count;
+            u64_to_ascii((u64)palette_count, palette_buf, sizeof(palette_buf));
+            u64_to_ascii((u64)custom_palette_base, base_buf, sizeof(base_buf));
+            u64_to_ascii(digits_target, digits_buf, sizeof(digits_buf));
+            u64_to_ascii(usable_pixels, capacity_buf, sizeof(capacity_buf));
+            console_write(2, "debug decode palette: size=");
+            console_write(2, palette_buf);
+            console_write(2, " base=");
+            console_write(2, base_buf);
+            console_write(2, " digits_expected=");
+            console_write(2, digits_buf);
+            console_write(2, " usable_pixels=");
+            console_line(2, capacity_buf);
         }
         if (digits_target > 0u) {
             if (!custom_digits.ensure((usize)digits_target)) {
@@ -8215,23 +8393,38 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
     if (use_custom_palette) {
-        const u8* digit_data_ptr = (digits_target > 0u && custom_digits.size)
-                                       ? custom_digits.data
-                                       : (const u8*)0;
-        makocode::ByteBuffer custom_bits_buffer;
+        u64 digits_available = (u64)custom_digits.size;
+        if (digits_target > 0u && digits_available == 0u) {
+            return false;
+        }
+        if (state.has_page_symbols && digits_target > 0u && digits_available < digits_target) {
+            return false;
+        }
+        if (!state.has_page_symbols && digits_available > 0u) {
+            state.has_page_symbols = true;
+            state.page_symbols_value = digits_available;
+        }
+        const u8* digit_data_ptr = digits_available ? custom_digits.data : (const u8*)0;
         u64 bit_target = capacity_with_reserve;
         if (state.has_page_bits && state.page_bits_value > 0u && state.page_bits_value <= bit_target) {
             bit_target = state.page_bits_value;
         }
-        if (!base_digits_to_bits(digit_data_ptr,
-                                 digits_target,
-                                 active_mapping.custom_palette_count,
-                                 bit_target,
-                                 custom_bits_buffer)) {
+        u32 digits_base = custom_palette_base ? custom_palette_base : mapping_custom_palette_base(active_mapping);
+        if (digits_base < 2u) {
             return false;
         }
-        frame_bit_count = bit_target;
-        byte_buffer_move(frame_bits, custom_bits_buffer);
+        if (!base_digits_to_bits(digit_data_ptr,
+                                 digits_available,
+                                 digits_base,
+                                 bit_target,
+                                 frame_bits)) {
+            return false;
+        }
+        u64 frame_bits_effective = bit_target;
+        if (frame_bits_effective == 0u) {
+            frame_bits_effective = (u64)frame_bits.size * 8u;
+        }
+        frame_bit_count = frame_bits_effective;
         if (color_mode == 3u && frame_bits.size) {
             for (usize i = 0u; i < frame_bits.size; ++i) {
                 u8 rotate = (u8)((i % 3u) + 1u);
@@ -8374,6 +8567,13 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
             dest.palette_text[copy_length] = '\0';
             dest.palette_text_length = copy_length;
         }
+    }
+    if (src.has_palette_base) {
+        if (dest.has_palette_base && dest.palette_base_value != src.palette_base_value) {
+            return false;
+        }
+        dest.has_palette_base = true;
+        dest.palette_base_value = src.palette_base_value;
     }
     if (src.has_page_symbols) {
         if (dest.has_page_symbols && dest.page_symbols_value != src.page_symbols_value) {
@@ -9425,6 +9625,11 @@ static bool ppm_append_extended_metadata(const PpmParserState& state,
             return false;
         }
     }
+    if (state.has_palette_base) {
+        if (!append_comment_number(output, "MAKOCODE_PALETTE_BASE", state.palette_base_value)) {
+            return false;
+        }
+    }
     if (state.has_palette_text && state.palette_text_length) {
         if (!append_comment_text(output,
                                  "MAKOCODE_PALETTE",
@@ -10081,8 +10286,13 @@ static bool ensure_frame_bits_fit_single_page(ImageMappingConfig& mapping,
         frame_bit_count = 1u;
     }
     double custom_bits_per_symbol = 0.0;
+    u32 custom_base = 0u;
     u64 bits_per_symbol = 0u;
     if (use_custom_palette) {
+        custom_base = mapping_custom_palette_base(mapping);
+        if (custom_base < 2u) {
+            return false;
+        }
         custom_bits_per_symbol = palette_bits_per_symbol(mapping);
         if (custom_bits_per_symbol <= 0.0) {
             return false;
@@ -10095,7 +10305,7 @@ static bool ensure_frame_bits_fit_single_page(ImageMappingConfig& mapping,
     }
     u64 min_data_pixels = 0u;
     if (use_custom_palette) {
-        min_data_pixels = compute_min_symbols_for_bits(frame_bit_count, custom_bits_per_symbol);
+        min_data_pixels = compute_min_symbols_for_bits(frame_bit_count, custom_base);
     } else {
         min_data_pixels = (frame_bit_count + bits_per_symbol - 1u) / bits_per_symbol;
     }
@@ -10567,7 +10777,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     u64 usable_data_pixels = total_data_pixels - reserved_data_pixels;
     bool use_custom_palette = mapping_has_custom_palette(mapping);
-    u32 custom_base = use_custom_palette ? mapping.custom_palette_count : 0u;
+    u32 custom_base = use_custom_palette ? mapping_custom_palette_base(mapping) : 0u;
     if (!use_custom_palette) {
         u64 expected_bits_per_page = usable_data_pixels *
                                      (u64)sample_bits *
@@ -10587,6 +10797,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     makocode::ByteBuffer page_bits_chunk;
     makocode::ByteBuffer base_digits;
     u64 digits_used = 0u;
+    u64 digit_span = 0u;
     if (use_custom_palette) {
         if (custom_base < 2u) {
             return false;
@@ -10598,7 +10809,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                page_bits_chunk)) {
             return false;
         }
-        if (!bits_to_base_digits(page_bits_chunk.data,
+        if (!bits_to_base_digits(page_bits_chunk,
                                  bits_per_page,
                                  custom_base,
                                  base_digits,
@@ -10606,19 +10817,46 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             return false;
         }
         if (debug_logging_enabled()) {
+            char palette_buf[32];
+            char base_buf[32];
+            char digits_buf[32];
+            char capacity_buf[32];
             char bits_buf[64];
-            char digits_buf[64];
-            u64_to_ascii(bits_per_page, bits_buf, sizeof(bits_buf));
+            u64_to_ascii((u64)mapping.custom_palette_count, palette_buf, sizeof(palette_buf));
+            u64_to_ascii((u64)custom_base, base_buf, sizeof(base_buf));
             u64_to_ascii(digits_used, digits_buf, sizeof(digits_buf));
-            console_write(2, "debug bits_per_page=");
-            console_write(2, bits_buf);
-            console_write(2, " digits_used=");
-            console_line(2, digits_buf);
+            u64_to_ascii(usable_data_pixels, capacity_buf, sizeof(capacity_buf));
+            u64_to_ascii(bits_per_page, bits_buf, sizeof(bits_buf));
+            console_write(2, "debug palette: size=");
+            console_write(2, palette_buf);
+            console_write(2, " base=");
+            console_write(2, base_buf);
+            console_write(2, " digits_from_bits=");
+            console_write(2, digits_buf);
+            console_write(2, " digits_per_page=");
+            console_write(2, capacity_buf);
+            console_write(2, " bits_per_page=");
+            console_line(2, bits_buf);
         }
         if (digits_used > usable_data_pixels) {
             console_line(2, "encode_page_to_ppm: insufficient data pixels for palette digits");
             return false;
         }
+        if (usable_data_pixels == 0u || usable_data_pixels > (u64)USIZE_MAX_VALUE) {
+            console_line(2, "encode_page_to_ppm: unusable palette pixel capacity");
+            return false;
+        }
+        usize target_digits = (usize)usable_data_pixels;
+        if (!base_digits.ensure(target_digits)) {
+            return false;
+        }
+        if (base_digits.size < target_digits) {
+            for (usize pad = base_digits.size; pad < target_digits; ++pad) {
+                base_digits.data[pad] = 0u;
+            }
+        }
+        base_digits.size = target_digits;
+        digit_span = (u64)base_digits.size;
     }
     u32 footer_rows = height_pixels - data_height_pixels;
     u8 footer_text_rgb[3] = {0u, 0u, 0u};
@@ -10682,6 +10920,9 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (!append_comment_number(output, "MAKOCODE_PAGE_SYMBOLS", digits_used)) {
             return false;
         }
+        if (!append_comment_number(output, "MAKOCODE_PALETTE_BASE", (u64)custom_base)) {
+            return false;
+        }
     }
     if (footer_rows) {
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
@@ -10719,10 +10960,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             if (!is_footer_row && !reserved_pixel) {
                 if (use_custom_palette) {
                     u8 symbol = 0u;
-                    if (digit_index < digits_used && digit_index < (u64)base_digits.size) {
+                    if (digit_index < (u64)base_digits.size) {
                         symbol = base_digits.data[digit_index];
-                        ++digit_index;
                     }
+                    ++digit_index;
                     if (symbol >= mapping.custom_palette_count) {
                         return false;
                     }
@@ -10778,6 +11019,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 return false;
             }
         }
+    }
+    if (use_custom_palette && digit_index != digit_span) {
+        console_line(2, "encode_page_to_ppm: palette digit span mismatch");
+        return false;
     }
     return true;
 }
@@ -11956,7 +12201,7 @@ static void write_usage() {
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
     console_line(1, "Options:");
     console_line(1, "  --color-channels N (1=Gray, 2=CMY, 3=RGB; default 1)");
-    console_line(1, "  --palette \"White ... Black\" (White must be first, Black last; quote lists)");
+    console_line(1, "  --palette \"Color ...\" (2-16 unique names from White/Cyan/Magenta/Yellow/Black)");
     console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
     console_line(1, "  --page-height PX   (page height in pixels; default 3508)");
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
@@ -11998,7 +12243,7 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "Layout:");
     console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
-    console_line(1, "  --palette \"White ... Black\"   Custom palette (White first, Black last; quote lists).");
+    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black).");
     console_line(1, "  --page-width PX      Override page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
@@ -12030,7 +12275,7 @@ static void write_decode_help() {
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
     console_line(1, "  --color-channels N   1=Gray (default), 2=CMY, 3=RGB.");
-    console_line(1, "  --palette \"White ... Black\"   Custom palette (White first, Black last; quote lists).");
+    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black).");
     console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");

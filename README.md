@@ -12,7 +12,7 @@ Written entirely with codex-gpt-5.
 make
 make test
 ./makocode encode --input=file.txt
-./makocode encode --input=file.txt --palette "White Cyan Magenta Yellow Black"
+./makocode encode --input=file.txt --palette "White Black"
 # Print, store, scan the output shown above
 ./makocode decode scan.ppm
 ```
@@ -25,9 +25,9 @@ To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`b
 
 ### Custom Palettes (Base-N Mode)
 
-- Pass `--palette "White ... Black"` to `encode`/`decode` to define a custom color alphabet. The five entries must include `White` first, `Black` last, and any ordering of `Cyan`, `Magenta`, `Yellow` in the middle.
-- The encoder automatically maps each page’s bitstream into base‑5 digits using that palette, so every non-reserved pixel uses one of the supplied colors. Footer backgrounds/text colors follow the first/last palette entries.
-- Palette metadata is embedded per page (via `MAKOCODE_PALETTE` / `MAKOCODE_PAGE_SYMBOLS`), so `decode` normally discovers the palette automatically, but you can still force it with `--palette ...` if desired.
+- Pass `--palette "Color ..."` to `encode`/`decode` with 2–16 unique entries selected from the existing names (`White`, `Cyan`, `Magenta`, `Yellow`, `Black`). Examples: `--palette "White Black"` (binary), `--palette "White Cyan Magenta"` (base‑3), `--palette "White Cyan Magenta Yellow Black"` (base‑5). Quote the list so the CLI keeps the whitespace intact.
+- The encoder automatically maps each page’s bitstream into base‑N digits (where `N` equals the palette length), pads out every non-reserved pixel, and chooses footer foreground/background colors by measuring palette contrast—no need for fixed White/Black endpoints.
+- Palette metadata is embedded per page (via `MAKOCODE_PALETTE`, `MAKOCODE_PALETTE_BASE`, and `MAKOCODE_PAGE_SYMBOLS`), so `decode` normally discovers the palette automatically, but you can still force it with `--palette ...` if desired.
 
 ## Sample Barcodes
 
