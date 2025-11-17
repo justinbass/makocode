@@ -1,5 +1,31 @@
 - Palette
- - Color channels CMYKB (include black, 5 bits?) - e.g. channels options are 1, 4, 5, and 8. Each 4 pixels (5^4 states) stores 9 bits of information (2^9 encoded bits), which is 2.25 bits/pixel. Configurable colors and arbitrary bits?
+ - Color channels
+    • Findings
+      - Reproduced the user report: ./makocode encode --input random.bin finishes in ≈0.8 s, but adding --palette "White Cyan" (two-color custom palette) stretches the
+        same 20 KB input to ≈17 s; decode shows the same slowdown. So the regression only appears once the custom-palette path is taken.
+      - Debug output (--debug) shows that one page tries to consume 25 325 616 bits, which are converted into 8 441 872 palette digits even though only ~277 k digits
+        contain real payload; that huge conversion dominates the runtime.
+      - The culprit is bits_to_base_digits/divide_le_bytes_by_base in makocode.cpp:4543-4588 and the mirror base_digits_to_bits in makocode.cpp:4610-4686. For every
+        palette digit produced, these helpers sweep the entire temporary buffer of bytes. With ~277 k digits per chunk, the function executes roughly 277 k full passes
+        over 35 k bytes (~10 billion byte-ops), which explains the super-linear curve (and the same structure runs during decode).
+      - When no custom palette is in play the encoder bypasses these helpers entirely and streams bits directly into pixels, which is why the runtime snaps back to
+        linear.
+      Ideas To Fix
+          1. Add a fast path for palettes whose size is a power of two (e.g., the two-color “White Cyan” case). You already know each digit maps to exactly log2(base)
+             bits, so you can reuse the existing bit-stream writer/reader and simply look up the palette color for each k-bit chunk instead of doing base conversion.
+             That immediately fixes the common 2/4/8-color cases with minimal code churn.
+          2. Replace the current repeated-division algorithm with a streaming converter that keeps a small accumulator (64–128 bits) and emits digits as soon as enough
+             entropy is available. By processing the bitstream LSB-first and only touching each byte/digit once, you drop the complexity to O(n). The decode side can
+             mirror this with a streaming multiplier/adder.
+          3. If you need exact density for arbitrary palette sizes, move to a chunked approach: process, say, 1024-bit windows as __uint128_t blocks, convert each
+             window to base‑P digits with a single div/mod per block, and append to the output. Knuth’s divide-and-conquer base conversion (or even a simple limb-based
+             big integer with 32-bit limbs and divmod on chunks) dramatically reduces the number of passes compared to per-digit division.
+          4. As a longer-term option, encode palette digits via an ANS/range coder that already operates in base P; it naturally provides linear-time streaming behavior
+             for both encode and decode and sidesteps the need for custom big-int math.
+      Implementing (1) gives you a quick win for the reported workload. Adopting (2) or (3) keeps performance roughly linear for any palette, and (4) offers the best
+      density/performance trade-off if you’re willing to integrate an entropy coder.
+      Next steps: pick the fast-path approach (1) to unblock users, then profile again; plan a streaming converter (2/3) so all palette sizes scale with input length;
+      mirror the change in the decoder so round trips stay symmetric.
 
 - Features
 - Overlay needs explicit palette arg, threshold the overlay image first.
