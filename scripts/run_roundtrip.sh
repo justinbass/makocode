@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+format_command() {
+    local formatted="" quoted=""
+    for arg in "$@"; do
+        printf -v quoted '%q' "$arg"
+        if [[ -z $formatted ]]; then
+            formatted=$quoted
+        else
+            formatted+=" $quoted"
+        fi
+    done
+    printf '%s' "$formatted"
+}
+
+print_makocode_cmd() {
+    local phase=$1
+    shift
+    printf '[%s] makocode %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+}
+
 usage() {
     cat <<'USAGE'
 Usage: run_roundtrip.sh --label NAME --size BYTES --ecc VALUE --width PX --height PX [options]
@@ -193,7 +212,14 @@ cleanup() {
         rm -rf "$tmp_dir"
     fi
 }
-trap cleanup EXIT
+on_exit() {
+    local exit_code=$?
+    cleanup
+    if [[ $exit_code -ne 0 ]]; then
+        printf '[%s] FAIL (exit %d)\n\n' "$label" "$exit_code" >&2
+    fi
+}
+trap on_exit EXIT
 
 head -c "$size" /dev/urandom > "$payload_path"
 
@@ -215,6 +241,7 @@ if ((${#encode_opts[@]})); then
         encode_cmd+=("$opt")
     done
 fi
+print_makocode_cmd "encode" "${encode_cmd[@]}"
 (
     cd "$tmp_dir"
     "${encode_cmd[@]}"
@@ -250,6 +277,7 @@ if [[ $multi_page -eq 1 ]]; then
 else
     decode_cmd+=("${ppm_paths[0]}")
 fi
+print_makocode_cmd "decode" "${decode_cmd[@]}"
 "${decode_cmd[@]}" >/dev/null
 
 baseline_decoded_payload="$baseline_decode_dir/random.bin"
@@ -332,6 +360,7 @@ if [[ $transform_needed -eq 1 ]]; then
     else
         transform_decode_cmd+=("${transform_outputs[0]}")
     fi
+    print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
     "${transform_decode_cmd[@]}" >/dev/null
     transformed_decoded_payload="$transformed_decode_dir/random.bin"
     if [[ ! -f $transformed_decoded_payload ]]; then
@@ -353,4 +382,9 @@ if [[ $transform_needed -eq 1 ]]; then
     mv "$transformed_decoded_payload" "$repo_root/test/${label}_random_payload_transformed_decoded.bin"
 fi
 
-echo "roundtrip $label ok (ecc=$ecc, size=$size, pages=${#ppm_targets[@]}${transform_needed:+, transformed})"
+suffix=""
+if [[ $transform_needed -eq 1 ]]; then
+    suffix=" (transformed)"
+fi
+printf '[%s] SUCCESS ecc=%s size=%s pages=%d%s\n\n' \
+    "$label" "$ecc" "$size" "${#ppm_targets[@]}" "$suffix"

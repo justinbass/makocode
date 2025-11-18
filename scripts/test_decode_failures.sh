@@ -1,6 +1,72 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    cat <<'USAGE'
+Usage: test_decode_failures.sh [--label NAME]
+
+  --label NAME    Identifier for log messages (default: decode_failures).
+  --help          Show this help message.
+USAGE
+}
+
+label="decode_failures"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --label)
+            label=${2:-}
+            shift 2
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "test_decode_failures: unknown flag '$1'" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z $label ]]; then
+    echo "test_decode_failures: --label requires a value" >&2
+    exit 1
+fi
+
+format_command() {
+    local formatted="" quoted=""
+    for arg in "$@"; do
+        printf -v quoted '%q' "$arg"
+        if [[ -z $formatted ]]; then
+            formatted=$quoted
+        else
+            formatted+=" $quoted"
+        fi
+    done
+    printf '%s' "$formatted"
+}
+
+print_makocode_cmd() {
+    local phase=$1
+    shift
+    printf '[%s] makocode %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+}
+
+run_expect_failure() {
+    local phase=$1
+    shift
+    print_makocode_cmd "$phase" "$@"
+    set +e
+    "$@" >/dev/null 2>&1
+    local status=$?
+    set -e
+    if [[ $status -eq 0 ]]; then
+        echo "test_decode_failures: decoder unexpectedly succeeded for $phase" >&2
+        exit 1
+    fi
+}
+
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
@@ -33,13 +99,7 @@ P6
 255
 PPM
 
-if "$makocode_bin" decode "$wrong_depth" >/dev/null 2>&1; then
-    echo "test_decode_failures: decoder accepted wrong maxval" >&2
-    exit 1
-fi
-if "$makocode_bin" decode "$invalid_magic" >/dev/null 2>&1; then
-    echo "test_decode_failures: decoder accepted invalid magic" >&2
-    exit 1
-fi
+run_expect_failure "decode-wrong-depth" "$makocode_bin" decode "$wrong_depth"
+run_expect_failure "decode-invalid-magic" "$makocode_bin" decode "$invalid_magic"
 
-echo "test_decode_failures: expected failures observed"
+printf '[%s] SUCCESS decode failures rejected as expected\n' "$label"

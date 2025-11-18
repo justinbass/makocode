@@ -63,4 +63,4 @@
  - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
  - Determine proper defaults
  - Attempt to optimize/shrink/minify/dedupe code, it still should be readable
- - Full test coverage, move out of makocode.cpp into Makefile?
+ - Full test coverage

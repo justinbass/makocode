@@ -1,6 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    cat <<'USAGE'
+Usage: test_cli_output_dir.sh [--label NAME]
+
+  --label NAME    Prefix for artifacts under test/ (default: cli_output_dir).
+  --help          Show this message.
+USAGE
+}
+
+label="cli_output_dir"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --label)
+            label=${2:-}
+            shift 2
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "test_cli_output_dir: unknown flag '$1'" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z $label ]]; then
+    echo "test_cli_output_dir: --label requires a value" >&2
+    exit 1
+fi
+
+format_command() {
+    local formatted="" quoted=""
+    for arg in "$@"; do
+        printf -v quoted '%q' "$arg"
+        if [[ -z $formatted ]]; then
+            formatted=$quoted
+        else
+            formatted+=" $quoted"
+        fi
+    done
+    printf '%s' "$formatted"
+}
+
+print_makocode_cmd() {
+    local phase=$1
+    shift
+    printf '[%s] makocode %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+}
+
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
@@ -19,15 +71,19 @@ cleanup() {
 trap cleanup EXIT
 
 printf '%s' "encode-decode-cli test payload" > "$payload"
+encode_cmd=(
+    "$makocode_bin" encode
+    "--input=$(basename "$payload")"
+    --ecc=0.5
+    --page-width=100
+    --page-height=100
+    --no-filename
+    --no-page-count
+)
+print_makocode_cmd "encode" "${encode_cmd[@]}"
 (
     cd "$tmp_dir"
-    "$makocode_bin" encode \
-        --input "$(basename "$payload")" \
-        --ecc=0.5 \
-        --page-width=100 \
-        --page-height=100 \
-        --no-filename \
-        --no-page-count >/dev/null
+    "${encode_cmd[@]}" >/dev/null
 )
 
 shopt -s nullglob
@@ -40,7 +96,9 @@ fi
 ppm_path="${ppms[0]}"
 decode_dir="$tmp_dir/decoded"
 mkdir -p "$decode_dir"
-"$makocode_bin" decode "$ppm_path" --output-dir "$decode_dir" >/dev/null
+decode_cmd=("$makocode_bin" decode "$ppm_path" --output-dir "$decode_dir")
+print_makocode_cmd "decode" "${decode_cmd[@]}"
+"${decode_cmd[@]}" >/dev/null
 
 decoded_payload="$decode_dir/cli_payload.bin"
 if [[ ! -f $decoded_payload ]]; then
@@ -49,8 +107,8 @@ if [[ ! -f $decoded_payload ]]; then
 fi
 cmp --silent "$payload" "$decoded_payload"
 
-mv "$payload" "$repo_root/test/3011_cli_payload.bin"
-mv "$ppm_path" "$repo_root/test/3011_cli_payload_encoded.ppm"
-mv "$decoded_payload" "$repo_root/test/3011_cli_payload_decoded.bin"
+mv "$payload" "$repo_root/test/${label}_cli_payload.bin"
+mv "$ppm_path" "$repo_root/test/${label}_cli_payload_encoded.ppm"
+mv "$decoded_payload" "$repo_root/test/${label}_cli_payload_decoded.bin"
 
-echo "test_cli_output_dir: ok"
+printf '[%s] SUCCESS CLI output-dir workflow\n' "$label"
