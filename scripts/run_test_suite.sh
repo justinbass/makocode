@@ -6,6 +6,8 @@ suite_bin="$repo_root/scripts/run_roundtrip.sh"
 cli_test="$repo_root/scripts/test_cli_output_dir.sh"
 decode_test="$repo_root/scripts/test_decode_failures.sh"
 overlay_test="$repo_root/scripts/test_overlay_e2e.sh"
+palette_test="$repo_root/scripts/test_palette_metadata.sh"
+password_fail_test="$repo_root/scripts/test_password_failures.sh"
 
 if [[ ! -x $suite_bin ]]; then
     echo "run_test_suite: missing $suite_bin" >&2
@@ -70,6 +72,17 @@ run_decode_case() {
     execute_case "$new_label" "$description" "$decode_test" --label "$new_label"
 }
 
+run_script_case() {
+    local script=$1
+    local slug=$2
+    local description=$3
+    shift 3
+    local new_label
+    printf -v new_label "%04d_%s" "$case_counter" "$slug"
+    case_counter=$((case_counter + 1))
+    execute_case "$new_label" "$description" "$script" --label "$new_label" "$@"
+}
+
 run_overlay_case() {
     local slug=$1
     local description=$2
@@ -131,11 +144,19 @@ run_roundtrip_case "gray_100k_stretch_h24_v26" "Grayscale stretch horizontal 2.4
     --size 102400 --ecc 0 --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
+#run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
+#    --size 65536 --ecc 0 --width 900 --height 900 \
+#    --scale 1.15 --rotate 7 --skew-x 6 --skew-y -4 --transform-seed 42
+
 run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
     --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password
 
 run_roundtrip_case "ecc_multi_page_massive" "262 KiB ECC multi-page stress" \
     --size 262144 --ecc 0.25 --width 520 --height 520 --multi-page
+
+#run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale/rotate distortions" \
+#    --size 196608 --ecc 0.5 --width 620 --height 620 --multi-page \
+#    --scale 1.2 --rotate -5 --border-thickness 10 --border-density 0.2 --transform-seed 7
 
 run_roundtrip_case "palette_base5_custom" "Custom palette/base-5 mode" \
     --size 16384 --ecc 0.25 --width 640 --height 640 \
@@ -150,3 +171,11 @@ run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 run_decode_case "decode_failures" "Decoder rejects malformed PPM inputs"
 
 #run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
+
+#run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
+#    --mode auto
+
+run_script_case "$palette_test" "palette_wrong_rejected" "Decoder rejects forced wrong palette" \
+    --mode wrong
+
+run_script_case "$password_fail_test" "password_failures" "Decoder enforces password requirement"

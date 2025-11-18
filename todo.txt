@@ -1,3 +1,5 @@
+- Fix warnings during test, commented out tests
+
 - Features
  - Need option for ECC to fill up through last page
   1. Baseline Verification
