@@ -37,8 +37,34 @@ coverage: clean
 	genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS)
 
 clean:
-	rm -f makocode
-	rm -rf makocode.dSYM
-	rm -rf test
-	rm -f makocode_minified.cpp
-	rm -f *.gcda *.gcno $(LCOV_REPORT)
+	@{ \
+		if [ -n "$${NO_COLOR:-}" ] || [ ! -t 1 ]; then \
+			tag='[clean]'; \
+			green=''; \
+			red=''; \
+			reset=''; \
+		else \
+			tag='\033[1;34m[clean]\033[0m'; \
+			green='\033[32m'; \
+			red='\033[31m'; \
+			reset='\033[0m'; \
+		fi; \
+		step() { \
+			desc="$$1"; shift; \
+			printf '%b %-24s ... ' "$$tag" "$$desc"; \
+			if "$$@"; then \
+				printf '%bPASS%b\n' "$$green" "$$reset"; \
+			else \
+				status="$$?"; \
+				printf '%bFAIL (exit %s)%b\n' "$$red" "$$status" "$$reset"; \
+				exit "$$status"; \
+			fi; \
+		}; \
+		printf '%b cleanup start%b\n' "$$tag" "$$reset"; \
+		step "binary" rm -f makocode; \
+		step "debug symbols" rm -rf makocode.dSYM; \
+		step "test artifacts" rm -rf test; \
+		step "minified stub" rm -f makocode_minified.cpp; \
+		step "coverage data" rm -f *.gcda *.gcno $(LCOV_REPORT); \
+		printf '%b cleanup complete%b\n' "$$tag" "$$reset"; \
+	}
