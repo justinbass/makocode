@@ -5,6 +5,7 @@ repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 suite_bin="$repo_root/scripts/run_roundtrip.sh"
 cli_test="$repo_root/scripts/test_cli_output_dir.sh"
 decode_test="$repo_root/scripts/test_decode_failures.sh"
+overlay_test="$repo_root/scripts/test_overlay_e2e.sh"
 
 if [[ ! -x $suite_bin ]]; then
     echo "run_test_suite: missing $suite_bin" >&2
@@ -67,6 +68,15 @@ run_decode_case() {
     printf -v new_label "%04d_%s" "$case_counter" "$slug"
     case_counter=$((case_counter + 1))
     execute_case "$new_label" "$description" "$decode_test" --label "$new_label"
+}
+
+run_overlay_case() {
+    local slug=$1
+    local description=$2
+    local new_label
+    printf -v new_label "%04d_%s" "$case_counter" "$slug"
+    case_counter=$((case_counter + 1))
+    execute_case "$new_label" "$description" "$overlay_test" "$new_label"
 }
 
 run_roundtrip_case "baseline_8k_ecc_050" "8 KiB payload, ECC 0.5 baseline" \
@@ -138,3 +148,5 @@ run_roundtrip_case "border_dirt" "Border dirt / distortion stress" \
 run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 
 run_decode_case "decode_failures" "Decoder rejects malformed PPM inputs"
+
+#run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
