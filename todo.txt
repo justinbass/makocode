@@ -51,7 +51,7 @@
   - # MAKOCODE_FIDUCIAL_MARGIN
   - # MAKOCODE_SUBGRID_COL_OFFSETS
   - # MAKOCODE_SUBGRID_ROW_OFFSETS
- - Fix wavy distortion test
+ - Wavy distortion test
  - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
  - Coffee stain test, black marker test, page folded/cut test
  - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
