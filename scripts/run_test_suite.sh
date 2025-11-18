@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
+script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/lib/colors.sh"
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
 suite_bin="$repo_root/scripts/run_roundtrip.sh"
 cli_test="$repo_root/scripts/test_cli_output_dir.sh"
 decode_test="$repo_root/scripts/test_decode_failures.sh"
@@ -25,7 +27,9 @@ print_header() {
     else
         first_case=0
     fi
-    printf '[%s] %s\n' "$label" "$description"
+    local label_fmt
+    label_fmt=$(mako_format_label "$label")
+    printf '%s %s\n' "$label_fmt" "$description"
 }
 
 execute_case() {
@@ -37,11 +41,13 @@ execute_case() {
     "$@"
     local status=$?
     set -e
+    local label_fmt
+    label_fmt=$(mako_format_label "$label")
     if [[ $status -ne 0 ]]; then
-        printf '[%s] FAIL (exit %d)\n' "$label" "$status"
+        printf '%s %bFAIL (exit %d)%b\n' "$label_fmt" "$MAKO_FAIL_COLOR" "$status" "$MAKO_RESET_COLOR"
         exit $status
     fi
-    printf '[%s] PASS\n' "$label"
+    printf '%s %bPASS%b\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"
 }
 
 run_roundtrip_case() {

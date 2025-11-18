@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/lib/colors.sh"
+
 usage() {
     cat <<'USAGE'
 Usage: test_password_failures.sh [--label NAME]
@@ -50,7 +53,9 @@ format_command() {
 print_labelled() {
     local phase=$1
     shift
-    printf '[%s] %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+    local label_fmt
+    label_fmt=$(mako_format_label "$label")
+    printf '%s %s: %s\n' "$label_fmt" "$phase" "$(format_command "$@")"
 }
 
 run_expect_failure() {
@@ -67,7 +72,7 @@ run_expect_failure() {
     fi
 }
 
-repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
     echo "test_password_failures: makocode binary not found at $makocode_bin" >&2
@@ -124,4 +129,5 @@ artifacts_prefix="$repo_root/test/${label}"
 mv "$payload" "${artifacts_prefix}_payload.bin"
 mv "$ppm_path" "${artifacts_prefix}_encoded.ppm"
 
-printf '[%s] SUCCESS password failures enforced\n' "$label"
+label_fmt=$(mako_format_label "$label")
+printf '%s %bSUCCESS%b password failures enforced\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"

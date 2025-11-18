@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/lib/colors.sh"
+
 usage() {
     cat <<'USAGE'
 Usage: test_decode_failures.sh [--label NAME]
@@ -50,7 +53,9 @@ format_command() {
 print_makocode_cmd() {
     local phase=$1
     shift
-    printf '[%s] makocode %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+    local label_fmt
+    label_fmt=$(mako_format_label "$label")
+    printf '%s makocode %s: %s\n' "$label_fmt" "$phase" "$(format_command "$@")"
 }
 
 run_expect_failure() {
@@ -67,7 +72,7 @@ run_expect_failure() {
     fi
 }
 
-repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
     echo "test_decode_failures: makocode binary not found at $makocode_bin" >&2
@@ -102,4 +107,5 @@ PPM
 run_expect_failure "decode-wrong-depth" "$makocode_bin" decode "$wrong_depth"
 run_expect_failure "decode-invalid-magic" "$makocode_bin" decode "$invalid_magic"
 
-printf '[%s] SUCCESS decode failures rejected as expected\n' "$label"
+label_fmt=$(mako_format_label "$label")
+printf '%s %bSUCCESS%b decode failures rejected as expected\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"

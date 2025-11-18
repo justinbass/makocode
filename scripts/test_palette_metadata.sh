@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/lib/colors.sh"
+
 usage() {
     cat <<'USAGE'
 Usage: test_palette_metadata.sh [--label NAME] [--mode MODE]
@@ -62,10 +65,12 @@ format_command() {
 print_labelled() {
     local phase=$1
     shift
-    printf '[%s] %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+    local label_fmt
+    label_fmt=$(mako_format_label "$label")
+    printf '%s %s: %s\n' "$label_fmt" "$phase" "$(format_command "$@")"
 }
 
-repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
     echo "test_palette_metadata: makocode binary not found at $makocode_bin" >&2
@@ -149,4 +154,5 @@ if [[ -f $decoded_payload ]]; then
     mv "$decoded_payload" "${artifacts_prefix}_decoded.bin"
 fi
 
-printf '[%s] SUCCESS mode=%s\n' "$label" "$mode"
+label_fmt=$(mako_format_label "$label")
+printf '%s %bSUCCESS%b mode=%s\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR" "$mode"

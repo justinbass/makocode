@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/lib/colors.sh"
+
 format_command() {
     local formatted="" quoted=""
     for arg in "$@"; do
@@ -17,7 +20,9 @@ format_command() {
 print_makocode_cmd() {
     local phase=$1
     shift
-    printf '[%s] makocode %s: %s\n' "$label" "$phase" "$(format_command "$@")"
+    local label_fmt
+    label_fmt=$(mako_format_label "$label")
+    printf '%s makocode %s: %s\n' "$label_fmt" "$phase" "$(format_command "$@")"
 }
 
 usage() {
@@ -197,7 +202,7 @@ if [[ -z $label || -z $size || -z $ecc || -z $width || -z $height ]]; then
     exit 1
 fi
 
-repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
     echo "run_roundtrip: makocode binary not found at $makocode_bin" >&2
@@ -216,7 +221,9 @@ on_exit() {
     local exit_code=$?
     cleanup
     if [[ $exit_code -ne 0 ]]; then
-        printf '[%s] FAIL (exit %d)\n\n' "$label" "$exit_code" >&2
+        local label_fmt
+        label_fmt=$(mako_format_label "$label")
+        printf '%s %bFAIL (exit %d)%b\n\n' "$label_fmt" "$MAKO_FAIL_COLOR" "$exit_code" "$MAKO_RESET_COLOR" >&2
     fi
 }
 trap on_exit EXIT
@@ -386,5 +393,6 @@ suffix=""
 if [[ $transform_needed -eq 1 ]]; then
     suffix=" (transformed)"
 fi
-printf '[%s] SUCCESS ecc=%s size=%s pages=%d%s\n\n' \
-    "$label" "$ecc" "$size" "${#ppm_targets[@]}" "$suffix"
+label_fmt=$(mako_format_label "$label")
+printf '%s %bSUCCESS%b ecc=%s size=%s pages=%d%s\n\n' \
+    "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR" "$ecc" "$size" "${#ppm_targets[@]}" "$suffix"
