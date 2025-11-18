@@ -1,5 +1,25 @@
 - Features
  - Need option for ECC to fill up through last page
+  1. Baseline Verification
+      - Capture current git status and note relevant files (makocode.cpp, docs, tests).
+      - Run the full regression suite (./makocode test) so we know we’re starting clean.
+  2. Encoder CLI Flag & Wiring
+      - Extend command_encode parsing to accept something like --ecc-tail[=MODE] and plumb that choice into the encoder config (new fields in the relevant structs).
+      - Update write_encode_help (and any usage text) to describe the option.
+      - Re-run the CLI/option coverage tests or at least ./makocode test to ensure parsing changes didn’t regress anything.
+  3. Encoder Tail Generation
+      - After frame_bit_count and page_count are known, keep requesting extra RS parity blocks (using the existing ECC builder) until page_count * bits_per_page bits
+        are filled; serialize those bits onto the final page(s).
+      - Emit a metadata breadcrumb (e.g., # MAKOCODE_TAIL_ECC RS255/223 extra=NNN) so other tooling can identify the tail.
+      - Run encode/round-trip tests (./makocode test-low-ecc, maybe a manual encode+decode) to confirm behavior and that the new metadata is present.
+  4. Decoder Tail Consumption
+      - In the RS repair path, detect the new metadata or tail TLV, harvest the stored parity symbols, and feed them into the solver when baseline parity is
+        insufficient.
+      - Ensure graceful fallback if the tail is missing or corrupted.
+      - Run decoder-heavy suites (./makocode test, ./makocode test-scan-basic, ./makocode test-border-dirt) to validate the new logic.
+  5. Docs & Final Regression
+      - Update README/help to explain how to enable the tail and how the decoder leverages it.
+      - Execute the entire automated test suite one last time to lock in the changes.
  - Imperfect decoding, return whatever we have after ECC applies even if it's lossy
  - Color channels non-base-2, works but slow
  - Overlay needs explicit palette arg, threshold the overlay image first.
@@ -8,8 +28,8 @@
  - 15 column ppm (from convert) in overlay, ignore newlines
 
 - Decoding
+ - Encode header in image header or footer in larger dots
  - Remove all headers from encoding, one by one and fix decoding for each one.
- - Or encode header in image header in large dots? Or footer
   - # MAKOCODE_BITS
   - # MAKOCODE_PAGE_BITS
   - # MAKOCODE_PAGE_WIDTH_PX
