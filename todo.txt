@@ -28,6 +28,8 @@
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page
  - 15 column ppm (from convert) in overlay, ignore newlines
+ - Mode for no filesystem, e.g. pipe in/out data. Maybe a directive to avoid any includes.
+ - Cli output prefix
 
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.

@@ -16436,7 +16436,7 @@ static void write_usage() {
     console_line(1, "  --page-height PX   (page height in pixels; default 3508)");
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
-    console_line(1, "  --output-dir PATH  (decode: destination directory; default .)");
+    console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: extract destination; default .)");
     console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
@@ -16470,6 +16470,9 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "Required:");
     console_line(1, "  --input PATH         Add a file or directory to the archive (repeatable).");
+    console_line(1, "");
+    console_line(1, "Output:");
+    console_line(1, "  --output-dir PATH    Directory for generated PPM pages (default current directory).");
     console_line(1, "");
     console_line(1, "Layout:");
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
@@ -16725,7 +16728,10 @@ static int command_encode(int arg_count, char** args) {
     makocode::ByteBuffer title_buffer;
     makocode::ByteBuffer filename_buffer;
     makocode::ByteBuffer password_buffer;
+    makocode::ByteBuffer output_dir_buffer;
     bool have_password = false;
+    const char* output_dir = ".";
+    bool have_output_dir = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "encode", &handled)) {
@@ -16746,6 +16752,51 @@ static int command_encode(int arg_count, char** args) {
             continue;
         }
         if (consume_debug_flag(arg)) {
+            continue;
+        }
+        const char output_prefix[] = "--output-dir=";
+        const char* output_value = 0;
+        usize output_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--output-dir")) {
+            if (have_output_dir) {
+                console_line(2, "encode: output directory specified multiple times");
+                return 1;
+            }
+            if ((i + 1) >= arg_count) {
+                console_line(2, "encode: --output-dir requires a non-empty path");
+                return 1;
+            }
+            output_value = args[i + 1];
+            if (!output_value) {
+                console_line(2, "encode: --output-dir requires a non-empty path");
+                return 1;
+            }
+            output_length = ascii_length(output_value);
+            i += 1;
+        } else if (ascii_starts_with(arg, output_prefix)) {
+            if (have_output_dir) {
+                console_line(2, "encode: output directory specified multiple times");
+                return 1;
+            }
+            output_value = arg + (sizeof(output_prefix) - 1u);
+            output_length = ascii_length(output_value);
+        }
+        if (output_value) {
+            if (output_length == 0u) {
+                console_line(2, "encode: --output-dir requires a non-empty path");
+                return 1;
+            }
+            if (!output_dir_buffer.ensure(output_length + 1u)) {
+                console_line(2, "encode: failed to allocate output directory buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < output_length; ++j) {
+                output_dir_buffer.data[j] = (u8)output_value[j];
+            }
+            output_dir_buffer.data[output_length] = 0u;
+            output_dir_buffer.size = output_length;
+            output_dir = (const char*)output_dir_buffer.data;
+            have_output_dir = true;
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
@@ -17192,19 +17243,29 @@ static int command_encode(int arg_count, char** args) {
         }
         byte_buffer_move(page_output, fiducial_page);
         makocode::ByteBuffer output_name;
+        makocode::ByteBuffer output_path;
         if (!build_page_filename(output_name, timestamp_name, 1u, 1u)) {
             console_line(2, "encode: failed to build output filename");
             return 1;
         }
-        if (!write_buffer_to_file((const char*)output_name.data, page_output)) {
+        if (!join_output_path(output_dir, (const char*)output_name.data, output_path)) {
+            console_line(2, "encode: failed to prepare output path");
+            return 1;
+        }
+        if (!ensure_parent_directories((const char*)output_path.data)) {
+            console_line(2, "encode: failed to prepare output directories");
+            return 1;
+        }
+        if (!write_buffer_to_file((const char*)output_path.data, page_output)) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
         console_write(1, "encode: wrote 1 page (");
-        console_write(1, (const char*)output_name.data);
+        console_write(1, (const char*)output_path.data);
         console_line(1, ")");
     } else {
         makocode::ByteBuffer name_buffer;
+        makocode::ByteBuffer path_buffer;
         for (u64 page = 0u; page < page_count; ++page) {
             makocode::ByteBuffer page_output;
             u64 bit_offset = page * bits_per_page;
@@ -17242,7 +17303,15 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to build filename");
                 return 1;
             }
-            if (!write_buffer_to_file((const char*)name_buffer.data, page_output)) {
+            if (!join_output_path(output_dir, (const char*)name_buffer.data, path_buffer)) {
+                console_line(2, "encode: failed to prepare output path");
+                return 1;
+            }
+            if (!ensure_parent_directories((const char*)path_buffer.data)) {
+                console_line(2, "encode: failed to prepare output directories");
+                return 1;
+            }
+            if (!write_buffer_to_file((const char*)path_buffer.data, page_output)) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }
@@ -17252,12 +17321,17 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to summarize filenames");
             return 1;
         }
+        makocode::ByteBuffer sample_path;
+        const char* summary_name = (const char*)sample_name.data;
+        if (join_output_path(output_dir, summary_name, sample_path)) {
+            summary_name = (const char*)sample_path.data;
+        }
         char digits[32];
         u64_to_ascii(page_count, digits, sizeof(digits));
         console_write(1, "encode: wrote ");
         console_write(1, digits);
         console_write(1, " pages (");
-        console_write(1, (const char*)sample_name.data);
+        console_write(1, summary_name);
         console_line(1, " ...)");
     }
     return 0;
