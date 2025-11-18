@@ -4,3 +4,6 @@ makocode
 .tmp/
 test/
 makocode_minified.cpp
+*.gcda
+*.gcno
+*.dSYM/

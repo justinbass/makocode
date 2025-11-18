@@ -26,6 +26,19 @@ Pass `--debug` (e.g., `./makocode --debug encode ...`) if you need the verbose d
 Artifacts for debugging are written to `test/` using the labels defined in each
 script (e.g., `3001_random_payload*`, `2005_payload_gray_100k_*`).
 
+### Coverage
+
+To run the same end-to-end suite with GCC/gcov instrumentation and produce an
+HTML coverage report, install `lcov` (which also ships `genhtml`) and run:
+
+```
+make coverage
+```
+
+This rebuilds `makocode` with `--coverage -O0 -g`, executes every case in
+`scripts/run_test_suite.sh`, and writes `test/makocode.info` plus an HTML
+dashboard under `test/coverage/index.html`.
+
 ### Converting Scans
 
 To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png scan.ppm`.
