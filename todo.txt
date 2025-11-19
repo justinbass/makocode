@@ -69,4 +69,5 @@
  - Determine proper defaults
  - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused code, it still should be readable
  - Dependencies section (C++, G++, Shell/Linux, Python for testing)
+ - Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2)
  - Full test coverage, remove python dependency (scripts/ppm_transform.py)
