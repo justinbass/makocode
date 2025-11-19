@@ -1,4 +1,7 @@
-- Fix warnings during test, commented out tests
+- Clean up
+ - Fix warnings during test, commented out tests
+ - Coffee stain test, black marker test, page folded/cut test
+ - Remove entire page test, with high ECC
 
 - Features
  - Need option for ECC to fill up through last page
@@ -57,9 +60,7 @@
   - # MAKOCODE_SUBGRID_ROW_OFFSETS
  - Wavy distortion test
  - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
- - Coffee stain test, black marker test, page folded/cut test
  - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
- - Remove entire page test, with high ECC
  - Only if necessary: Encode header in image header or footer in larger dots
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 
