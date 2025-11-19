@@ -2,6 +2,7 @@
  - Fix warnings during test, commented out tests
  - Coffee stain test, black marker test, page folded/cut test
  - Remove entire page test, with high ECC
+ - Branch coverage
 
 - Features
  - Need option for ECC to fill up through last page
