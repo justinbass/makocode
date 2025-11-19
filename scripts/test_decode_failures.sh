@@ -79,16 +79,12 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-mkdir -p "$repo_root/test"
-tmp_dir=$(mktemp -d "$repo_root/test/decode_fail_tmp.XXXXXX")
-cleanup() {
-    if [[ -d $tmp_dir ]]; then
-        rm -rf "$tmp_dir"
-    fi
-}
-trap cleanup EXIT
+test_dir="$repo_root/test"
+mkdir -p "$test_dir"
+wrong_depth="$test_dir/${label}_wrong_depth.ppm"
+invalid_magic="$test_dir/${label}_invalid_magic.ppm"
+rm -f "$wrong_depth" "$invalid_magic"
 
-wrong_depth="$tmp_dir/wrong_depth.ppm"
 cat > "$wrong_depth" <<'PPM'
 P3
 2 2
@@ -97,7 +93,6 @@ P3
 0 0 0  0 0 0
 PPM
 
-invalid_magic="$tmp_dir/invalid_magic.ppm"
 cat > "$invalid_magic" <<'PPM'
 P6
 2 2

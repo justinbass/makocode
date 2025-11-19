@@ -79,55 +79,56 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-mkdir -p "$repo_root/test"
-tmp_dir=$(mktemp -d "$repo_root/test/${label}_tmp.XXXXXX")
-payload="$tmp_dir/secret.bin"
+test_dir="$repo_root/test"
+work_dir="$test_dir/${label}_password_work"
+payload="$test_dir/${label}_payload.bin"
+ppm_target="$test_dir/${label}_encoded.ppm"
+
 cleanup() {
-    if [[ -d $tmp_dir ]]; then
-        rm -rf "$tmp_dir"
+    if [[ -d $work_dir ]]; then
+        rm -rf "$work_dir"
     fi
 }
 trap cleanup EXIT
+
+rm -rf "$work_dir"
+mkdir -p "$work_dir"
+rm -f "$payload" "$ppm_target"
 
 head -c 32768 /dev/urandom > "$payload"
 password="suite-password"
 
 encode_cmd=(
     "$makocode_bin" encode
-    "--input=$(basename "$payload")"
+    "--input=$payload"
     --ecc=0.5
     --page-width=720
     --page-height=720
     "--password=$password"
+    "--output-dir=$work_dir"
 )
 print_labelled "encode" "${encode_cmd[@]}"
-(
-    cd "$tmp_dir"
-    "${encode_cmd[@]}" >/dev/null
-)
+"${encode_cmd[@]}" >/dev/null
 
 shopt -s nullglob
-ppms=("$tmp_dir"/*.ppm)
+ppms=("$work_dir"/*.ppm)
 shopt -u nullglob
 if [[ ${#ppms[@]} -eq 0 ]]; then
     echo "test_password_failures: encode emitted no PPMs" >&2
     exit 1
 fi
 ppm_path="${ppms[0]}"
+mv -f "$ppm_path" "$ppm_target"
 
-decoded_no_pw="$tmp_dir/decoded_no_pw"
-decoded_wrong_pw="$tmp_dir/decoded_wrong_pw"
+decoded_no_pw="$work_dir/decoded_no_pw"
+decoded_wrong_pw="$work_dir/decoded_wrong_pw"
 mkdir -p "$decoded_no_pw" "$decoded_wrong_pw"
 
 run_expect_failure "decode-missing-password" \
-    "$makocode_bin" decode "$ppm_path" --output-dir "$decoded_no_pw"
+    "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_no_pw"
 
 run_expect_failure "decode-wrong-password" \
-    "$makocode_bin" decode "$ppm_path" --output-dir "$decoded_wrong_pw" --password=bad-password
-
-artifacts_prefix="$repo_root/test/${label}"
-mv "$payload" "${artifacts_prefix}_payload.bin"
-mv "$ppm_path" "${artifacts_prefix}_encoded.ppm"
+    "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_wrong_pw" --password=bad-password
 
 label_fmt=$(mako_format_label "$label")
 printf '%s %bSUCCESS%b password failures enforced\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"

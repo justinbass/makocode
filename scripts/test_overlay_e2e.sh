@@ -1,37 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-move_artifact() {
-    local src="$1"
-    local dst="$2"
-    if [[ -f "$src" ]]; then
-        rm -f "$dst"
-        mv "$src" "$dst"
-    fi
-}
-
-cleanup_and_archive() {
-    local exit_code="$1"
-    trap - EXIT
-    set +e
-    if [[ -d "$tmp_dir" ]]; then
-        mkdir -p "$repo_root/test"
-        move_artifact "$payload" "$payload_dst"
-        if [[ -n "$base_ppm" ]]; then
-            move_artifact "$tmp_dir/$base_ppm" "$encoded_dst"
-        fi
-        move_artifact "$overlay" "$overlay_dst"
-        move_artifact "$merged" "$merged_dst"
-        move_artifact "$decoded_payload" "$decoded_dst"
-        rm -rf "$tmp_dir"
-    fi
-    if [[ "$exit_code" -ne 0 ]]; then
-        echo "test_overlay_e2e: saved artifacts under $repo_root/test for debugging" >&2
-    fi
-    exit "$exit_code"
-}
-
-repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
+script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
+repo_root=$(cd -- "$script_dir/.." && pwd -P)
 makocode_bin="$repo_root/makocode"
 
 if [[ ! -x "$makocode_bin" ]]; then
@@ -45,37 +16,52 @@ if [[ -z "$label" ]]; then
     exit 1
 fi
 
-mkdir -p "$repo_root/test"
-tmp_dir=$(mktemp -d "$repo_root/test/${label}_overlay_tmp.XXXXXX")
+test_dir="$repo_root/test"
+work_dir="$test_dir/${label}_overlay_work"
+payload_path="$test_dir/${label}_overlay_payload.bin"
+payload_work="$work_dir/payload.bin"
+encoded_path="$test_dir/${label}_overlay_encoded.ppm"
+overlay_path="$test_dir/${label}_overlay_mask.ppm"
+merged_path="$test_dir/${label}_overlay_merged.ppm"
+decoded_path="$test_dir/${label}_overlay_decoded.bin"
 
-payload="$tmp_dir/payload.bin"
-overlay="$tmp_dir/circle_overlay.ppm"
-merged="$tmp_dir/merged.ppm"
-decoded_payload="$tmp_dir/decoded/payload.bin"
-base_ppm=""
+cleanup() {
+    if [[ -d $work_dir ]]; then
+        rm -rf "$work_dir"
+    fi
+}
+trap cleanup EXIT
 
-payload_dst="$repo_root/test/${label}_overlay_payload.bin"
-encoded_dst="$repo_root/test/${label}_overlay_encoded.ppm"
-overlay_dst="$repo_root/test/${label}_overlay_mask.ppm"
-merged_dst="$repo_root/test/${label}_overlay_merged.ppm"
-decoded_dst="$repo_root/test/${label}_overlay_decoded.bin"
+rm -rf "$work_dir"
+mkdir -p "$test_dir" "$work_dir"
+rm -f "$payload_path" "$encoded_path" "$overlay_path" "$merged_path" "$decoded_path"
 
-trap 'cleanup_and_archive "$?"' EXIT
+head -c 32768 /dev/urandom > "$payload_path"
+cp "$payload_path" "$payload_work"
 
-head -c 32768 /dev/urandom > "$payload"
-
-(
-    cd "$tmp_dir"
-    "$makocode_bin" encode --input payload.bin --ecc=1.0 --page-width=1000 --page-height=1000 > /dev/null
+encode_cmd=(
+    "$makocode_bin" encode
+    "--input=payload.bin"
+    --ecc=1.0
+    --page-width=1000
+    --page-height=1000
+    "--output-dir=$work_dir"
 )
+(
+    cd "$work_dir"
+    "${encode_cmd[@]}"
+) >/dev/null
 
-base_ppm=$(cd "$tmp_dir" && ls -1 *.ppm | head -n 1 || true)
-if [[ -z "$base_ppm" ]]; then
+shopt -s nullglob
+ppms=("$work_dir"/*.ppm)
+shopt -u nullglob
+if [[ ${#ppms[@]} -eq 0 ]]; then
     echo "test_overlay_e2e: encode did not produce a ppm page" >&2
     exit 1
 fi
+mv -f "${ppms[0]}" "$encoded_path"
 
-OVERLAY_PPM="$overlay" python3 - <<'PY'
+OVERLAY_PPM="$overlay_path" python3 - <<'PY'
 import math
 import os
 
@@ -101,12 +87,20 @@ with open(path, "w", encoding="ascii", newline="\n") as f:
 PY
 
 fraction=0.2
-"$makocode_bin" overlay "$tmp_dir/$base_ppm" "$overlay" "$fraction" > "$merged"
+"$makocode_bin" overlay "$encoded_path" "$overlay_path" "$fraction" > "$merged_path"
 
-"$makocode_bin" decode "$merged" --output-dir "$tmp_dir/decoded"
-cmp --silent "$payload" "$decoded_payload"
+decoded_dir="$work_dir/decoded"
+mkdir -p "$decoded_dir"
+"$makocode_bin" decode "$merged_path" --output-dir "$decoded_dir"
+decoded_source="$decoded_dir/payload.bin"
+if [[ ! -f $decoded_source ]]; then
+    echo "test_overlay_e2e: decode missing payload.bin" >&2
+    exit 1
+fi
+cmp --silent "$payload_path" "$decoded_source"
+mv "$decoded_source" "$decoded_path"
 
-python3 - "$tmp_dir/$base_ppm" "$merged" <<'PY'
+python3 - "$encoded_path" "$merged_path" <<'PY'
 import pathlib, sys
 
 base = pathlib.Path(sys.argv[1])
@@ -153,4 +147,5 @@ if diff == 0:
 ratio = diff / pixels
 print(f"overlay pixels modified: {diff} ({ratio:.6f})")
 PY
+
 echo "overlay e2e ok (label=$label, artifacts prefix ${label}_overlay_*)"

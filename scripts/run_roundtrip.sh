@@ -226,12 +226,19 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-mkdir -p "$repo_root/test"
-tmp_dir=$(mktemp -d "$repo_root/test/${label}_tmp.XXXXXX")
-payload_path="$tmp_dir/random.bin"
+test_dir="$repo_root/test"
+mkdir -p "$test_dir"
+work_dir="$test_dir/${label}_work"
+payload_final="$test_dir/${label}_random_payload.bin"
+payload_work="$work_dir/random.bin"
+encoded_prefix="$test_dir/${label}_random_payload_encoded"
+decoded_payload_target="$test_dir/${label}_random_payload_decoded.bin"
+transformed_prefix="$test_dir/${label}_random_payload_transformed_encoded"
+transformed_decoded_target="$test_dir/${label}_random_payload_transformed_decoded.bin"
+
 cleanup() {
-    if [[ -d $tmp_dir ]]; then
-        rm -rf "$tmp_dir"
+    if [[ -d $work_dir ]]; then
+        rm -rf "$work_dir"
     fi
 }
 on_exit() {
@@ -245,9 +252,17 @@ on_exit() {
 }
 trap on_exit EXIT
 
-head -c "$size" /dev/urandom > "$payload_path"
+rm -rf "$work_dir"
+mkdir -p "$work_dir"
 
-encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=$ecc" "--page-width=$width" "--page-height=$height")
+rm -f "$payload_final" "$decoded_payload_target" "$transformed_decoded_target"
+rm -f "${encoded_prefix}.ppm" ${encoded_prefix}_*.ppm 2>/dev/null || true
+rm -f "${transformed_prefix}.ppm" ${transformed_prefix}_*.ppm 2>/dev/null || true
+
+head -c "$size" /dev/urandom > "$payload_final"
+cp "$payload_final" "$payload_work"
+
+encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=$ecc" "--page-width=$width" "--page-height=$height" "--output-dir=$work_dir")
 if [[ -n $palette ]]; then
     encode_cmd+=("--palette" "$palette")
 fi
@@ -267,12 +282,12 @@ if ((${#encode_opts[@]})); then
 fi
 print_makocode_cmd "encode" "${encode_cmd[@]}"
 (
-    cd "$tmp_dir"
+    cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
 
 shopt -s nullglob
-ppm_paths=("$tmp_dir"/*.ppm)
+ppm_paths=("$work_dir"/*.ppm)
 shopt -u nullglob
 if [[ ${#ppm_paths[@]} -eq 0 ]]; then
     echo "run_roundtrip: encode produced no PPM pages" >&2
@@ -281,7 +296,22 @@ fi
 IFS=$'\n' ppm_paths=($(printf '%s\n' "${ppm_paths[@]}" | LC_ALL=C sort))
 unset IFS
 
-baseline_decode_dir="$tmp_dir/decoded"
+baseline_targets=()
+if [[ ${#ppm_paths[@]} -eq 1 ]]; then
+    dest="${encoded_prefix}.ppm"
+    mv -f "${ppm_paths[0]}" "$dest"
+    baseline_targets+=("$dest")
+else
+    idx=1
+    for ppm in "${ppm_paths[@]}"; do
+        printf -v dest "%s_%02d.ppm" "$encoded_prefix" "$idx"
+        mv -f "$ppm" "$dest"
+        baseline_targets+=("$dest")
+        idx=$((idx + 1))
+    done
+fi
+
+baseline_decode_dir="$work_dir/decoded"
 mkdir -p "$baseline_decode_dir"
 decode_cmd=("$makocode_bin" decode)
 if ((${#decode_opts[@]})); then
@@ -297,9 +327,9 @@ if [[ -n $password ]]; then
 fi
 decode_cmd+=("--output-dir=$baseline_decode_dir")
 if [[ $multi_page -eq 1 ]]; then
-    decode_cmd+=("${ppm_paths[@]}")
+    decode_cmd+=("${baseline_targets[@]}")
 else
-    decode_cmd+=("${ppm_paths[0]}")
+    decode_cmd+=("${baseline_targets[0]}")
 fi
 print_makocode_cmd "decode" "${decode_cmd[@]}"
 "${decode_cmd[@]}" >/dev/null
@@ -309,27 +339,7 @@ if [[ ! -f $baseline_decoded_payload ]]; then
     echo "run_roundtrip: decode did not emit random.bin" >&2
     exit 1
 fi
-cmp --silent "$payload_path" "$baseline_decoded_payload"
-
-origin_payload="$repo_root/test/${label}_random_payload.bin"
-encoded_prefix="$repo_root/test/${label}_random_payload_encoded"
-decoded_payload_target="$repo_root/test/${label}_random_payload_decoded.bin"
-baseline_targets=()
-
-mv "$payload_path" "$origin_payload"
-if [[ ${#ppm_paths[@]} -eq 1 ]]; then
-    dest="${encoded_prefix}.ppm"
-    mv "${ppm_paths[0]}" "$dest"
-    baseline_targets+=("$dest")
-else
-    idx=1
-    for ppm in "${ppm_paths[@]}"; do
-        printf -v dest "%s_%02d.ppm" "$encoded_prefix" "$idx"
-        mv "$ppm" "$dest"
-        baseline_targets+=("$dest")
-        idx=$((idx + 1))
-    done
-fi
+cmp --silent "$payload_final" "$baseline_decoded_payload"
 mv "$baseline_decoded_payload" "$decoded_payload_target"
 
 transform_needed=0
@@ -352,7 +362,7 @@ if [[ $transform_needed -eq 1 ]]; then
     idx=1
     for ppm in "${ppm_targets[@]}"; do
         base_name=$(basename "$ppm")
-        transformed_path="$tmp_dir/${base_name%.*}_transformed.ppm"
+        transformed_path="$work_dir/${base_name%.*}_transformed.ppm"
         python3 "$repo_root/scripts/ppm_transform.py" \
             --input "$ppm" \
             --output "$transformed_path" \
@@ -369,7 +379,21 @@ if [[ $transform_needed -eq 1 ]]; then
         transform_outputs+=("$transformed_path")
         idx=$((idx + 1))
     done
-    transformed_decode_dir="$tmp_dir/decoded_transformed"
+    transformed_targets=()
+    if [[ ${#transform_outputs[@]} -eq 1 ]]; then
+        dest="${transformed_prefix}.ppm"
+        mv -f "${transform_outputs[0]}" "$dest"
+        transformed_targets+=("$dest")
+    else
+        idx=1
+        for ppm in "${transform_outputs[@]}"; do
+            printf -v dest "%s_%02d.ppm" "$transformed_prefix" "$idx"
+            mv -f "$ppm" "$dest"
+            transformed_targets+=("$dest")
+            idx=$((idx + 1))
+        done
+    fi
+    transformed_decode_dir="$work_dir/decoded_transformed"
     mkdir -p "$transformed_decode_dir"
     transform_decode_cmd=("$makocode_bin" decode)
     if ((${#decode_opts[@]})); then
@@ -385,9 +409,9 @@ if [[ $transform_needed -eq 1 ]]; then
     fi
     transform_decode_cmd+=("--output-dir=$transformed_decode_dir")
     if [[ $multi_page -eq 1 ]]; then
-        transform_decode_cmd+=("${transform_outputs[@]}")
+        transform_decode_cmd+=("${transformed_targets[@]}")
     else
-        transform_decode_cmd+=("${transform_outputs[0]}")
+        transform_decode_cmd+=("${transformed_targets[0]}")
     fi
     print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
     "${transform_decode_cmd[@]}" >/dev/null
@@ -396,19 +420,8 @@ if [[ $transform_needed -eq 1 ]]; then
         echo "run_roundtrip: transformed decode missing random.bin" >&2
         exit 1
     fi
-    cmp --silent "$origin_payload" "$transformed_decoded_payload"
-    transformed_prefix="$repo_root/test/${label}_random_payload_transformed_encoded"
-    if [[ ${#transform_outputs[@]} -eq 1 ]]; then
-        mv "${transform_outputs[0]}" "${transformed_prefix}.ppm"
-    else
-        idx=1
-        for ppm in "${transform_outputs[@]}"; do
-            printf -v dest "%s_%02d.ppm" "$transformed_prefix" "$idx"
-            mv "$ppm" "$dest"
-            idx=$((idx + 1))
-        done
-    fi
-    mv "$transformed_decoded_payload" "$repo_root/test/${label}_random_payload_transformed_decoded.bin"
+    cmp --silent "$payload_final" "$transformed_decoded_payload"
+    mv "$transformed_decoded_payload" "$transformed_decoded_target"
 fi
 
 suffix=""

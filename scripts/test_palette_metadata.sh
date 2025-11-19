@@ -77,49 +77,60 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-mkdir -p "$repo_root/test"
-tmp_dir=$(mktemp -d "$repo_root/test/${label}_tmp.XXXXXX")
-payload="$tmp_dir/payload.bin"
+test_dir="$repo_root/test"
+work_dir="$test_dir/${label}_palette_work"
+payload="$test_dir/${label}_payload.bin"
+payload_work="$work_dir/payload.bin"
+ppm_target="$test_dir/${label}_encoded.ppm"
+decoded_target="$test_dir/${label}_decoded.bin"
+
 cleanup() {
-    if [[ -d $tmp_dir ]]; then
-        rm -rf "$tmp_dir"
+    if [[ -d $work_dir ]]; then
+        rm -rf "$work_dir"
     fi
 }
 trap cleanup EXIT
 
+rm -rf "$work_dir"
+mkdir -p "$test_dir" "$work_dir"
+rm -f "$payload" "$ppm_target" "$decoded_target"
+
 head -c 16384 /dev/urandom > "$payload"
+cp "$payload" "$payload_work"
 palette="White Cyan Magenta Yellow"
 
 encode_cmd=(
     "$makocode_bin" encode
-    "--input=$(basename "$payload")"
+    "--input=payload.bin"
     --ecc=0.25
     --page-width=640
     --page-height=640
     --palette "$palette"
+    "--output-dir=$work_dir"
 )
 print_labelled "encode" "${encode_cmd[@]}"
 (
-    cd "$tmp_dir"
-    "${encode_cmd[@]}" >/dev/null
-)
+    cd "$work_dir"
+    "${encode_cmd[@]}"
+) >/dev/null
 
 shopt -s nullglob
-ppms=("$tmp_dir"/*.ppm)
+ppms=("$work_dir"/*.ppm)
 shopt -u nullglob
 if [[ ${#ppms[@]} -eq 0 ]]; then
     echo "test_palette_metadata: encode emitted no PPMs" >&2
     exit 1
 fi
 ppm_path="${ppms[0]}"
+mv -f "$ppm_path" "$ppm_target"
 
-decoded_dir="$tmp_dir/decoded"
+decoded_dir="$work_dir/decoded"
 mkdir -p "$decoded_dir"
 decoded_payload="$decoded_dir/payload.bin"
 
 case "$mode" in
     auto)
-        decode_cmd=("$makocode_bin" decode "$ppm_path" --output-dir "$decoded_dir")
+        decode_cmd=("$makocode_bin" decode "$ppm_target" --output-dir "$decoded_dir")
         print_labelled "decode-auto" "${decode_cmd[@]}"
         "${decode_cmd[@]}" >/dev/null
         if [[ ! -f $decoded_payload ]]; then
@@ -131,7 +142,7 @@ case "$mode" in
     wrong)
         decode_cmd=(
             "$makocode_bin" decode
-            "$ppm_path"
+            "$ppm_target"
             --output-dir "$decoded_dir"
             --palette "White Black"
         )
@@ -147,11 +158,8 @@ case "$mode" in
         ;;
 esac
 
-artifacts_prefix="$repo_root/test/${label}"
-mv "$payload" "${artifacts_prefix}_payload.bin"
-mv "$ppm_path" "${artifacts_prefix}_encoded.ppm"
 if [[ -f $decoded_payload ]]; then
-    mv "$decoded_payload" "${artifacts_prefix}_decoded.bin"
+    mv "$decoded_payload" "$decoded_target"
 fi
 
 label_fmt=$(mako_format_label "$label")

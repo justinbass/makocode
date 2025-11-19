@@ -65,56 +65,65 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-mkdir -p "$repo_root/test"
-tmp_dir=$(mktemp -d "$repo_root/test/output_dir_cli_tmp.XXXXXX")
-payload="$tmp_dir/cli_payload.bin"
+test_dir="$repo_root/test"
+work_dir="$test_dir/${label}_cli_work"
+payload="$test_dir/${label}_cli_payload.bin"
+payload_source_name="cli_payload.bin"
+payload_work="$work_dir/$payload_source_name"
+ppm_target="$test_dir/${label}_cli_payload_encoded.ppm"
+decoded_payload="$test_dir/${label}_cli_payload_decoded.bin"
+
 cleanup() {
-    if [[ -d $tmp_dir ]]; then
-        rm -rf "$tmp_dir"
+    if [[ -d $work_dir ]]; then
+        rm -rf "$work_dir"
     fi
 }
 trap cleanup EXIT
 
+rm -rf "$work_dir"
+mkdir -p "$test_dir" "$work_dir"
+rm -f "$payload" "$ppm_target" "$decoded_payload"
+
 printf '%s' "encode-decode-cli test payload" > "$payload"
+cp "$payload" "$payload_work"
 encode_cmd=(
     "$makocode_bin" encode
-    "--input=$(basename "$payload")"
+    "--input=$payload_source_name"
     --ecc=0.5
     --page-width=100
     --page-height=100
     --no-filename
     --no-page-count
+    "--output-dir=$work_dir"
 )
 print_makocode_cmd "encode" "${encode_cmd[@]}"
 (
-    cd "$tmp_dir"
-    "${encode_cmd[@]}" >/dev/null
-)
+    cd "$work_dir"
+    "${encode_cmd[@]}"
+) >/dev/null
 
 shopt -s nullglob
-ppms=("$tmp_dir"/*.ppm)
+ppms=("$work_dir"/*.ppm)
 shopt -u nullglob
 if [[ ${#ppms[@]} -eq 0 ]]; then
     echo "test_cli_output_dir: encode did not emit a PPM" >&2
     exit 1
 fi
 ppm_path="${ppms[0]}"
-decode_dir="$tmp_dir/decoded"
+mv -f "$ppm_path" "$ppm_target"
+decode_dir="$work_dir/decoded"
 mkdir -p "$decode_dir"
-decode_cmd=("$makocode_bin" decode "$ppm_path" --output-dir "$decode_dir")
+decode_cmd=("$makocode_bin" decode "$ppm_target" --output-dir "$decode_dir")
 print_makocode_cmd "decode" "${decode_cmd[@]}"
 "${decode_cmd[@]}" >/dev/null
 
-decoded_payload="$decode_dir/cli_payload.bin"
-if [[ ! -f $decoded_payload ]]; then
+decoded_source="$decode_dir/$payload_source_name"
+if [[ ! -f $decoded_source ]]; then
     echo "test_cli_output_dir: decode missing cli_payload.bin" >&2
     exit 1
 fi
-cmp --silent "$payload" "$decoded_payload"
-
-mv "$payload" "$repo_root/test/${label}_cli_payload.bin"
-mv "$ppm_path" "$repo_root/test/${label}_cli_payload_encoded.ppm"
-mv "$decoded_payload" "$repo_root/test/${label}_cli_payload_decoded.bin"
+cmp --silent "$payload" "$decoded_source"
+mv "$decoded_source" "$decoded_payload"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s %bSUCCESS%b CLI output-dir workflow\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"
