@@ -57,6 +57,8 @@ Distortions (applied after baseline roundtrip when requested):
   --border-thickness PX Add noisy dirt along all borders with thickness PX.
   --border-density R    Density (0-1) for border dirt when applied (default 0.35).
   --transform-seed N    Seed for deterministic distortions (default 0).
+  --ink-blot-radius PX  Draw a circular blot of radius PX at the page center (requires color).
+  --ink-blot-color C    Blot color name (White/Black) or RRGGBB hex.
 
 General:
   --help                Show this help message.
@@ -86,6 +88,8 @@ skew_y="0"
 border_thickness="0"
 border_density="0.35"
 transform_seed="0"
+ink_blot_radius="0"
+ink_blot_color=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -184,6 +188,14 @@ while [[ $# -gt 0 ]]; do
             transform_seed=${2:-}
             shift 2
             ;;
+        --ink-blot-radius)
+            ink_blot_radius=${2:-}
+            shift 2
+            ;;
+        --ink-blot-color)
+            ink_blot_color=${2:-}
+            shift 2
+            ;;
         --help)
             usage
             exit 0
@@ -199,6 +211,11 @@ done
 if [[ -z $label || -z $size || -z $ecc || -z $width || -z $height ]]; then
     echo "run_roundtrip: --label, --size, --ecc, --width, and --height are required" >&2
     usage >&2
+    exit 1
+fi
+
+if (( ink_blot_radius > 0 )) && [[ -z $ink_blot_color ]]; then
+    echo "run_roundtrip: --ink-blot-radius requires --ink-blot-color" >&2
     exit 1
 fi
 
@@ -319,6 +336,9 @@ transform_needed=0
 if [[ $scale_x != 1 || $scale_y != 1 || $rotate_deg != 0 || $skew_x != 0 || $skew_y != 0 || $border_thickness != 0 ]]; then
     transform_needed=1
 fi
+if (( ink_blot_radius > 0 )); then
+    transform_needed=1
+fi
 
 # Reuse the archived baseline artifacts when building transformed copies
 ppm_targets=("${baseline_targets[@]}")
@@ -343,7 +363,9 @@ if [[ $transform_needed -eq 1 ]]; then
             --skew-y "$skew_y" \
             --border-thickness "$border_thickness" \
             --border-density "$border_density" \
-            --seed "$transform_seed"
+            --seed "$transform_seed" \
+            --ink-blot-radius "$ink_blot_radius" \
+            --ink-blot-color "$ink_blot_color"
         transform_outputs+=("$transformed_path")
         idx=$((idx + 1))
     done

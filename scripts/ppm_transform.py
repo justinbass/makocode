@@ -192,6 +192,51 @@ def add_border_noise(pixels, width, height, thickness, density, seed):
     return new_pixels
 
 
+def parse_color(value):
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    lowered = trimmed.lower()
+    if lowered == 'white':
+        return (255, 255, 255)
+    if lowered == 'black':
+        return (0, 0, 0)
+    if trimmed.startswith('#'):
+        trimmed = trimmed[1:]
+    if len(trimmed) == 6:
+        try:
+            r = int(trimmed[0:2], 16)
+            g = int(trimmed[2:4], 16)
+            b = int(trimmed[4:6], 16)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise SystemExit(
+                "ppm_transform: invalid ink blot color format"
+            ) from exc
+        return (r, g, b)
+    raise SystemExit("ppm_transform: ink blot color must be White, Black, or RRGGBB hex")
+
+
+def apply_ink_blot(pixels, width, height, radius, color):
+    if radius <= 0 or color is None or width <= 0 or height <= 0:
+        return pixels[:]
+    radius_sq = radius * radius
+    cx = (width - 1) / 2.0
+    cy = (height - 1) / 2.0
+    new_pixels = pixels[:]
+    for y in range(height):
+        dy = y - cy
+        dy_sq = dy * dy
+        row_base = y * width * 3
+        for x in range(width):
+            dx = x - cx
+            if dx * dx + dy_sq <= radius_sq:
+                idx = row_base + x * 3
+                new_pixels[idx:idx + 3] = color
+    return new_pixels
+
+
 def main():
     parser = argparse.ArgumentParser(description="Apply geometric distortions to a P3 PPM.")
     parser.add_argument('--input', required=True)
@@ -204,6 +249,10 @@ def main():
     parser.add_argument('--border-thickness', type=int, default=0)
     parser.add_argument('--border-density', type=float, default=0.35)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--ink-blot-radius', type=int, default=0,
+                        help='Radius in pixels for the central ink blot (0 disables).')
+    parser.add_argument('--ink-blot-color', default='',
+                        help='Ink blot color: White, Black, or RRGGBB hex (ignored if radius=0).')
     args = parser.parse_args()
 
     comments, width, height, pixels = read_ppm(Path(args.input))
@@ -213,6 +262,10 @@ def main():
     width, height, pixels = skew_vertical(pixels, width, height, args.skew_y)
     width, height, pixels = rotate_image(pixels, width, height, args.rotate)
     pixels = add_border_noise(pixels, width, height, args.border_thickness, args.border_density, args.seed)
+    blot_color = parse_color(args.ink_blot_color)
+    if args.ink_blot_radius > 0 and blot_color is None:
+        raise SystemExit("ppm_transform: --ink-blot-radius requires --ink-blot-color")
+    pixels = apply_ink_blot(pixels, width, height, args.ink_blot_radius, blot_color)
 
     write_ppm(Path(args.output), comments, width, height, pixels)
 

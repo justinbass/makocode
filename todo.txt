@@ -1,5 +1,13 @@
 - Clean up
- - Coffee stain test, black marker test, page folded/cut test
+ - Always show all test files
+ - Log no newline
+   - [coverage] run tests (COVERAGE=1)       ... [build] compile makocode             ... PASS
+   - [test] ensure test dir              ... PASS
+   - [test] run test suite               ... [0001_baseline_8k_ecc_050] 8 KiB payload, ECC 0.5 baseline
+ - Log SUCCESS doesn't need to be green
+ - Fix README images
+ - Lcov warnings
+ - Remove all temp files in make test, any tests should be written out even if there's an error (test by manually removing ECC)
  - Remove entire page test, with high ECC
  - Commented out tests
 
@@ -65,7 +73,7 @@
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 
 - Finalize
- - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, different storage conditions, etc. Post findings.
+ - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
  - Determine proper defaults
  - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused code, it still should be readable
  - Dependencies section (C++, G++, Shell/Linux, Python for testing)
