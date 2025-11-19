@@ -18263,51 +18263,51 @@ retry_decode:
         bitstream_header_valid = bitstream_header_present && bitstream_header.valid && bitstream_header.enabled;
     }
     bool ecc_metadata_available = have_metadata &&
-                                   aggregate_state.has_ecc_flag &&
-                                   aggregate_state.ecc_flag_value;
+                                  aggregate_state.has_ecc_flag &&
+                                  aggregate_state.ecc_flag_value;
+    bool ecc_metadata_complete = ecc_metadata_available &&
+                                 aggregate_state.has_ecc_block_data &&
+                                 aggregate_state.has_ecc_parity &&
+                                 aggregate_state.has_ecc_block_count &&
+                                 aggregate_state.has_ecc_original_bytes;
     if (have_metadata &&
         aggregate_state.has_ecc_flag &&
         !aggregate_state.ecc_flag_value) {
         console_line(2, "decode: warning: payload was encoded without ECC protection");
     }
-    if (!bitstream_header_valid &&
-        ecc_metadata_available &&
-        aggregate_state.has_ecc_block_data &&
-        aggregate_state.has_ecc_parity &&
-        aggregate_state.has_ecc_block_count &&
-        aggregate_state.has_ecc_original_bytes &&
-        bitstream.data &&
-        bitstream.size >= makocode::ECC_HEADER_BYTES &&
-        bit_count >= (u64)makocode::ECC_HEADER_BITS) {
-        u64 block_data_value = aggregate_state.ecc_block_data_value;
-        u64 parity_value = aggregate_state.ecc_parity_value;
-        if (block_data_value <= 0xFFFFu && parity_value <= 0xFFFFu) {
-            u8 header_bytes[makocode::ECC_HEADER_BYTES];
-            if (makocode::build_ecc_header_bytes(header_bytes,
-                                                 makocode::ECC_HEADER_BYTES,
-                                                 (u16)block_data_value,
-                                                 (u16)parity_value,
-                                                 aggregate_state.ecc_block_count_value,
-                                                 aggregate_state.ecc_original_bytes_value)) {
-                bool differs = false;
-                for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
-                    if (bitstream.data[i] != header_bytes[i]) {
-                        differs = true;
-                        break;
-                    }
-                }
-                if (differs) {
+    if (!bitstream_header_valid) {
+        if (ecc_metadata_complete &&
+            bitstream.data &&
+            bitstream.size >= makocode::ECC_HEADER_BYTES &&
+            bit_count >= (u64)makocode::ECC_HEADER_BITS) {
+            u64 block_data_value = aggregate_state.ecc_block_data_value;
+            u64 parity_value = aggregate_state.ecc_parity_value;
+            if (block_data_value <= 0xFFFFu && parity_value <= 0xFFFFu) {
+                u8 header_bytes[makocode::ECC_HEADER_BYTES];
+                if (makocode::build_ecc_header_bytes(header_bytes,
+                                                     makocode::ECC_HEADER_BYTES,
+                                                     (u16)block_data_value,
+                                                     (u16)parity_value,
+                                                     aggregate_state.ecc_block_count_value,
+                                                     aggregate_state.ecc_original_bytes_value)) {
+                    bool differs = false;
                     for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
-                        bitstream.data[i] = header_bytes[i];
+                        if (bitstream.data[i] != header_bytes[i]) {
+                            differs = true;
+                            break;
+                        }
                     }
-                    ecc_header_repaired = true;
+                    if (differs) {
+                        for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
+                            bitstream.data[i] = header_bytes[i];
+                        }
+                        ecc_header_repaired = true;
+                    }
                 }
             }
+        } else if (ecc_metadata_available) {
+            console_line(2, "decode: warning: ECC metadata incomplete; header reconstruction skipped");
         }
-    } else if (have_metadata &&
-               aggregate_state.has_ecc_flag &&
-               aggregate_state.ecc_flag_value) {
-        console_line(2, "decode: warning: ECC metadata incomplete; header reconstruction skipped");
     }
     if (ecc_header_repaired) {
         console_line(2, "decode: repaired ECC header from metadata");
