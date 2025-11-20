@@ -1,9 +1,8 @@
 - Features
- - Imperfect decoding, return whatever we have after ECC applies even if it's lossy
- - Color channels non-base-2, works but slow
  - Overlay needs explicit palette arg, threshold the overlay image first.
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page
+ - Color channels non-base-2, works but slow
  - 15 column ppm (from convert) in overlay, ignore newlines
  - Mode for no filesystem, e.g. pipe in/out data. Maybe a directive to avoid any includes.
  - Cli output prefix
