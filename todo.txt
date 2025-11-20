@@ -1,13 +1,10 @@
 - Clean up
- - Always show all test files
  - Log no newline
    - [coverage] run tests (COVERAGE=1)       ... [build] compile makocode             ... PASS
    - [test] ensure test dir              ... PASS
    - [test] run test suite               ... [0001_baseline_8k_ecc_050] 8 KiB payload, ECC 0.5 baseline
- - Log SUCCESS doesn't need to be green
  - Fix README images
  - Lcov warnings
- - Remove all temp files in make test, any tests should be written out even if there's an error (test by manually removing ECC)
  - Remove entire page test, with high ECC
  - Commented out tests
 

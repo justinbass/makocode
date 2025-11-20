@@ -163,4 +163,4 @@ if [[ -f $decoded_payload ]]; then
 fi
 
 label_fmt=$(mako_format_label "$label")
-printf '%s %bSUCCESS%b mode=%s\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR" "$mode"
+printf '%s SUCCESS mode=%s\n' "$label_fmt" "$mode"

@@ -429,5 +429,5 @@ if [[ $transform_needed -eq 1 ]]; then
     suffix=" (transformed)"
 fi
 label_fmt=$(mako_format_label "$label")
-printf '%s %bSUCCESS%b ecc=%s size=%s pages=%d%s\n\n' \
-    "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR" "$ecc" "$size" "${#ppm_targets[@]}" "$suffix"
+printf '%s SUCCESS ecc=%s size=%s pages=%d%s\n\n' \
+    "$label_fmt" "$ecc" "$size" "${#ppm_targets[@]}" "$suffix"

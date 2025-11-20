@@ -131,4 +131,4 @@ run_expect_failure "decode-wrong-password" \
     "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_wrong_pw" --password=bad-password
 
 label_fmt=$(mako_format_label "$label")
-printf '%s %bSUCCESS%b password failures enforced\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"
+printf '%s SUCCESS password failures enforced\n' "$label_fmt"

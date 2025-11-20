@@ -126,4 +126,4 @@ cmp --silent "$payload" "$decoded_source"
 mv "$decoded_source" "$decoded_payload"
 
 label_fmt=$(mako_format_label "$label")
-printf '%s %bSUCCESS%b CLI output-dir workflow\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"
+printf '%s SUCCESS CLI output-dir workflow\n' "$label_fmt"

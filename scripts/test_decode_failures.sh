@@ -103,4 +103,4 @@ run_expect_failure "decode-wrong-depth" "$makocode_bin" decode "$wrong_depth"
 run_expect_failure "decode-invalid-magic" "$makocode_bin" decode "$invalid_magic"
 
 label_fmt=$(mako_format_label "$label")
-printf '%s %bSUCCESS%b decode failures rejected as expected\n' "$label_fmt" "$MAKO_PASS_COLOR" "$MAKO_RESET_COLOR"
+printf '%s SUCCESS decode failures rejected as expected\n' "$label_fmt"
