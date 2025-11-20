@@ -1,6 +1,3 @@
-- Clean up
- - Fix all commented out tests in scripts/run_test_suite.sh
-
 - Features
  - Need option for ECC to fill up through last page
   1. Baseline Verification
@@ -33,6 +30,7 @@
  - Cli output prefix
 
 - Decoding
+ - Fix all commented out tests in scripts/run_test_suite.sh
  - Remove entire page test, with high ECC
  - Remove all headers from encoding, one by one and fix decoding for each one.
   - # MAKOCODE_BITS
@@ -66,7 +64,8 @@
 - Finalize
  - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
  - Determine proper defaults
- - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused code, it still should be readable
+ - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere code, it still should be readable
  - Dependencies section (C++, G++, Shell/Linux, Python for testing)
+ - Much better documentation, or a spec
  - Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2)
  - Full test coverage, remove python dependency (scripts/ppm_transform.py)
