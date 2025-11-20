@@ -70,6 +70,7 @@ typedef unsigned long long  u64;
 typedef long long           i64;
 
 static const usize USIZE_MAX_VALUE = (usize)~(usize)0;
+static const u64 U64_MAX_VALUE = (u64)~(u64)0;
 
 extern "C" void* malloc(unsigned long size);
 extern "C" void  free(void* ptr);
@@ -14996,6 +14997,7 @@ static bool build_frame_bits(const makocode::EncoderContext& encoder,
     return true;
 }
 
+
 static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                const makocode::ByteBuffer& frame_bits,
                                u64 frame_bit_count,
@@ -16443,6 +16445,7 @@ static void write_usage() {
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
     console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: extract destination; default .)");
     console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
+    console_line(1, "  --ecc-fill-calculate  Print the ECC ratio that would fill the last page (no PPM output)");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
@@ -16487,6 +16490,7 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "ECC & security:");
     console_line(1, "  --ecc RATIO          Reed-Solomon redundancy (default 0.20, 0 disables).");
+    console_line(1, "  --ecc-fill-calculate  Report the ECC ratio that will fill the final page instead of emitting pages.");
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
     console_line(1, "");
     console_line(1, "Footer customization:");
@@ -16719,6 +16723,258 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
     return true;
 }
 
+static bool compute_page_layout(const ImageMappingConfig& mapping,
+                                PageFooterConfig& footer_config,
+                                u64 frame_bit_count,
+                                u32 width_pixels,
+                                u32 height_pixels,
+                                FooterLayout& footer_layout,
+                                u32& data_height_pixels,
+                                u64& bits_per_page,
+                                u64& page_count) {
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    data_height_pixels = height_pixels;
+    bits_per_page = 0u;
+    page_count = 1u;
+    const u32 MAX_FOOTER_LAYOUT_PASSES = 16u;
+    bool layout_converged = false;
+    for (u32 pass = 0u; pass < MAX_FOOTER_LAYOUT_PASSES; ++pass) {
+        u64 text_page_count = footer_config.display_page_info ? page_count : 1u;
+        footer_config.max_text_length = footer_compute_max_text_length(footer_config, text_page_count);
+        if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
+            return false;
+        }
+        data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+        if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+            return false;
+        }
+        if (!compute_bits_per_page(width_pixels,
+                                   height_pixels,
+                                   data_height_pixels,
+                                   sample_bits,
+                                   samples_per_pixel,
+                                   bits_per_page,
+                                   0)) {
+            return false;
+        }
+        if (bits_per_page == 0u) {
+            return false;
+        }
+        u64 new_page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
+        if (new_page_count == 0u) {
+            new_page_count = 1u;
+        }
+        if (!footer_config.display_page_info || new_page_count == page_count) {
+            page_count = new_page_count;
+            layout_converged = true;
+            break;
+        }
+        page_count = new_page_count;
+    }
+    return layout_converged;
+}
+
+static bool compute_frame_statistics(usize payload_bytes,
+                                     double redundancy,
+                                     u16& block_data,
+                                     u16& parity_symbols,
+                                     u64& block_count,
+                                     u64& payload_bit_count,
+                                     u64& frame_bit_count) {
+    block_data = 0u;
+    parity_symbols = 0u;
+    block_count = 0u;
+    payload_bit_count = 0u;
+    frame_bit_count = 64u;
+    if (payload_bytes == 0u) {
+        payload_bit_count = 0u;
+        frame_bit_count = 64u;
+        return true;
+    }
+    if (redundancy <= 0.0) {
+        payload_bit_count = (u64)payload_bytes * 8u;
+        if (payload_bit_count > U64_MAX_VALUE - 64u) {
+            return false;
+        }
+        frame_bit_count = payload_bit_count + 64u;
+        return true;
+    }
+        if (!makocode::compute_ecc_layout(payload_bytes, redundancy, block_data, parity_symbols, block_count)) {
+            return false;
+        }
+    if (block_data == 0u || parity_symbols == 0u || block_count == 0u) {
+        return false;
+    }
+    u64 total_symbols = (u64)(block_data + parity_symbols) * block_count;
+    if (total_symbols > (U64_MAX_VALUE / 8u)) {
+        return false;
+    }
+    u64 encoded_bits = total_symbols * 8u;
+    if (encoded_bits > U64_MAX_VALUE - makocode::ECC_HEADER_BITS) {
+        return false;
+    }
+    payload_bit_count = encoded_bits + makocode::ECC_HEADER_BITS;
+    if (payload_bit_count > U64_MAX_VALUE - 64u) {
+        return false;
+    }
+    frame_bit_count = payload_bit_count + 64u;
+    return true;
+}
+
+struct EccFillCandidate {
+    double ratio;
+    u16 block_data;
+    u16 parity;
+    u64 block_count;
+    u64 payload_bits;
+    u64 frame_bits;
+    u64 bits_per_page;
+    u64 page_count;
+};
+
+static bool evaluate_ecc_fill_candidate(usize payload_bytes,
+                                        double redundancy,
+                                        const ImageMappingConfig& mapping,
+                                        const PageFooterConfig& footer_template,
+                                        u32 width_pixels,
+                                        u32 height_pixels,
+                                        EccFillCandidate& candidate) {
+    if (payload_bytes == 0u) {
+        return false;
+    }
+    u64 dummy_payload_bits = 0u;
+    if (!compute_frame_statistics(payload_bytes,
+                                  redundancy,
+                                  candidate.block_data,
+                                  candidate.parity,
+                                  candidate.block_count,
+                                  dummy_payload_bits,
+                                  candidate.frame_bits)) {
+        return false;
+    }
+    if (candidate.block_data == 0u || candidate.parity == 0u) {
+        return false;
+    }
+    FooterLayout layout = FooterLayout();
+    PageFooterConfig footer_copy = footer_template;
+    u32 layout_data_height = height_pixels;
+    u64 bits_per_page = 0u;
+    u64 page_count = 0u;
+    if (!compute_page_layout(mapping,
+                             footer_copy,
+                             candidate.frame_bits,
+                             width_pixels,
+                             height_pixels,
+                             layout,
+                             layout_data_height,
+                             bits_per_page,
+                             page_count)) {
+        return false;
+    }
+    if (page_count == 0u) {
+        page_count = 1u;
+    }
+    candidate.ratio = (double)candidate.parity / (double)candidate.block_data;
+    candidate.bits_per_page = bits_per_page;
+    candidate.page_count = page_count;
+    return true;
+}
+
+static bool find_best_ecc_fill(usize payload_bytes,
+                               double min_ratio,
+                               double max_ratio,
+                               const ImageMappingConfig& mapping,
+                               const PageFooterConfig& footer_config,
+                               u32 width_pixels,
+                               u32 height_pixels,
+                               double& best_ratio,
+                               u16& best_block_data,
+                               u16& best_parity,
+                               u64& best_frame_bits,
+                               u64& best_bits_needed,
+                               u64& best_page_count) {
+    best_ratio = -1.0;
+    best_block_data = 0u;
+    best_parity = 0u;
+    best_frame_bits = 0u;
+    best_bits_needed = U64_MAX_VALUE;
+    best_page_count = 0u;
+    if (payload_bytes == 0u) {
+        return false;
+    }
+    double search_low = min_ratio;
+    double search_high = max_ratio;
+    EccFillCandidate candidate;
+    auto try_candidate = [&](double redundancy) -> bool {
+        EccFillCandidate local;
+        if (!evaluate_ecc_fill_candidate(payload_bytes,
+                                          redundancy,
+                                          mapping,
+                                          footer_config,
+                                          width_pixels,
+                                          height_pixels,
+                                          local)) {
+            return false;
+        }
+        if (local.page_count == 1u) {
+            u64 bits_remaining = (local.bits_per_page > local.frame_bits) ? (local.bits_per_page - local.frame_bits) : 0u;
+            if (best_ratio < 0.0 || bits_remaining < best_bits_needed ||
+                (bits_remaining == best_bits_needed && local.ratio < best_ratio)) {
+                best_ratio = local.ratio;
+                best_block_data = local.block_data;
+                best_parity = local.parity;
+                best_frame_bits = local.frame_bits;
+                best_bits_needed = bits_remaining;
+                best_page_count = local.page_count;
+            }
+        }
+        candidate = local;
+        return true;
+    };
+    if (!try_candidate(search_low)) {
+        return false;
+    }
+    if (candidate.page_count != 1u) {
+        return false;
+    }
+    for (u32 iteration = 0u; iteration < 64u; ++iteration) {
+        double mid = (search_low + search_high) * 0.5;
+        if (mid == search_low || mid == search_high) {
+            break;
+        }
+        if (!evaluate_ecc_fill_candidate(payload_bytes,
+                                          mid,
+                                          mapping,
+                                          footer_config,
+                                          width_pixels,
+                                          height_pixels,
+                                          candidate)) {
+            search_high = mid;
+            continue;
+        }
+        if (candidate.page_count == 1u) {
+            u64 bits_remaining = (candidate.bits_per_page > candidate.frame_bits) ? (candidate.bits_per_page - candidate.frame_bits) : 0u;
+            if (best_ratio < 0.0 || bits_remaining < best_bits_needed ||
+                (bits_remaining == best_bits_needed && candidate.ratio < best_ratio)) {
+                best_ratio = candidate.ratio;
+                best_block_data = candidate.block_data;
+                best_parity = candidate.parity;
+                best_frame_bits = candidate.frame_bits;
+                best_bits_needed = bits_remaining;
+                best_page_count = candidate.page_count;
+            }
+            search_low = mid;
+        } else {
+            search_high = mid;
+        }
+    }
+    return (best_ratio >= 0.0);
+}
+
 static int command_encode(int arg_count, char** args) {
     if (arguments_request_help(arg_count, args)) {
         write_encode_help();
@@ -16737,6 +16993,7 @@ static int command_encode(int arg_count, char** args) {
     bool have_password = false;
     const char* output_dir = ".";
     bool have_output_dir = false;
+    bool ecc_fill_calculate = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "encode", &handled)) {
@@ -16841,11 +17098,15 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: --ecc value is not a valid decimal number");
                 return 1;
             }
-            if (redundancy_value < 0.0 || redundancy_value > 8.0) {
-                console_line(2, "encode: --ecc must be between 0.0 and 8.0");
+            if (redundancy_value < 0.0) {
+                console_line(2, "encode: --ecc must be >= 0.0");
                 return 1;
             }
             ecc_redundancy = redundancy_value;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--ecc-fill-calculate")) {
+            ecc_fill_calculate = true;
             continue;
         }
         const char input_prefix[] = "--input=";
@@ -17126,6 +17387,93 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: title configuration is invalid");
         return 1;
     }
+    u32 width_pixels = 0u;
+    u32 height_pixels = 0u;
+    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
+        console_line(2, "encode: invalid page dimensions");
+        return 1;
+    }
+    if (ecc_fill_calculate) {
+        makocode::ByteBuffer compressed_payload;
+        if (!lzma_compress(archive.buffer.data, archive.buffer.size, compressed_payload)) {
+            console_line(2, "encode: failed to compress payload for ECC fill calculation");
+            return 1;
+        }
+        usize compressed_size = compressed_payload.size;
+        compressed_payload.release();
+        usize payload_bytes = compressed_size;
+        if (have_password) {
+            usize overhead = makocode::ENCRYPTION_HEADER_BYTES + makocode::ENCRYPTION_TAG_BYTES;
+            if (payload_bytes > USIZE_MAX_VALUE - overhead) {
+                console_line(2, "encode: payload size overflow while estimating ECC fill");
+                return 1;
+            }
+            payload_bytes += overhead;
+        }
+        if (payload_bytes == 0u) {
+            console_line(2, "encode: payload is empty, ECC fill calculation unnecessary");
+            return 0;
+        }
+        u16 frame_block_data = 0u;
+        u16 frame_parity = 0u;
+        u64 frame_block_count = 0u;
+        u64 frame_payload_bits = 0u;
+        u64 frame_bits = 0u;
+        if (!compute_frame_statistics(payload_bytes,
+                                      ecc_redundancy,
+                                      frame_block_data,
+                                      frame_parity,
+                                      frame_block_count,
+                                      frame_payload_bits,
+                                      frame_bits)) {
+            console_line(2, "encode: could not compute frame size for ECC fill calculation");
+            return 1;
+        }
+        double best_ratio = -1.0;
+        u16 best_block_data = 0u;
+        u16 best_parity = 0u;
+        u64 best_frame_bits = 0u;
+        u64 best_bits_needed = 0u;
+        u64 best_page_count = 0u;
+        if (!find_best_ecc_fill(payload_bytes,
+                                ecc_redundancy,
+                                (double)makocode::RS_FIELD_SIZE,
+                                mapping,
+                                footer_config,
+                                width_pixels,
+                                height_pixels,
+                                best_ratio,
+                                best_block_data,
+                                best_parity,
+                                best_frame_bits,
+                                best_bits_needed,
+                                best_page_count)) {
+            console_line(2, "encode: failed to derive ECC fill candidate");
+            return 1;
+        }
+        char ratio_buffer[32];
+        format_fixed_3(best_ratio, ratio_buffer, sizeof(ratio_buffer));
+        char block_buffer[32];
+        u64_to_ascii(best_block_data, block_buffer, sizeof(block_buffer));
+        char parity_buffer[32];
+        u64_to_ascii(best_parity, parity_buffer, sizeof(parity_buffer));
+        char bits_buffer[32];
+        u64_to_ascii(best_bits_needed, bits_buffer, sizeof(bits_buffer));
+        char page_buffer[32];
+        u64_to_ascii(best_page_count, page_buffer, sizeof(page_buffer));
+        console_write(1, "encode: --ecc-fill-calculate -> --ecc=");
+        console_write(1, ratio_buffer);
+        console_write(1, " (blocks=");
+        console_write(1, block_buffer);
+        console_write(1, " parity=");
+        console_write(1, parity_buffer);
+        console_write(1, " pages=");
+        console_write(1, page_buffer);
+        console_write(1, " bits_needed=");
+        console_write(1, bits_buffer);
+        console_line(1, ")");
+        return 0;
+    }
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
     if (have_password) {
@@ -17149,62 +17497,19 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: failed to build frame");
         return 1;
     }
-    u32 width_pixels = 0u;
-    u32 height_pixels = 0u;
-    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
-        console_line(2, "encode: invalid page dimensions");
-        return 1;
-    }
-    u8 sample_bits = bits_per_sample(mapping.color_channels);
-    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        console_line(2, "encode: unsupported color configuration");
-        return 1;
-    }
     FooterLayout footer_layout;
-    u32 data_height_pixels = height_pixels;
+    u32 layout_data_height = height_pixels;
     u64 bits_per_page = 0u;
-    u64 page_count = 1u;
-    const u32 MAX_FOOTER_LAYOUT_PASSES = 16u;
-    bool layout_converged = false;
-    for (u32 pass = 0u; pass < MAX_FOOTER_LAYOUT_PASSES; ++pass) {
-        u64 text_page_count = footer_config.display_page_info ? page_count : 1u;
-        footer_config.max_text_length = footer_compute_max_text_length(footer_config, text_page_count);
-        if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
-            console_line(2, "encode: footer text does not fit within the page layout");
-            return 1;
-        }
-        data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
-        if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-            console_line(2, "encode: invalid footer configuration");
-            return 1;
-        }
-        if (!compute_bits_per_page(width_pixels,
-                                   height_pixels,
-                                   data_height_pixels,
-                                   sample_bits,
-                                   samples_per_pixel,
-                                   bits_per_page,
-                                   0)) {
-            console_line(2, "encode: fiducial layout leaves no data capacity");
-            return 1;
-        }
-        if (bits_per_page == 0u) {
-            console_line(2, "encode: page capacity is zero");
-            return 1;
-        }
-        u64 new_page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
-        if (new_page_count == 0u) {
-            new_page_count = 1u;
-        }
-        if (!footer_config.display_page_info || new_page_count == page_count) {
-            page_count = new_page_count;
-            layout_converged = true;
-            break;
-        }
-        page_count = new_page_count;
-    }
-    if (!layout_converged) {
+    u64 page_count = 0u;
+    if (!compute_page_layout(mapping,
+                             footer_config,
+                             frame_bit_count,
+                             width_pixels,
+                             height_pixels,
+                             footer_layout,
+                             layout_data_height,
+                             bits_per_page,
+                             page_count)) {
         console_line(2, "encode: footer layout did not converge");
         return 1;
     }
