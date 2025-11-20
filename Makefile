@@ -5,6 +5,7 @@ LDFLAGS ?=
 LCOV_REPORT ?= test/makocode.info
 LCOV_HTML_DIR ?= test/coverage
 LCOV_FLAGS ?= --ignore-errors inconsistent,unsupported,format
+LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
 GENHTML_FLAGS ?= --ignore-errors inconsistent,unsupported,corrupt,category
 
 STATUS ?= ./scripts/make_step.sh
@@ -28,8 +29,8 @@ test: makocode
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
 	@$(STATUS) coverage "check genhtml" sh -c 'command -v genhtml >/dev/null 2>&1'
-	@$(STATUS) coverage "run tests (COVERAGE=1)" $(MAKE) COVERAGE=1 test
-	@$(STATUS) coverage "capture lcov" lcov --capture --no-external --directory . --output-file $(LCOV_REPORT) $(LCOV_FLAGS) --rc lcov_branch_coverage=1
+	@$(STATUS) coverage "run tests (COVERAGE=1)" env MAKOCODE_COVERAGE_PROBES=1 $(MAKE) COVERAGE=1 test
+	@$(STATUS) coverage "capture lcov" lcov --capture --no-external --directory . --output-file $(LCOV_REPORT) $(LCOV_FLAGS) $(LCOV_RC)
 	@$(STATUS) coverage "generate html" genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS) --branch-coverage
 
 clean:

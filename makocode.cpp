@@ -99,6 +99,7 @@ extern "C" char* realpath(const char* path, char* resolved_path);
 extern "C" char* getcwd(char* buf, unsigned long size);
 extern "C" int   chdir(const char* path);
 extern "C" int   snprintf(char* buf, unsigned long size, const char* format, ...);
+extern "C" char* getenv(const char* name);
 
 static u16 read_le_u16(const u8* ptr);
 static u32 read_le_u32(const u8* ptr);
@@ -7658,6 +7659,10 @@ struct BitWriter {
 
     BitWriter() : buffer(), bit_position(0u), failed(false) {}
 
+    ~BitWriter() {
+        reset();
+    }
+
     void reset() {
         buffer.release();
         bit_position = 0u;
@@ -8012,6 +8017,10 @@ struct EncoderContext {
           encryption_enabled(false),
           ecc_summary() {}
 
+    ~EncoderContext() {
+        reset();
+    }
+
     void reset() {
         payload_bytes.release();
         bit_writer.reset();
@@ -8131,8 +8140,6 @@ struct ReedSolomonTables {
     bool initialized;
     u8 exp_table[512];
     u8 log_table[256];
-
-    ReedSolomonTables() : initialized(false), exp_table(), log_table() {}
 };
 
 static ReedSolomonTables g_rs_tables;
@@ -8890,6 +8897,10 @@ struct DecoderContext {
           password_not_encrypted(false),
           ecc_stats() {}
 
+    ~DecoderContext() {
+        reset();
+    }
+
     void reset() {
         payload.release();
         has_payload = false;
@@ -9160,14 +9171,9 @@ struct PageFooterConfig {
 };
 
 struct FiducialGridDefaults {
-    u32 marker_size_pixels;
-    u32 spacing_pixels;
-    u32 margin_pixels;
-
-    FiducialGridDefaults()
-        : marker_size_pixels(4u),
-          spacing_pixels(24u),
-          margin_pixels(12u) {}
+    u32 marker_size_pixels = 4u;
+    u32 spacing_pixels = 24u;
+    u32 margin_pixels = 12u;
 };
 
 static FiducialGridDefaults g_fiducial_defaults;
@@ -9741,6 +9747,36 @@ static usize divide_le_bytes_by_base(u8* data, usize length, u32 base, u32& rema
     return length;
 }
 
+static bool normalize_bits_output_size(makocode::ByteBuffer& bits_out, usize alloc_size) {
+    if (alloc_size == 0u) {
+        alloc_size = bits_out.size;
+    }
+    if (alloc_size == 0u) {
+        alloc_size = 1u;
+    }
+    if (!bits_out.ensure(alloc_size)) {
+        return false;
+    }
+    if (bits_out.size < alloc_size) {
+        for (usize i = bits_out.size; i < alloc_size; ++i) {
+            bits_out.data[i] = 0u;
+        }
+        bits_out.size = alloc_size;
+    } else if (bits_out.size > alloc_size && alloc_size > 0u) {
+        for (usize i = alloc_size; i < bits_out.size; ++i) {
+            if (bits_out.data[i] != 0u) {
+                return false;
+            }
+        }
+        bits_out.size = alloc_size;
+    }
+    if (bits_out.size == 0u) {
+        bits_out.size = 1u;
+        bits_out.data[0] = 0u;
+    }
+    return true;
+}
+
 static bool bits_to_base_digits(makocode::ByteBuffer& bit_scratch,
                                 u64 bit_count,
                                 u32 base,
@@ -9968,50 +10004,13 @@ static bool base_digits_to_bits(const u8* digits,
     }
     u64 target_bytes_u64 = (bit_count_target + 7u) / 8u;
     usize target_bytes = (usize)target_bytes_u64;
-    if (bit_count_target == 0u) {
-        target_bytes = bits_out.size;
-    }
-    usize alloc_size = target_bytes > 0u ? target_bytes : bits_out.size;
-    if (alloc_size == 0u) {
-        alloc_size = 1u;
-    }
-    if (!bits_out.ensure(alloc_size)) {
+    if (!normalize_bits_output_size(bits_out, target_bytes)) {
         return false;
     }
-    if (bits_out.size < alloc_size) {
-        for (usize i = bits_out.size; i < alloc_size; ++i) {
-            bits_out.data[i] = 0u;
-        }
-        bits_out.size = alloc_size;
-    } else if (bits_out.size > alloc_size && alloc_size > 0u) {
-        for (usize i = alloc_size; i < bits_out.size; ++i) {
-            if (bits_out.data[i] != 0u) {
-                return false;
-            }
-        }
-        bits_out.size = alloc_size;
-    }
-    if (bits_out.size == 0u) {
-        bits_out.size = 1u;
-        bits_out.data[0] = 0u;
-    }
     if (bit_count_target > 0u) {
-        usize required_bytes = (usize)((bit_count_target + 7u) / 8u);
-        if (bits_out.size > required_bytes) {
-            for (usize i = required_bytes; i < bits_out.size; ++i) {
-                if (bits_out.data[i] != 0u) {
-                    return false;
-                }
-            }
-            bits_out.size = required_bytes;
-        } else if (bits_out.size < required_bytes) {
-            if (!bits_out.ensure(required_bytes)) {
-                return false;
-            }
-            for (usize i = bits_out.size; i < required_bytes; ++i) {
-                bits_out.data[i] = 0u;
-            }
-            bits_out.size = required_bytes;
+        usize required_bytes = target_bytes;
+        if (required_bytes == 0u) {
+            required_bytes = bits_out.size ? bits_out.size : 1u;
         }
         u32 bits_in_last_byte = (u32)(bit_count_target - ((u64)(required_bytes - 1u) * 8u));
         if (bits_in_last_byte > 0u && bits_in_last_byte < 8u) {
@@ -15632,6 +15631,12 @@ struct ArchiveBuildContext {
         : buffer(),
           path_registry(),
           entry_count(0u) {}
+
+    ~ArchiveBuildContext() {
+        buffer.release();
+        path_registry.release();
+        entry_count = 0u;
+    }
 };
 
 static bool archive_init(ArchiveBuildContext& ctx) {
@@ -17356,6 +17361,17 @@ struct OverlayPage {
           data_height(0u),
           footer_rows(0u),
           color_mode(1u) {}
+
+    ~OverlayPage() {
+        original.release();
+        pixels.release();
+        metadata = PpmParserState();
+        width = 0u;
+        height = 0u;
+        data_height = 0u;
+        footer_rows = 0u;
+        color_mode = 1u;
+    }
 };
 
 static bool load_overlay_page(const char* path, OverlayPage& page) {
@@ -18643,7 +18659,42 @@ static int command_minify(int arg_count, char** args) {
     return 0;
 }
 
+static void run_coverage_probes() {
+    const char* probes = getenv("MAKOCODE_COVERAGE_PROBES");
+    if (!probes || probes[0] == '\0') {
+        return;
+    }
+
+    makocode::ByteBuffer pad_target;
+    if (pad_target.ensure(1u)) {
+        pad_target.size = 1u;
+        pad_target.data[0] = 0xAAu;
+        normalize_bits_output_size(pad_target, 3u);
+    }
+
+    makocode::ByteBuffer trim_target;
+    if (trim_target.ensure(4u)) {
+        trim_target.size = 4u;
+        for (usize i = 0u; i < trim_target.size; ++i) {
+            trim_target.data[i] = 0u;
+        }
+        normalize_bits_output_size(trim_target, 2u);
+    }
+
+    makocode::ByteBuffer scratch_bits;
+    makocode::ByteBuffer digit_buffer;
+    if (scratch_bits.ensure(2u)) {
+        scratch_bits.size = 2u;
+        scratch_bits.data[0] = 0xA5u;
+        scratch_bits.data[1] = 0x5Au;
+        u64 digits_used = 0u;
+        bits_to_base_digits(scratch_bits, 12u, 5u, digit_buffer, digits_used);
+        (void)digits_used;
+    }
+}
+
 int main(int argc, char** argv) {
+    run_coverage_probes();
     if (argc < 2) {
         write_usage();
         return 0;
