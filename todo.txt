@@ -1,12 +1,5 @@
 - Clean up
- - Log no newline
-   - [coverage] run tests (COVERAGE=1)       ... [build] compile makocode             ... PASS
-   - [test] ensure test dir              ... PASS
-   - [test] run test suite               ... [0001_baseline_8k_ecc_050] 8 KiB payload, ECC 0.5 baseline
- - Fix README images
  - Lcov warnings
- - Remove entire page test, with high ECC
- - Commented out tests
 
 - Features
  - Need option for ECC to fill up through last page
@@ -40,6 +33,8 @@
  - Cli output prefix
 
 - Decoding
+ - Fix all commented out tests in scripts/run_test_suite.sh
+ - Remove entire page test, with high ECC
  - Remove all headers from encoding, one by one and fix decoding for each one.
   - # MAKOCODE_BITS
   - # MAKOCODE_PAGE_BITS

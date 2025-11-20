@@ -19,6 +19,11 @@ fi
 case_counter=1
 first_case=1
 
+if [[ ${MAKE_STEP_LINE_OPEN:-0} -eq 1 ]]; then
+    printf '\n'
+    MAKE_STEP_LINE_OPEN=0
+fi
+
 print_header() {
     local label=$1
     local description=$2

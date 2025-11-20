@@ -51,8 +51,8 @@ To turn a scanned image into a `.ppm` file for decoding, install ImageMagick (`b
 
 ## Sample Barcodes
 
-Examples of the encoded output for channel colors 1-3:
+Examples of the encoded output for 2, 4, and 8 colors:
 
-<img alt="Color 1 barcode" src="images/data_s1_c1_p01_encoded.png">
-<img alt="Color 2 barcode" src="images/data_s1_c2_p01_encoded.png">
-<img alt="Color 3 barcode" src="images/data_s1_c3_p01_encoded.png">
+<img alt="Color 1 barcode" src="images/one_color_encoded.png">
+<img alt="Color 2 barcode" src="images/two_colors_encoded.png">
+<img alt="Color 3 barcode" src="images/three_colors_encoded.png">
