@@ -112,6 +112,12 @@ run_roundtrip_case "baseline_8k_ecc_000" "8 KiB payload, ECC disabled baseline" 
 run_roundtrip_case "baseline_multi_page_ecc_100" "128 KiB payload, ECC 1.0 multi-page" \
     --size 131072 --ecc 1.0 --width 700 --height 700 --multi-page
 
+run_roundtrip_case "ecc_fill_moderate" "ECC fill saturates moderate payload" \
+    --size 12000 --ecc 0.5 --width 420 --height 420 --encode-opt "--ecc-fill"
+
+run_roundtrip_case "ecc_fill_sparse_large_page" "ECC fill small payload on large page" \
+    --size 1024 --ecc 0.5 --width 1400 --height 1800 --encode-opt "--ecc-fill"
+
 run_roundtrip_case "palette_white_black" "Two-color palette stress" \
     --size 8192 --ecc 0.25 --width 360 --height 360 --palette "White Black"
 

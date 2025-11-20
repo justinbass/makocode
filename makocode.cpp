@@ -16445,7 +16445,7 @@ static void write_usage() {
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
     console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: extract destination; default .)");
     console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
-    console_line(1, "  --ecc-fill-calculate  Print the ECC ratio that would fill the last page (no PPM output)");
+    console_line(1, "  --ecc-fill         Compute the ECC ratio that will fill the final page and use it for encoding");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
     console_line(1, "  --no-filename      (omit payload filename from footer text)");
     console_line(1, "  --no-page-count    (omit page index/total from footer text)");
@@ -16490,7 +16490,7 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "ECC & security:");
     console_line(1, "  --ecc RATIO          Reed-Solomon redundancy (default 0.20, 0 disables).");
-    console_line(1, "  --ecc-fill-calculate  Report the ECC ratio that will fill the final page instead of emitting pages.");
+    console_line(1, "  --ecc-fill           Derive the ECC ratio that fills the final page and emit pages with that redundancy.");
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
     console_line(1, "");
     console_line(1, "Footer customization:");
@@ -16993,7 +16993,7 @@ static int command_encode(int arg_count, char** args) {
     bool have_password = false;
     const char* output_dir = ".";
     bool have_output_dir = false;
-    bool ecc_fill_calculate = false;
+    bool ecc_fill_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "encode", &handled)) {
@@ -17105,8 +17105,8 @@ static int command_encode(int arg_count, char** args) {
             ecc_redundancy = redundancy_value;
             continue;
         }
-        if (ascii_equals_token(arg, ascii_length(arg), "--ecc-fill-calculate")) {
-            ecc_fill_calculate = true;
+        if (ascii_equals_token(arg, ascii_length(arg), "--ecc-fill")) {
+            ecc_fill_requested = true;
             continue;
         }
         const char input_prefix[] = "--input=";
@@ -17393,7 +17393,7 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: invalid page dimensions");
         return 1;
     }
-    if (ecc_fill_calculate) {
+    if (ecc_fill_requested) {
         makocode::ByteBuffer compressed_payload;
         if (!lzma_compress(archive.buffer.data, archive.buffer.size, compressed_payload)) {
             console_line(2, "encode: failed to compress payload for ECC fill calculation");
@@ -17461,7 +17461,7 @@ static int command_encode(int arg_count, char** args) {
         u64_to_ascii(best_bits_needed, bits_buffer, sizeof(bits_buffer));
         char page_buffer[32];
         u64_to_ascii(best_page_count, page_buffer, sizeof(page_buffer));
-        console_write(1, "encode: --ecc-fill-calculate -> --ecc=");
+        console_write(1, "encode: --ecc-fill -> --ecc=");
         console_write(1, ratio_buffer);
         console_write(1, " (blocks=");
         console_write(1, block_buffer);
@@ -17472,7 +17472,7 @@ static int command_encode(int arg_count, char** args) {
         console_write(1, " bits_needed=");
         console_write(1, bits_buffer);
         console_line(1, ")");
-        return 0;
+        ecc_redundancy = best_ratio;
     }
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
