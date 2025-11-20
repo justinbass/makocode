@@ -1,3 +1,6 @@
+- Clean up
+ - Fix all commented out tests in scripts/run_test_suite.sh
+
 - Features
  - Need option for ECC to fill up through last page
   1. Baseline Verification
@@ -30,7 +33,6 @@
  - Cli output prefix
 
 - Decoding
- - Fix all commented out tests in scripts/run_test_suite.sh
  - Remove entire page test, with high ECC
  - Remove all headers from encoding, one by one and fix decoding for each one.
   - # MAKOCODE_BITS
