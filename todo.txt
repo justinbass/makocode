@@ -1,4 +1,33 @@
+- Triple ECC header redundancy
+  1. Refactor header handling (no behavior change).
+      - Add an EccHeader struct that owns the current fields (magic, version, flags, block sizes, counts).
+      - Give it helpers like bool serialize(u8* dest), bool write(BitWriter&), and static bool parse(const u8* bytes, usize len, EccHeader&).
+      - Replace the ad hoc pointer math in encode_payload_with_ecc, build_ecc_header_bytes, and parse_ecc_header with the struct.
+      - Run the existing round-trip tests to confirm no regressions.
+  2. Store multiple raw header copies.
+      - Teach encode_payload_with_ecc to emit the canonical header plus two identical byte copies immediately afterward (still unprotected).
+      - Adjust makocode::ECC_HEADER_BYTES (or add a new constant) so shuffle/unshuffle, bit-length accounting, and decoder skipping logic know the new total header span.
+      - Update build_frame_bits/decoder to consume all three copies before touching payload bits.
+      - Verify the suite still passes; behavior is unchanged except for the extra bytes.
+  3. Protect each copy with Reed–Solomon.
+      - Define a tiny RS configuration (e.g., data=26 bytes, parity=6 bytes) reused for all copies.
+      - During encode, wrap each header clone in a parity block (header data + RS parity) and emit that as the “copy.”
+      - On decode, run the matching RS decode for each copy; accept the first successful decode or majority-vote between successes. If all fail, fall back to metadata
+        reconstruction.
+      - Add counters/logging so you can see when a copy needed repair. Re-run targeted blot tests.
+  4. Propagate awareness everywhere.
+      - Ensure shuffle/unshuffle skip the entire protected header region.
+      - Update metadata repair (build_ecc_header_bytes) and debug dumps to write/read all copies.
+      - Make the decoder’s “header repaired from metadata” path re-encode all three RS-protected copies, not just the first.
+      - Confirm commands like --ecc-fill and multi-page encode/decode still work.
+  5. Test corruption tolerance.
+      - Extend or add a scripted test that deliberately corrupts one and two header copies (e.g., use dd or a helper to flip bytes) before running makocode decode.
+      - Validate that with one busted copy decode still passes, with two busted copies the third copy (or metadata) carries you, and with all three broken you still fail
+        cleanly.
+      - Run scripts/run_test_suite.sh to ensure the whole regression suite stays green.
+
 - Features
+ - Confirm overlay avoids header or sensitive data
  - Overlay needs explicit palette arg, threshold the overlay image first.
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page
