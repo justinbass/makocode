@@ -33,8 +33,9 @@
   - # MAKOCODE_SUBGRID_ROW_OFFSETS
  - Wavy distortion test
  - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
+ - Discolored paper (off-white) test
  - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
- - Only if necessary: Encode header in image header or footer in larger dots
+ - Encode ECC header or any basic data in footer in larger dots in first/last color (2-3x the regular dots). This makes it localized but less sensitive to certain kinds of damage. Footer could be optional if normal dots are kepts, it could be a backup. Or remove regular header and make footer mandatory.
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 
 - Finalize
