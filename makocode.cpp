@@ -16444,6 +16444,7 @@ static void write_usage() {
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
     console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: extract destination; default .)");
+    console_line(1, "  --prefix TEXT       (encode: base name for generated pages; default UTC timestamp, no '/' or '\\\\').");
     console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
     console_line(1, "  --ecc-fill         Compute the ECC ratio that will fill the final page and use it for encoding");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
@@ -16481,6 +16482,7 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "Output:");
     console_line(1, "  --output-dir PATH    Directory for generated PPM pages (default current directory).");
+    console_line(1, "  --prefix TEXT        Base filename prefix for generated pages (default UTC timestamp, no '/' or '\\\\').");
     console_line(1, "");
     console_line(1, "Layout:");
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
@@ -16990,9 +16992,11 @@ static int command_encode(int arg_count, char** args) {
     makocode::ByteBuffer filename_buffer;
     makocode::ByteBuffer password_buffer;
     makocode::ByteBuffer output_dir_buffer;
+    makocode::ByteBuffer prefix_buffer;
     bool have_password = false;
     const char* output_dir = ".";
     bool have_output_dir = false;
+    bool have_prefix = false;
     bool ecc_fill_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
@@ -17059,6 +17063,55 @@ static int command_encode(int arg_count, char** args) {
             output_dir_buffer.size = output_length;
             output_dir = (const char*)output_dir_buffer.data;
             have_output_dir = true;
+            continue;
+        }
+        const char prefix_prefix[] = "--prefix=";
+        const char* prefix_value = 0;
+        usize prefix_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--prefix")) {
+            if (have_prefix) {
+                console_line(2, "encode: --prefix specified multiple times");
+                return 1;
+            }
+            if ((i + 1) >= arg_count) {
+                console_line(2, "encode: --prefix requires a non-empty value");
+                return 1;
+            }
+            prefix_value = args[i + 1];
+            if (!prefix_value) {
+                console_line(2, "encode: --prefix requires a non-empty value");
+                return 1;
+            }
+            prefix_length = ascii_length(prefix_value);
+            i += 1;
+        } else if (ascii_starts_with(arg, prefix_prefix)) {
+            if (have_prefix) {
+                console_line(2, "encode: --prefix specified multiple times");
+                return 1;
+            }
+            prefix_value = arg + (sizeof(prefix_prefix) - 1u);
+            prefix_length = ascii_length(prefix_value);
+        }
+        if (prefix_value) {
+            if (prefix_length == 0u) {
+                console_line(2, "encode: --prefix requires a non-empty value");
+                return 1;
+            }
+            if (!prefix_buffer.ensure(prefix_length + 1u)) {
+                console_line(2, "encode: failed to allocate prefix buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < prefix_length; ++j) {
+                char c = prefix_value[j];
+                if (c == '/' || c == '\\') {
+                    console_line(2, "encode: --prefix must not contain '/' or '\\\\'");
+                    return 1;
+                }
+                prefix_buffer.data[j] = (u8)c;
+            }
+            prefix_buffer.data[prefix_length] = 0u;
+            prefix_buffer.size = prefix_length;
+            have_prefix = true;
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
@@ -17514,9 +17567,15 @@ static int command_encode(int arg_count, char** args) {
         return 1;
     }
     char timestamp_name[32];
-    if (!utc_timestamp_string(timestamp_name, sizeof(timestamp_name))) {
-        console_line(2, "encode: failed to construct timestamped filename");
-        return 1;
+    const char* page_name_prefix = 0;
+    if (have_prefix) {
+        page_name_prefix = (const char*)prefix_buffer.data;
+    } else {
+        if (!utc_timestamp_string(timestamp_name, sizeof(timestamp_name))) {
+            console_line(2, "encode: failed to construct timestamped filename");
+            return 1;
+        }
+        page_name_prefix = timestamp_name;
     }
     makocode::ByteBuffer footer_text_buffer;
     const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
@@ -17554,7 +17613,7 @@ static int command_encode(int arg_count, char** args) {
         byte_buffer_move(page_output, fiducial_page);
         makocode::ByteBuffer output_name;
         makocode::ByteBuffer output_path;
-        if (!build_page_filename(output_name, timestamp_name, 1u, 1u)) {
+        if (!build_page_filename(output_name, page_name_prefix, 1u, 1u)) {
             console_line(2, "encode: failed to build output filename");
             return 1;
         }
@@ -17609,7 +17668,7 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             byte_buffer_move(page_output, fiducial_page);
-            if (!build_page_filename(name_buffer, timestamp_name, page + 1u, page_count)) {
+            if (!build_page_filename(name_buffer, page_name_prefix, page + 1u, page_count)) {
                 console_line(2, "encode: failed to build filename");
                 return 1;
             }
@@ -17627,7 +17686,7 @@ static int command_encode(int arg_count, char** args) {
             }
         }
         makocode::ByteBuffer sample_name;
-        if (!build_page_filename(sample_name, timestamp_name, 1u, page_count)) {
+        if (!build_page_filename(sample_name, page_name_prefix, 1u, page_count)) {
             console_line(2, "encode: failed to summarize filenames");
             return 1;
         }
