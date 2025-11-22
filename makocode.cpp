@@ -9488,8 +9488,7 @@ static bool compute_fiducial_reservation(u32 width_pixels,
 static bool compute_bits_per_page(u32 width_pixels,
                                   u32 height_pixels,
                                   u32 data_height_pixels,
-                                  u8 sample_bits,
-                                  u8 samples_per_pixel,
+                                  double bits_per_pixel,
                                   u64& bits_per_page,
                                   u64* reserved_pixels_out = 0);
 
@@ -10573,6 +10572,27 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
     }
     samples[0] = best_index;
     return true;
+}
+
+static double mapping_bits_per_data_pixel(const ImageMappingConfig& mapping) {
+    if (mapping_has_custom_palette(mapping)) {
+        u32 base = mapping_custom_palette_base(mapping);
+        if (base < 2u) {
+            return 0.0;
+        }
+        double base_log = log((double)base);
+        double log_two = log(2.0);
+        if (log_two == 0.0) {
+            return 0.0;
+        }
+        return base_log / log_two;
+    }
+    u8 sample_bits = bits_per_sample(mapping.color_channels);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return 0.0;
+    }
+    return (double)sample_bits * (double)samples_per_pixel;
 }
 
 static u8 rotate_left_u8(u8 value, u8 amount) {
@@ -15153,11 +15173,10 @@ static bool compute_fiducial_reservation(u32 width_pixels,
 static bool compute_bits_per_page(u32 width_pixels,
                                   u32 height_pixels,
                                   u32 data_height_pixels,
-                                  u8 sample_bits,
-                                  u8 samples_per_pixel,
+                                  double bits_per_pixel,
                                   u64& bits_per_page,
                                   u64* reserved_pixels_out) {
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
+    if (bits_per_pixel <= 0.0) {
         return false;
     }
     if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
@@ -15178,7 +15197,20 @@ static bool compute_bits_per_page(u32 width_pixels,
         return false;
     }
     u64 usable_pixels = total_pixels - reserved_pixels;
-    bits_per_page = usable_pixels * (u64)sample_bits * (u64)samples_per_pixel;
+    double capacity_bits = (double)usable_pixels * bits_per_pixel;
+    if (capacity_bits <= 0.0) {
+        bits_per_page = 0u;
+        return false;
+    }
+    if (capacity_bits > (double)U64_MAX_VALUE) {
+        return false;
+    }
+    u64 computed_bits = (u64)capacity_bits;
+    if (computed_bits == 0u) {
+        bits_per_page = 0u;
+        return false;
+    }
+    bits_per_page = computed_bits;
     if (reserved_pixels_out) {
         *reserved_pixels_out = reserved_pixels;
     }
@@ -17039,6 +17071,10 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
     if (sample_bits == 0u || samples_per_pixel == 0u) {
         return false;
     }
+    double bits_per_pixel = mapping_bits_per_data_pixel(mapping);
+    if (bits_per_pixel <= 0.0) {
+        return false;
+    }
     data_height_pixels = height_pixels;
     bits_per_page = 0u;
     page_count = 1u;
@@ -17057,8 +17093,7 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
         if (!compute_bits_per_page(width_pixels,
                                    height_pixels,
                                    data_height_pixels,
-                                   sample_bits,
-                                   samples_per_pixel,
+                                   bits_per_pixel,
                                    bits_per_page,
                                    0)) {
             return false;
