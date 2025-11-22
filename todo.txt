@@ -1,11 +1,13 @@
 - Features
  - Increase blot tests (prep for overlay)
+ - Fails: ./makocode encode --input makocode.cpp --ecc-fill --page-width 1756 --page-height 2315 --palette "White Cyan Magenta Yellow"
  - Confirm overlay avoids header or sensitive data
+ - Overlay to dynamically check ECC and confirm parameter is not excessive
  - Overlay needs explicit palette arg, threshold the overlay image first.
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page
  - Color channels non-base-2, works but slow
- - 15 column ppm (from convert) in overlay, ignore newlines
+ - 15 column ppm (from convert) in decode or overlay, ignore newlines
 
 - Decoding
  - Fix all commented out tests in scripts/run_test_suite.sh
@@ -42,6 +44,7 @@
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 
 - Finalize
+ - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)
  - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution.
  - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
  - Determine proper defaults
@@ -50,4 +53,5 @@
  - Much better documentation, or a spec
  - Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2)
  - Basic random data test with many iterations (to ensure consistency of result under many conditions)
- - Full test coverage, remove python dependency (scripts/ppm_transform.py)
+ - Remove python dependency (scripts/ppm_transform.py), convert to C++?
+ - 100% branch coverage, test parameterization of each combination of options
