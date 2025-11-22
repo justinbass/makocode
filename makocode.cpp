@@ -8684,6 +8684,7 @@ static u8 poly_eval(const u8* poly, u16 length, u8 x) {
 static bool rs_find_error_locations(const u8* locator,
                                     u16 locator_size,
                                     u16 codeword_length,
+                                    u16 exponent_offset,
                                     u16* positions,
                                     u16& position_count) {
     if (!locator || !positions || locator_size <= 1u) {
@@ -8691,12 +8692,16 @@ static bool rs_find_error_locations(const u8* locator,
     }
     position_count = 0u;
     for (u16 i = 0u; i < codeword_length; ++i) {
-        u8 x = gf_pow_alpha(i);
+        u16 exponent = (u16)(i + exponent_offset);
+        u8 x = gf_pow_alpha(exponent);
         if (poly_eval(locator, locator_size, x) == 0u) {
             if (position_count >= (locator_size - 1u)) {
                 return false;
             }
             u16 position = (i == 0u) ? (u16)(codeword_length - 1u) : (u16)(i - 1u);
+            if (position >= codeword_length) {
+                return false;
+            }
             positions[position_count++] = position;
         }
     }
@@ -8811,7 +8816,8 @@ static bool rs_decode_block(u8* block,
     }
     u16 error_positions[RS_POLY_CAPACITY];
     u16 error_count = 0u;
-    if (!rs_find_error_locations(locator, locator_size, codeword_length, error_positions, error_count)) {
+    u16 exponent_offset = (u16)(RS_FIELD_SIZE - codeword_length);
+    if (!rs_find_error_locations(locator, locator_size, codeword_length, exponent_offset, error_positions, error_count)) {
         return false;
     }
     if ((error_count * 2u) > parity_symbols) {

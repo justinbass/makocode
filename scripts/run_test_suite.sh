@@ -200,10 +200,10 @@ run_script_case "$password_fail_test" "password_failures" "Decoder enforces pass
 run_script_case "$repo_root/scripts/test_header_copy_corruption.sh" \
     "header_copy_corruption" "Header copy RS repairs before decode"
 
-# run_roundtrip_case "palette_white_black_blot_black" "High-ECC black blot recovery on White/Black page" \
-#     --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
-#     --ink-blot-radius 4 --ink-blot-color black
+run_roundtrip_case "palette_white_black_blot_black" "High-ECC black blot recovery on White/Black page" \
+    --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
+    --ink-blot-radius 7 --ink-blot-color black
 
-# run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recovery on White/Black page" \
-#     --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
-#     --ink-blot-radius 4 --ink-blot-color white
+run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recovery on White/Black page" \
+    --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
+    --ink-blot-radius 7 --ink-blot-color white
