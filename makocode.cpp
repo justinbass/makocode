@@ -7986,12 +7986,14 @@ struct EccDecodeStats {
     u64 total_parity_symbols;
     u64 total_blocks;
     u64 blocks_with_errors;
+    u64 header_copy_repairs;
 
     EccDecodeStats()
         : corrected_symbols(0u),
           total_parity_symbols(0u),
           total_blocks(0u),
-          blocks_with_errors(0u) {}
+          blocks_with_errors(0u),
+          header_copy_repairs(0u) {}
 };
 
 static bool encode_payload_with_ecc(const ByteBuffer& compressed,
@@ -8136,6 +8138,260 @@ static const u16 ECC_HEADER_MAGIC = 0x4543u;
 static const u8  ECC_HEADER_VERSION = 1u;
 static const usize ECC_HEADER_BITS = 208u;
 static const usize ECC_HEADER_BYTES = ECC_HEADER_BITS / 8u;
+static const usize ECC_HEADER_COPY_COUNT = 3u;
+static const usize ECC_HEADER_COPY_DATA_BYTES = ECC_HEADER_BYTES;
+static const usize ECC_HEADER_COPY_PARITY_BYTES = 6u;
+static const usize ECC_HEADER_COPY_TOTAL_BYTES = ECC_HEADER_COPY_DATA_BYTES + ECC_HEADER_COPY_PARITY_BYTES;
+static const usize ECC_HEADER_COPY_TOTAL_BITS = ECC_HEADER_COPY_TOTAL_BYTES * 8u;
+static const usize ECC_HEADER_TOTAL_BITS = ECC_HEADER_COPY_TOTAL_BITS * ECC_HEADER_COPY_COUNT;
+static const usize ECC_HEADER_TOTAL_BYTES = ECC_HEADER_COPY_TOTAL_BYTES * ECC_HEADER_COPY_COUNT;
+static const u16 ECC_HEADER_COPY_DATA_SYMBOLS = (u16)ECC_HEADER_COPY_DATA_BYTES;
+static const u16 ECC_HEADER_COPY_PARITY_SYMBOLS = (u16)ECC_HEADER_COPY_PARITY_BYTES;
+
+struct EccHeader {
+    u16 magic;
+    u8 version;
+    u8 flags;
+    u16 block_data;
+    u16 parity;
+    u16 reserved;
+    u64 block_count;
+    u64 original_bytes;
+
+    EccHeader()
+        : magic(ECC_HEADER_MAGIC),
+          version(ECC_HEADER_VERSION),
+          flags(0x01u),
+          block_data(0u),
+          parity(0u),
+          reserved(0u),
+          block_count(0u),
+          original_bytes(0u) {}
+
+    bool serialize(u8* dest) const {
+        if (!dest) {
+            return false;
+        }
+        dest[0] = (u8)(magic & 0xFFu);
+        dest[1] = (u8)((magic >> 8u) & 0xFFu);
+        dest[2] = version;
+        dest[3] = flags;
+        write_le_u16(dest + 4u, block_data);
+        write_le_u16(dest + 6u, parity);
+        write_le_u16(dest + 8u, reserved);
+        write_le_u64(dest + 10u, block_count);
+        write_le_u64(dest + 18u, original_bytes);
+        return true;
+    }
+
+    bool write(BitWriter& writer) const {
+        if (!writer.write_bits((u64)magic, 16u)) {
+            return false;
+        }
+        if (!writer.write_bits((u64)version, 8u)) {
+            return false;
+        }
+        if (!writer.write_bits((u64)flags, 8u)) {
+            return false;
+        }
+        if (!writer.write_bits((u64)block_data, 16u)) {
+            return false;
+        }
+        if (!writer.write_bits((u64)parity, 16u)) {
+            return false;
+        }
+        if (!writer.write_bits((u64)reserved, 16u)) {
+            return false;
+        }
+        if (!writer.write_bits(block_count, 64u)) {
+            return false;
+        }
+        if (!writer.write_bits(original_bytes, 64u)) {
+            return false;
+        }
+        return true;
+    }
+
+    static bool parse(const u8* bytes, usize length, EccHeader& header) {
+        if (!bytes || length < ECC_HEADER_BYTES) {
+            return false;
+        }
+        header.magic = read_le_u16(bytes);
+        header.version = bytes[2];
+        header.flags = bytes[3];
+        header.block_data = read_le_u16(bytes + 4u);
+        header.parity = read_le_u16(bytes + 6u);
+        header.reserved = read_le_u16(bytes + 8u);
+        header.block_count = read_le_u64(bytes + 10u);
+        header.original_bytes = read_le_u64(bytes + 18u);
+        if (header.magic != ECC_HEADER_MAGIC) {
+            return false;
+        }
+        if (header.version != ECC_HEADER_VERSION) {
+            return false;
+        }
+        if (!(header.flags & 0x01u)) {
+            return false;
+        }
+        if (header.block_data == 0u || header.parity == 0u) {
+            return false;
+        }
+        if (header.block_data >= RS_FIELD_SIZE || header.parity >= RS_FIELD_SIZE) {
+            return false;
+        }
+        if ((u32)header.block_data + header.parity > RS_FIELD_SIZE) {
+            return false;
+        }
+        if (header.block_count == 0u) {
+            return false;
+        }
+        if (header.original_bytes > (u64)USIZE_MAX_VALUE) {
+            return false;
+        }
+        return true;
+    }
+};
+
+static bool header_copy_data_equal(const u8* left, const u8* right) {
+    if (!left || !right) {
+        return false;
+    }
+    for (usize i = 0u; i < ECC_HEADER_COPY_DATA_BYTES; ++i) {
+        if (left[i] != right[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool build_protected_header_copy(const EccHeader& header, u8* out_copy);
+static bool rs_decode_block(u8* block,
+                            u16 data_symbols,
+                            u16 parity_symbols,
+                            u16* corrected_errors);
+
+static bool reconstruct_ecc_header_copies(const u8* bytes,
+                                          usize byte_count,
+                                          EccHeader& header,
+                                          u32& repaired_copies,
+                                          u32& success_count) {
+    if (!bytes || byte_count < ECC_HEADER_TOTAL_BYTES) {
+        return false;
+    }
+    repaired_copies = 0u;
+    success_count = 0u;
+    u8 decoded[ECC_HEADER_COPY_COUNT][ECC_HEADER_COPY_DATA_BYTES];
+    bool valid[ECC_HEADER_COPY_COUNT] = {false, false, false};
+    u8 buffer[RS_POLY_CAPACITY];
+    for (usize copy_index = 0u; copy_index < ECC_HEADER_COPY_COUNT; ++copy_index) {
+        usize offset = copy_index * ECC_HEADER_COPY_TOTAL_BYTES;
+        if (offset + ECC_HEADER_COPY_TOTAL_BYTES > byte_count) {
+            continue;
+        }
+        for (usize i = 0u; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
+            buffer[i] = bytes[offset + i];
+        }
+        u16 corrections = 0u;
+        if (!rs_decode_block(buffer,
+                             ECC_HEADER_COPY_DATA_SYMBOLS,
+                             ECC_HEADER_COPY_PARITY_SYMBOLS,
+                             &corrections)) {
+            continue;
+        }
+        valid[copy_index] = true;
+        ++success_count;
+        if (corrections > 0u) {
+            ++repaired_copies;
+            if (debug_logging_enabled()) {
+                char index_buffer[32];
+                char corrected_buffer[32];
+                u64_to_ascii((u64)copy_index + 1u, index_buffer, sizeof(index_buffer));
+                u64_to_ascii((u64)corrections, corrected_buffer, sizeof(corrected_buffer));
+                console_write(2, "debug parse: ECC header copy ");
+                console_write(2, index_buffer);
+                console_write(2, " repaired ");
+                console_write(2, corrected_buffer);
+                console_line(2, " symbol(s)");
+            }
+        }
+        for (usize i = 0u; i < ECC_HEADER_COPY_DATA_BYTES; ++i) {
+            decoded[copy_index][i] = buffer[i];
+        }
+    }
+    if (debug_logging_enabled() && success_count > 0u) {
+        char success_buffer[32];
+        char repaired_buffer[32];
+        char copy_buffer[32];
+        u64_to_ascii((u64)success_count, success_buffer, sizeof(success_buffer));
+        u64_to_ascii((u64)repaired_copies, repaired_buffer, sizeof(repaired_buffer));
+        console_write(2, "debug parse: header copies validity=");
+        for (usize copy_index = 0u; copy_index < ECC_HEADER_COPY_COUNT; ++copy_index) {
+            u64_to_ascii(valid[copy_index] ? 1u : 0u, copy_buffer, sizeof(copy_buffer));
+            console_write(2, copy_buffer);
+            if (copy_index + 1u < ECC_HEADER_COPY_COUNT) {
+                console_write(2, "/");
+            }
+        }
+        console_write(2, " successes=");
+        console_write(2, success_buffer);
+        console_write(2, " repairs=");
+        console_write(2, repaired_buffer);
+        console_line(2, "");
+    }
+    int chosen_index = -1;
+    auto copies_equal = [&](usize a, usize b) -> bool {
+        if (!valid[a] || !valid[b]) {
+            return false;
+        }
+        return header_copy_data_equal(decoded[a], decoded[b]);
+    };
+    if (copies_equal(0u, 1u)) {
+        chosen_index = 0;
+    } else if (copies_equal(0u, 2u)) {
+        chosen_index = 0;
+    } else if (copies_equal(1u, 2u)) {
+        chosen_index = 1;
+    } else if (valid[0u]) {
+        chosen_index = 0;
+    } else if (valid[1u]) {
+        chosen_index = 1;
+    } else if (valid[2u]) {
+        chosen_index = 2;
+    } else {
+        return false;
+    }
+    if (success_count > 1u && debug_logging_enabled()) {
+        bool discrepancy = false;
+        for (usize i = 0u; i < ECC_HEADER_COPY_COUNT; ++i) {
+            if ((int)i == chosen_index) {
+                continue;
+            }
+            if (valid[i] && !copies_equal((usize)chosen_index, i)) {
+                discrepancy = true;
+                break;
+            }
+        }
+        if (discrepancy) {
+            char index_buffer[32];
+            u64_to_ascii((u64)chosen_index + 1u, index_buffer, sizeof(index_buffer));
+            console_write(2, "debug parse: ECC header copies disagree; using copy ");
+            console_write(2, index_buffer);
+            console_line(2, "");
+        }
+    }
+    if (debug_logging_enabled()) {
+        char success_buffer[32];
+        char repaired_buffer[32];
+        u64_to_ascii((u64)success_count, success_buffer, sizeof(success_buffer));
+        u64_to_ascii((u64)repaired_copies, repaired_buffer, sizeof(repaired_buffer));
+        console_write(2, "debug parse: header reconstruction successes=");
+        console_write(2, success_buffer);
+        console_write(2, " repairs=");
+        console_write(2, repaired_buffer);
+        console_line(2, "");
+    }
+    return EccHeader::parse(decoded[chosen_index], ECC_HEADER_COPY_DATA_BYTES, header);
+}
 
 struct ReedSolomonTables {
     bool initialized;
@@ -8299,6 +8555,34 @@ static void rs_compute_parity(const u8* generator,
             }
         }
     }
+}
+
+static bool build_protected_header_copy(const EccHeader& header, u8* out_copy) {
+    if (!out_copy) {
+        return false;
+    }
+    if (!header.serialize(out_copy)) {
+        return false;
+    }
+    u8 generator[RS_POLY_CAPACITY];
+    u16 generator_size = 0u;
+    if (!rs_build_generator(ECC_HEADER_COPY_PARITY_SYMBOLS, generator, generator_size)) {
+        return false;
+    }
+    (void)generator_size;
+    rs_compute_parity(generator,
+                      ECC_HEADER_COPY_PARITY_SYMBOLS,
+                      out_copy,
+                      (u16)ECC_HEADER_COPY_DATA_BYTES,
+                      out_copy + ECC_HEADER_COPY_DATA_BYTES);
+    return true;
+}
+
+static usize ecc_header_span_for_bytes(usize byte_count) {
+    if (byte_count >= ECC_HEADER_TOTAL_BYTES) {
+        return ECC_HEADER_TOTAL_BYTES;
+    }
+    return byte_count;
 }
 
 static bool rs_compute_syndromes(const u8* codeword,
@@ -8653,30 +8937,29 @@ static bool encode_payload_with_ecc(const ByteBuffer& compressed,
         }
         payload_offset += (usize)block_data;
     }
-    if (!writer.write_bits((u64)ECC_HEADER_MAGIC, 16u)) {
+    EccHeader header;
+    header.block_data = block_data;
+    header.parity = parity_symbols;
+    header.block_count = block_count;
+    header.original_bytes = (u64)compressed.size;
+    if (!header.write(writer)) {
         return false;
     }
-    if (!writer.write_bits((u64)ECC_HEADER_VERSION, 8u)) {
+    u8 header_copy[ECC_HEADER_COPY_TOTAL_BYTES];
+    if (!build_protected_header_copy(header, header_copy)) {
         return false;
     }
-    u8 flags = 0x01u;
-    if (!writer.write_bits((u64)flags, 8u)) {
-        return false;
+    for (usize i = ECC_HEADER_COPY_DATA_BYTES; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
+        if (!writer.write_bits((u64)header_copy[i], 8u)) {
+            return false;
+        }
     }
-    if (!writer.write_bits((u64)block_data, 16u)) {
-        return false;
-    }
-    if (!writer.write_bits((u64)parity_symbols, 16u)) {
-        return false;
-    }
-    if (!writer.write_bits(0u, 16u)) {
-        return false;
-    }
-    if (!writer.write_bits(block_count, 64u)) {
-        return false;
-    }
-    if (!writer.write_bits((u64)compressed.size, 64u)) {
-        return false;
+    for (usize copy_index = 1u; copy_index < ECC_HEADER_COPY_COUNT; ++copy_index) {
+        for (usize i = 0u; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
+            if (!writer.write_bits((u64)header_copy[i], 8u)) {
+                return false;
+            }
+        }
     }
     for (usize i = 0u; i < encoded.size; ++i) {
         if (!writer.write_bits((u64)encoded.data[i], 8u)) {
@@ -8700,6 +8983,7 @@ struct EccHeaderInfo {
     u16 parity;
     u64 block_count;
     u64 original_bytes;
+    u32 header_copies_repaired;
 
     EccHeaderInfo()
         : detected(false),
@@ -8708,7 +8992,8 @@ struct EccHeaderInfo {
           block_data(0u),
           parity(0u),
           block_count(0u),
-          original_bytes(0u) {}
+          original_bytes(0u),
+          header_copies_repaired(0u) {}
 };
 
 static bool build_ecc_header_bytes(u8* dest,
@@ -8717,7 +9002,7 @@ static bool build_ecc_header_bytes(u8* dest,
                                    u16 parity,
                                    u64 block_count,
                                    u64 original_bytes) {
-    if (!dest || dest_capacity < ECC_HEADER_BYTES) {
+    if (!dest || dest_capacity < ECC_HEADER_TOTAL_BYTES) {
         return false;
     }
     if (block_data == 0u || parity == 0u || block_count == 0u) {
@@ -8729,15 +9014,22 @@ static bool build_ecc_header_bytes(u8* dest,
     if ((u32)block_data + parity > RS_FIELD_SIZE) {
         return false;
     }
-    dest[0] = (u8)(ECC_HEADER_MAGIC & 0xFFu);
-    dest[1] = (u8)((ECC_HEADER_MAGIC >> 8u) & 0xFFu);
-    dest[2] = ECC_HEADER_VERSION;
-    dest[3] = 0x01u;
-    write_le_u16(dest + 4u, block_data);
-    write_le_u16(dest + 6u, parity);
-    write_le_u16(dest + 8u, 0u);
-    write_le_u64(dest + 10u, block_count);
-    write_le_u64(dest + 18u, original_bytes);
+    EccHeader header;
+    header.block_data = block_data;
+    header.parity = parity;
+    header.block_count = block_count;
+    header.original_bytes = original_bytes;
+    header.reserved = 0u;
+    u8 header_copy[ECC_HEADER_COPY_TOTAL_BYTES];
+    if (!build_protected_header_copy(header, header_copy)) {
+        return false;
+    }
+    for (usize copy_index = 0u; copy_index < ECC_HEADER_COPY_COUNT; ++copy_index) {
+        usize base = copy_index * ECC_HEADER_COPY_TOTAL_BYTES;
+        for (usize i = 0u; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
+            dest[base + i] = header_copy[i];
+        }
+    }
     return true;
 }
 
@@ -8745,7 +9037,7 @@ static bool parse_ecc_header(const u8* bytes,
                              usize byte_count,
                              EccHeaderInfo& header) {
     header = EccHeaderInfo();
-    if (!bytes || byte_count < 2u) {
+    if (!bytes || byte_count < ECC_HEADER_BYTES) {
         return false;
     }
     u16 magic = read_le_u16(bytes);
@@ -8753,41 +9045,23 @@ static bool parse_ecc_header(const u8* bytes,
         return false;
     }
     header.detected = true;
-    if (byte_count < ECC_HEADER_BYTES) {
+    if (byte_count < ECC_HEADER_TOTAL_BYTES) {
         return false;
     }
-    u8 version = bytes[2];
-    u8 flags = bytes[3];
-    u16 block_data = read_le_u16(bytes + 4u);
-    u16 parity = read_le_u16(bytes + 6u);
-    u16 reserved = read_le_u16(bytes + 8u);
-    u64 block_count = read_le_u64(bytes + 10u);
-    u64 original_bytes = read_le_u64(bytes + 18u);
-    (void)reserved;
-    if (version != ECC_HEADER_VERSION) {
-        return false;
-    }
-    if (!(flags & 0x01u)) {
-        return false;
-    }
-    if (block_data == 0u || parity == 0u || block_data >= RS_FIELD_SIZE || parity >= RS_FIELD_SIZE) {
-        return false;
-    }
-    if ((u32)block_data + parity > RS_FIELD_SIZE) {
-        return false;
-    }
-    if (block_count == 0u) {
-        return false;
-    }
-    if (original_bytes > (u64)USIZE_MAX_VALUE) {
+    EccHeader parsed;
+    u32 repaired_copies = 0u;
+    u32 success_count = 0u;
+    if (!reconstruct_ecc_header_copies(bytes, byte_count, parsed, repaired_copies, success_count)) {
+        header.header_copies_repaired = repaired_copies;
         return false;
     }
     header.valid = true;
-    header.enabled = true;
-    header.block_data = block_data;
-    header.parity = parity;
-    header.block_count = block_count;
-    header.original_bytes = original_bytes;
+    header.enabled = ((parsed.flags & 0x01u) != 0u);
+    header.block_data = parsed.block_data;
+    header.parity = parsed.parity;
+    header.block_count = parsed.block_count;
+    header.original_bytes = parsed.original_bytes;
+    header.header_copies_repaired = repaired_copies;
     return true;
 }
 
@@ -8813,6 +9087,7 @@ static bool decode_ecc_payload(const u8* bytes,
         stats->blocks_with_errors = 0u;
         stats->total_blocks = header.block_count;
         stats->total_parity_symbols = (u64)header.parity * header.block_count;
+        stats->header_copy_repairs = 0u;
     }
     u8 block_buffer[RS_POLY_CAPACITY];
     for (u64 block_index = 0u; block_index < header.block_count; ++block_index) {
@@ -8850,10 +9125,11 @@ static bool shuffle_encoded_stream(u8* data, usize byte_count, bool ecc_enabled)
     if (!ecc_enabled) {
         return fisher_yates_shuffle(data, byte_count);
     }
-    if (byte_count <= ECC_HEADER_BYTES) {
+    usize header_span = ecc_header_span_for_bytes(byte_count);
+    if (byte_count <= header_span) {
         return true;
     }
-    return fisher_yates_shuffle(data + ECC_HEADER_BYTES, byte_count - ECC_HEADER_BYTES);
+    return fisher_yates_shuffle(data + header_span, byte_count - header_span);
 }
 
 static bool unshuffle_encoded_stream(u8* data, usize byte_count) {
@@ -8874,10 +9150,11 @@ static bool unshuffle_encoded_stream(u8* data, usize byte_count) {
     if (!treat_as_ecc) {
         return fisher_yates_unshuffle(data, byte_count);
     }
-    if (byte_count <= ECC_HEADER_BYTES) {
+    usize header_span = ecc_header_span_for_bytes(byte_count);
+    if (byte_count <= header_span) {
         return true;
     }
-    return fisher_yates_unshuffle(data + ECC_HEADER_BYTES, byte_count - ECC_HEADER_BYTES);
+    return fisher_yates_unshuffle(data + header_span, byte_count - header_span);
 }
 
 struct DecoderContext {
@@ -8935,14 +9212,20 @@ struct DecoderContext {
         bool header_ok = parse_ecc_header(data, byte_count, header);
         bool have_password = (password && password_length > 0u);
         if (header_ok && header.valid && header.enabled) {
+            ecc_stats.header_copy_repairs = header.header_copies_repaired;
             u16 block_total = (u16)(header.block_data + header.parity);
             u64 expected_bytes = (u64)block_total * header.block_count;
             u64 available_bytes = (u64)byte_count;
-            if (available_bytes < (u64)ECC_HEADER_BYTES + expected_bytes) {
+            usize header_span = ecc_header_span_for_bytes(byte_count);
+            if (header_span < ECC_HEADER_COPY_TOTAL_BYTES) {
                 ecc_failed = true;
                 return false;
             }
-            const u8* encoded = data + ECC_HEADER_BYTES;
+            if (available_bytes < (u64)header_span + expected_bytes) {
+                ecc_failed = true;
+                return false;
+            }
+            const u8* encoded = data + header_span;
             ByteBuffer compressed;
             if (!decode_ecc_payload(encoded, header, compressed, &ecc_stats)) {
                 if (debug_logging_enabled()) {
@@ -9000,6 +9283,17 @@ struct DecoderContext {
                 return false;
             }
             if (!lzma_decompress(working->data, (usize)bit_total, payload)) {
+                if (debug_logging_enabled()) {
+                    char size_buffer[32];
+                    char bits_buffer[32];
+                    u64_to_ascii((u64)working->size, size_buffer, sizeof(size_buffer));
+                    u64_to_ascii(bit_total, bits_buffer, sizeof(bits_buffer));
+                    console_write(2, "debug parse: lzma decompress failure (bytes=");
+                    console_write(2, size_buffer);
+                    console_write(2, ", bits=");
+                    console_write(2, bits_buffer);
+                    console_line(2, ")");
+                }
                 ecc_failed = true;
                 return false;
             }
@@ -16816,10 +17110,10 @@ static bool compute_frame_statistics(usize payload_bytes,
         return false;
     }
     u64 encoded_bits = total_symbols * 8u;
-    if (encoded_bits > U64_MAX_VALUE - makocode::ECC_HEADER_BITS) {
+    if (encoded_bits > U64_MAX_VALUE - makocode::ECC_HEADER_TOTAL_BITS) {
         return false;
     }
-    payload_bit_count = encoded_bits + makocode::ECC_HEADER_BITS;
+    payload_bit_count = encoded_bits + makocode::ECC_HEADER_TOTAL_BITS;
     if (payload_bit_count > U64_MAX_VALUE - 64u) {
         return false;
     }
@@ -18384,8 +18678,9 @@ static int command_decode(int arg_count, char** args) {
     makocode::ByteBuffer password_buffer;
     bool have_password = false;
     makocode::ByteBuffer output_dir_buffer;
-   const char* output_dir = ".";
-   bool have_output_dir = false;
+    const char* output_dir = ".";
+    bool have_output_dir = false;
+    u32 corrupt_header_copies = 0u;
    for (int i = 0; i < arg_count; ++i) {
        bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "decode", &handled)) {
@@ -18489,10 +18784,29 @@ static int command_decode(int arg_count, char** args) {
             have_password = true;
             continue;
         }
-    if (file_count >= MAX_INPUT_FILES) {
-        console_line(2, "decode: too many input files");
-        return 1;
-    }
+        const char corrupt_prefix[] = "--corrupt-header-copies=";
+        if (ascii_starts_with(arg, corrupt_prefix)) {
+            const char* value = arg + (sizeof(corrupt_prefix) - 1u);
+            usize value_length = ascii_length(value);
+            if (value_length == 0u) {
+                console_line(2, "decode: --corrupt-header-copies requires a value");
+                return 1;
+            }
+            u64 parsed = 0u;
+            if (!ascii_to_u64(value, value_length, &parsed)) {
+                console_line(2, "decode: invalid value for --corrupt-header-copies");
+                return 1;
+            }
+            if (parsed > (u64)makocode::ECC_HEADER_COPY_COUNT) {
+                parsed = (u64)makocode::ECC_HEADER_COPY_COUNT;
+            }
+            corrupt_header_copies = (u32)parsed;
+            continue;
+        }
+        if (file_count >= MAX_INPUT_FILES) {
+            console_line(2, "decode: too many input files");
+            return 1;
+        }
     input_files[file_count++] = arg;
 }
     if (mapping.palette_set) {
@@ -18638,7 +18952,7 @@ retry_decode:
     makocode::EccHeaderInfo bitstream_header;
     bool bitstream_header_present = false;
     bool bitstream_header_valid = false;
-    if (bitstream.data && bitstream.size >= makocode::ECC_HEADER_BYTES) {
+    if (bitstream.data && bitstream.size >= makocode::ECC_HEADER_TOTAL_BYTES) {
         bitstream_header_present = makocode::parse_ecc_header(bitstream.data, bitstream.size, bitstream_header);
         bitstream_header_valid = bitstream_header_present && bitstream_header.valid && bitstream_header.enabled;
     }
@@ -18658,27 +18972,27 @@ retry_decode:
     if (!bitstream_header_valid) {
         if (ecc_metadata_complete &&
             bitstream.data &&
-            bitstream.size >= makocode::ECC_HEADER_BYTES &&
-            bit_count >= (u64)makocode::ECC_HEADER_BITS) {
+            bitstream.size >= makocode::ECC_HEADER_TOTAL_BYTES &&
+            bit_count >= (u64)makocode::ECC_HEADER_TOTAL_BITS) {
             u64 block_data_value = aggregate_state.ecc_block_data_value;
             u64 parity_value = aggregate_state.ecc_parity_value;
             if (block_data_value <= 0xFFFFu && parity_value <= 0xFFFFu) {
-                u8 header_bytes[makocode::ECC_HEADER_BYTES];
+                u8 header_bytes[makocode::ECC_HEADER_TOTAL_BYTES];
                 if (makocode::build_ecc_header_bytes(header_bytes,
-                                                     makocode::ECC_HEADER_BYTES,
+                                                     makocode::ECC_HEADER_TOTAL_BYTES,
                                                      (u16)block_data_value,
                                                      (u16)parity_value,
                                                      aggregate_state.ecc_block_count_value,
                                                      aggregate_state.ecc_original_bytes_value)) {
                     bool differs = false;
-                    for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
+                    for (usize i = 0u; i < makocode::ECC_HEADER_TOTAL_BYTES; ++i) {
                         if (bitstream.data[i] != header_bytes[i]) {
                             differs = true;
                             break;
                         }
                     }
                     if (differs) {
-                        for (usize i = 0u; i < makocode::ECC_HEADER_BYTES; ++i) {
+                        for (usize i = 0u; i < makocode::ECC_HEADER_TOTAL_BYTES; ++i) {
                             bitstream.data[i] = header_bytes[i];
                         }
                         ecc_header_repaired = true;
@@ -18691,6 +19005,35 @@ retry_decode:
     }
     if (ecc_header_repaired) {
         console_line(2, "decode: repaired ECC header from metadata");
+    }
+    if (corrupt_header_copies > 0u &&
+        bitstream.data &&
+        bitstream.size >= ((usize)makocode::ECC_HEADER_COPY_TOTAL_BYTES)) {
+        u32 count = corrupt_header_copies;
+        if (count > (u32)makocode::ECC_HEADER_COPY_COUNT) {
+            count = (u32)makocode::ECC_HEADER_COPY_COUNT;
+        }
+        for (u32 copy_index = 0u; copy_index < count; ++copy_index) {
+            usize base = (usize)copy_index * makocode::ECC_HEADER_COPY_TOTAL_BYTES + makocode::ECC_HEADER_COPY_DATA_BYTES;
+            usize limit = base + ((usize)makocode::ECC_HEADER_COPY_PARITY_SYMBOLS + 1u);
+            usize copy_end = ((usize)copy_index + 1u) * makocode::ECC_HEADER_COPY_TOTAL_BYTES;
+            if (limit > copy_end) {
+                limit = copy_end;
+            }
+            if (limit > bitstream.size) {
+                limit = bitstream.size;
+            }
+            for (usize i = base; i < limit; ++i) {
+                bitstream.data[i] ^= 0xFFu;
+            }
+        }
+        if (debug_logging_enabled()) {
+            char count_buffer[32];
+            u64_to_ascii((u64)count, count_buffer, sizeof(count_buffer));
+            console_write(2, "debug decode: corrupted ");
+            console_write(2, count_buffer);
+            console_line(2, " header copies");
+        }
     }
     makocode::DecoderContext decoder;
     const char* password_ptr = have_password ? (const char*)password_buffer.data : (const char*)0;
