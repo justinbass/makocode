@@ -12477,6 +12477,155 @@ static bool ppm_read_rgb_pixels(PpmParserState& state,
     return true;
 }
 
+static double compute_rotation_margin_from_geometry(unsigned src_width,
+                                                    unsigned src_height,
+                                                    double rotation_degrees,
+                                                    unsigned rotated_width,
+                                                    unsigned rotated_height) {
+    if (src_width == 0u || src_height == 0u || rotated_width == 0u || rotated_height == 0u) {
+        return 0.0;
+    }
+    if (rotation_degrees == 0.0) {
+        return 0.0;
+    }
+    const double radians = rotation_degrees * (3.14159265358979323846 / 180.0);
+    const double cos_a = cos(radians);
+    const double sin_a = sin(radians);
+    const double center_x = ((double)src_width - 1.0) * 0.5;
+    const double center_y = ((double)src_height - 1.0) * 0.5;
+    double min_x = 0.0;
+    double min_y = 0.0;
+    bool initialized = false;
+    for (int i = 0; i < 4; ++i) {
+        double corner_x = (i & 1) ? (double)(src_width - 1u) : 0.0;
+        double corner_y = (i & 2) ? (double)(src_height - 1u) : 0.0;
+        double dx = corner_x - center_x;
+        double dy = corner_y - center_y;
+        double rx = dx * cos_a - dy * sin_a;
+        double ry = dx * sin_a + dy * cos_a;
+        if (!initialized) {
+            min_x = rx;
+            min_y = ry;
+            initialized = true;
+        } else {
+            if (rx < min_x) {
+                min_x = rx;
+            }
+            if (ry < min_y) {
+                min_y = ry;
+            }
+        }
+    }
+    double offset_x = (((double)rotated_width - 1.0) * 0.5) + min_x;
+    double offset_y = (((double)rotated_height - 1.0) * 0.5) + min_y;
+    if (offset_x < 0.0) {
+        offset_x = 0.0;
+    }
+    if (offset_y < 0.0) {
+        offset_y = 0.0;
+    }
+    return (offset_x + offset_y) * 0.5;
+}
+
+static bool auto_detect_page_rotation(const u8* pixel_data,
+                                      u64 image_width,
+                                      u64 image_height,
+                                      u64 expected_width,
+                                      u64 expected_height,
+                                      PpmParserState& state) {
+    if (!pixel_data || !image_width || !image_height || !expected_width || !expected_height) {
+        return false;
+    }
+    if (expected_width < 256u || expected_height < 256u) {
+        return false;
+    }
+    if (image_width > 0xFFFFFFFFull || image_height > 0xFFFFFFFFull) {
+        return false;
+    }
+    if (expected_width > 0xFFFFFFFFull || expected_height > 0xFFFFFFFFull) {
+        return false;
+    }
+    u64 pixel_count = image_width * image_height;
+    if (pixel_count == 0u || pixel_count > (u64)USIZE_MAX_VALUE) {
+        return false;
+    }
+
+    makocode::image::ImageBuffer gray;
+    gray.width = (unsigned)image_width;
+    gray.height = (unsigned)image_height;
+    gray.pixels = (unsigned char*)malloc((usize)pixel_count);
+    if (!gray.pixels) {
+        return false;
+    }
+    const u8* rgb_ptr = pixel_data;
+    for (u64 idx = 0u; idx < pixel_count; ++idx) {
+        u32 r = rgb_ptr[0u];
+        u32 g = rgb_ptr[1u];
+        u32 b = rgb_ptr[2u];
+        gray.pixels[idx] = (u8)((r + g + b) / 3u);
+        rgb_ptr += 3u;
+    }
+
+    makocode::image::Histogram histogram;
+    makocode::image::compute_histogram(gray, histogram);
+    makocode::image::CutLevels levels;
+    if (!makocode::image::analyze_cut_levels(histogram, 0.80, levels)) {
+        makocode::image::release(gray);
+        return false;
+    }
+    makocode::image::CornerDetectionConfig config;
+    config.logical_width = (u32)expected_width;
+    config.logical_height = (u32)expected_height;
+    if (config.logical_width == 0u || config.logical_height == 0u) {
+        makocode::image::release(gray);
+        return false;
+    }
+    if (config.logical_width > 64u && config.logical_height > 64u) {
+        config.cross_half = 5u;
+        config.cross_trim = 0.5;
+    }
+    makocode::image::CornerDetectionResult result;
+    bool found = makocode::image::find_corners(gray, levels.global_cut, config, result);
+    makocode::image::release(gray);
+    if (!found || !result.valid) {
+        return false;
+    }
+    double rotation_radians = atan2(result.pixelhy, result.pixelhx);
+    double rotation_degrees = rotation_radians * (180.0 / 3.14159265358979323846);
+    rotation_degrees = makocode::image::normalize_angle(rotation_degrees);
+    double abs_rotation = (rotation_degrees < 0.0) ? -rotation_degrees : rotation_degrees;
+    if (abs_rotation < 0.35) {
+        return false;
+    }
+    double width_pixels = result.hpixel * (double)config.logical_width;
+    double height_pixels = result.vpixel * (double)config.logical_height;
+    if (width_pixels <= 0.0 || height_pixels <= 0.0) {
+        return false;
+    }
+    u64 rotation_width = (u64)(width_pixels + 0.5);
+    u64 rotation_height = (u64)(height_pixels + 0.5);
+    if (!rotation_width || !rotation_height) {
+        return false;
+    }
+    if (rotation_width > 0xFFFFFFFFull || rotation_height > 0xFFFFFFFFull) {
+        return false;
+    }
+    double rotation_margin = compute_rotation_margin_from_geometry((unsigned)rotation_width,
+                                                                   (unsigned)rotation_height,
+                                                                   rotation_degrees,
+                                                                   (unsigned)image_width,
+                                                                   (unsigned)image_height);
+    state.has_rotation_degrees = true;
+    state.rotation_degrees_value = rotation_degrees;
+    state.has_rotation_width = true;
+    state.rotation_width_value = rotation_width;
+    state.has_rotation_height = true;
+    state.rotation_height_value = rotation_height;
+    state.has_rotation_margin = true;
+    state.rotation_margin_value = rotation_margin;
+    return true;
+}
+
 static u64 detect_horizontal_scale_similarity(const u8* pixels, u64 width, u64 height) {
     if (!pixels || width == 0u || height == 0u) {
         return 1u;
@@ -12876,26 +13025,53 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (!pixel_data) {
         return false;
     }
-    bool has_rotation = state.has_rotation_degrees &&
+    bool has_rotation = false;
+    unsigned rotated_width = (unsigned)width;
+    unsigned rotated_height = (unsigned)height;
+    unsigned rotation_width = 0u;
+    unsigned rotation_height = 0u;
+    double rotation_margin = 4.0;
+    double rotation_radians = 0.0;
+    double rotation_cos = 1.0;
+    double rotation_sin = 0.0;
+    double rotation_center_x = 0.0;
+    double rotation_center_y = 0.0;
+    double rotation_offset_x = 0.0;
+    double rotation_offset_y = 0.0;
+    auto refresh_rotation_state = [&]() {
+        has_rotation = state.has_rotation_degrees &&
                         state.rotation_degrees_value != 0.0 &&
                         state.has_rotation_width &&
                         state.has_rotation_height;
-    unsigned rotated_width = (unsigned)width;
-    unsigned rotated_height = (unsigned)height;
-    unsigned rotation_width = has_rotation ? (unsigned)state.rotation_width_value : 0u;
-    unsigned rotation_height = has_rotation ? (unsigned)state.rotation_height_value : 0u;
-    double rotation_margin = (has_rotation && state.has_rotation_margin) ? state.rotation_margin_value : 4.0;
-    if (rotation_margin < 0.0) {
-        rotation_margin = 0.0;
-    }
-    double rotation_radians = has_rotation ? (state.rotation_degrees_value * (3.14159265358979323846 / 180.0)) : 0.0;
-    double rotation_cos = has_rotation ? cos(rotation_radians) : 1.0;
-    double rotation_sin = has_rotation ? sin(rotation_radians) : 0.0;
-    double rotation_center_x = has_rotation ? (((double)rotation_width - 1.0) * 0.5) : 0.0;
-    double rotation_center_y = has_rotation ? (((double)rotation_height - 1.0) * 0.5) : 0.0;
-    double rotation_offset_x = 0.0;
-    double rotation_offset_y = 0.0;
-    if (has_rotation) {
+        if (!has_rotation) {
+            rotation_width = 0u;
+            rotation_height = 0u;
+            rotation_margin = (state.has_rotation_margin && state.rotation_margin_value > 0.0)
+                                  ? state.rotation_margin_value
+                                  : 4.0;
+            if (rotation_margin < 0.0) {
+                rotation_margin = 0.0;
+            }
+            rotation_radians = 0.0;
+            rotation_cos = 1.0;
+            rotation_sin = 0.0;
+            rotation_center_x = 0.0;
+            rotation_center_y = 0.0;
+            rotation_offset_x = 0.0;
+            rotation_offset_y = 0.0;
+            return;
+        }
+        rotation_width = (unsigned)state.rotation_width_value;
+        rotation_height = (unsigned)state.rotation_height_value;
+        rotation_margin = state.has_rotation_margin ? state.rotation_margin_value : 4.0;
+        if (rotation_margin < 0.0) {
+            rotation_margin = 0.0;
+        }
+        rotation_radians = state.rotation_degrees_value * (3.14159265358979323846 / 180.0);
+        rotation_cos = cos(rotation_radians);
+        rotation_sin = sin(rotation_radians);
+        rotation_center_x = ((double)rotation_width - 1.0) * 0.5;
+        rotation_center_y = ((double)rotation_height - 1.0) * 0.5;
         double min_x = 0.0;
         double max_x = 0.0;
         double min_y = 0.0;
@@ -12919,7 +13095,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
         rotation_offset_x = -min_x + rotation_margin;
         rotation_offset_y = -min_y + rotation_margin;
-    }
+    };
+    refresh_rotation_state();
     bool has_skew = state.has_skew_src_width &&
                     state.has_skew_src_height &&
                     state.has_skew_margin_x &&
@@ -12962,8 +13139,68 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         expected_height = state.page_height_pixels_value;
         height_known = true;
     }
+    if (!has_rotation && width_known && height_known) {
+        if (auto_detect_page_rotation(pixel_data,
+                                      width,
+                                      height,
+                                      expected_width,
+                                      expected_height,
+                                      state)) {
+            refresh_rotation_state();
+            if (has_rotation && debug_logging_enabled()) {
+                char angle_buffer[32];
+                char rot_w_buffer[32];
+                char rot_h_buffer[32];
+                char margin_buffer[32];
+                format_fixed_3(state.rotation_degrees_value, angle_buffer, sizeof(angle_buffer));
+                u64_to_ascii((u64)rotation_width, rot_w_buffer, sizeof(rot_w_buffer));
+                u64_to_ascii((u64)rotation_height, rot_h_buffer, sizeof(rot_h_buffer));
+                format_fixed_3(rotation_margin, margin_buffer, sizeof(margin_buffer));
+                console_write(2, "debug auto-rotation: angle_deg=");
+                console_write(2, angle_buffer);
+                console_write(2, " src=");
+                console_write(2, rot_w_buffer);
+                console_write(2, "x");
+                console_write(2, rot_h_buffer);
+                console_write(2, " margin=");
+                console_line(2, margin_buffer);
+            }
+        }
+    }
     u64 analysis_width = has_rotation ? (u64)rotation_width : width;
     u64 analysis_height = has_rotation ? (u64)rotation_height : height;
+    if (debug_logging_enabled()) {
+        char ppm_w[32];
+        char ppm_h[32];
+        char meta_w[32];
+        char meta_h[32];
+        const char* expected_w_text = "n/a";
+        const char* expected_h_text = "n/a";
+        u64_to_ascii(width, ppm_w, sizeof(ppm_w));
+        u64_to_ascii(height, ppm_h, sizeof(ppm_h));
+        if (width_known) {
+            u64_to_ascii(expected_width, meta_w, sizeof(meta_w));
+            expected_w_text = meta_w;
+        }
+        if (height_known) {
+            u64_to_ascii(expected_height, meta_h, sizeof(meta_h));
+            expected_h_text = meta_h;
+        }
+        const char* rotation_flag = has_rotation ? "yes" : "no";
+        const char* skew_flag = has_skew ? "yes" : "no";
+        console_write(2, "debug geometry: ppm=");
+        console_write(2, ppm_w);
+        console_write(2, "x");
+        console_write(2, ppm_h);
+        console_write(2, " metadata=");
+        console_write(2, expected_w_text);
+        console_write(2, "x");
+        console_write(2, expected_h_text);
+        console_write(2, " rotation_tag=");
+        console_write(2, rotation_flag);
+        console_write(2, " skew_tag=");
+        console_line(2, skew_flag);
+    }
     if (!has_rotation && has_skew) {
         analysis_width = skew_src_width;
         analysis_height = skew_src_height;
@@ -13041,6 +13278,40 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             scale_x_integer = true;
             scale_y_integer = true;
         }
+    }
+    if (debug_logging_enabled()) {
+        char scale_x_buf[32];
+        char scale_y_buf[32];
+        char scale_x_int_buf[32];
+        char scale_y_int_buf[32];
+        char analysis_w_buf[32];
+        char analysis_h_buf[32];
+        format_fixed_3(scale_x, scale_x_buf, sizeof(scale_x_buf));
+        format_fixed_3(scale_y, scale_y_buf, sizeof(scale_y_buf));
+        u64_to_ascii(scale_x_int, scale_x_int_buf, sizeof(scale_x_int_buf));
+        u64_to_ascii(scale_y_int, scale_y_int_buf, sizeof(scale_y_int_buf));
+        u64_to_ascii(analysis_width, analysis_w_buf, sizeof(analysis_w_buf));
+        u64_to_ascii(analysis_height, analysis_h_buf, sizeof(analysis_h_buf));
+        const char* scale_x_mode = scale_x_integer ? "integer" : "float";
+        const char* scale_y_mode = scale_y_integer ? "integer" : "float";
+        console_write(2, "debug scale: analysis=");
+        console_write(2, analysis_w_buf);
+        console_write(2, "x");
+        console_write(2, analysis_h_buf);
+        console_write(2, " scale_x=");
+        console_write(2, scale_x_buf);
+        console_write(2, " (");
+        console_write(2, scale_x_mode);
+        console_write(2, " ");
+        console_write(2, scale_x_int_buf);
+        console_write(2, ") scale_y=");
+        console_write(2, scale_y_buf);
+        console_write(2, " (");
+        console_write(2, scale_y_mode);
+        console_write(2, " ");
+        console_write(2, scale_y_int_buf);
+        console_write(2, ")");
+        console_line(2, "");
     }
     if (scale_x_integer) {
         if (scale_x_int == 0u || (analysis_width % scale_x_int) != 0u) {
@@ -13691,6 +13962,24 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
 
+    if (debug_logging_enabled()) {
+        char column_buf[32];
+        char row_buf[32];
+        u64_to_ascii(state.has_fiducial_columns ? state.fiducial_columns_value : 0u, column_buf, sizeof(column_buf));
+        u64_to_ascii(state.has_fiducial_rows ? state.fiducial_rows_value : 0u, row_buf, sizeof(row_buf));
+        console_write(2, "debug fiducials: metadata_cols=");
+        console_write(2, column_buf);
+        console_write(2, " metadata_rows=");
+        console_write(2, row_buf);
+        console_write(2, " subgrid_active=");
+        console_write(2, use_fiducial_subgrid ? "yes" : "no");
+        console_write(2, " overrides=");
+        console_write(2, metadata_columns_overridden ? "cols" : "-");
+        console_write(2, "/");
+        console_write(2, metadata_rows_overridden ? "rows" : "-");
+        console_write(2, " displacement=");
+        console_line(2, fiducial_displacement_active ? "yes" : "no");
+    }
     bool prefer_nearest_sampling = false;
     if (use_fiducial_subgrid && metadata_columns_overridden && metadata_rows_overridden) {
         prefer_nearest_sampling = true;

@@ -161,9 +161,9 @@ run_roundtrip_case "gray_100k_stretch_h24_v26" "Grayscale stretch horizontal 2.4
     --size 102400 --ecc 0 --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
-#run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
-#    --size 65536 --ecc 0 --width 900 --height 900 \
-#    --scale 1.15 --rotate 7 --skew-x 6 --skew-y -4 --transform-seed 42
+run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
+    --size 65536 --ecc 0.25 --width 900 --height 900 \
+    --scale 3 --rotate 1 --skew-x 1 --skew-y 1 --transform-seed 42
 
 run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
     --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password
@@ -171,9 +171,9 @@ run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
 run_roundtrip_case "ecc_multi_page_massive" "262 KiB ECC multi-page stress" \
     --size 262144 --ecc 0.25 --width 520 --height 520 --multi-page
 
-#run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale/rotate distortions" \
-#    --size 196608 --ecc 0.5 --width 620 --height 620 --multi-page \
-#    --scale 1.2 --rotate -5 --border-thickness 10 --border-density 0.2 --transform-seed 7
+run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale/rotate distortions" \
+    --size 24576 --ecc 0.5 --width 620 --height 620 --multi-page \
+    --scale 3 --rotate 1 --border-thickness 10 --border-density 0.2 --transform-seed 7
 
 run_roundtrip_case "palette_base5_custom" "Custom palette/base-5 mode" \
     --size 16384 --ecc 0.25 --width 640 --height 640 \

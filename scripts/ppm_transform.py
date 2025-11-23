@@ -60,6 +60,72 @@ def nearly_equal(a: float, b: float) -> bool:
     return abs(a - b) < EPSILON
 
 
+def format_float(value: float) -> str:
+    text = f"{value:.6f}"
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    if text in ('-0', '-0.0'):
+        return '0'
+    return text
+
+
+def strip_geometry_comments(comments):
+    prefixes = (
+        '# rotation_deg',
+        '# rotation_src_width',
+        '# rotation_src_height',
+        '# rotation_margin',
+        '# skew_src_width',
+        '# skew_src_height',
+        '# skew_margin_x',
+        '# skew_x_pixels',
+        '# skew_bottom_x',
+    )
+    cleaned = []
+    for line in comments:
+        stripped = line.lstrip()
+        if any(stripped.startswith(prefix) for prefix in prefixes):
+            continue
+        cleaned.append(line)
+    return cleaned
+
+
+def compute_rotation_margin(src_width, src_height, degrees, dst_width, dst_height):
+    if nearly_equal(degrees, 0.0):
+        return 0.0
+    if src_width <= 0 or src_height <= 0 or dst_width <= 0 or dst_height <= 0:
+        return 0.0
+    radians = math.radians(degrees)
+    cos_a = math.cos(radians)
+    sin_a = math.sin(radians)
+    cx = (src_width - 1) / 2.0
+    cy = (src_height - 1) / 2.0
+    min_x = None
+    min_y = None
+    for corner in range(4):
+        corner_x = (src_width - 1) if (corner & 1) else 0
+        corner_y = (src_height - 1) if (corner & 2) else 0
+        dx = corner_x - cx
+        dy = corner_y - cy
+        rx = dx * cos_a - dy * sin_a
+        ry = dx * sin_a + dy * cos_a
+        if min_x is None or rx < min_x:
+            min_x = rx
+        if min_y is None or ry < min_y:
+            min_y = ry
+    if min_x is None or min_y is None:
+        return 0.0
+    nx = (dst_width - 1) / 2.0
+    ny = (dst_height - 1) / 2.0
+    margin_x = nx + min_x
+    margin_y = ny + min_y
+    if margin_x < 0.0:
+        margin_x = 0.0
+    if margin_y < 0.0:
+        margin_y = 0.0
+    return (margin_x + margin_y) * 0.5
+
+
 def bilinear_sample(pixels, width, height, fx, fy):
     fx = min(max(fx, 0.0), width - 1.0)
     fy = min(max(fy, 0.0), height - 1.0)
@@ -256,17 +322,50 @@ def main():
     args = parser.parse_args()
 
     comments, width, height, pixels = read_ppm(Path(args.input))
+    comments = strip_geometry_comments(comments)
+    metadata_lines = []
 
     width, height, pixels = scale_image(pixels, width, height, args.scale_x, args.scale_y)
-    width, height, pixels = skew_horizontal(pixels, width, height, args.skew_x)
+
+    if not nearly_equal(args.skew_x, 0.0):
+        skew_src_width = width
+        skew_src_height = height
+        width, height, pixels = skew_horizontal(pixels, width, height, args.skew_x)
+        skew_margin = -min(0.0, args.skew_x)
+        metadata_lines.append(f"# skew_src_width {skew_src_width}")
+        metadata_lines.append(f"# skew_src_height {skew_src_height}")
+        metadata_lines.append(f"# skew_margin_x {format_float(skew_margin)}")
+        metadata_lines.append(f"# skew_x_pixels {format_float(0.0)}")
+        metadata_lines.append(f"# skew_bottom_x {format_float(args.skew_x)}")
+    else:
+        width, height, pixels = skew_horizontal(pixels, width, height, args.skew_x)
+
     width, height, pixels = skew_vertical(pixels, width, height, args.skew_y)
+
+    rotation_pending = not nearly_equal(args.rotate, 0.0)
+    if rotation_pending:
+        rotation_src_width = width
+        rotation_src_height = height
     width, height, pixels = rotate_image(pixels, width, height, args.rotate)
+    if rotation_pending:
+        rotation_margin = compute_rotation_margin(rotation_src_width,
+                                                  rotation_src_height,
+                                                  args.rotate,
+                                                  width,
+                                                  height)
+        metadata_lines.append(f"# rotation_deg {format_float(args.rotate)}")
+        metadata_lines.append(f"# rotation_src_width {rotation_src_width}")
+        metadata_lines.append(f"# rotation_src_height {rotation_src_height}")
+        metadata_lines.append(f"# rotation_margin {format_float(rotation_margin)}")
+
     pixels = add_border_noise(pixels, width, height, args.border_thickness, args.border_density, args.seed)
     blot_color = parse_color(args.ink_blot_color)
     if args.ink_blot_radius > 0 and blot_color is None:
         raise SystemExit("ppm_transform: --ink-blot-radius requires --ink-blot-color")
     pixels = apply_ink_blot(pixels, width, height, args.ink_blot_radius, blot_color)
 
+    if metadata_lines:
+        comments.extend(metadata_lines)
     write_ppm(Path(args.output), comments, width, height, pixels)
 
 
