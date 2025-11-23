@@ -86,7 +86,7 @@ with open(path, "w", encoding="ascii", newline="\n") as f:
         f.write("\n")
 PY
 
-fraction=0.2
+fraction=0.1
 "$makocode_bin" overlay "$encoded_path" "$overlay_path" "$fraction" > "$merged_path"
 
 decoded_dir="$work_dir/decoded"

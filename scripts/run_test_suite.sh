@@ -187,7 +187,7 @@ run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 
 run_decode_case "decode_failures" "Decoder rejects malformed PPM inputs"
 
-#run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
+run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
 
 #run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
 #    --mode auto
