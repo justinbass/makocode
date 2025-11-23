@@ -1,6 +1,6 @@
 - Features
  - Overlay to dynamically check ECC and confirm parameter is not excessive
- - Overlay needs explicit palette arg, threshold the overlay image first.
+ - Overlay needs to respect image color - auto-detect. May be working, add tests.
  - Overay needs --ignore-color arg
  - Overlay won't work well on final page
  - Color channels non-base-2, works but slow

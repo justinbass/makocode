@@ -47,6 +47,9 @@ encode_cmd=(
     --page-height=1000
     "--output-dir=$work_dir"
 )
+if [[ -n "${MAKO_OVERLAY_PALETTE:-}" ]]; then
+    encode_cmd+=(--palette "${MAKO_OVERLAY_PALETTE}")
+fi
 (
     cd "$work_dir"
     "${encode_cmd[@]}"
@@ -61,16 +64,19 @@ if [[ ${#ppms[@]} -eq 0 ]]; then
 fi
 mv -f "${ppms[0]}" "$encoded_path"
 
-OVERLAY_PPM="$overlay_path" python3 - <<'PY'
-import math
-import os
+circle_color="${MAKO_OVERLAY_CIRCLE_COLOR:-0 0 0}"
+background_color="${MAKO_OVERLAY_BACKGROUND_COLOR:-255 255 255}"
+OVERLAY_PPM="$overlay_path" python3 - "$circle_color" "$background_color" <<'PY'
+import os, sys
 
-path = os.environ["OVERLAY_PPM"]
+path = os.environ.get("OVERLAY_PPM")
+if not path:
+    raise SystemExit("overlay: missing OVERLAY_PPM environment")
 w = h = 1000
 cx = cy = w // 2
 radius = int(w * 0.45)
-white = "255 255 255"
-black = "0 0 0"
+circle_color = sys.argv[1]
+background_color = sys.argv[2]
 with open(path, "w", encoding="ascii", newline="\n") as f:
     f.write("P3\n")
     f.write(f"{w} {h}\n")
@@ -79,14 +85,14 @@ with open(path, "w", encoding="ascii", newline="\n") as f:
         row = []
         for x in range(w):
             if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= radius * radius:
-                row.append(black)
+                row.append(circle_color)
             else:
-                row.append(white)
+                row.append(background_color)
         f.write(" ".join(row))
         f.write("\n")
 PY
 
-fraction=0.1
+fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 "$makocode_bin" overlay "$encoded_path" "$overlay_path" "$fraction" > "$merged_path"
 
 decoded_dir="$work_dir/decoded"
@@ -100,11 +106,13 @@ fi
 cmp --silent "$payload_path" "$decoded_source"
 mv "$decoded_source" "$decoded_path"
 
-python3 - "$encoded_path" "$merged_path" <<'PY'
+skip_grayscale="${MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK:-0}"
+python3 - "$encoded_path" "$merged_path" "$skip_grayscale" <<'PY'
 import pathlib, sys
 
 base = pathlib.Path(sys.argv[1])
 merged = pathlib.Path(sys.argv[2])
+skip_grayscale = bool(int(sys.argv[3]))
 
 def read_ppm(path):
     tokens = []
@@ -134,12 +142,13 @@ pixels = w * h
 diff = 0
 for i in range(pixels):
     r, g, b = merged_nums[i*3:(i+1)*3]
-    if not (r == g == b):
-        raise SystemExit(f"non-grayscale pixel {r} {g} {b} at index {i}")
-    if r not in (0, 255):
-        raise SystemExit(f"pixel {r} {g} {b} is not pure black or white at index {i}")
     if merged_nums[i*3:(i+1)*3] != base_nums[i*3:(i+1)*3]:
         diff += 1
+    if not skip_grayscale:
+        if not (r == g == b):
+            raise SystemExit(f"non-grayscale pixel {r} {g} {b} at index {i}")
+        if r not in (0, 255):
+            raise SystemExit(f"pixel {r} {g} {b} is not pure black or white at index {i}")
 
 if diff == 0:
     raise SystemExit('overlay did not modify any pixels')

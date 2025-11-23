@@ -18654,6 +18654,16 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
         page.data_height = page.height;
     }
     page.color_mode = 1u;
+    if (page.metadata.has_palette_base) {
+        const u64 palette_base = page.metadata.palette_base_value;
+        if (palette_base >= 8u) {
+            page.color_mode = 3u;
+        } else if (palette_base >= 4u) {
+            page.color_mode = 2u;
+        } else {
+            page.color_mode = 1u;
+        }
+    }
     return true;
 }
 

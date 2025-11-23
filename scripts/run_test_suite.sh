@@ -97,10 +97,20 @@ run_script_case() {
 run_overlay_case() {
     local slug=$1
     local description=$2
+    shift 2
+    local env_args=()
+    while [[ $# -gt 0 ]]; do
+        env_args+=("$1")
+        shift
+    done
     local new_label
     printf -v new_label "%04d_%s" "$case_counter" "$slug"
     case_counter=$((case_counter + 1))
-    execute_case "$new_label" "$description" "$overlay_test" "$new_label"
+    if [[ ${#env_args[@]} -gt 0 ]]; then
+        execute_case "$new_label" "$description" env "${env_args[@]}" "$overlay_test" "$new_label"
+    else
+        execute_case "$new_label" "$description" "$overlay_test" "$new_label"
+    fi
 }
 
 run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
@@ -190,8 +200,6 @@ run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 
 run_decode_case "decode_failures" "Decoder rejects malformed PPM inputs"
 
-run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
-
 #run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
 #    --mode auto
 
@@ -210,3 +218,11 @@ run_roundtrip_case "palette_white_black_blot_black" "High-ECC black blot recover
 run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recovery on White/Black page" \
     --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
     --ink-blot-radius 180 --ink-blot-color white
+
+run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
+
+run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette with yellow mask" \
+    MAKO_OVERLAY_PALETTE="White Cyan Magenta Yellow" \
+    MAKO_OVERLAY_CIRCLE_COLOR="255 255 0" \
+    MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1 \
+    MAKO_OVERLAY_FRACTION=0.05
