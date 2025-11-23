@@ -8789,6 +8789,7 @@ static u16 rs_compute_locator_derivative(const u8* locator,
 
 static bool rs_correct_errors(u8* codeword,
                               u16 codeword_length,
+                              u16 exponent_offset,
                               const u8* omega,
                               u16 omega_size,
                               const u8* locator_derivative,
@@ -8798,12 +8799,28 @@ static bool rs_correct_errors(u8* codeword,
     if (!codeword || !omega || !locator_derivative || !positions) {
         return false;
     }
+    if (debug_logging_enabled() && g_rs_debug_block_index >= 0 && position_count > 0u) {
+        console_write(2, "debug rs: correcting block=");
+        char block_buffer[32];
+        u64_to_ascii((u64)g_rs_debug_block_index, block_buffer, sizeof(block_buffer));
+        console_write(2, block_buffer);
+        console_write(2, " positions=");
+        for (u16 i = 0u; i < position_count; ++i) {
+            char pos_buffer[32];
+            u64_to_ascii((u64)positions[i], pos_buffer, sizeof(pos_buffer));
+            console_write(2, pos_buffer);
+            if ((i + 1u) < position_count) {
+                console_write(2, ",");
+            }
+        }
+        console_line(2, "");
+    }
     for (u16 i = 0u; i < position_count; ++i) {
         u16 pos = positions[i];
         if (pos >= codeword_length) {
             return false;
         }
-        u16 exponent = (u16)((pos + 1u) % RS_FIELD_SIZE);
+        u16 exponent = (u16)((pos + 1u + exponent_offset) % RS_FIELD_SIZE);
         u8 root = gf_pow_alpha(exponent);
         u8 numerator = poly_eval(omega, omega_size, root);
         u8 denominator = poly_eval(locator_derivative, derivative_size, root);
@@ -8882,7 +8899,15 @@ static bool rs_decode_block(u8* block,
         rs_debug_failure("derivative", data_symbols, parity_symbols);
         return false;
     }
-    if (!rs_correct_errors(block, codeword_length, evaluator, evaluator_size, locator_derivative, derivative_size, error_positions, error_count)) {
+    if (!rs_correct_errors(block,
+                           codeword_length,
+                           exponent_offset,
+                           evaluator,
+                           evaluator_size,
+                           locator_derivative,
+                           derivative_size,
+                           error_positions,
+                           error_count)) {
         rs_debug_failure("correct", data_symbols, parity_symbols);
         return false;
     }
@@ -9164,6 +9189,16 @@ static bool decode_ecc_payload(const u8* bytes,
             stats->corrected_symbols += (u64)block_errors;
             stats->blocks_with_errors += 1u;
         }
+        if (debug_logging_enabled() && block_errors > 0u) {
+            char block_buffer[32];
+            char error_buffer[32];
+            u64_to_ascii(block_index, block_buffer, sizeof(block_buffer));
+            u64_to_ascii((u64)block_errors, error_buffer, sizeof(error_buffer));
+            console_write(2, "debug rs: corrected block=");
+            console_write(2, block_buffer);
+            console_write(2, " symbols=");
+            console_line(2, error_buffer);
+        }
         u16 copy = header.block_data;
         if (written + copy > header.original_bytes) {
             copy = (u16)(header.original_bytes - written);
@@ -9372,6 +9407,36 @@ struct DecoderContext {
             if (bit_total > (u64)USIZE_MAX_VALUE) {
                 ecc_failed = true;
                 return false;
+            }
+            const char* ecc_output_dump = getenv("MAKOCODE_DEBUG_ECC_OUTPUT");
+            if (ecc_output_dump && *ecc_output_dump && working->data && working->size > 0u) {
+                int dump_fd = open(ecc_output_dump, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (dump_fd >= 0) {
+                    const u8* dump_ptr = working->data;
+                    usize dump_remaining = working->size;
+                    while (dump_remaining > 0u) {
+                        usize chunk = dump_remaining;
+                        if (chunk > 1u << 20) {
+                            chunk = 1u << 20;
+                        }
+                        ssize_t write_result = write(dump_fd, dump_ptr, chunk);
+                        if (write_result < 0) {
+                            if (debug_logging_enabled()) {
+                                console_line(2, "debug parse: ECC output dump write failed");
+                            }
+                            break;
+                        }
+                        if (write_result == 0) {
+                            break;
+                        }
+                        dump_ptr += (usize)write_result;
+                        dump_remaining -= (usize)write_result;
+                    }
+                    close(dump_fd);
+                } else if (debug_logging_enabled()) {
+                    console_write(2, "debug parse: failed to open ECC output dump ");
+                    console_line(2, ecc_output_dump);
+                }
             }
             if (!lzma_decompress(working->data, (usize)bit_total, payload)) {
                 if (debug_logging_enabled()) {

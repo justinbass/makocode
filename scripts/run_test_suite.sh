@@ -202,8 +202,8 @@ run_script_case "$repo_root/scripts/test_header_copy_corruption.sh" \
 
 run_roundtrip_case "palette_white_black_blot_black" "High-ECC black blot recovery on White/Black page" \
     --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
-    --ink-blot-radius 12 --ink-blot-color black
+    --ink-blot-radius 180 --ink-blot-color black
 
 run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recovery on White/Black page" \
     --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
-    --ink-blot-radius 13 --ink-blot-color white
+    --ink-blot-radius 180 --ink-blot-color white
