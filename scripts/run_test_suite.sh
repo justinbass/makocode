@@ -103,6 +103,9 @@ run_overlay_case() {
     execute_case "$new_label" "$description" "$overlay_test" "$new_label"
 }
 
+run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
+    --mode auto
+
 run_roundtrip_case "baseline_8k_ecc_050" "8 KiB payload, ECC 0.5 baseline" \
     --size 8192 --ecc 0.5 --width 500 --height 500
 

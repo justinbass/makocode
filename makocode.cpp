@@ -12854,14 +12854,37 @@ static u64 detect_vertical_scale_similarity(const u8* pixels, u64 width, u64 hei
     return scale ? scale : 1u;
 }
 
+static bool map_rgb_to_detection_sample(u8 color_mode,
+                                        const ImageMappingConfig* mapping,
+                                        const u8* rgb,
+                                        u32* sample_out) {
+    if (!rgb || !sample_out) {
+        return false;
+    }
+    if (mapping && mapping_has_custom_palette(*mapping)) {
+        u32 symbol = 0u;
+        if (!map_rgb_to_custom_symbol(*mapping, rgb, symbol)) {
+            return false;
+        }
+        *sample_out = symbol;
+        return true;
+    }
+    return map_rgb_to_samples(color_mode, rgb, sample_out);
+}
+
 static u64 detect_horizontal_scale_palette(const u8* pixels,
                                            u64 width,
                                            u64 height,
-                                           u8 color_mode) {
+                                           u8 color_mode,
+                                           const ImageMappingConfig* mapping) {
     if (!pixels || width < 2u || height == 0u) {
         return 1u;
     }
-    if (color_mode == 0u || color_mode > 3u) {
+    u8 effective_color_mode = color_mode;
+    if (mapping && mapping_has_custom_palette(*mapping)) {
+        effective_color_mode = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
+    }
+    if (effective_color_mode == 0u || effective_color_mode > 3u) {
         return 1u;
     }
     u64 row_limit = (height < 256u) ? height : 256u;
@@ -12870,7 +12893,7 @@ static u64 detect_horizontal_scale_palette(const u8* pixels,
     for (u64 row = 0u; row < row_limit; ++row) {
         const u8* row_ptr = pixels + (row * width * 3u);
         u32 prev_sample = 0u;
-        if (!map_rgb_to_samples(color_mode, row_ptr, &prev_sample)) {
+        if (!map_rgb_to_detection_sample(color_mode, mapping, row_ptr, &prev_sample)) {
             continue;
         }
         u64 run_length = 1u;
@@ -12878,7 +12901,7 @@ static u64 detect_horizontal_scale_palette(const u8* pixels,
         for (u64 col = 1u; col < width; ++col) {
             const u8* pixel_ptr = row_ptr + col * 3u;
             u32 current_sample = 0u;
-            if (!map_rgb_to_samples(color_mode, pixel_ptr, &current_sample)) {
+            if (!map_rgb_to_detection_sample(color_mode, mapping, pixel_ptr, &current_sample)) {
                 row_ok = false;
                 break;
             }
@@ -12921,11 +12944,16 @@ static u64 detect_horizontal_scale_palette(const u8* pixels,
 static u64 detect_vertical_scale_palette(const u8* pixels,
                                          u64 width,
                                          u64 height,
-                                         u8 color_mode) {
+                                         u8 color_mode,
+                                         const ImageMappingConfig* mapping) {
     if (!pixels || width == 0u || height < 2u) {
         return 1u;
     }
-    if (color_mode == 0u || color_mode > 3u) {
+    u8 effective_color_mode = color_mode;
+    if (mapping && mapping_has_custom_palette(*mapping)) {
+        effective_color_mode = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
+    }
+    if (effective_color_mode == 0u || effective_color_mode > 3u) {
         return 1u;
     }
     u64 column_limit = (width < 256u) ? width : 256u;
@@ -12935,7 +12963,7 @@ static u64 detect_vertical_scale_palette(const u8* pixels,
     for (u64 col = 0u; col < column_limit; ++col) {
         u32 prev_sample = 0u;
         const u8* first_pixel = pixels + (col * 3u);
-        if (!map_rgb_to_samples(color_mode, first_pixel, &prev_sample)) {
+        if (!map_rgb_to_detection_sample(color_mode, mapping, first_pixel, &prev_sample)) {
             continue;
         }
         u64 run_length = 1u;
@@ -12943,7 +12971,7 @@ static u64 detect_vertical_scale_palette(const u8* pixels,
         for (u64 row = 1u; row < row_limit; ++row) {
             const u8* pixel_ptr = pixels + ((row * width + col) * 3u);
             u32 current_sample = 0u;
-            if (!map_rgb_to_samples(color_mode, pixel_ptr, &current_sample)) {
+            if (!map_rgb_to_detection_sample(color_mode, mapping, pixel_ptr, &current_sample)) {
                 column_ok = false;
                 break;
             }
@@ -12986,11 +13014,12 @@ static u64 detect_vertical_scale_palette(const u8* pixels,
 static u64 detect_horizontal_scale(const u8* pixels,
                                    u64 width,
                                    u64 height,
-                                   u8 color_mode) {
+                                   u8 color_mode,
+                                   const ImageMappingConfig* mapping) {
     if (!pixels || width == 0u || height == 0u) {
         return 1u;
     }
-    u64 palette_scale = detect_horizontal_scale_palette(pixels, width, height, color_mode);
+    u64 palette_scale = detect_horizontal_scale_palette(pixels, width, height, color_mode, mapping);
     if (palette_scale > 1u) {
         return palette_scale;
     }
@@ -13000,11 +13029,12 @@ static u64 detect_horizontal_scale(const u8* pixels,
 static u64 detect_vertical_scale(const u8* pixels,
                                  u64 width,
                                  u64 height,
-                                 u8 color_mode) {
+                                 u8 color_mode,
+                                 const ImageMappingConfig* mapping) {
     if (!pixels || width == 0u || height == 0u) {
         return 1u;
     }
-    u64 palette_scale = detect_vertical_scale_palette(pixels, width, height, color_mode);
+    u64 palette_scale = detect_vertical_scale_palette(pixels, width, height, color_mode, mapping);
     if (palette_scale > 1u) {
         return palette_scale;
     }
@@ -13016,7 +13046,8 @@ static bool validate_integer_scale(const u8* pixels,
                                    u64 height,
                                    u64 scale_x,
                                    u64 scale_y,
-                                   u8 color_mode) {
+                                   u8 color_mode,
+                                   const ImageMappingConfig* mapping) {
     if (!pixels || width == 0u || height == 0u) {
         return false;
     }
@@ -13029,7 +13060,11 @@ static bool validate_integer_scale(const u8* pixels,
     if ((width % scale_x) != 0u || (height % scale_y) != 0u) {
         return false;
     }
-    if (color_mode == 0u || color_mode > 3u) {
+    u8 effective_color_mode = color_mode;
+    if (mapping && mapping_has_custom_palette(*mapping)) {
+        effective_color_mode = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
+    }
+    if (effective_color_mode == 0u || effective_color_mode > 3u) {
         return false;
     }
     u64 logical_width = width / scale_x;
@@ -13040,7 +13075,7 @@ static bool validate_integer_scale(const u8* pixels,
             u64 base_col = logical_col * scale_x;
             const u8* origin = pixels + ((base_row * width) + base_col) * 3u;
             u32 reference_sample = 0u;
-            if (!map_rgb_to_samples(color_mode, origin, &reference_sample)) {
+            if (!map_rgb_to_detection_sample(color_mode, mapping, origin, &reference_sample)) {
                 return false;
             }
             for (u64 dy = 0u; dy < scale_y; ++dy) {
@@ -13052,7 +13087,7 @@ static bool validate_integer_scale(const u8* pixels,
                 for (u64 dx = 0u; dx < scale_x; ++dx) {
                     const u8* sample = row_ptr + dx * 3u;
                     u32 sample_value = 0u;
-                    if (!map_rgb_to_samples(color_mode, sample, &sample_value)) {
+                    if (!map_rgb_to_detection_sample(color_mode, mapping, sample, &sample_value)) {
                         return false;
                     }
                     if (sample_value != reference_sample) {
@@ -13261,7 +13296,23 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             has_skew = false;
         }
     }
-    u8 detection_color_mode = overrides.color_channels;
+    ImageMappingConfig active_mapping = overrides;
+    if (active_mapping.palette_set) {
+        if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
+            return false;
+        }
+    } else if (state.has_palette_text && state.palette_text_length) {
+        if (!image_mapping_set_palette_text(active_mapping,
+                                            state.palette_text,
+                                            state.palette_text_length,
+                                            "decode")) {
+            return false;
+        }
+        if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
+            return false;
+        }
+    }
+    u8 detection_color_mode = active_mapping.color_channels;
     if (detection_color_mode == 0u || detection_color_mode > 3u) {
         detection_color_mode = 1u;
     }
@@ -13406,21 +13457,21 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
     if (!has_rotation && !has_skew && scale_x_integer && scale_x_int == 1u && width > 1u) {
-        u64 detected_x = detect_horizontal_scale(pixel_data, width, height, detection_color_mode);
+        u64 detected_x = detect_horizontal_scale(pixel_data, width, height, detection_color_mode, &active_mapping);
         if (detected_x > 1u && (width % detected_x) == 0u) {
             scale_x_int = detected_x;
             scale_x = (double)detected_x;
         }
     }
     if (!has_rotation && !has_skew && scale_y_integer && scale_y_int == 1u && height > 1u) {
-        u64 detected_y = detect_vertical_scale(pixel_data, width, height, detection_color_mode);
+        u64 detected_y = detect_vertical_scale(pixel_data, width, height, detection_color_mode, &active_mapping);
         if (detected_y > 1u && (height % detected_y) == 0u) {
             scale_y_int = detected_y;
             scale_y = (double)detected_y;
         }
     }
     if (!has_rotation && !has_skew && scale_x_integer && scale_y_integer) {
-        if (!validate_integer_scale(pixel_data, width, height, scale_x_int, scale_y_int, detection_color_mode)) {
+        if (!validate_integer_scale(pixel_data, width, height, scale_x_int, scale_y_int, detection_color_mode, &active_mapping)) {
             scale_x = 1.0;
             scale_y = 1.0;
             scale_x_int = 1u;
@@ -13522,30 +13573,13 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                       &fiducial_mask)) {
         return false;
     }
-    ImageMappingConfig active_mapping = overrides;
-    if (active_mapping.palette_set) {
-        if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
-            return false;
-        }
-    } else if (state.has_palette_text && state.palette_text_length) {
-        if (!image_mapping_set_palette_text(active_mapping,
-                                            state.palette_text,
-                                            state.palette_text_length,
-                                            "decode")) {
-            return false;
-        }
-        if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
-            return false;
-        }
-    }
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u32 custom_palette_base = 0u;
-    u8 color_mode = overrides.color_channels;
+    u8 color_mode = active_mapping.color_channels;
     if (color_mode == 0u || color_mode > 3u) {
         color_mode = 1u;
     }
     if (use_custom_palette) {
-        color_mode = active_mapping.color_channels;
         custom_palette_base = mapping_custom_palette_base(active_mapping);
         if (custom_palette_base < 2u) {
             return false;
