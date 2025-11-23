@@ -1,4 +1,5 @@
 - Features
+ - Fix commented tests
  - Confirm overlay avoids header or sensitive data
  - Overlay to dynamically check ECC and confirm parameter is not excessive
  - Overlay needs explicit palette arg, threshold the overlay image first.
