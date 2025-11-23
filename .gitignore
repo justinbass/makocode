@@ -7,3 +7,4 @@ makocode_minified.cpp
 *.gcda
 *.gcno
 *.dSYM/
+*__pycache__*

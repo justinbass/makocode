@@ -61,6 +61,15 @@
 #ifndef O_RDONLY
 #define O_RDONLY 0
 #endif
+#ifndef O_WRONLY
+#define O_WRONLY 1
+#endif
+#ifndef O_CREAT
+#define O_CREAT 0x0200
+#endif
+#ifndef O_TRUNC
+#define O_TRUNC 0x0400
+#endif
 
 typedef unsigned char       u8;
 typedef unsigned short      u16;
@@ -8681,31 +8690,59 @@ static u8 poly_eval(const u8* poly, u16 length, u8 x) {
     return result;
 }
 
+
+static i64 g_rs_debug_block_index = -1;
+
+static void rs_debug_failure(const char* reason,
+                             u16 data_symbols,
+                             u16 parity_symbols) {
+    if (!reason || !debug_logging_enabled() || g_rs_debug_block_index < 0) {
+        return;
+    }
+    char block_buffer[32];
+    char data_buffer[32];
+    char parity_buffer[32];
+    u64_to_ascii((u64)g_rs_debug_block_index, block_buffer, sizeof(block_buffer));
+    u64_to_ascii((u64)data_symbols, data_buffer, sizeof(data_buffer));
+    u64_to_ascii((u64)parity_symbols, parity_buffer, sizeof(parity_buffer));
+    console_write(2, "debug rs: block=");
+    console_write(2, block_buffer);
+    console_write(2, " data=");
+    console_write(2, data_buffer);
+    console_write(2, " parity=");
+    console_write(2, parity_buffer);
+    console_write(2, " reason=");
+    console_line(2, reason);
+}
+
 static bool rs_find_error_locations(const u8* locator,
                                     u16 locator_size,
                                     u16 codeword_length,
                                     u16 exponent_offset,
                                     u16* positions,
-                                    u16& position_count) {
+                                    u16& position_count,
+                                    u16 data_symbols,
+                                    u16 parity_symbols) {
     if (!locator || !positions || locator_size <= 1u) {
         return false;
     }
     position_count = 0u;
-    for (u16 i = 0u; i < codeword_length; ++i) {
-        u16 exponent = (u16)(i + exponent_offset);
+    for (u16 pos = 0u; pos < codeword_length; ++pos) {
+        u32 exponent = (u32)pos + 1u + (u32)exponent_offset;
         u8 x = gf_pow_alpha(exponent);
         if (poly_eval(locator, locator_size, x) == 0u) {
             if (position_count >= (locator_size - 1u)) {
+                rs_debug_failure("locations-overflow", data_symbols, parity_symbols);
                 return false;
             }
-            u16 position = (i == 0u) ? (u16)(codeword_length - 1u) : (u16)(i - 1u);
-            if (position >= codeword_length) {
-                return false;
-            }
-            positions[position_count++] = position;
+            positions[position_count++] = pos;
         }
     }
-    return (position_count == (locator_size - 1u));
+    if (position_count != (locator_size - 1u)) {
+        rs_debug_failure("locations-mismatch", data_symbols, parity_symbols);
+        return false;
+    }
+    return true;
 }
 
 static u16 rs_compute_error_evaluator(const u8* locator,
@@ -8789,15 +8826,18 @@ static bool rs_decode_block(u8* block,
         *corrected_errors = 0u;
     }
     if (!block || parity_symbols == 0u || data_symbols == 0u) {
+        rs_debug_failure("invalid-params", data_symbols, parity_symbols);
         return false;
     }
     u16 codeword_length = (u16)(data_symbols + parity_symbols);
     if (codeword_length > RS_FIELD_SIZE) {
+        rs_debug_failure("codeword-length", data_symbols, parity_symbols);
         return false;
     }
     u8 syndromes[RS_POLY_CAPACITY];
     bool all_zero = false;
     if (!rs_compute_syndromes(block, codeword_length, parity_symbols, syndromes, all_zero)) {
+        rs_debug_failure("syndromes", data_symbols, parity_symbols);
         return false;
     }
     if (all_zero) {
@@ -8809,18 +8849,29 @@ static bool rs_decode_block(u8* block,
     }
     u16 locator_size = 0u;
     if (!rs_berlekamp_massey(syndromes, parity_symbols, locator, locator_size)) {
+        rs_debug_failure("berlekamp", data_symbols, parity_symbols);
         return false;
     }
     if (locator_size <= 1u) {
+        rs_debug_failure("locator-size", data_symbols, parity_symbols);
         return false;
     }
     u16 error_positions[RS_POLY_CAPACITY];
     u16 error_count = 0u;
     u16 exponent_offset = (u16)(RS_FIELD_SIZE - codeword_length);
-    if (!rs_find_error_locations(locator, locator_size, codeword_length, exponent_offset, error_positions, error_count)) {
+    if (!rs_find_error_locations(locator,
+                                 locator_size,
+                                 codeword_length,
+                                 exponent_offset,
+                                 error_positions,
+                                 error_count,
+                                 data_symbols,
+                                 parity_symbols)) {
+        rs_debug_failure("locations", data_symbols, parity_symbols);
         return false;
     }
     if ((error_count * 2u) > parity_symbols) {
+        rs_debug_failure("too-many-errors", data_symbols, parity_symbols);
         return false;
     }
     u8 evaluator[RS_POLY_CAPACITY];
@@ -8828,9 +8879,11 @@ static bool rs_decode_block(u8* block,
     u8 locator_derivative[RS_POLY_CAPACITY];
     u16 derivative_size = rs_compute_locator_derivative(locator, locator_size, locator_derivative);
     if (derivative_size == 0u) {
+        rs_debug_failure("derivative", data_symbols, parity_symbols);
         return false;
     }
     if (!rs_correct_errors(block, codeword_length, evaluator, evaluator_size, locator_derivative, derivative_size, error_positions, error_count)) {
+        rs_debug_failure("correct", data_symbols, parity_symbols);
         return false;
     }
     if (corrected_errors) {
@@ -9102,9 +9155,11 @@ static bool decode_ecc_payload(const u8* bytes,
             block_buffer[i] = bytes[offset + i];
         }
         u16 block_errors = 0u;
+        g_rs_debug_block_index = (i64)block_index;
         if (!rs_decode_block(block_buffer, header.block_data, header.parity, &block_errors)) {
             return false;
         }
+        g_rs_debug_block_index = -1;
         if (stats && block_errors > 0u) {
             stats->corrected_symbols += (u64)block_errors;
             stats->blocks_with_errors += 1u;
@@ -9208,14 +9263,44 @@ struct DecoderContext {
             return true;
         }
         if (!data) {
-            return false;
+        return false;
+    }
+    usize byte_count = (size_in_bits + 7u) >> 3u;
+    if (byte_count > 0u && !unshuffle_encoded_stream(data, byte_count)) {
+        return false;
+    }
+    const char* ecc_input_dump = getenv("MAKOCODE_DEBUG_ECC_INPUT");
+    if (ecc_input_dump && *ecc_input_dump && data && byte_count > 0u) {
+        int dump_fd = open(ecc_input_dump, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (dump_fd >= 0) {
+            usize remaining = byte_count;
+            const u8* ptr = data;
+            while (remaining > 0u) {
+                usize chunk = remaining;
+                if (chunk > 1u << 20) {
+                    chunk = 1u << 20;
+                }
+                ssize_t write_result = write(dump_fd, ptr, chunk);
+                if (write_result < 0) {
+                    if (debug_logging_enabled()) {
+                        console_line(2, "debug parse: ECC input dump write failed");
+                    }
+                    break;
+                }
+                if (write_result == 0) {
+                    break;
+                }
+                ptr += (usize)write_result;
+                remaining -= (usize)write_result;
+            }
+            close(dump_fd);
+        } else if (debug_logging_enabled()) {
+            console_write(2, "debug parse: failed to open ECC input dump ");
+            console_line(2, ecc_input_dump);
         }
-        usize byte_count = (size_in_bits + 7u) >> 3u;
-        if (byte_count > 0u && !unshuffle_encoded_stream(data, byte_count)) {
-            return false;
-        }
-        EccHeaderInfo header;
-        bool header_ok = parse_ecc_header(data, byte_count, header);
+    }
+    EccHeaderInfo header;
+    bool header_ok = parse_ecc_header(data, byte_count, header);
         bool have_password = (password && password_length > 0u);
         if (header_ok && header.valid && header.enabled) {
             ecc_stats.header_copy_repairs = header.header_copies_repaired;
@@ -19365,6 +19450,37 @@ retry_decode:
             console_line(2, " header copies");
         }
     }
+    const char* debug_bitstream_path = getenv("MAKOCODE_DEBUG_BITSTREAM");
+    if (debug_bitstream_path && *debug_bitstream_path && bitstream.data && bitstream.size > 0u) {
+        int dump_fd = open(debug_bitstream_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (dump_fd >= 0) {
+            const u8* dump_ptr = bitstream.data;
+            usize dump_remaining = bitstream.size;
+            while (dump_remaining > 0u) {
+                usize chunk = dump_remaining;
+                if (chunk > 1u << 20) {
+                    chunk = 1u << 20;
+                }
+                ssize_t write_result = write(dump_fd, dump_ptr, chunk);
+                if (write_result < 0) {
+                    if (debug_logging_enabled()) {
+                        console_line(2, "debug decode: bitstream dump write failed");
+                    }
+                    break;
+                }
+                if (write_result == 0) {
+                    break;
+                }
+                dump_ptr += (usize)write_result;
+                dump_remaining -= (usize)write_result;
+            }
+            close(dump_fd);
+        } else if (debug_logging_enabled()) {
+            console_write(2, "debug decode: failed to open bitstream dump ");
+            console_line(2, debug_bitstream_path);
+        }
+    }
+
     makocode::DecoderContext decoder;
     const char* password_ptr = have_password ? (const char*)password_buffer.data : (const char*)0;
     usize password_length = have_password ? password_buffer.size : 0u;
