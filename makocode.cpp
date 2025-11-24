@@ -19210,12 +19210,147 @@ static int command_overlay(int arg_count, char** args) {
             return 1;
         }
         u64 accumulator = 0u;
+        makocode::ByteBuffer block_counters;
+        makocode::ByteBuffer block_shuffle_map;
+        u16* block_counters_ptr = 0;
+        usize* block_shuffle_map_ptr = 0;
+        bool block_limit_active = false;
+        u64 block_limit_start = 0u;
+        u64 block_limit_end = 0u;
+        u64 block_limit_hits = 0u;
+        u64 block_total_symbols = 0u;
+        u64 block_total_count = 0u;
+        u64 block_limit_per_block = 0u;
+        u64 shuffle_entry_count = 0u;
+        const u64 payload_prefix_bytes = 8u;
+        const u64 header_span_bytes = (u64)makocode::ECC_HEADER_TOTAL_BYTES;
+        if (base_bytes >= payload_prefix_bytes + header_span_bytes) {
+            u64 payload_bytes = base_bytes - payload_prefix_bytes;
+            usize payload_byte_count = (payload_bytes > (u64)USIZE_MAX_VALUE)
+                                          ? USIZE_MAX_VALUE
+                                          : (usize)payload_bytes;
+            if (payload_byte_count >= makocode::ECC_HEADER_TOTAL_BYTES) {
+                const u8* payload_ptr = base_ptr + payload_prefix_bytes;
+                makocode::EccHeaderInfo ecc_header;
+                if (makocode::parse_ecc_header(payload_ptr, payload_byte_count, ecc_header) &&
+                    ecc_header.valid && ecc_header.enabled) {
+                    u64 block_data = (u64)ecc_header.block_data;
+                    u64 parity = (u64)ecc_header.parity;
+                    u64 block_total = block_data + parity;
+                    u64 block_count_value = ecc_header.block_count;
+                    if (block_data && parity && block_total && block_count_value &&
+                        block_total <= (U64_MAX_VALUE / block_count_value)) {
+                        u64 encoded_block_bytes = block_total * block_count_value;
+                        u64 available_rs_bytes = (payload_bytes >= header_span_bytes)
+                                                    ? (payload_bytes - header_span_bytes)
+                                                    : 0u;
+                        if (encoded_block_bytes > available_rs_bytes) {
+                            encoded_block_bytes = available_rs_bytes;
+                        }
+                        if (encoded_block_bytes > 0u &&
+                            block_count_value <= (u64)(USIZE_MAX_VALUE / sizeof(u16))) {
+                            usize counter_bytes = (usize)(block_count_value * (u64)sizeof(u16));
+                            if (counter_bytes != 0u && block_counters.ensure(counter_bytes)) {
+                                block_counters.size = counter_bytes;
+                                for (usize counter_index = 0u; counter_index < counter_bytes; ++counter_index) {
+                                    block_counters.data[counter_index] = 0u;
+                                }
+                                block_total_symbols = block_total;
+                                block_total_count = block_count_value;
+                                block_limit_per_block = parity / 2u;
+                                if (block_limit_per_block == 0u) {
+                                    block_limit_per_block = 1u;
+                                }
+                                if (encoded_block_bytes <= (u64)USIZE_MAX_VALUE) {
+                                    usize entries = (usize)encoded_block_bytes;
+                                    if (entries != 0u &&
+                                        entries <= (USIZE_MAX_VALUE / sizeof(usize))) {
+                                        usize map_bytes = entries * sizeof(usize);
+                                        if (map_bytes != 0u && block_shuffle_map.ensure(map_bytes)) {
+                                            block_shuffle_map.size = map_bytes;
+                                            block_shuffle_map_ptr = (usize*)block_shuffle_map.data;
+                                            for (usize map_index = 0u; map_index < entries; ++map_index) {
+                                                block_shuffle_map_ptr[map_index] = map_index;
+                                            }
+                                            makocode::Pcg64Generator rng;
+                                            rng.seed(0u);
+                                            for (usize map_index = entries; map_index > 1u; --map_index) {
+                                                usize i_map = map_index - 1u;
+                                                u64 value = rng.next();
+                                                usize j_map = (usize)(value % (u64)(i_map + 1u));
+                                                usize temp = block_shuffle_map_ptr[i_map];
+                                                block_shuffle_map_ptr[i_map] = block_shuffle_map_ptr[j_map];
+                                                block_shuffle_map_ptr[j_map] = temp;
+                                            }
+                                            block_counters_ptr = (u16*)block_counters.data;
+                                            shuffle_entry_count = (u64)entries;
+                                            block_limit_start = payload_prefix_bytes + header_span_bytes;
+                                            block_limit_end = block_limit_start + shuffle_entry_count;
+                                            if (block_limit_end > base_bytes) {
+                                                block_limit_end = base_bytes;
+                                            }
+                                            block_limit_active = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for (u64 i = 0u; i < copy_bytes; ++i) {
             accumulator += numerator;
-            if (accumulator >= denominator) {
+            if (accumulator < denominator) {
+                continue;
+            }
+            bool replaced = false;
+            bool skipped_for_limit = false;
+            if (block_limit_active &&
+                block_shuffle_map_ptr &&
+                block_counters_ptr &&
+                block_total_symbols > 0u &&
+                block_total_count > 0u &&
+                i >= block_limit_start &&
+                i < block_limit_end) {
+                u64 relative = i - block_limit_start;
+                if (relative < shuffle_entry_count) {
+                    u64 original_index = (u64)block_shuffle_map_ptr[(usize)relative];
+                    u64 block_index = original_index / block_total_symbols;
+                    if (block_index < block_total_count) {
+                        usize counter_index = (usize)block_index;
+                        u16 current_count = block_counters_ptr[counter_index];
+                        if ((u64)current_count < block_limit_per_block) {
+                            base_ptr[i] = overlay_ptr[i];
+                            block_counters_ptr[counter_index] = (u16)(current_count + 1u);
+                            replaced = true;
+                        } else {
+                            skipped_for_limit = true;
+                            ++block_limit_hits;
+                        }
+                    }
+                }
+            }
+            if (!replaced && !skipped_for_limit) {
                 base_ptr[i] = overlay_ptr[i];
+                replaced = true;
+            }
+            if (replaced) {
                 accumulator -= denominator;
             }
+        }
+        if (block_limit_active && debug_logging_enabled()) {
+            char limit_buf[32];
+            char hits_buf[32];
+            console_write(2, "debug overlay: block limit=");
+            u64_to_ascii(block_limit_per_block, limit_buf, sizeof(limit_buf));
+            console_write(2, limit_buf);
+            console_write(2, " blocks=");
+            u64_to_ascii(block_total_count, limit_buf, sizeof(limit_buf));
+            console_write(2, limit_buf);
+            console_write(2, " hits=");
+            u64_to_ascii(block_limit_hits, hits_buf, sizeof(hits_buf));
+            console_line(2, hits_buf);
         }
         if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page)) {
             console_line(2, "overlay: failed to map merged bytes back to base image");

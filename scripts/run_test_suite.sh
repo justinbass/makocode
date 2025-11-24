@@ -288,11 +288,11 @@ run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recover
     --ink-blot-radius 180 --ink-blot-color white
 
 run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes" \
-    --overlay-fraction 0.25 \
+    --overlay-fraction 0.35 \
     --overlay-encode-opt "--ecc-fill"
 
 run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette with yellow mask" \
-    --overlay-fraction 0.1 \
+    --overlay-fraction 0.10 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-circle-color "255 255 0" \
