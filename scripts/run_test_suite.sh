@@ -100,8 +100,64 @@ run_overlay_case() {
     shift 2
     local env_args=()
     while [[ $# -gt 0 ]]; do
-        env_args+=("$1")
-        shift
+        case $1 in
+            --overlay-palette)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-palette requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_PALETTE="$2")
+                shift 2
+                ;;
+            --overlay-circle-color)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-circle-color requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_CIRCLE_COLOR="$2")
+                shift 2
+                ;;
+            --overlay-background-color)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-background-color requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_BACKGROUND_COLOR="$2")
+                shift 2
+                ;;
+            --overlay-fraction)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-fraction requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_FRACTION="$2")
+                shift 2
+                ;;
+            --overlay-skip-grayscale-check)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-skip-grayscale-check requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK="$2")
+                shift 2
+                ;;
+            --ecc)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --ecc requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_ECC="$2")
+                shift 2
+                ;;
+            *=*)
+                env_args+=("$1")
+                shift
+                ;;
+            *)
+                echo "run_overlay_case: unknown option $1" >&2
+                exit 1
+                ;;
+        esac
     done
     local new_label
     printf -v new_label "%04d_%s" "$case_counter" "$slug"
@@ -219,10 +275,13 @@ run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recover
     --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
     --ink-blot-radius 180 --ink-blot-color white
 
-run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes"
+run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes" \
+    --ecc 1.3 \
+    --overlay-fraction 0.01
 
 run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette with yellow mask" \
-    MAKO_OVERLAY_PALETTE="White Cyan Magenta Yellow" \
-    MAKO_OVERLAY_CIRCLE_COLOR="255 255 0" \
-    MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1 \
-    MAKO_OVERLAY_FRACTION=0.05
+    --ecc 1.3 \
+    --overlay-fraction 0.01 \
+    --overlay-palette "White Cyan Magenta Yellow" \
+    --overlay-circle-color "255 255 0" \
+    --overlay-skip-grayscale-check 1

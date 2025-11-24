@@ -25,6 +25,8 @@ overlay_path="$test_dir/${label}_overlay_mask.ppm"
 merged_path="$test_dir/${label}_overlay_merged.ppm"
 decoded_path="$test_dir/${label}_overlay_decoded.bin"
 
+ecc="${MAKO_OVERLAY_ECC:-1.0}"
+
 cleanup() {
     if [[ -d $work_dir ]]; then
         rm -rf "$work_dir"
@@ -42,7 +44,7 @@ cp "$payload_path" "$payload_work"
 encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
-    --ecc=1.0
+    "--ecc=$ecc"
     --page-width=1000
     --page-height=1000
     "--output-dir=$work_dir"
