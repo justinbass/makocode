@@ -118,12 +118,36 @@ run_overlay_case() {
                 env_args+=(MAKO_OVERLAY_CIRCLE_COLOR="$2")
                 shift 2
                 ;;
+            --overlay-circle-colors)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-circle-colors requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_CIRCLE_COLORS="$2")
+                shift 2
+                ;;
             --overlay-background-color)
                 if [[ $# -lt 2 ]]; then
                     echo "run_overlay_case: --overlay-background-color requires a value" >&2
                     exit 1
                 fi
                 env_args+=(MAKO_OVERLAY_BACKGROUND_COLOR="$2")
+                shift 2
+                ;;
+            --overlay-mask-palette-base)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-mask-palette-base requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_MASK_PALETTE_BASE="$2")
+                shift 2
+                ;;
+            --overlay-mask-palette-text)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-mask-palette-text requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_MASK_PALETTE_TEXT="$2")
                 shift 2
                 ;;
             --overlay-fraction)
@@ -298,3 +322,18 @@ run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette
     --overlay-circle-color "255 255 0" \
     --overlay-skip-grayscale-check 1
 
+run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle overlay" \
+    --overlay-fraction 0.365 \
+    --overlay-encode-opt "--ecc-fill" \
+    --overlay-palette "White Black" \
+    --overlay-mask-palette-base 4 \
+    --overlay-mask-palette-text "White Cyan Magenta Yellow" \
+    --overlay-background-color "0 0 0" \
+    --overlay-circle-colors "0 255 255;255 0 255;255 255 0;255 255 255" \
+    --overlay-skip-grayscale-check 1
+
+run_overlay_case "overlay_cmy_base_bw" "CMYW base with black/white circle overlay" \
+    --overlay-fraction 0.01 \
+    --overlay-encode-opt "--ecc-fill" \
+    --overlay-palette "White Cyan Magenta Yellow" \
+    --overlay-skip-grayscale-check 1

@@ -75,7 +75,7 @@ mv -f "${ppms[0]}" "$encoded_path"
 circle_color="${MAKO_OVERLAY_CIRCLE_COLOR:-0 0 0}"
 background_color="${MAKO_OVERLAY_BACKGROUND_COLOR:-255 255 255}"
 OVERLAY_PPM="$overlay_path" python3 - "$circle_color" "$background_color" <<'PY'
-import os, sys
+import math, os, sys
 
 path = os.environ.get("OVERLAY_PPM")
 if not path:
@@ -85,15 +85,44 @@ cx = cy = w // 2
 radius = int(w * 0.45)
 circle_color = sys.argv[1]
 background_color = sys.argv[2]
+circle_colors_text = os.environ.get("MAKO_OVERLAY_CIRCLE_COLORS")
+circle_palette = []
+if circle_colors_text:
+    for segment in circle_colors_text.split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        parts = segment.split()
+        if len(parts) != 3:
+            raise SystemExit("overlay: invalid circle palette entry")
+        circle_palette.append(" ".join(parts))
+overlay_palette_base = os.environ.get("MAKO_OVERLAY_MASK_PALETTE_BASE")
+overlay_palette_text = os.environ.get("MAKO_OVERLAY_MASK_PALETTE_TEXT")
 with open(path, "w", encoding="ascii", newline="\n") as f:
     f.write("P3\n")
+    if overlay_palette_base:
+        f.write(f"# MAKOCODE_PALETTE_BASE {overlay_palette_base}\n")
+    if overlay_palette_text:
+        sanitized = overlay_palette_text.replace("\n", " ")
+        f.write(f"# MAKOCODE_PALETTE {sanitized}\n")
     f.write(f"{w} {h}\n")
     f.write("255\n")
     for y in range(h):
         row = []
         for x in range(w):
-            if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= radius * radius:
-                row.append(circle_color)
+            dx = x - cx
+            dy = y - cy
+            inside = (dx * dx + dy * dy) <= radius * radius
+            if inside:
+                if circle_palette:
+                    angle = math.atan2(dy, dx)
+                    if angle < 0.0:
+                        angle += 2.0 * math.pi
+                    segment_index = int((angle / (2.0 * math.pi)) * len(circle_palette))
+                    segment_index %= len(circle_palette)
+                    row.append(circle_palette[segment_index])
+                else:
+                    row.append(circle_color)
             else:
                 row.append(background_color)
         f.write(" ".join(row))
