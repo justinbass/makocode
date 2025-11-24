@@ -1,8 +1,8 @@
 - Features
- - Improve overlay tests, overlay fraction increase
- - Overlay to dynamically check ECC and confirm parameter is not excessive. Note the image overlay breaks down at high numbers.
  - Overlay needs to respect image color - auto-detect. May be working, add tests.
  - Overay needs --ignore-color arg
+ - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position
+ - Overlay to dynamically check ECC and confirm parameter is not excessive. Note the image overlay breaks down at high numbers.
  - Color channels non-base-2, works but slow
  - 15 column ppm (from convert) in decode or overlay, ignore newlines
 
