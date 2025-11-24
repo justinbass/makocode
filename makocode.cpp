@@ -15066,6 +15066,47 @@ static bool ppm_append_extended_metadata(const PpmParserState& state,
     return true;
 }
 
+static bool ppm_append_fiducial_metadata(const PpmParserState& state,
+                                         makocode::ByteBuffer& output) {
+    if (state.has_fiducial_size) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_SIZE", state.fiducial_size_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_columns) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_COLUMNS", state.fiducial_columns_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_rows) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_ROWS", state.fiducial_rows_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_margin) {
+        if (!append_comment_number(output, "MAKOCODE_FIDUCIAL_MARGIN", state.fiducial_margin_value)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count > 0u) {
+        if (!append_comment_list(output,
+                                  "MAKOCODE_SUBGRID_COL_OFFSETS",
+                                  state.fiducial_col_offsets,
+                                  state.fiducial_col_offset_count)) {
+            return false;
+        }
+    }
+    if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count > 0u) {
+        if (!append_comment_list(output,
+                                  "MAKOCODE_SUBGRID_ROW_OFFSETS",
+                                  state.fiducial_row_offsets,
+                                  state.fiducial_row_offset_count)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      u32 marker_size,
                                      u32 grid_columns,
@@ -19009,6 +19050,9 @@ static bool serialize_overlay_page(const OverlayPage& page,
         return false;
     }
     if (!ppm_append_extended_metadata(page.metadata, output)) {
+        return false;
+    }
+    if (!ppm_append_fiducial_metadata(page.metadata, output)) {
         return false;
     }
     if (!ppm_write_dimensions((u64)page.width, (u64)page.height, output)) {

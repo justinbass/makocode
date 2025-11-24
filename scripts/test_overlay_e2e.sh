@@ -52,6 +52,12 @@ encode_cmd=(
 if [[ -n "${MAKO_OVERLAY_PALETTE:-}" ]]; then
     encode_cmd+=(--palette "${MAKO_OVERLAY_PALETTE}")
 fi
+if [[ -n "${MAKO_OVERLAY_ENCODE_OPTS:-}" ]]; then
+    read -r -a encode_extra <<< "$MAKO_OVERLAY_ENCODE_OPTS"
+    if [[ ${#encode_extra[@]} -gt 0 ]]; then
+        encode_cmd+=("${encode_extra[@]}")
+    fi
+fi
 (
     cd "$work_dir"
     "${encode_cmd[@]}"

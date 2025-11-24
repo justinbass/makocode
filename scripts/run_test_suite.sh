@@ -99,6 +99,7 @@ run_overlay_case() {
     local description=$2
     shift 2
     local env_args=()
+    local overlay_encode_opts=()
     while [[ $# -gt 0 ]]; do
         case $1 in
             --overlay-palette)
@@ -141,6 +142,14 @@ run_overlay_case() {
                 env_args+=(MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK="$2")
                 shift 2
                 ;;
+            --overlay-encode-opt)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-encode-opt requires a value" >&2
+                    exit 1
+                fi
+                overlay_encode_opts+=("$2")
+                shift 2
+                ;;
             --ecc)
                 if [[ $# -lt 2 ]]; then
                     echo "run_overlay_case: --ecc requires a value" >&2
@@ -159,6 +168,9 @@ run_overlay_case() {
                 ;;
         esac
     done
+    if [[ ${#overlay_encode_opts[@]} -gt 0 ]]; then
+        env_args+=(MAKO_OVERLAY_ENCODE_OPTS="${overlay_encode_opts[*]}")
+    fi
     local new_label
     printf -v new_label "%04d_%s" "$case_counter" "$slug"
     case_counter=$((case_counter + 1))
@@ -276,12 +288,13 @@ run_roundtrip_case "palette_white_black_blot_white" "High-ECC white blot recover
     --ink-blot-radius 180 --ink-blot-color white
 
 run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes" \
-    --ecc 1.3 \
-    --overlay-fraction 0.01
+    --overlay-fraction 0.25 \
+    --overlay-encode-opt "--ecc-fill"
 
 run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette with yellow mask" \
-    --ecc 1.3 \
-    --overlay-fraction 0.01 \
+    --overlay-fraction 0.1 \
+    --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-circle-color "255 255 0" \
     --overlay-skip-grayscale-check 1
+
