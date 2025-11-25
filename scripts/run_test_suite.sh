@@ -328,7 +328,7 @@ run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette
     --overlay-skip-grayscale-check 1
 
 run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle overlay" \
-    --overlay-fraction 0.05 \
+    --overlay-fraction 0.45 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Black" \
     --overlay-mask-palette-base 4 \
@@ -339,7 +339,7 @@ run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle
     --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
 run_overlay_case "overlay_cmy_base_bw" "CMYW base with black/white circle overlay" \
-    --overlay-fraction 0.1 \
+    --overlay-fraction 0.5 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-skip-grayscale-check 1 \

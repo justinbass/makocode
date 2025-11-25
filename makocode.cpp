@@ -19405,14 +19405,28 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
     }
     const bool have_base_mask = (base_mask.data && base_mask.size);
     const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
-    u64 accumulator = 0u;
     u8 sample_bits = bits_per_sample(base_page.color_mode);
     u8 samples_per_pixel = color_mode_samples_per_pixel(base_page.color_mode);
     if (sample_bits == 0u || samples_per_pixel == 0u) {
         return false;
     }
     u64 bits_per_pixel = (u64)sample_bits * (u64)samples_per_pixel;
-    u64 bit_cursor = 0u;
+    struct RawOverlayPixelCandidate {
+        u64 bit_start;
+        usize pixel_index;
+    };
+    if (total_pixels > (SIZE_MAX / sizeof(RawOverlayPixelCandidate))) {
+        return false;
+    }
+    usize candidate_capacity_bytes = total_pixels * sizeof(RawOverlayPixelCandidate);
+    makocode::ByteBuffer candidate_buffer;
+    if (!candidate_buffer.ensure(candidate_capacity_bytes)) {
+        return false;
+    }
+    RawOverlayPixelCandidate* candidates =
+        (RawOverlayPixelCandidate*)candidate_buffer.data;
+    usize candidate_count = 0u;
+    u64 candidate_rank = 0u;
     for (u32 row = 0u; row < apply_height; ++row) {
         for (u32 column = 0u; column < base_page.width; ++column) {
             usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
@@ -19426,33 +19440,52 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
             if (reserved) {
                 continue;
             }
-            u64 pixel_bit_start = bit_cursor;
-            bit_cursor += bits_per_pixel;
-            accumulator += numerator;
-            if (accumulator < denominator) {
+            RawOverlayPixelCandidate* entry = &candidates[candidate_count++];
+            entry->pixel_index = pixel_index;
+            entry->bit_start = candidate_rank * bits_per_pixel;
+            candidate_rank += 1u;
+        }
+    }
+    if (candidate_count > 1u) {
+        makocode::Pcg64Generator shuffle_rng;
+        shuffle_rng.seed(0u);
+        for (usize remaining = candidate_count; remaining > 1u; --remaining) {
+            usize i = remaining - 1u;
+            u64 value = shuffle_rng.next();
+            usize j = (usize)(value % (u64)remaining);
+            RawOverlayPixelCandidate temp = candidates[i];
+            candidates[i] = candidates[j];
+            candidates[j] = temp;
+        }
+    }
+    u64 accumulator = 0u;
+    for (usize idx = 0u; idx < candidate_count; ++idx) {
+        const RawOverlayPixelCandidate& candidate = candidates[idx];
+        accumulator += numerator;
+        if (accumulator < denominator) {
+            continue;
+        }
+        accumulator -= denominator;
+        usize pixel_index = candidate.pixel_index;
+        usize byte_index = pixel_index * 3u;
+        if (byte_index + 2u >= base_page.pixels.size ||
+            byte_index + 2u >= overlay_page.pixels.size) {
+            return false;
+        }
+        bool changed = false;
+        if (base_page.pixels.data[byte_index + 0u] != overlay_page.pixels.data[byte_index + 0u] ||
+            base_page.pixels.data[byte_index + 1u] != overlay_page.pixels.data[byte_index + 1u] ||
+            base_page.pixels.data[byte_index + 2u] != overlay_page.pixels.data[byte_index + 2u]) {
+            changed = true;
+        }
+        if (changed) {
+            if (!raw_overlay_tracker_try_reserve_bits(tracker, candidate.bit_start, bits_per_pixel)) {
                 continue;
             }
-            accumulator -= denominator;
-            usize byte_index = pixel_index * 3u;
-            if (byte_index + 2u >= base_page.pixels.size ||
-                byte_index + 2u >= overlay_page.pixels.size) {
-                return false;
-            }
-            bool changed = false;
-            if (base_page.pixels.data[byte_index + 0u] != overlay_page.pixels.data[byte_index + 0u] ||
-                base_page.pixels.data[byte_index + 1u] != overlay_page.pixels.data[byte_index + 1u] ||
-                base_page.pixels.data[byte_index + 2u] != overlay_page.pixels.data[byte_index + 2u]) {
-                changed = true;
-            }
-            if (changed) {
-                if (!raw_overlay_tracker_try_reserve_bits(tracker, pixel_bit_start, bits_per_pixel)) {
-                    continue;
-                }
-            }
-            memcpy(base_page.pixels.data + byte_index,
-                   overlay_page.pixels.data + byte_index,
-                   3u);
         }
+        memcpy(base_page.pixels.data + byte_index,
+               overlay_page.pixels.data + byte_index,
+               3u);
     }
     raw_overlay_tracker_finish(tracker);
     return true;
