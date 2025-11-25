@@ -145,7 +145,7 @@ mv "$decoded_source" "$decoded_path"
 
 skip_grayscale="${MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK:-0}"
 python3 - "$encoded_path" "$merged_path" "$skip_grayscale" <<'PY'
-import pathlib, sys
+import os, pathlib, sys
 
 base = pathlib.Path(sys.argv[1])
 merged = pathlib.Path(sys.argv[2])
@@ -175,12 +175,33 @@ w2, h2, merged_nums = read_ppm(merged)
 if (w, h) != (w2, h2):
     raise SystemExit('dimension mismatch')
 
+allowed_colors_text = os.environ.get('MAKO_OVERLAY_ALLOWED_COLORS')
+allowed_colors = None
+if allowed_colors_text:
+    allowed_colors = set()
+    for entry in allowed_colors_text.split(';'):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split()
+        if len(parts) != 3:
+            raise SystemExit("overlay: invalid allowed color entry")
+        try:
+            channels = tuple(int(part) for part in parts)
+        except ValueError:
+            raise SystemExit("overlay: invalid allowed color entry")
+        if any(channel < 0 or channel > 255 for channel in channels):
+            raise SystemExit("overlay: allowed color values must be 0-255")
+        allowed_colors.add(channels)
+
 pixels = w * h
 diff = 0
 for i in range(pixels):
     r, g, b = merged_nums[i*3:(i+1)*3]
     if merged_nums[i*3:(i+1)*3] != base_nums[i*3:(i+1)*3]:
         diff += 1
+    if allowed_colors and (r, g, b) not in allowed_colors:
+        raise SystemExit(f"pixel {r} {g} {b} at index {i} not in allowed palette")
     if not skip_grayscale:
         if not (r == g == b):
             raise SystemExit(f"non-grayscale pixel {r} {g} {b} at index {i}")

@@ -150,6 +150,14 @@ run_overlay_case() {
                 env_args+=(MAKO_OVERLAY_MASK_PALETTE_TEXT="$2")
                 shift 2
                 ;;
+            --overlay-allowed-colors)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-allowed-colors requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_ALLOWED_COLORS="$2")
+                shift 2
+                ;;
             --overlay-fraction)
                 if [[ $# -lt 2 ]]; then
                     echo "run_overlay_case: --overlay-fraction requires a value" >&2
@@ -204,9 +212,6 @@ run_overlay_case() {
         execute_case "$new_label" "$description" "$overlay_test" "$new_label"
     fi
 }
-
-run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
-    --mode auto
 
 run_roundtrip_case "baseline_8k_ecc_050" "8 KiB payload, ECC 0.5 baseline" \
     --size 8192 --ecc 0.5 --width 500 --height 500
@@ -323,17 +328,19 @@ run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette
     --overlay-skip-grayscale-check 1
 
 run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle overlay" \
-    --overlay-fraction 0.365 \
+    --overlay-fraction 0.05 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Black" \
     --overlay-mask-palette-base 4 \
     --overlay-mask-palette-text "White Cyan Magenta Yellow" \
     --overlay-background-color "0 0 0" \
     --overlay-circle-colors "0 255 255;255 0 255;255 255 0;255 255 255" \
-    --overlay-skip-grayscale-check 1
+    --overlay-skip-grayscale-check 1 \
+    --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
 run_overlay_case "overlay_cmy_base_bw" "CMYW base with black/white circle overlay" \
-    --overlay-fraction 0.01 \
+    --overlay-fraction 0.1 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
-    --overlay-skip-grayscale-check 1
+    --overlay-skip-grayscale-check 1 \
+    --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"

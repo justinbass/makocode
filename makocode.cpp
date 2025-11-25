@@ -19025,19 +19025,19 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
             if (reserved) {
                 continue;
             }
-            for (u8 channel = 0u; channel < 3u; ++channel) {
-                accumulator += numerator;
-                if (accumulator < denominator) {
-                    continue;
-                }
-                accumulator -= denominator;
-                usize byte_index = pixel_index * 3u + (usize)channel;
-                if (byte_index >= base_page.pixels.size ||
-                    byte_index >= overlay_page.pixels.size) {
-                    return false;
-                }
-                base_page.pixels.data[byte_index] = overlay_page.pixels.data[byte_index];
+            accumulator += numerator;
+            if (accumulator < denominator) {
+                continue;
             }
+            accumulator -= denominator;
+            usize byte_index = pixel_index * 3u;
+            if (byte_index + 2u >= base_page.pixels.size ||
+                byte_index + 2u >= overlay_page.pixels.size) {
+                return false;
+            }
+            memcpy(base_page.pixels.data + byte_index,
+                   overlay_page.pixels.data + byte_index,
+                   3u);
         }
     }
     return true;
