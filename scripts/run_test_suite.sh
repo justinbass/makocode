@@ -321,7 +321,7 @@ run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes" \
     --overlay-encode-opt "--ecc-fill"
 
 run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette with yellow mask" \
-    --overlay-fraction 0.10 \
+    --overlay-fraction 0.15 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-circle-color "255 255 0" \
