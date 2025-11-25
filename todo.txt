@@ -1,5 +1,6 @@
 - Features
  - Improve maximum allowed overlay
+ - Overlay option to ignore color
  - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position
  - Overlay to dynamically check ECC and confirm parameter is not excessive. Note the image overlay breaks down at high numbers.
  - Color channels non-base-2, works but slow

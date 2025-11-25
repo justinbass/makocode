@@ -18974,12 +18974,406 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
     return true;
 }
 
+struct RawOverlayBlockTracker {
+    bool enabled;
+    bool limits_known;
+    bool hit_limit;
+    bool log_enabled;
+    u64 parity_symbols;
+    u64 block_total_symbols;
+    u64 block_count;
+    u64 block_limit_per_block;
+    u64 rs_region_start;
+    u64 rs_region_end;
+    u64 encoded_block_bytes;
+    u64 total_symbol_changes;
+    u64 max_block_errors;
+    u64 max_block_index;
+    u64 first_limit_block;
+    u64 first_limit_errors;
+    u64 rejected_changes;
+    makocode::ByteBuffer counts;
+    makocode::ByteBuffer shuffle_map;
+    makocode::ByteBuffer symbol_marks;
+    makocode::ByteBuffer pending_symbols;
+    makocode::ByteBuffer pending_blocks;
+
+    RawOverlayBlockTracker()
+        : enabled(false),
+          limits_known(false),
+          hit_limit(false),
+          log_enabled(false),
+          parity_symbols(0u),
+          block_total_symbols(0u),
+          block_count(0u),
+          block_limit_per_block(0u),
+          rs_region_start(0u),
+          rs_region_end(0u),
+          encoded_block_bytes(0u),
+          total_symbol_changes(0u),
+          max_block_errors(0u),
+          max_block_index(0u),
+          first_limit_block(0u),
+          first_limit_errors(0u),
+          rejected_changes(0u),
+          counts(),
+          shuffle_map(),
+          symbol_marks(),
+          pending_symbols(),
+          pending_blocks() {}
+
+    ~RawOverlayBlockTracker() {
+        counts.release();
+        shuffle_map.release();
+        symbol_marks.release();
+        pending_symbols.release();
+        pending_blocks.release();
+    }
+};
+
+static void raw_overlay_tracker_init(const OverlayPage& base_page,
+                                     RawOverlayBlockTracker& tracker) {
+    tracker.enabled = false;
+    tracker.limits_known = false;
+    tracker.hit_limit = false;
+    tracker.log_enabled = false;
+    tracker.parity_symbols = 0u;
+    tracker.block_total_symbols = 0u;
+    tracker.block_count = 0u;
+    tracker.block_limit_per_block = 0u;
+    tracker.rs_region_start = 0u;
+    tracker.rs_region_end = 0u;
+    tracker.encoded_block_bytes = 0u;
+    tracker.total_symbol_changes = 0u;
+    tracker.max_block_errors = 0u;
+    tracker.max_block_index = 0u;
+    tracker.first_limit_block = 0u;
+    tracker.first_limit_errors = 0u;
+    tracker.rejected_changes = 0u;
+    tracker.counts.release();
+    tracker.shuffle_map.release();
+    tracker.symbol_marks.release();
+    tracker.pending_symbols.release();
+    tracker.pending_blocks.release();
+    const char* debug_env = getenv("MAKO_OVERLAY_DEBUG_RAW");
+    if (debug_env && debug_env[0]) {
+        tracker.log_enabled = true;
+    }
+    if (!base_page.metadata.has_ecc_block_data ||
+        !base_page.metadata.has_ecc_parity ||
+        !base_page.metadata.has_ecc_block_count) {
+        return;
+    }
+    u64 block_data_symbols = base_page.metadata.ecc_block_data_value;
+    u64 parity_symbols = base_page.metadata.ecc_parity_value;
+    u64 block_count = base_page.metadata.ecc_block_count_value;
+    if (block_data_symbols == 0u || parity_symbols == 0u || block_count == 0u) {
+        return;
+    }
+    if (block_data_symbols > (U64_MAX_VALUE - parity_symbols)) {
+        return;
+    }
+    u64 block_total_symbols = block_data_symbols + parity_symbols;
+    if (block_total_symbols == 0u) {
+        return;
+    }
+    u64 encoded_block_bytes = 0u;
+    if (block_total_symbols > (U64_MAX_VALUE / block_count)) {
+        return;
+    }
+    encoded_block_bytes = block_total_symbols * block_count;
+    const u64 payload_prefix_bytes = 8u;
+    const u64 header_span_bytes = (u64)makocode::ECC_HEADER_TOTAL_BYTES;
+    u64 rs_region_start = payload_prefix_bytes + header_span_bytes;
+    u64 rs_region_end = rs_region_start;
+    if (encoded_block_bytes > (U64_MAX_VALUE - rs_region_start)) {
+        rs_region_end = U64_MAX_VALUE;
+    } else {
+        rs_region_end = rs_region_start + encoded_block_bytes;
+    }
+    u64 base_bits = 0u;
+    if (base_page.metadata.has_bits) {
+        base_bits = base_page.metadata.bits_value;
+    }
+    u64 base_bytes = (base_bits + 7u) >> 3u;
+    if (!base_bytes) {
+        // Fall back to the stored MAKOCODE_BYTES metadata if available.
+        if (base_page.metadata.has_bytes) {
+            base_bytes = base_page.metadata.bytes_value;
+        }
+    }
+    if (!base_bytes) {
+        // Without a reliable byte count we cannot safely map symbols.
+        return;
+    }
+    if (rs_region_start >= base_bytes) {
+        return;
+    }
+    if (rs_region_end > base_bytes) {
+        rs_region_end = base_bytes;
+    }
+    usize counter_bytes = 0u;
+    if (block_count > (U64_MAX_VALUE / (u64)sizeof(u32))) {
+        return;
+    }
+    counter_bytes = (usize)(block_count * (u64)sizeof(u32));
+    if (counter_bytes == 0u) {
+        return;
+    }
+    if (!tracker.counts.ensure(counter_bytes)) {
+        return;
+    }
+    tracker.counts.size = counter_bytes;
+    for (usize i = 0u; i < counter_bytes; ++i) {
+        tracker.counts.data[i] = 0u;
+    }
+    if (encoded_block_bytes == 0u) {
+        return;
+    }
+    if (encoded_block_bytes > (U64_MAX_VALUE / (u64)sizeof(usize))) {
+        return;
+    }
+    usize shuffle_bytes = (usize)(encoded_block_bytes * (u64)sizeof(usize));
+    if (shuffle_bytes == 0u) {
+        return;
+    }
+    if (!tracker.shuffle_map.ensure(shuffle_bytes)) {
+        return;
+    }
+    tracker.shuffle_map.size = shuffle_bytes;
+    usize* shuffle_ptr = (usize*)tracker.shuffle_map.data;
+    for (u64 entry = 0u; entry < encoded_block_bytes; ++entry) {
+        shuffle_ptr[entry] = (usize)entry;
+    }
+    makocode::Pcg64Generator rng;
+    rng.seed(0u);
+    for (u64 remaining = encoded_block_bytes; remaining > 1u; --remaining) {
+        usize i_map = (usize)(remaining - 1u);
+        u64 value = rng.next();
+        usize j_map = (usize)(value % (u64)(i_map + 1u));
+        usize temp = shuffle_ptr[i_map];
+        shuffle_ptr[i_map] = shuffle_ptr[j_map];
+        shuffle_ptr[j_map] = temp;
+    }
+    if (!tracker.symbol_marks.ensure((usize)encoded_block_bytes)) {
+        return;
+    }
+    tracker.symbol_marks.size = (usize)encoded_block_bytes;
+    for (u64 entry = 0u; entry < encoded_block_bytes; ++entry) {
+        tracker.symbol_marks.data[entry] = 0u;
+    }
+    tracker.enabled = true;
+    tracker.limits_known = true;
+    tracker.parity_symbols = parity_symbols;
+    tracker.block_total_symbols = block_total_symbols;
+    tracker.block_count = block_count;
+    tracker.block_limit_per_block = parity_symbols / 2u;
+    if (tracker.block_limit_per_block == 0u) {
+        tracker.block_limit_per_block = 1u;
+    }
+    tracker.rs_region_start = rs_region_start;
+    tracker.rs_region_end = rs_region_end;
+    tracker.encoded_block_bytes = encoded_block_bytes;
+}
+
+static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracker,
+                                                  u64 byte_start,
+                                                  u64 byte_end) {
+    if (!tracker.enabled || !tracker.limits_known) {
+        return true;
+    }
+    if (byte_start >= byte_end) {
+        return true;
+    }
+    if (byte_end <= tracker.rs_region_start || byte_start >= tracker.rs_region_end) {
+        return true;
+    }
+    if (byte_start < tracker.rs_region_start) {
+        byte_start = tracker.rs_region_start;
+    }
+    if (byte_end > tracker.rs_region_end) {
+        byte_end = tracker.rs_region_end;
+    }
+    if (byte_start >= byte_end) {
+        return true;
+    }
+    u32* counts = (u32*)tracker.counts.data;
+    const usize* shuffle_ptr = tracker.shuffle_map.data
+                                   ? (const usize*)tracker.shuffle_map.data
+                                   : 0;
+    u8* mark_ptr = tracker.symbol_marks.data ? tracker.symbol_marks.data : 0;
+    struct RawOverlayPendingSymbol {
+        u64 relative;
+        usize counter_index;
+        u64 block_index;
+    };
+    struct RawOverlayPendingBlock {
+        u64 block_index;
+        usize counter_index;
+        u32 pending;
+    };
+    usize span = (usize)(byte_end - byte_start);
+    if (span == 0u) {
+        return true;
+    }
+    if (span > (SIZE_MAX / sizeof(RawOverlayPendingSymbol))) {
+        return false;
+    }
+    usize pending_symbol_bytes = span * sizeof(RawOverlayPendingSymbol);
+    if (!tracker.pending_symbols.ensure(pending_symbol_bytes)) {
+        return false;
+    }
+    RawOverlayPendingSymbol* pending_symbols =
+        (RawOverlayPendingSymbol*)tracker.pending_symbols.data;
+    usize pending_symbol_count = 0u;
+    if (span > (SIZE_MAX / sizeof(RawOverlayPendingBlock))) {
+        return false;
+    }
+    usize block_bytes = span * sizeof(RawOverlayPendingBlock);
+    if (!tracker.pending_blocks.ensure(block_bytes)) {
+        return false;
+    }
+    RawOverlayPendingBlock* block_accums =
+        (RawOverlayPendingBlock*)tracker.pending_blocks.data;
+    usize block_accum_count = 0u;
+    for (u64 byte_index = byte_start; byte_index < byte_end; ++byte_index) {
+        u64 relative = byte_index - tracker.rs_region_start;
+        if (relative >= tracker.encoded_block_bytes) {
+            continue;
+        }
+        if (mark_ptr && mark_ptr[relative]) {
+            continue;
+        }
+        u64 original_index = shuffle_ptr ? (u64)shuffle_ptr[(usize)relative] : relative;
+        u64 block_index = original_index / tracker.block_total_symbols;
+        if (block_index >= tracker.block_count) {
+            continue;
+        }
+        usize counter_index = (usize)block_index;
+        if (counter_index >= (tracker.counts.size / sizeof(u32))) {
+            continue;
+        }
+        RawOverlayPendingBlock* block_entry = 0;
+        for (usize i = 0u; i < block_accum_count; ++i) {
+            if (block_accums[i].block_index == block_index) {
+                block_entry = &block_accums[i];
+                break;
+            }
+        }
+        if (!block_entry) {
+            if (block_accum_count >= span) {
+                return false;
+            }
+            block_entry = &block_accums[block_accum_count++];
+            block_entry->block_index = block_index;
+            block_entry->counter_index = counter_index;
+            block_entry->pending = 0u;
+        }
+        u32 current_value = counts[counter_index];
+        u64 prospective = (u64)current_value + (u64)block_entry->pending + 1u;
+        if (prospective > tracker.block_limit_per_block) {
+            tracker.rejected_changes += 1u;
+            if (!tracker.hit_limit) {
+                tracker.hit_limit = true;
+                tracker.first_limit_block = block_index;
+                tracker.first_limit_errors = prospective;
+            }
+            return false;
+        }
+        RawOverlayPendingSymbol* symbol_entry = &pending_symbols[pending_symbol_count++];
+        symbol_entry->relative = relative;
+        symbol_entry->counter_index = counter_index;
+        symbol_entry->block_index = block_index;
+        block_entry->pending += 1u;
+    }
+    if (pending_symbol_count == 0u) {
+        return true;
+    }
+    for (usize i = 0u; i < pending_symbol_count; ++i) {
+        if (mark_ptr) {
+            mark_ptr[pending_symbols[i].relative] = 1u;
+        }
+    }
+    for (usize i = 0u; i < block_accum_count; ++i) {
+        RawOverlayPendingBlock& block_entry = block_accums[i];
+        u32* counter_ptr = counts + block_entry.counter_index;
+        u64 new_value = (u64)(*counter_ptr) + (u64)block_entry.pending;
+        if (new_value > 0xFFFFFFFFu) {
+            new_value = 0xFFFFFFFFu;
+        }
+        *counter_ptr = (u32)new_value;
+        tracker.total_symbol_changes += (u64)block_entry.pending;
+        if (new_value > tracker.max_block_errors) {
+            tracker.max_block_errors = new_value;
+            tracker.max_block_index = block_entry.block_index;
+        }
+    }
+    return true;
+}
+
+static bool raw_overlay_tracker_try_reserve_bits(RawOverlayBlockTracker& tracker,
+                                                 u64 bit_start,
+                                                 u64 bit_length) {
+    if (!tracker.enabled || bit_length == 0u) {
+        return true;
+    }
+    u64 bit_end = bit_start + bit_length;
+    if (bit_end < bit_start) {
+        return false;
+    }
+    u64 byte_start = bit_start >> 3u;
+    u64 byte_end = (bit_end + 7u) >> 3u;
+    return raw_overlay_tracker_try_reserve_bytes(tracker, byte_start, byte_end);
+}
+
+static void raw_overlay_tracker_finish(const RawOverlayBlockTracker& tracker) {
+    if (!tracker.enabled || !tracker.log_enabled) {
+        return;
+    }
+    console_write(2, "overlay raw debug: blocks=");
+    char buffer[32];
+    u64_to_ascii(tracker.block_count, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " symbols_per_block=");
+    u64_to_ascii(tracker.block_total_symbols, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " parity=");
+    u64_to_ascii(tracker.parity_symbols, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " limit_per_block=");
+    u64_to_ascii(tracker.block_limit_per_block, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " total_symbol_changes=");
+    u64_to_ascii(tracker.total_symbol_changes, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " peak_block=");
+    u64_to_ascii(tracker.max_block_index, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " peak_errors=");
+    u64_to_ascii(tracker.max_block_errors, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    console_write(2, " rejected_changes=");
+    u64_to_ascii(tracker.rejected_changes, buffer, sizeof(buffer));
+    console_write(2, buffer);
+    if (tracker.hit_limit) {
+        console_write(2, " first_limit_block=");
+        u64_to_ascii(tracker.first_limit_block, buffer, sizeof(buffer));
+        console_write(2, buffer);
+        console_write(2, " first_limit_errors=");
+        u64_to_ascii(tracker.first_limit_errors, buffer, sizeof(buffer));
+        console_write(2, buffer);
+    }
+    console_line(2, "");
+}
+
 static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
                                      const makocode::ByteBuffer& base_mask,
                                      const makocode::ByteBuffer& overlay_mask,
                                      u64 numerator,
                                      u64 denominator,
                                      OverlayPage& base_page) {
+    RawOverlayBlockTracker tracker;
+    raw_overlay_tracker_init(base_page, tracker);
     if (!base_page.pixels.data || !overlay_page.pixels.data) {
         return false;
     }
@@ -19012,6 +19406,13 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
     const bool have_base_mask = (base_mask.data && base_mask.size);
     const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
     u64 accumulator = 0u;
+    u8 sample_bits = bits_per_sample(base_page.color_mode);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(base_page.color_mode);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    u64 bits_per_pixel = (u64)sample_bits * (u64)samples_per_pixel;
+    u64 bit_cursor = 0u;
     for (u32 row = 0u; row < apply_height; ++row) {
         for (u32 column = 0u; column < base_page.width; ++column) {
             usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
@@ -19025,6 +19426,8 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
             if (reserved) {
                 continue;
             }
+            u64 pixel_bit_start = bit_cursor;
+            bit_cursor += bits_per_pixel;
             accumulator += numerator;
             if (accumulator < denominator) {
                 continue;
@@ -19035,11 +19438,23 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
                 byte_index + 2u >= overlay_page.pixels.size) {
                 return false;
             }
+            bool changed = false;
+            if (base_page.pixels.data[byte_index + 0u] != overlay_page.pixels.data[byte_index + 0u] ||
+                base_page.pixels.data[byte_index + 1u] != overlay_page.pixels.data[byte_index + 1u] ||
+                base_page.pixels.data[byte_index + 2u] != overlay_page.pixels.data[byte_index + 2u]) {
+                changed = true;
+            }
+            if (changed) {
+                if (!raw_overlay_tracker_try_reserve_bits(tracker, pixel_bit_start, bits_per_pixel)) {
+                    continue;
+                }
+            }
             memcpy(base_page.pixels.data + byte_index,
                    overlay_page.pixels.data + byte_index,
                    3u);
         }
     }
+    raw_overlay_tracker_finish(tracker);
     return true;
 }
 
