@@ -9690,7 +9690,7 @@ struct FooterLayout {
 namespace FooterStripe {
     using namespace makocode;
     static const u32 ModulePitch = 2u;
-    static const u32 Rows = 19u;
+    static const u32 Rows = 3u;
     static const u32 GapPixels = ModulePitch;
     static const u32 QuietModules = 2u;
     static const u32 SentinelModules = 8u;
