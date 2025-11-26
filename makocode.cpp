@@ -9653,6 +9653,16 @@ struct FooterLayout {
     u32 text_top_row;
     u32 text_left_column;
     u32 text_pixel_width;
+    u32 stripe_module_pitch;
+    u32 stripe_rows;
+    u32 stripe_gap_pixels;
+    u32 stripe_height_pixels;
+    u32 stripe_top_row;
+    u32 stripe_module_count;
+    u32 stripe_data_bits;
+    u32 stripe_pixel_width;
+    u32 stripe_quiet_modules;
+    u32 stripe_sentinel_modules;
 
     FooterLayout()
         : has_text(false),
@@ -9664,8 +9674,456 @@ struct FooterLayout {
           data_height_pixels(0u),
           text_top_row(0u),
           text_left_column(0u),
-          text_pixel_width(0u) {}
+          text_pixel_width(0u),
+          stripe_module_pitch(0u),
+          stripe_rows(0u),
+          stripe_gap_pixels(0u),
+          stripe_height_pixels(0u),
+          stripe_top_row(0u),
+          stripe_module_count(0u),
+          stripe_data_bits(0u),
+          stripe_pixel_width(0u),
+          stripe_quiet_modules(0u),
+          stripe_sentinel_modules(0u) {}
 };
+
+namespace FooterStripe {
+    using namespace makocode;
+    static const u32 ModulePitch = 2u;
+    static const u32 Rows = 19u;
+    static const u32 GapPixels = ModulePitch;
+    static const u32 QuietModules = 2u;
+    static const u32 SentinelModules = 8u;
+    static const u32 ParitySymbols = 8u;
+    static const u32 MetadataBytes = 20u;
+    static const u32 DataBits = (MetadataBytes + ParitySymbols) * 8u;
+    static const u32 MaxRowDataBits = (DataBits + Rows - 1u) / Rows;
+    static const u32 ModuleCount = QuietModules * 2u + SentinelModules * 2u + MaxRowDataBits;
+    static const u32 PixelWidth = ModuleCount * ModulePitch;
+    static const u8 SentinelPattern[SentinelModules] = {1u, 1u, 1u, 0u, 0u, 1u, 1u, 1u};
+
+    struct Values {
+        u64 page_bits;
+        u64 page_count;
+        u64 page_index;
+        u64 footer_rows;
+        bool ecc_enabled;
+        u16 ecc_block_data;
+        u16 ecc_parity;
+        u64 ecc_block_count;
+        u64 ecc_original_bytes;
+    };
+
+    struct Pattern {
+        ByteBuffer rows[Rows];
+    };
+
+    static u32 row_data_bits(u32 row_index) {
+        if (row_index >= Rows) {
+            return 0u;
+        }
+        u32 base = DataBits / Rows;
+        u32 remainder = DataBits % Rows;
+        return base + ((row_index < remainder) ? 1u : 0u);
+    }
+
+    static u8 compute_crc8(const u8* data, usize length) {
+        u8 crc = 0u;
+        for (usize i = 0u; i < length; ++i) {
+            crc ^= data[i];
+            for (u32 bit = 0u; bit < 8u; ++bit) {
+                if (crc & 0x80u) {
+                    crc = (u8)((crc << 1u) ^ 0x07u);
+                } else {
+                    crc <<= 1u;
+                }
+            }
+        }
+        return crc;
+    }
+
+    static void log_metadata_limit(const char* label, u64 value) {
+        if (!debug_logging_enabled()) {
+            return;
+        }
+        char buffer[32];
+        u64_to_ascii(value, buffer, sizeof(buffer));
+        console_write(2, "debug footer stripe metadata limit ");
+        console_write(2, label);
+        console_write(2, "=");
+        console_line(2, buffer);
+    }
+
+    static bool encode_metadata(const Values& values, ByteBuffer& output) {
+        output.release();
+        if (values.page_bits >= (1ull << 24u)) {
+            log_metadata_limit("page_bits", values.page_bits);
+            return false;
+        }
+        if (values.page_count >= (1ull << 20u)) {
+            log_metadata_limit("page_count", values.page_count);
+            return false;
+        }
+        if (values.page_index >= (1ull << 20u)) {
+            log_metadata_limit("page_index", values.page_index);
+            return false;
+        }
+        if (values.footer_rows >= (1ull << 8u)) {
+            log_metadata_limit("footer_rows", values.footer_rows);
+            return false;
+        }
+        if (values.ecc_block_data >= (1u << 10u)) {
+            log_metadata_limit("ecc_block_data", values.ecc_block_data);
+            return false;
+        }
+        if (values.ecc_parity >= (1u << 10u)) {
+            log_metadata_limit("ecc_parity", values.ecc_parity);
+            return false;
+        }
+        if (values.ecc_block_count >= (1ull << 20u)) {
+            log_metadata_limit("ecc_block_count", values.ecc_block_count);
+            return false;
+        }
+        if (values.ecc_original_bytes >= (1ull << 28u)) {
+            log_metadata_limit("ecc_original_bytes", values.ecc_original_bytes);
+            return false;
+        }
+        BitWriter writer;
+        if (!writer.write_bits(1ull, 4u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.page_bits, 24u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.page_count, 20u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.page_index, 20u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.footer_rows, 8u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.ecc_enabled ? 1ull : 0ull, 1u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.ecc_block_data, 10u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.ecc_parity, 10u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.ecc_block_count, 20u)) {
+            return false;
+        }
+        if (!writer.write_bits(values.ecc_original_bytes, 28u)) {
+            return false;
+        }
+        if (!writer.align_to_byte()) {
+            return false;
+        }
+        ByteBuffer header_copy;
+        usize header_bytes = writer.byte_size();
+        if (header_bytes == 0u) {
+            return false;
+        }
+        if (!header_copy.ensure(header_bytes)) {
+            return false;
+        }
+        for (usize i = 0u; i < header_bytes; ++i) {
+            const u8* writer_data = writer.data();
+            header_copy.data[i] = writer_data ? writer_data[i] : 0u;
+        }
+        header_copy.size = header_bytes;
+        u8 crc = compute_crc8(header_copy.data, header_copy.size);
+        if (!writer.write_bits(crc, 8u)) {
+            return false;
+        }
+        if (!writer.align_to_byte()) {
+            return false;
+        }
+        usize total_bytes = writer.byte_size();
+        if (!output.ensure(total_bytes)) {
+            return false;
+        }
+        output.size = total_bytes;
+        const u8* final_data = writer.data();
+        for (usize i = 0u; i < total_bytes; ++i) {
+            output.data[i] = final_data ? final_data[i] : 0u;
+        }
+        return true;
+    }
+
+    static bool build_pattern(const Values& values, Pattern& pattern) {
+        ByteBuffer metadata;
+        if (!encode_metadata(values, metadata)) {
+            if (debug_logging_enabled()) {
+                console_line(2, "debug footer stripe encode_metadata failed");
+            }
+            return false;
+        }
+        if (metadata.size != MetadataBytes) {
+            if (debug_logging_enabled()) {
+                char num_buf[32];
+                u64_to_ascii((u64)metadata.size, num_buf, sizeof(num_buf));
+                console_write(2, "debug footer stripe metadata size=");
+                console_line(2, num_buf);
+            }
+            return false;
+        }
+        ByteBuffer codeword;
+        if (!codeword.ensure(metadata.size + ParitySymbols)) {
+            return false;
+        }
+        codeword.size = metadata.size + ParitySymbols;
+        for (usize i = 0u; i < metadata.size; ++i) {
+            codeword.data[i] = metadata.data[i];
+        }
+        u8 generator[RS_POLY_CAPACITY];
+        u16 generator_size = 0u;
+        if (!rs_build_generator(ParitySymbols, generator, generator_size)) {
+            return false;
+        }
+        u8 parity[RS_POLY_CAPACITY];
+        rs_compute_parity(generator,
+                          (u16)ParitySymbols,
+                          metadata.data,
+                          (u16)metadata.size,
+                          parity);
+        for (u32 i = 0u; i < ParitySymbols; ++i) {
+            codeword.data[metadata.size + i] = parity[i];
+        }
+        ByteBuffer bit_sequence;
+        usize total_bits = codeword.size * 8u;
+        if (!bit_sequence.ensure(total_bits)) {
+            return false;
+        }
+        bit_sequence.size = 0u;
+        for (usize byte_index = 0u; byte_index < codeword.size; ++byte_index) {
+            u8 byte = codeword.data[byte_index];
+            for (u32 bit = 0u; bit < 8u; ++bit) {
+                bit_sequence.data[bit_sequence.size++] = (u8)((byte >> bit) & 1u);
+            }
+        }
+        if ((usize)DataBits != bit_sequence.size) {
+            return false;
+        }
+        usize bit_cursor = 0u;
+        for (u32 row = 0u; row < Rows; ++row) {
+            ByteBuffer& row_buffer = pattern.rows[row];
+            if (!row_buffer.ensure(ModuleCount)) {
+                return false;
+            }
+            row_buffer.size = ModuleCount;
+            u32 module_index = 0u;
+            for (u32 i = 0u; i < QuietModules; ++i) {
+                row_buffer.data[module_index++] = 0u;
+            }
+            for (u32 i = 0u; i < SentinelModules; ++i) {
+                row_buffer.data[module_index++] = SentinelPattern[i];
+            }
+            u32 bits_in_row = row_data_bits(row);
+            for (u32 i = 0u; i < MaxRowDataBits; ++i) {
+                u8 module_bit = 0u;
+                if (i < bits_in_row) {
+                    if (bit_cursor >= bit_sequence.size) {
+                        return false;
+                    }
+                    module_bit = bit_sequence.data[bit_cursor++];
+                }
+                row_buffer.data[module_index++] = module_bit;
+            }
+            for (u32 i = 0u; i < SentinelModules; ++i) {
+                row_buffer.data[module_index++] = SentinelPattern[i];
+            }
+            for (u32 i = 0u; i < QuietModules; ++i) {
+                row_buffer.data[module_index++] = 0u;
+            }
+            if (module_index != ModuleCount) {
+                return false;
+            }
+        }
+        if (bit_cursor != bit_sequence.size) {
+            return false;
+        }
+        return true;
+    }
+
+    static bool decode_from_bits(const ByteBuffer& module_bits, Values& values) {
+        u32 modules_per_row = ModuleCount;
+        u32 expected_size = modules_per_row * Rows;
+        if (module_bits.size < expected_size) {
+            return false;
+        }
+        u32 data_start = QuietModules + SentinelModules;
+        u32 max_data = MaxRowDataBits;
+        u32 trailing_start = data_start + max_data;
+        for (u32 row = 0u; row < Rows; ++row) {
+            u32 row_offset = row * modules_per_row;
+            for (u32 i = 0u; i < SentinelModules; ++i) {
+                if (module_bits.data[row_offset + QuietModules + i] != SentinelPattern[i]) {
+                    return false;
+                }
+            }
+            for (u32 i = 0u; i < SentinelModules; ++i) {
+                if (module_bits.data[row_offset + trailing_start + i] != SentinelPattern[i]) {
+                    return false;
+                }
+            }
+        }
+        u8 codeword[MetadataBytes + ParitySymbols];
+        memset(codeword, 0, sizeof(codeword));
+        u32 bit_cursor = 0u;
+        for (u32 row = 0u; row < Rows; ++row) {
+            u32 row_bits = row_data_bits(row);
+            u32 row_offset = row * modules_per_row;
+            for (u32 bit_index = 0u; bit_index < row_bits; ++bit_index) {
+                if (module_bits.data[row_offset + data_start + bit_index]) {
+                    u32 byte_index = bit_cursor >> 3u;
+                    u32 bit_offset = bit_cursor & 7u;
+                    codeword[byte_index] = (u8)(codeword[byte_index] | (1u << bit_offset));
+                }
+                ++bit_cursor;
+            }
+        }
+        if (bit_cursor != DataBits) {
+            return false;
+        }
+        u16 corrections = 0u;
+        if (!rs_decode_block(codeword, (u16)MetadataBytes, (u16)ParitySymbols, &corrections)) {
+            return false;
+        }
+        u8 computed_crc = compute_crc8(codeword, MetadataBytes - 1u);
+        u8 stored_crc = codeword[MetadataBytes - 1u];
+        if (computed_crc != stored_crc) {
+            return false;
+        }
+        BitReader reader;
+        reader.reset(codeword, (MetadataBytes - 1u) * 8u);
+        u64 schema = reader.read_bits(4u);
+        if (reader.failed || schema != 1ull) {
+            return false;
+        }
+        u64 page_bits = reader.read_bits(24u);
+        u64 page_count = reader.read_bits(20u);
+        u64 page_index = reader.read_bits(20u);
+        u64 footer_rows = reader.read_bits(8u);
+        u64 ecc_flag = reader.read_bits(1u);
+        u64 ecc_block_data = reader.read_bits(10u);
+        u64 ecc_parity = reader.read_bits(10u);
+        u64 ecc_block_count = reader.read_bits(20u);
+        u64 ecc_original_bytes = reader.read_bits(28u);
+        if (reader.failed) {
+            return false;
+        }
+        values.page_bits = page_bits;
+        values.page_count = page_count;
+        values.page_index = page_index;
+        values.footer_rows = footer_rows;
+        values.ecc_enabled = (ecc_flag != 0ull);
+        values.ecc_block_data = (u16)ecc_block_data;
+        values.ecc_parity = (u16)ecc_parity;
+        values.ecc_block_count = ecc_block_count;
+        values.ecc_original_bytes = ecc_original_bytes;
+        return true;
+    }
+
+    static bool sample_module(const u8* pixels,
+                              u32 width,
+                              u32 height,
+                              u32 row,
+                              u32 column,
+                              u8& out_bit) {
+        if (!pixels || row >= height || column >= width) {
+            return false;
+        }
+        usize index = ((usize)row * (usize)width + (usize)column) * 3u;
+        u32 value = (u32)pixels[index] + (u32)pixels[index + 1u] + (u32)pixels[index + 2u];
+        out_bit = (value < 384u) ? 1u : 0u;
+        return true;
+    }
+
+    static bool capture_module_row(const u8* pixels,
+                                   u32 width,
+                                   u32 height,
+                                   u32 stripe_top,
+                                   u32 start_column,
+                                   u32 row_index,
+                                   u8* row_storage) {
+        u32 module_pitch = ModulePitch;
+        u32 sample_row = stripe_top + row_index * module_pitch + (module_pitch / 2u);
+        if (sample_row >= height) {
+            return false;
+        }
+        if (!row_storage) {
+            return false;
+        }
+        for (u32 index = 0u; index < ModuleCount; ++index) {
+            u32 sample_column = start_column + index * module_pitch + (module_pitch / 2u);
+            u8 bit = 0u;
+            if (!sample_module(pixels, width, height, sample_row, sample_column, bit)) {
+                return false;
+            }
+            row_storage[index] = bit;
+        }
+        return true;
+    }
+
+    static bool capture_stripe(const u8* pixels,
+                               u32 width,
+                               u32 height,
+                               u32 stripe_top,
+                               u32 start_column,
+                               ByteBuffer& module_bits) {
+        usize total = (usize)ModuleCount * Rows;
+        if (!module_bits.ensure(total)) {
+            return false;
+        }
+        module_bits.size = total;
+        for (u32 row = 0u; row < Rows; ++row) {
+            if (!capture_module_row(pixels, width, height, stripe_top, start_column, row, module_bits.data + (usize)row * ModuleCount)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool decode_at(const u8* pixels,
+                          u32 width,
+                          u32 height,
+                          u32 start_column,
+                          Values& values) {
+        if (width < PixelWidth) {
+            return false;
+        }
+        if (height < GapPixels + Rows * ModulePitch) {
+            return false;
+        }
+        u32 stripe_top = height - Rows * ModulePitch;
+        ByteBuffer module_bits;
+        if (!capture_stripe(pixels, width, height, stripe_top, start_column, module_bits)) {
+            return false;
+        }
+        if (!decode_from_bits(module_bits, values)) {
+            return false;
+        }
+        return true;
+    }
+
+    static bool decode(const u8* pixels, u32 width, u32 height, Values& values) {
+        u32 left_start = 0u;
+        u32 right_start = (width >= PixelWidth) ? (width - PixelWidth) : 0u;
+        if (decode_at(pixels, width, height, left_start, values)) {
+            return true;
+        }
+        if (right_start != left_start) {
+            if (decode_at(pixels, width, height, right_start, values)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
 
 struct GlyphPattern {
     char symbol;
@@ -9793,62 +10251,72 @@ static bool compute_footer_layout(u32 page_width_pixels,
                                   u32 page_height_pixels,
                                   const PageFooterConfig& footer,
                                   FooterLayout& layout) {
-    layout = FooterLayout();
-    layout.font_size = footer.font_size;
-    layout.data_height_pixels = page_height_pixels;
-    if (footer.max_text_length == 0u) {
-        return true;
-    }
-    if (footer.font_size == 0u) {
-        return false;
-    }
     if (page_width_pixels == 0u || page_height_pixels == 0u) {
         return false;
     }
-    if (footer.max_text_length > (USIZE_MAX_VALUE / FOOTER_BASE_GLYPH_WIDTH)) {
+    layout = FooterLayout();
+    bool has_text = (footer.max_text_length > 0u);
+    u32 text_height_pixels = 0u;
+    if (has_text) {
+        if (footer.font_size == 0u) {
+            return false;
+        }
+        if (footer.font_size > 2048u) {
+            return false;
+        }
+        if (footer.max_text_length > (USIZE_MAX_VALUE / FOOTER_BASE_GLYPH_WIDTH)) {
+            return false;
+        }
+        u32 scale = footer.font_size;
+        u64 glyph_width_pixels = (u64)FOOTER_BASE_GLYPH_WIDTH * (u64)scale;
+        u64 glyph_height_pixels = (u64)FOOTER_BASE_GLYPH_HEIGHT * (u64)scale;
+        u64 char_spacing_pixels = (u64)scale;
+        u64 text_pixel_width = (u64)footer.max_text_length * glyph_width_pixels;
+        if (footer.max_text_length > 1u) {
+            text_pixel_width += (u64)(footer.max_text_length - 1u) * char_spacing_pixels;
+        }
+        if (text_pixel_width > (u64)page_width_pixels) {
+            return false;
+        }
+        u32 text_width_u32 = (u32)text_pixel_width;
+        u32 text_left = 0u;
+        if (page_width_pixels > text_width_u32) {
+            text_left = (page_width_pixels - text_width_u32) / 2u;
+        }
+        layout.has_text = true;
+        layout.font_size = scale;
+        layout.glyph_width_pixels = (u32)glyph_width_pixels;
+        layout.glyph_height_pixels = (u32)glyph_height_pixels;
+        layout.char_spacing_pixels = (u32)char_spacing_pixels;
+        layout.text_left_column = text_left;
+        layout.text_pixel_width = text_width_u32;
+        text_height_pixels = (u32)glyph_height_pixels;
+    } else {
+        layout.has_text = false;
+    }
+    layout.stripe_module_pitch = FooterStripe::ModulePitch;
+    layout.stripe_rows = FooterStripe::Rows;
+    layout.stripe_gap_pixels = FooterStripe::GapPixels;
+    layout.stripe_height_pixels = FooterStripe::Rows * FooterStripe::ModulePitch;
+    layout.stripe_data_bits = FooterStripe::DataBits;
+    layout.stripe_quiet_modules = FooterStripe::QuietModules;
+    layout.stripe_sentinel_modules = FooterStripe::SentinelModules;
+    layout.stripe_module_count = FooterStripe::ModuleCount;
+    layout.stripe_pixel_width = FooterStripe::PixelWidth;
+    if ((u64)layout.stripe_pixel_width > page_width_pixels) {
         return false;
     }
-    if (footer.font_size > 2048u) {
+    u32 footer_height = text_height_pixels + layout.stripe_gap_pixels + layout.stripe_height_pixels;
+    if (footer_height >= page_height_pixels) {
         return false;
     }
-    u32 scale = footer.font_size;
-    u64 glyph_width_pixels = (u64)FOOTER_BASE_GLYPH_WIDTH * (u64)scale;
-    u64 glyph_height_pixels = (u64)FOOTER_BASE_GLYPH_HEIGHT * (u64)scale;
-    u64 char_spacing_pixels = (u64)scale;
-    u64 top_margin_pixels = 0u;
-    u64 bottom_margin_pixels = 0u;
-    u64 text_pixel_width = (u64)footer.max_text_length * glyph_width_pixels;
-    if (footer.max_text_length > 1u) {
-        text_pixel_width += (u64)(footer.max_text_length - 1u) * char_spacing_pixels;
-    }
-    if (text_pixel_width > (u64)page_width_pixels) {
+    layout.footer_height_pixels = footer_height;
+    layout.data_height_pixels = page_height_pixels - footer_height;
+    if (layout.data_height_pixels == 0u) {
         return false;
     }
-    u64 footer_height_pixels = glyph_height_pixels + top_margin_pixels + bottom_margin_pixels;
-    if (footer_height_pixels >= (u64)page_height_pixels) {
-        return false;
-    }
-    u32 footer_height_u32 = (u32)footer_height_pixels;
-    u32 data_height = page_height_pixels - footer_height_u32;
-    if (data_height == 0u) {
-        return false;
-    }
-    u32 text_width_u32 = (u32)text_pixel_width;
-    u32 text_left = 0u;
-    if (page_width_pixels > text_width_u32) {
-        text_left = (page_width_pixels - text_width_u32) / 2u;
-    }
-    u32 text_top = data_height + (u32)top_margin_pixels;
-    layout.has_text = true;
-    layout.font_size = scale;
-    layout.glyph_width_pixels = (u32)glyph_width_pixels;
-    layout.glyph_height_pixels = (u32)glyph_height_pixels;
-    layout.char_spacing_pixels = (u32)char_spacing_pixels;
-    layout.footer_height_pixels = footer_height_u32;
-    layout.data_height_pixels = data_height;
-    layout.text_top_row = text_top;
-    layout.text_left_column = text_left;
-    layout.text_pixel_width = text_width_u32;
+    layout.text_top_row = layout.data_height_pixels;
+    layout.stripe_top_row = page_height_pixels - layout.stripe_height_pixels;
     return true;
 }
 
@@ -10908,6 +11376,8 @@ struct PpmParserState {
     u64 page_bits_value;
     bool has_footer_rows;
     u64 footer_rows_value;
+    bool has_footer_stripe;
+    FooterStripe::Values footer_stripe_values;
     bool has_font_size;
     u64 font_size_value;
     bool has_rotation_degrees;
@@ -10979,6 +11449,8 @@ struct PpmParserState {
           page_bits_value(0u),
           has_footer_rows(false),
           footer_rows_value(0u),
+          has_footer_stripe(false),
+          footer_stripe_values(),
           has_font_size(false),
           font_size_value(0u),
           has_rotation_degrees(false),
@@ -11021,6 +11493,9 @@ struct PpmParserState {
 
 static bool ppm_append_extended_metadata(const PpmParserState& state,
                                          makocode::ByteBuffer& output);
+
+static void apply_footer_stripe_metadata(PpmParserState& state,
+                                         const FooterStripe::Values& values);
 
 static void ppm_consume_comment(PpmParserState& state, usize start, usize length) {
     const char* comment = (const char*)(state.data + start);
@@ -13210,6 +13685,18 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (!pixel_data) {
         return false;
     }
+    FooterStripe::Values stripe_values = {};
+    bool stripe_available = false;
+    if (width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
+        stripe_available = FooterStripe::decode(pixel_data, (u32)width, (u32)height, stripe_values);
+    }
+    if (stripe_available) {
+        state.has_footer_stripe = true;
+        state.footer_stripe_values = stripe_values;
+        apply_footer_stripe_metadata(state, stripe_values);
+    } else {
+        console_line(1, "decode: footer stripe unreadable, falling back to PPM headers");
+    }
     bool has_rotation = false;
     unsigned rotated_width = (unsigned)width;
     unsigned rotated_height = (unsigned)height;
@@ -14558,6 +15045,105 @@ static bool append_bits_from_buffer(makocode::BitWriter& writer,
     return true;
 }
 
+static void log_footer_stripe_mismatch(const char* label,
+                                       u64 first_value,
+                                       u64 second_value) {
+    if (!debug_logging_enabled()) {
+        return;
+    }
+    char first_buffer[32];
+    char second_buffer[32];
+    u64_to_ascii(first_value, first_buffer, sizeof(first_buffer));
+    u64_to_ascii(second_value, second_buffer, sizeof(second_buffer));
+    console_write(2, "debug footer stripe mismatch ");
+    console_write(2, label);
+    console_write(2, ": first=");
+    console_write(2, first_buffer);
+    console_write(2, " second=");
+    console_line(2, second_buffer);
+}
+
+static bool footer_stripe_values_equal(const FooterStripe::Values& a,
+                                       const FooterStripe::Values& b) {
+    if (a.page_bits != b.page_bits) {
+        log_footer_stripe_mismatch("page_bits", a.page_bits, b.page_bits);
+        return false;
+    }
+    if (a.page_count != b.page_count) {
+        log_footer_stripe_mismatch("page_count", a.page_count, b.page_count);
+        return false;
+    }
+    if (a.footer_rows != b.footer_rows) {
+        log_footer_stripe_mismatch("footer_rows", a.footer_rows, b.footer_rows);
+        return false;
+    }
+    if (a.ecc_enabled != b.ecc_enabled) {
+        log_footer_stripe_mismatch("ecc", a.ecc_enabled ? 1ull : 0ull, b.ecc_enabled ? 1ull : 0ull);
+        return false;
+    }
+    if (a.ecc_block_data != b.ecc_block_data) {
+        log_footer_stripe_mismatch("ecc_block_data", a.ecc_block_data, b.ecc_block_data);
+        return false;
+    }
+    if (a.ecc_parity != b.ecc_parity) {
+        log_footer_stripe_mismatch("ecc_parity", a.ecc_parity, b.ecc_parity);
+        return false;
+    }
+    if (a.ecc_block_count != b.ecc_block_count) {
+        log_footer_stripe_mismatch("ecc_block_count", a.ecc_block_count, b.ecc_block_count);
+        return false;
+    }
+    if (a.ecc_original_bytes != b.ecc_original_bytes) {
+        log_footer_stripe_mismatch("ecc_original_bytes", a.ecc_original_bytes, b.ecc_original_bytes);
+        return false;
+    }
+    return true;
+}
+
+static void stripe_metadata_log_mismatch(const char* label,
+                                         u64 header_value,
+                                         u64 stripe_value) {
+    if (!debug_logging_enabled()) {
+        return;
+    }
+    char header_buffer[32];
+    char stripe_buffer[32];
+    u64_to_ascii(header_value, header_buffer, sizeof(header_buffer));
+    u64_to_ascii(stripe_value, stripe_buffer, sizeof(stripe_buffer));
+    console_write(2, "debug footer stripe mismatch ");
+    console_write(2, label);
+    console_write(2, ": header=");
+    console_write(2, header_buffer);
+    console_write(2, " stripe=");
+    console_line(2, stripe_buffer);
+}
+
+static void update_stripe_metadata_field(const char* label,
+                                         bool& flag,
+                                         u64& target,
+                                         u64 value) {
+    if (flag && target != value) {
+        stripe_metadata_log_mismatch(label, target, value);
+    }
+    flag = true;
+    target = value;
+}
+
+static void apply_footer_stripe_metadata(PpmParserState& state,
+                                         const FooterStripe::Values& values) {
+    update_stripe_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, values.page_bits);
+    update_stripe_metadata_field("MAKOCODE_PAGE_COUNT", state.has_page_count, state.page_count_value, values.page_count);
+    update_stripe_metadata_field("MAKOCODE_PAGE_INDEX", state.has_page_index, state.page_index_value, values.page_index);
+    update_stripe_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, values.footer_rows);
+    update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
+    if (values.ecc_enabled) {
+        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_DATA", state.has_ecc_block_data, state.ecc_block_data_value, (u64)values.ecc_block_data);
+        update_stripe_metadata_field("MAKOCODE_ECC_PARITY", state.has_ecc_parity, state.ecc_parity_value, (u64)values.ecc_parity);
+        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_COUNT", state.has_ecc_block_count, state.ecc_block_count_value, values.ecc_block_count);
+        update_stripe_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES", state.has_ecc_original_bytes, state.ecc_original_bytes_value, values.ecc_original_bytes);
+    }
+}
+
 static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) {
     if (src.has_bytes) {
         if (dest.has_bytes && dest.bytes_value != src.bytes_value) {
@@ -14747,6 +15333,13 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_footer_rows = true;
         dest.footer_rows_value = src.footer_rows_value;
+    }
+    if (src.has_footer_stripe) {
+        if (dest.has_footer_stripe && !footer_stripe_values_equal(dest.footer_stripe_values, src.footer_stripe_values)) {
+            return false;
+        }
+        dest.has_footer_stripe = true;
+        dest.footer_stripe_values = src.footer_stripe_values;
     }
     if (src.has_font_size) {
         if (dest.has_font_size && dest.font_size_value != src.font_size_value) {
@@ -15985,6 +16578,38 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         digit_span = (u64)base_digits.size;
     }
     u32 footer_rows = height_pixels - data_height_pixels;
+    FooterStripe::Values stripe_values = {};
+    stripe_values.page_bits = bits_per_page;
+    stripe_values.page_count = page_count;
+    stripe_values.page_index = page_index;
+    stripe_values.footer_rows = footer_rows;
+    stripe_values.ecc_enabled = (ecc_summary && ecc_summary->enabled);
+    if (stripe_values.ecc_enabled && ecc_summary) {
+        stripe_values.ecc_block_data = ecc_summary->block_data_symbols;
+        stripe_values.ecc_parity = ecc_summary->parity_symbols;
+        stripe_values.ecc_block_count = ecc_summary->block_count;
+        stripe_values.ecc_original_bytes = ecc_summary->original_bytes;
+    }
+    FooterStripe::Pattern stripe_pattern;
+    if (!FooterStripe::build_pattern(stripe_values, stripe_pattern)) {
+        console_line(2, "encode_page_to_ppm: failed to render footer stripe");
+        return false;
+    }
+    const u32 stripe_pixel_width = footer_layout.stripe_pixel_width;
+    if ((u64)width_pixels < stripe_pixel_width) {
+        console_line(2, "encode_page_to_ppm: page width too narrow for footer stripe");
+        return false;
+    }
+    u32 stripe_positions[2];
+    u32 stripe_count = 0u;
+    if ((u64)width_pixels >= (u64)stripe_pixel_width * 2u) {
+        stripe_positions[stripe_count++] = 0u;
+        stripe_positions[stripe_count++] = width_pixels - stripe_pixel_width;
+    } else {
+        stripe_positions[stripe_count++] = (width_pixels > stripe_pixel_width)
+            ? (u32)((width_pixels - stripe_pixel_width) / 2u)
+            : 0u;
+    }
     u8 footer_text_rgb[3] = {0u, 0u, 0u};
     u8 footer_background_rgb[3] = {255u, 255u, 255u};
     footer_select_colors(mapping, footer_text_rgb, footer_background_rgb);
@@ -16066,6 +16691,11 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (!output.append_ascii("255\n")) {
         return false;
     }
+    const u32 stripe_top_row = footer_layout.stripe_top_row;
+    const u32 stripe_height_pixels = footer_layout.stripe_height_pixels;
+    const u32 stripe_module_pitch = footer_layout.stripe_module_pitch;
+    const u32 stripe_module_count = footer_layout.stripe_module_count;
+    // stripe_pattern.rows[] already sized to ModuleCount
     const u8* frame_data = frame_bits.data;
     const u8* mask_data = fiducial_mask.data;
     usize mask_size = fiducial_mask.size;
@@ -16122,10 +16752,44 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 rgb[0] = footer_background_rgb[0];
                 rgb[1] = footer_background_rgb[1];
                 rgb[2] = footer_background_rgb[2];
-                if (has_footer_text && footer_is_text_pixel(footer_text, footer_length, footer_layout, column, row)) {
+                bool text_pixel = (has_footer_text &&
+                                   footer_is_text_pixel(footer_text, footer_length, footer_layout, column, row));
+                if (text_pixel) {
                     rgb[0] = footer_text_rgb[0];
                     rgb[1] = footer_text_rgb[1];
                     rgb[2] = footer_text_rgb[2];
+                }
+                if (!text_pixel && stripe_height_pixels > 0u &&
+                    row >= stripe_top_row && row < stripe_top_row + stripe_height_pixels &&
+                    stripe_module_pitch > 0u && stripe_module_count > 0u) {
+                    u32 vertical_offset = row - stripe_top_row;
+                    u32 module_row = vertical_offset / stripe_module_pitch;
+                    if (module_row >= footer_layout.stripe_rows) {
+                        module_row = footer_layout.stripe_rows - 1u;
+                    }
+                    const u8* pattern_row = stripe_pattern.rows[module_row].data;
+                    u32 module_index = 0u;
+                    bool inside_stripe = false;
+                    for (u32 stripe_idx = 0u; stripe_idx < stripe_count; ++stripe_idx) {
+                        u32 stripe_start = stripe_positions[stripe_idx];
+                        if (column >= stripe_start && column < stripe_start + stripe_pixel_width) {
+                            module_index = (column - stripe_start) / stripe_module_pitch;
+                            inside_stripe = true;
+                            break;
+                        }
+                    }
+                    if (inside_stripe && module_index < stripe_module_count && pattern_row) {
+                        u8 module_bit = pattern_row[module_index];
+                        if (module_bit) {
+                            rgb[0] = footer_text_rgb[0];
+                            rgb[1] = footer_text_rgb[1];
+                            rgb[2] = footer_text_rgb[2];
+                        } else {
+                            rgb[0] = footer_background_rgb[0];
+                            rgb[1] = footer_background_rgb[1];
+                            rgb[2] = footer_background_rgb[2];
+                        }
+                    }
                 }
             }
             for (u8 channel = 0u; channel < 3u; ++channel) {
