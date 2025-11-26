@@ -1,16 +1,8 @@
-- Features
- - Improve overlay up to 50% ECC for each, including ignore.
- - ECC target 100% should work.
- - Invalid ECC should fail.
- - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions)!
- - Color channels non-base-2, works but slow
-
 - Decoding
- - Fix all commented out tests in scripts/run_test_suite.sh
- - Remove entire page test, with high ECC
  - Remove all headers from encoding, one by one and fix decoding for each one.
    - Detect colors automatically in decoding, optionally write out color channel information in footer
    - Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+ - Remove entire page test, with high ECC
  - Wavy distortion test
  - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
  - Discolored paper (off-white) test
@@ -19,6 +11,13 @@
     - Also triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit.
  - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
+
+- Features
+ - Improve overlay up to 50% ECC for each, including ignore.
+ - ECC target 100% should work.
+ - Invalid ECC should fail.
+ - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions)!
+ - Color channels non-base-2, works but slow
 
 - Finalize
  - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)
