@@ -27,6 +27,7 @@ decoded_path="$test_dir/${label}_overlay_decoded.bin"
 
 ecc="${MAKO_OVERLAY_ECC:-1.0}"
 ignore_colors="${MAKO_OVERLAY_IGNORE_COLORS:-}"
+ecc_target="${MAKO_OVERLAY_ECC_TARGET:-}"
 
 cleanup() {
     if [[ -d $work_dir ]]; then
@@ -134,6 +135,9 @@ fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 overlay_cmd=("$makocode_bin" overlay)
 if [[ -n "$ignore_colors" ]]; then
     overlay_cmd+=(--ignore-colors "$ignore_colors")
+fi
+if [[ -n "$ecc_target" ]]; then
+    overlay_cmd+=(--overlay-ecc-target "$ecc_target")
 fi
 overlay_cmd+=("$encoded_path" "$overlay_path" "$fraction")
 "${overlay_cmd[@]}" > "$merged_path"

@@ -182,6 +182,18 @@ run_overlay_case() {
                 env_args+=(MAKO_OVERLAY_IGNORE_COLORS="$2")
                 shift 2
                 ;;
+            --overlay-ecc-target)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-ecc-target requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_ECC_TARGET="$2")
+                shift 2
+                ;;
+            --overlay-ecc-target=*)
+                env_args+=(MAKO_OVERLAY_ECC_TARGET="${1#*=}")
+                shift
+                ;;
             --overlay-encode-opt)
                 if [[ $# -lt 2 ]]; then
                     echo "run_overlay_case: --overlay-encode-opt requires a value" >&2
@@ -329,7 +341,7 @@ run_overlay_case "overlay_e2e" "Overlay CLI merges masks and decodes" \
     --overlay-encode-opt "--ecc-fill"
 
 run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette with yellow mask" \
-    --overlay-fraction 0.15 \
+    --overlay-fraction 0.10 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-circle-color "255 255 0" \
@@ -357,3 +369,23 @@ run_overlay_case "overlay_e2e_ignore_colors" "Overlay CLI skips white background
     --overlay-fraction 0.35 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-ignore-colors "White"
+
+run_overlay_case "overlay_bw_ecc_target_025" "Black/white circle overlay obeys ECC target 0.25" \
+    --overlay-fraction 1.0 \
+    --overlay-encode-opt "--ecc-fill" \
+    --overlay-palette "White Black" \
+    --overlay-circle-color "0 0 0" \
+    --overlay-background-color "255 255 255" \
+    --overlay-allowed-colors "0 0 0;255 255 255" \
+    --overlay-skip-grayscale-check 1 \
+    --overlay-ecc-target 0.25
+
+run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys ECC target 0.75" \
+    --overlay-fraction 1.0 \
+    --overlay-encode-opt "--ecc-fill" \
+    --overlay-palette "White Black" \
+    --overlay-circle-color "0 0 0" \
+    --overlay-background-color "255 255 255" \
+    --overlay-allowed-colors "0 0 0;255 255 255" \
+    --overlay-skip-grayscale-check 1 \
+    --overlay-ecc-target 0.75

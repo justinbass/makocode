@@ -17376,11 +17376,12 @@ static void write_decode_help() {
 
 static void write_overlay_help() {
     console_line(1, "makocode overlay");
-    console_line(1, "Usage: makocode overlay [--ignore-colors COLORS] BASE.ppm OVERLAY.ppm FRACTION");
+    console_line(1, "Usage: makocode overlay [--ignore-colors COLORS] [--overlay-ecc-target TARGET] BASE.ppm OVERLAY.ppm FRACTION");
     console_line(1, "Blends OVERLAY data bytes into BASE using FRACTION (0.0-1.0 decimal).");
     console_line(1, "Both pages must share dimensions and fiducial layout.");
     console_line(1, "  --ignore-colors COLORS  Skip writing overlay pixels whose color matches one of the listed");
     console_line(1, "                           color names (White/Cyan/Magenta/Yellow/Black) or hex tokens (RRGGBB).");
+    console_line(1, "  --overlay-ecc-target TARGET  Aim to consume this fraction (0.0-1.0) of the ECC parity budget.");
 }
 
 static void write_minify_help() {
@@ -19435,6 +19436,162 @@ static bool raw_overlay_tracker_try_reserve_bits(RawOverlayBlockTracker& tracker
     return raw_overlay_tracker_try_reserve_bytes(tracker, byte_start, byte_end);
 }
 
+static bool count_overlay_pixel_candidates(const OverlayPage& base_page,
+                                          const OverlayPage& overlay_page,
+                                          const makocode::ByteBuffer& base_mask,
+                                          const makocode::ByteBuffer& overlay_mask,
+                                          const OverlayIgnoreColorList* ignore_list,
+                                          usize& out_count) {
+    out_count = 0u;
+    if (!base_page.pixels.data || !overlay_page.pixels.data) {
+        return false;
+    }
+    if (base_page.width != overlay_page.width ||
+        base_page.height != overlay_page.height) {
+        return false;
+    }
+    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
+    if (base_page.pixels.size < total_pixels * 3u ||
+        overlay_page.pixels.size < total_pixels * 3u) {
+        return false;
+    }
+    if ((base_mask.size && base_mask.size != total_pixels) ||
+        (overlay_mask.size && overlay_mask.size != total_pixels)) {
+        return false;
+    }
+    u32 apply_height = base_page.data_height;
+    if (overlay_page.data_height < apply_height) {
+        apply_height = overlay_page.data_height;
+    }
+    if (apply_height > base_page.height) {
+        apply_height = base_page.height;
+    }
+    if (apply_height == 0u) {
+        return true;
+    }
+    const bool have_base_mask = (base_mask.data && base_mask.size);
+    const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
+    for (u32 row = 0u; row < (u32)apply_height; ++row) {
+        for (u32 column = 0u; column < base_page.width; ++column) {
+            usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
+            bool reserved = false;
+            if (have_base_mask && base_mask.data[pixel_index]) {
+                reserved = true;
+            }
+            if (!reserved && have_overlay_mask && overlay_mask.data[pixel_index]) {
+                reserved = true;
+            }
+            if (reserved) {
+                continue;
+            }
+            usize byte_index = pixel_index * 3u;
+            if (byte_index + 2u >= base_page.pixels.size ||
+                byte_index + 2u >= overlay_page.pixels.size) {
+                return false;
+            }
+            if (ignore_list) {
+                u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
+                u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
+                u8 overlay_b = overlay_page.pixels.data[byte_index + 2u];
+                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
+                    continue;
+                }
+            }
+            out_count += 1u;
+        }
+    }
+    return true;
+}
+
+static bool count_overlay_byte_candidates(const OverlayPage& base_page,
+                                          const OverlayPage& overlay_page,
+                                          const makocode::ByteBuffer& base_mask,
+                                          const makocode::ByteBuffer& overlay_mask,
+                                          const OverlayIgnoreColorList* ignore_list,
+                                          u64& out_bytes) {
+    out_bytes = 0u;
+    if (!base_page.pixels.data || !overlay_page.pixels.data) {
+        return false;
+    }
+    if (base_page.width != overlay_page.width ||
+        base_page.height != overlay_page.height) {
+        return false;
+    }
+    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
+    if (base_page.pixels.size < total_pixels * 3u ||
+        overlay_page.pixels.size < total_pixels * 3u) {
+        return false;
+    }
+    if ((base_mask.size && base_mask.size != total_pixels) ||
+        (overlay_mask.size && overlay_mask.size != total_pixels)) {
+        return false;
+    }
+    u32 apply_height = base_page.data_height;
+    if (overlay_page.data_height < apply_height) {
+        apply_height = overlay_page.data_height;
+    }
+    if (apply_height > base_page.height) {
+        apply_height = base_page.height;
+    }
+    if (apply_height == 0u) {
+        return true;
+    }
+    const bool have_base_mask = (base_mask.data && base_mask.size);
+    const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
+    u8 sample_bits = bits_per_sample(base_page.color_mode);
+    u8 samples_per_pixel = color_mode_samples_per_pixel(base_page.color_mode);
+    if (sample_bits == 0u || samples_per_pixel == 0u) {
+        return false;
+    }
+    u64 bits_per_pixel = (u64)sample_bits * (u64)samples_per_pixel;
+    if (bits_per_pixel == 0u) {
+        return false;
+    }
+    u64 bit_count = 0u;
+    for (u32 row = 0u; row < (u32)apply_height; ++row) {
+        for (u32 column = 0u; column < base_page.width; ++column) {
+            usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
+            bool reserved = false;
+            if (have_base_mask && base_mask.data[pixel_index]) {
+                reserved = true;
+            }
+            if (!reserved && have_overlay_mask && overlay_mask.data[pixel_index]) {
+                reserved = true;
+            }
+            if (reserved) {
+                continue;
+            }
+            usize byte_index = pixel_index * 3u;
+            if (byte_index + 2u >= base_page.pixels.size ||
+                byte_index + 2u >= overlay_page.pixels.size) {
+                return false;
+            }
+            if (ignore_list) {
+                u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
+                u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
+                u8 overlay_b = overlay_page.pixels.data[byte_index + 2u];
+                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
+                    continue;
+                }
+            }
+            if (bit_count > (U64_MAX_VALUE - bits_per_pixel)) {
+                bit_count = U64_MAX_VALUE;
+            } else {
+                bit_count += bits_per_pixel;
+            }
+        }
+    }
+    if (bit_count == 0u) {
+        return true;
+    }
+    u64 byte_count = bit_count >> 3u;
+    if (bit_count & 7u) {
+        ++byte_count;
+    }
+    out_bytes = byte_count;
+    return true;
+}
+
 static void raw_overlay_tracker_finish(const RawOverlayBlockTracker& tracker) {
     if (!tracker.enabled || !tracker.log_enabled) {
         return;
@@ -19684,9 +19841,14 @@ static int command_overlay(int arg_count, char** args) {
     const char* ignore_text = 0;
     usize ignore_length = 0u;
     bool ignore_specified = false;
+    bool ecc_target_specified = false;
+    u64 ecc_target_numerator = 0u;
+    u64 ecc_target_denominator = 1u;
     int option_index = 0;
     const char ignore_option[] = "--ignore-colors";
     const char ignore_prefix[] = "--ignore-colors=";
+    const char ecc_target_option[] = "--overlay-ecc-target";
+    const char ecc_target_prefix[] = "--overlay-ecc-target=";
     while (option_index < arg_count) {
         const char* arg = args[option_index];
         if (!arg) {
@@ -19739,11 +19901,64 @@ static int command_overlay(int arg_count, char** args) {
             ++option_index;
             continue;
         }
+        if (ascii_equals_token(arg, length, ecc_target_option)) {
+            if (ecc_target_specified) {
+                console_line(2, "overlay: --overlay-ecc-target specified multiple times");
+                return 1;
+            }
+            if ((option_index + 1) >= arg_count) {
+                console_line(2, "overlay: --overlay-ecc-target requires a value");
+                return 1;
+            }
+            const char* value = args[option_index + 1];
+            if (!value) {
+                console_line(2, "overlay: --overlay-ecc-target requires a value");
+                return 1;
+            }
+            usize value_length = ascii_length(value);
+            if (value_length == 0u) {
+                console_line(2, "overlay: --overlay-ecc-target requires a non-empty value");
+                return 1;
+            }
+            if (!ascii_to_fraction(value, value_length, ecc_target_numerator, ecc_target_denominator)) {
+                console_line(2, "overlay: --overlay-ecc-target requires a decimal value such as 0.5");
+                return 1;
+            }
+            if (ecc_target_denominator == 0u) {
+                console_line(2, "overlay: --overlay-ecc-target requires a non-zero denominator");
+                return 1;
+            }
+            ecc_target_specified = true;
+            option_index += 2;
+            continue;
+        }
+        if (ascii_starts_with(arg, ecc_target_prefix)) {
+            if (ecc_target_specified) {
+                console_line(2, "overlay: --overlay-ecc-target specified multiple times");
+                return 1;
+            }
+            const char* value = arg + (sizeof(ecc_target_prefix) - 1u);
+            if (!value || *value == '\0') {
+                console_line(2, "overlay: --overlay-ecc-target requires a non-empty value");
+                return 1;
+            }
+            if (!ascii_to_fraction(value, ascii_length(value), ecc_target_numerator, ecc_target_denominator)) {
+                console_line(2, "overlay: --overlay-ecc-target requires a decimal value such as 0.5");
+                return 1;
+            }
+            if (ecc_target_denominator == 0u) {
+                console_line(2, "overlay: --overlay-ecc-target requires a non-zero denominator");
+                return 1;
+            }
+            ecc_target_specified = true;
+            ++option_index;
+            continue;
+        }
         break;
     }
     int positional_count = arg_count - option_index;
     if (positional_count != 3) {
-        console_line(2, "overlay: usage: makocode overlay [--ignore-colors COLORS] BASE.ppm OVERLAY.ppm FRACTION");
+        console_line(2, "overlay: usage: makocode overlay [--ignore-colors COLORS] [--overlay-ecc-target TARGET] BASE.ppm OVERLAY.ppm FRACTION");
         return 1;
     }
     const char* base_path = args[option_index];
@@ -19802,6 +20017,76 @@ static int command_overlay(int arg_count, char** args) {
     if (base_mask.size != overlay_mask.size) {
         console_line(2, "overlay: fiducial mask size mismatch");
         return 1;
+    }
+    if (ecc_target_specified) {
+        RawOverlayBlockTracker ecc_tracker;
+        raw_overlay_tracker_init(base_page, ecc_tracker);
+        if (!ecc_tracker.enabled) {
+            console_line(2, "overlay: --overlay-ecc-target requires ECC metadata");
+            return 1;
+        }
+        u64 candidate_limit = 0u;
+        if (base_page.color_mode != overlay_page.color_mode) {
+            usize candidate_count = 0u;
+            if (!count_overlay_pixel_candidates(base_page,
+                                                overlay_page,
+                                                base_mask,
+                                                overlay_mask,
+                                                overlay_ignore,
+                                                candidate_count)) {
+                console_line(2, "overlay: failed to evaluate overlay candidates");
+                return 1;
+            }
+            candidate_limit = (candidate_count > (usize)U64_MAX_VALUE)
+                                ? U64_MAX_VALUE
+                                : (u64)candidate_count;
+        } else {
+            u64 candidate_bytes = 0u;
+            if (!count_overlay_byte_candidates(base_page,
+                                               overlay_page,
+                                               base_mask,
+                                               overlay_mask,
+                                               overlay_ignore,
+                                               candidate_bytes)) {
+                console_line(2, "overlay: failed to evaluate overlay candidates");
+                return 1;
+            }
+            candidate_limit = candidate_bytes;
+        }
+        long double target_fraction = (long double)ecc_target_numerator /
+                                       (long double)ecc_target_denominator;
+        if (target_fraction < 0.0L) {
+            target_fraction = 0.0L;
+        } else if (target_fraction > 1.0L) {
+            target_fraction = 1.0L;
+        }
+        u64 total_limit = ecc_tracker.block_count * ecc_tracker.block_limit_per_block;
+        if (total_limit == 0u) {
+            console_line(2, "overlay: ECC metadata reports zero capacity");
+            return 1;
+        }
+        long double desired_changes = target_fraction * (long double)total_limit;
+        u64 target_changes = (u64)(desired_changes + 0.5L);
+        if (target_changes == 0u && target_fraction > 0.0L && candidate_limit > 0u) {
+            target_changes = 1u;
+        }
+        if (target_changes > candidate_limit) {
+            target_changes = candidate_limit;
+        }
+        if (candidate_limit == 0u) {
+            if (target_changes > 0u) {
+                console_line(2, "overlay: no overlay candidates remain after masks/ignore");
+                return 1;
+            }
+            numerator = 0u;
+            denominator = 1u;
+        } else {
+            numerator = target_changes;
+            denominator = candidate_limit;
+            if (numerator > denominator) {
+                numerator = denominator;
+            }
+        }
     }
     if (numerator == 0u) {
         if (!write_buffer_to_fd(1, base_page.original)) {
