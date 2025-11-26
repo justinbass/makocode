@@ -42,7 +42,7 @@
 
 - Finalize
  - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)
- - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution.
+ - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
  - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
  - Determine proper defaults
  - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere code, it still should be readable
