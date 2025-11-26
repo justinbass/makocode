@@ -174,6 +174,14 @@ run_overlay_case() {
                 env_args+=(MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK="$2")
                 shift 2
                 ;;
+            --overlay-ignore-colors)
+                if [[ $# -lt 2 ]]; then
+                    echo "run_overlay_case: --overlay-ignore-colors requires a value" >&2
+                    exit 1
+                fi
+                env_args+=(MAKO_OVERLAY_IGNORE_COLORS="$2")
+                shift 2
+                ;;
             --overlay-encode-opt)
                 if [[ $# -lt 2 ]]; then
                     echo "run_overlay_case: --overlay-encode-opt requires a value" >&2
@@ -344,3 +352,8 @@ run_overlay_case "overlay_cmy_base_bw" "CMYW base with black/white circle overla
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-skip-grayscale-check 1 \
     --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
+
+run_overlay_case "overlay_e2e_ignore_colors" "Overlay CLI skips white background when merging" \
+    --overlay-fraction 0.35 \
+    --overlay-encode-opt "--ecc-fill" \
+    --overlay-ignore-colors "White"

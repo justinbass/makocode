@@ -17376,9 +17376,11 @@ static void write_decode_help() {
 
 static void write_overlay_help() {
     console_line(1, "makocode overlay");
-    console_line(1, "Usage: makocode overlay BASE.ppm OVERLAY.ppm FRACTION");
+    console_line(1, "Usage: makocode overlay [--ignore-colors COLORS] BASE.ppm OVERLAY.ppm FRACTION");
     console_line(1, "Blends OVERLAY data bytes into BASE using FRACTION (0.0-1.0 decimal).");
     console_line(1, "Both pages must share dimensions and fiducial layout.");
+    console_line(1, "  --ignore-colors COLORS  Skip writing overlay pixels whose color matches one of the listed");
+    console_line(1, "                           color names (White/Cyan/Magenta/Yellow/Black) or hex tokens (RRGGBB).");
 }
 
 static void write_minify_help() {
@@ -18587,6 +18589,88 @@ struct OverlayPage {
     }
 };
 
+static const usize MAX_OVERLAY_IGNORE_COLORS = 64u;
+
+struct OverlayIgnoreColorList {
+    PaletteColor colors[MAX_OVERLAY_IGNORE_COLORS];
+    usize count;
+};
+
+static bool overlay_ignore_char_is_delimiter(char c) {
+    switch (c) {
+        case ' ':
+        case '\t':
+        case '\n':
+        case '\r':
+        case ',':
+        case ';':
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool overlay_color_matches_ignore(const OverlayIgnoreColorList& list,
+                                        u8 r,
+                                        u8 g,
+                                        u8 b) {
+    for (usize i = 0u; i < list.count; ++i) {
+        const PaletteColor& candidate = list.colors[i];
+        if (candidate.r == r && candidate.g == g && candidate.b == b) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool parse_overlay_ignore_colors(const char* text,
+                                        usize length,
+                                        OverlayIgnoreColorList& list) {
+    list.count = 0u;
+    if (!text || length == 0u) {
+        return true;
+    }
+    usize cursor = 0u;
+    while (cursor < length) {
+        while (cursor < length && overlay_ignore_char_is_delimiter(text[cursor])) {
+            ++cursor;
+        }
+        if (cursor >= length) {
+            break;
+        }
+        usize start = cursor;
+        while (cursor < length && !overlay_ignore_char_is_delimiter(text[cursor])) {
+            ++cursor;
+        }
+        usize token_length = cursor - start;
+        if (token_length == 0u) {
+            continue;
+        }
+        if (list.count >= MAX_OVERLAY_IGNORE_COLORS) {
+            console_line(2, "overlay: --ignore-colors supports at most 64 entries");
+            return false;
+        }
+        PaletteColor color;
+        u8 color_id = NAMED_COLOR_INVALID;
+        if (!decode_named_palette_color(text + start, token_length, color_id, color)) {
+            console_line(2, "overlay: --ignore-colors contains an invalid color");
+            return false;
+        }
+        bool duplicate = false;
+        for (usize i = 0u; i < list.count; ++i) {
+            if (palette_colors_equal(list.colors[i], color)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+        list.colors[list.count++] = color;
+    }
+    return true;
+}
+
 static bool load_overlay_page(const char* path, OverlayPage& page) {
     page.original.release();
     page.pixels.release();
@@ -18900,7 +18984,9 @@ static bool gather_overlay_bits(const OverlayPage& page,
 static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
                                u64 bit_count,
                                const makocode::ByteBuffer& mask,
-                               OverlayPage& page) {
+                               OverlayPage& page,
+                               const OverlayPage* overlay_page,
+                               const OverlayIgnoreColorList* ignore_list) {
     if (!page.pixels.data || page.pixels.size == 0u) {
         return false;
     }
@@ -18930,6 +19016,12 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
         bit_data = rotated.data;
         bit_data_size = rotated.size;
     }
+    const bool filter_overlay_colors = (ignore_list && overlay_page && overlay_page->pixels.data);
+    if (filter_overlay_colors) {
+        if (overlay_page->width != page.width || overlay_page->height != page.height) {
+            return false;
+        }
+    }
     u64 cursor = 0u;
     for (u32 row = 0u; row < page.data_height; ++row) {
         for (u32 column = 0u; column < page.width; ++column) {
@@ -18940,6 +19032,20 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
             }
             if (reserved) {
                 continue;
+            }
+
+            bool skip_overlay_pixel = false;
+            if (filter_overlay_colors) {
+                usize overlay_index = (((usize)row * (usize)overlay_page->width) + (usize)column) * 3u;
+                if ((overlay_index + 2u) >= overlay_page->pixels.size) {
+                    return false;
+                }
+                u8 overlay_r = overlay_page->pixels.data[overlay_index + 0u];
+                u8 overlay_g = overlay_page->pixels.data[overlay_index + 1u];
+                u8 overlay_b = overlay_page->pixels.data[overlay_index + 2u];
+                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
+                    skip_overlay_pixel = true;
+                }
             }
             u32 samples[3] = {0u, 0u, 0u};
             for (u8 sample_idx = 0u; sample_idx < samples_per_pixel; ++sample_idx) {
@@ -18965,6 +19071,9 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
             usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
             if ((pixel_index + 2u) >= page.pixels.size) {
                 return false;
+            }
+            if (skip_overlay_pixel) {
+                continue;
             }
             page.pixels.data[pixel_index + 0u] = rgb[0];
             page.pixels.data[pixel_index + 1u] = rgb[1];
@@ -19371,6 +19480,7 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
                                      const makocode::ByteBuffer& overlay_mask,
                                      u64 numerator,
                                      u64 denominator,
+                                     const OverlayIgnoreColorList* ignore_list,
                                      OverlayPage& base_page) {
     RawOverlayBlockTracker tracker;
     raw_overlay_tracker_init(base_page, tracker);
@@ -19439,6 +19549,19 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
             }
             if (reserved) {
                 continue;
+            }
+            usize byte_index = pixel_index * 3u;
+            if (byte_index + 2u >= base_page.pixels.size ||
+                byte_index + 2u >= overlay_page.pixels.size) {
+                return false;
+            }
+            if (ignore_list) {
+                u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
+                u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
+                u8 overlay_b = overlay_page.pixels.data[byte_index + 2u];
+                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
+                    continue;
+                }
             }
             RawOverlayPixelCandidate* entry = &candidates[candidate_count++];
             entry->pixel_index = pixel_index;
@@ -19556,13 +19679,82 @@ static int command_overlay(int arg_count, char** args) {
         write_overlay_help();
         return 0;
     }
-    if (arg_count != 3) {
-        console_line(2, "overlay: usage: makocode overlay BASE.ppm OVERLAY.ppm FRACTION");
+    OverlayIgnoreColorList ignore_colors;
+    ignore_colors.count = 0u;
+    const char* ignore_text = 0;
+    usize ignore_length = 0u;
+    bool ignore_specified = false;
+    int option_index = 0;
+    const char ignore_option[] = "--ignore-colors";
+    const char ignore_prefix[] = "--ignore-colors=";
+    while (option_index < arg_count) {
+        const char* arg = args[option_index];
+        if (!arg) {
+            ++option_index;
+            continue;
+        }
+        if (consume_debug_flag(arg)) {
+            ++option_index;
+            continue;
+        }
+        usize length = ascii_length(arg);
+        if (ascii_equals_token(arg, length, ignore_option)) {
+            if (ignore_specified) {
+                console_line(2, "overlay: --ignore-colors specified multiple times");
+                return 1;
+            }
+            if ((option_index + 1) >= arg_count) {
+                console_line(2, "overlay: --ignore-colors requires a value");
+                return 1;
+            }
+            const char* value = args[option_index + 1];
+            if (!value) {
+                console_line(2, "overlay: --ignore-colors requires a value");
+                return 1;
+            }
+            usize value_length = ascii_length(value);
+            if (value_length == 0u) {
+                console_line(2, "overlay: --ignore-colors requires a non-empty value");
+                return 1;
+            }
+            ignore_text = value;
+            ignore_length = value_length;
+            ignore_specified = true;
+            option_index += 2;
+            continue;
+        }
+        if (ascii_starts_with(arg, ignore_prefix)) {
+            if (ignore_specified) {
+                console_line(2, "overlay: --ignore-colors specified multiple times");
+                return 1;
+            }
+            const char* value = arg + (sizeof(ignore_prefix) - 1u);
+            if (!value || *value == '\0') {
+                console_line(2, "overlay: --ignore-colors requires a non-empty value");
+                return 1;
+            }
+            ignore_text = value;
+            ignore_length = ascii_length(value);
+            ignore_specified = true;
+            ++option_index;
+            continue;
+        }
+        break;
+    }
+    int positional_count = arg_count - option_index;
+    if (positional_count != 3) {
+        console_line(2, "overlay: usage: makocode overlay [--ignore-colors COLORS] BASE.ppm OVERLAY.ppm FRACTION");
         return 1;
     }
-    const char* base_path = args[0];
-    const char* overlay_path = args[1];
-    const char* fraction_text = args[2];
+    const char* base_path = args[option_index];
+    const char* overlay_path = args[option_index + 1];
+    const char* fraction_text = args[option_index + 2];
+    if (ignore_specified) {
+        if (!parse_overlay_ignore_colors(ignore_text, ignore_length, ignore_colors)) {
+            return 1;
+        }
+    }
+    const OverlayIgnoreColorList* overlay_ignore = (ignore_colors.count > 0u) ? &ignore_colors : 0;
     if (!base_path || !overlay_path || !fraction_text) {
         console_line(2, "overlay: arguments may not be empty");
         return 1;
@@ -19619,7 +19811,7 @@ static int command_overlay(int arg_count, char** args) {
         return 0;
     }
     if (base_page.color_mode != overlay_page.color_mode) {
-        if (!apply_overlay_pixels_raw(overlay_page, base_mask, overlay_mask, numerator, denominator, base_page)) {
+        if (!apply_overlay_pixels_raw(overlay_page, base_mask, overlay_mask, numerator, denominator, overlay_ignore, base_page)) {
             console_line(2, "overlay: failed to copy raw pixel data between color modes");
             return 1;
         }
@@ -19800,7 +19992,7 @@ static int command_overlay(int arg_count, char** args) {
             u64_to_ascii(block_limit_hits, hits_buf, sizeof(hits_buf));
             console_line(2, hits_buf);
         }
-        if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page)) {
+        if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page, &overlay_page, overlay_ignore)) {
             console_line(2, "overlay: failed to map merged bytes back to base image");
             return 1;
         }
