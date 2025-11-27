@@ -1,14 +1,20 @@
 - Decoding
+ - Remove these headers first:
+  - # rotation_deg 1
+  - # rotation_src_width 1860
+  - # rotation_src_height 1860
+  - # rotation_margin 0
  - Remove all headers from encoding, one by one and fix decoding for each one.
-  - # MAKOCODE_BITS 965968
+  - # MAKOCODE_PAGE_COUNT 1
+  - # MAKOCODE_PAGE_INDEX 1
   - # MAKOCODE_ECC 1
   - # MAKOCODE_ECC_BLOCK_DATA 70
   - # MAKOCODE_ECC_PARITY 184
   - # MAKOCODE_ECC_BLOCK_COUNT 475
   - # MAKOCODE_ECC_ORIGINAL_BYTES 33249
+ - Add to footer stripe before removing:
+  - # MAKOCODE_PALETTE
   - # MAKOCODE_OVERLAY_FRACTION 9/20
-  - # MAKOCODE_PAGE_COUNT 1
-  - # MAKOCODE_PAGE_INDEX 1
   - # MAKOCODE_PAGE_BITS 966104
   - # MAKOCODE_PAGE_WIDTH_PX 1000
   - # MAKOCODE_PAGE_HEIGHT_PX 1000
