@@ -16555,15 +16555,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     u32 data_height_pixels = height_pixels;
-    if (footer_layout.has_text) {
-        if (footer_layout.data_height_pixels == 0u || footer_layout.data_height_pixels > height_pixels) {
-            return false;
-        }
-        data_height_pixels = footer_layout.data_height_pixels;
-    }
-    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
+    if (footer_layout.data_height_pixels == 0u || footer_layout.data_height_pixels > height_pixels) {
         return false;
     }
+    data_height_pixels = footer_layout.data_height_pixels;
     makocode::ByteBuffer fiducial_mask;
     u64 reserved_data_pixels = 0u;
     if (!compute_fiducial_reservation(width_pixels,
@@ -18350,7 +18345,11 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
         if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
             return false;
         }
-        data_height_pixels = footer_layout.has_text ? footer_layout.data_height_pixels : height_pixels;
+        data_height_pixels = footer_layout.data_height_pixels;
+        if (data_height_pixels >= height_pixels) {
+            console_line(2, "encode: footer layout would drop the barcode footer");
+            return false;
+        }
         if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
             return false;
         }
