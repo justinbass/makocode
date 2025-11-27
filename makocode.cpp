@@ -10306,8 +10306,11 @@ static bool compute_footer_layout(u32 page_width_pixels,
     if ((u64)layout.stripe_pixel_width > page_width_pixels) {
         return false;
     }
-    u32 footer_height = text_height_pixels + layout.stripe_gap_pixels + layout.stripe_height_pixels;
-    if (footer_height >= page_height_pixels) {
+    u32 footer_height = layout.stripe_height_pixels;
+    if (has_text && text_height_pixels > footer_height) {
+        footer_height = text_height_pixels;
+    }
+    if (footer_height == 0u || footer_height >= page_height_pixels) {
         return false;
     }
     layout.footer_height_pixels = footer_height;
@@ -10316,7 +10319,7 @@ static bool compute_footer_layout(u32 page_width_pixels,
         return false;
     }
     layout.text_top_row = layout.data_height_pixels;
-    layout.stripe_top_row = page_height_pixels - layout.stripe_height_pixels;
+    layout.stripe_top_row = layout.data_height_pixels;
     return true;
 }
 
