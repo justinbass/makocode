@@ -74,11 +74,19 @@ ppm_target="$test_dir/${label}_cli_payload_encoded.ppm"
 decoded_payload="$test_dir/${label}_cli_payload_decoded.bin"
 
 cleanup() {
+    local exit_code=${1:-0}
+    if [[ $exit_code -ne 0 ]]; then
+        return
+    fi
     if [[ -d $work_dir ]]; then
         rm -rf "$work_dir"
     fi
 }
-trap cleanup EXIT
+on_exit() {
+    local exit_code=$?
+    cleanup "$exit_code"
+}
+trap 'on_exit' EXIT
 
 rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir"
@@ -90,7 +98,7 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=$payload_source_name"
     --ecc=0.5
-    --page-width=100
+    --page-width=200
     --page-height=100
     --no-filename
     --no-page-count

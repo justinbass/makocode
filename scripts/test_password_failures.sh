@@ -85,11 +85,19 @@ payload="$test_dir/${label}_payload.bin"
 ppm_target="$test_dir/${label}_encoded.ppm"
 
 cleanup() {
+    local exit_code=${1:-0}
+    if [[ $exit_code -ne 0 ]]; then
+        return
+    fi
     if [[ -d $work_dir ]]; then
         rm -rf "$work_dir"
     fi
 }
-trap cleanup EXIT
+on_exit() {
+    local exit_code=$?
+    cleanup "$exit_code"
+}
+trap 'on_exit' EXIT
 
 rm -rf "$work_dir"
 mkdir -p "$work_dir"

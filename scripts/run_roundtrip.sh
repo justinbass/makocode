@@ -237,13 +237,17 @@ transformed_prefix="$test_dir/${label}_random_payload_transformed_encoded"
 transformed_decoded_target="$test_dir/${label}_random_payload_transformed_decoded.bin"
 
 cleanup() {
+    local exit_code=${1:-0}
+    if [[ $exit_code -ne 0 ]]; then
+        return
+    fi
     if [[ -d $work_dir ]]; then
         rm -rf "$work_dir"
     fi
 }
 on_exit() {
     local exit_code=$?
-    cleanup
+    cleanup "$exit_code"
     if [[ $exit_code -ne 0 ]]; then
         local label_fmt
         label_fmt=$(mako_format_label "$label")

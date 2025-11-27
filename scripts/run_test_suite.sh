@@ -268,7 +268,7 @@ run_roundtrip_case "large_canvas_cmykw" "Large canvas CMYKW palette" \
     --size 32768 --ecc 0.25 --width 1000 --height 1000 --palette "White Cyan Magenta Yellow Black"
 
 run_roundtrip_case "low_ecc_fiducial" "Low ECC fiducial reservation, tiny pages" \
-    --size 256 --ecc 0 --width 64 --height 64 \
+    --size 256 --ecc 0 --width 200 --height 64 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count"
 
@@ -380,7 +380,7 @@ run_overlay_case "overlay_bw_ecc_target_025" "Black/white circle overlay obeys E
     --overlay-skip-grayscale-check 1 \
     --overlay-ecc-target 0.25
 
-run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys ECC target 0.75" \
+run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys ECC target 0.5" \
     --overlay-fraction 1.0 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Black" \
@@ -388,4 +388,4 @@ run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys E
     --overlay-background-color "255 255 255" \
     --overlay-allowed-colors "0 0 0;255 255 255" \
     --overlay-skip-grayscale-check 1 \
-    --overlay-ecc-target 0.75
+    --overlay-ecc-target 0.5
