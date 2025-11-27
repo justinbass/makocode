@@ -10346,20 +10346,60 @@ static bool compute_footer_layout(u32 page_width_pixels,
     if ((u64)layout.stripe_pixel_width > page_width_pixels) {
         return false;
     }
-    u32 footer_height = layout.stripe_height_pixels;
-    if (has_text && text_height_pixels > footer_height) {
-        footer_height = text_height_pixels;
+    bool text_conflicts_with_stripe = false;
+    if (layout.has_text) {
+        u32 text_left = layout.text_left_column;
+        u64 text_right = (u64)text_left + (u64)layout.text_pixel_width;
+        u32 stripe_positions[2];
+        u32 stripe_count = 0u;
+        if ((u64)page_width_pixels >= (u64)layout.stripe_pixel_width * 2u) {
+            stripe_positions[stripe_count++] = 0u;
+            stripe_positions[stripe_count++] = page_width_pixels - layout.stripe_pixel_width;
+        } else {
+            stripe_positions[stripe_count++] = (page_width_pixels > layout.stripe_pixel_width)
+                ? (page_width_pixels - layout.stripe_pixel_width) / 2u
+                : 0u;
+        }
+        for (u32 stripe_idx = 0u; stripe_idx < stripe_count; ++stripe_idx) {
+            u32 stripe_left = stripe_positions[stripe_idx];
+            u64 stripe_right = (u64)stripe_left + (u64)layout.stripe_pixel_width;
+            if ((u64)text_left < stripe_right && (u64)stripe_left < text_right) {
+                text_conflicts_with_stripe = true;
+                break;
+            }
+        }
+    }
+    u64 footer_height = layout.stripe_height_pixels;
+    bool text_below_stripe = false;
+    if (has_text) {
+        if (text_conflicts_with_stripe) {
+            u64 combined_height = (u64)layout.stripe_height_pixels + (u64)text_height_pixels;
+            if (combined_height >= page_height_pixels) {
+                return false;
+            }
+            footer_height = (u32)combined_height;
+            text_below_stripe = true;
+        } else if (text_height_pixels > footer_height) {
+            footer_height = text_height_pixels;
+        }
     }
     if (footer_height == 0u || footer_height >= page_height_pixels) {
         return false;
     }
-    layout.footer_height_pixels = footer_height;
-    layout.data_height_pixels = page_height_pixels - footer_height;
+    layout.footer_height_pixels = (u32)footer_height;
+    layout.data_height_pixels = page_height_pixels - layout.footer_height_pixels;
     if (layout.data_height_pixels == 0u) {
         return false;
     }
-    layout.text_top_row = layout.data_height_pixels;
     layout.stripe_top_row = layout.data_height_pixels;
+    if (layout.has_text) {
+        layout.text_top_row = layout.data_height_pixels + (text_below_stripe ? layout.stripe_height_pixels : 0u);
+        if ((u64)layout.text_top_row + (u64)layout.glyph_height_pixels > page_height_pixels) {
+            return false;
+        }
+    } else {
+        layout.text_top_row = 0u;
+    }
     return true;
 }
 
