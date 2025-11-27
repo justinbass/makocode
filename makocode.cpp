@@ -10028,21 +10028,6 @@ namespace FooterStripe {
         return true;
     }
 
-    static bool sample_module(const u8* pixels,
-                              u32 width,
-                              u32 height,
-                              u32 row,
-                              u32 column,
-                              u8& out_bit) {
-        if (!pixels || row >= height || column >= width) {
-            return false;
-        }
-        usize index = ((usize)row * (usize)width + (usize)column) * 3u;
-        u32 value = (u32)pixels[index] + (u32)pixels[index + 1u] + (u32)pixels[index + 2u];
-        out_bit = (value < 384u) ? 1u : 0u;
-        return true;
-    }
-
     static bool capture_module_row(const u8* pixels,
                                    u32 width,
                                    u32 height,
@@ -10058,13 +10043,59 @@ namespace FooterStripe {
         if (!row_storage) {
             return false;
         }
+        u16 brightness[ModuleCount];
         for (u32 index = 0u; index < ModuleCount; ++index) {
             u32 sample_column = start_column + index * module_pitch + (module_pitch / 2u);
-            u8 bit = 0u;
-            if (!sample_module(pixels, width, height, sample_row, sample_column, bit)) {
+            if (sample_column >= width) {
                 return false;
             }
-            row_storage[index] = bit;
+            usize pixel_index = ((usize)sample_row * (usize)width + (usize)sample_column) * 3u;
+            u32 value = (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
+            brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
+        }
+        u32 background_sum = 0u;
+        u32 background_count = 0u;
+        auto add_background = [&](u32 module_idx) {
+            if (module_idx < ModuleCount) {
+                background_sum += brightness[module_idx];
+                ++background_count;
+            }
+        };
+        for (u32 i = 0u; i < QuietModules; ++i) {
+            add_background(i);
+        }
+        u32 trailing_start = QuietModules + SentinelModules + MaxRowDataBits;
+        for (u32 i = 0u; i < QuietModules; ++i) {
+            add_background(trailing_start + i);
+        }
+        u32 sentinel_sum = 0u;
+        u32 sentinel_count = 0u;
+        u32 sentinel_start = QuietModules;
+        u32 sentinel_end = QuietModules + SentinelModules + MaxRowDataBits;
+        for (u32 i = 0u; i < SentinelModules; ++i) {
+            if (SentinelPattern[i]) {
+                if (sentinel_start + i < ModuleCount) {
+                    sentinel_sum += brightness[sentinel_start + i];
+                    ++sentinel_count;
+                }
+                if (sentinel_end + i < ModuleCount) {
+                    sentinel_sum += brightness[sentinel_end + i];
+                    ++sentinel_count;
+                }
+            }
+        }
+        u32 threshold = 384u;
+        if (background_count > 0u && sentinel_count > 0u) {
+            u32 background_avg = background_sum / background_count;
+            u32 sentinel_avg = sentinel_sum / sentinel_count;
+            if (sentinel_avg < background_avg) {
+                threshold = (background_avg + sentinel_avg) / 2u;
+            } else if (background_avg > 0u) {
+                threshold = background_avg / 2u;
+            }
+        }
+        for (u32 index = 0u; index < ModuleCount; ++index) {
+            row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
         }
         return true;
     }
