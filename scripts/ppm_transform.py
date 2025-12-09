@@ -348,15 +348,11 @@ def main():
         rotation_src_height = height
     width, height, pixels = rotate_image(pixels, width, height, args.rotate)
     if rotation_pending:
-        rotation_margin = compute_rotation_margin(rotation_src_width,
-                                                  rotation_src_height,
-                                                  args.rotate,
-                                                  width,
-                                                  height)
-        metadata_lines.append(f"# rotation_deg {format_float(args.rotate)}")
-        metadata_lines.append(f"# rotation_src_width {rotation_src_width}")
-        metadata_lines.append(f"# rotation_src_height {rotation_src_height}")
-        metadata_lines.append(f"# rotation_margin {format_float(rotation_margin)}")
+        compute_rotation_margin(rotation_src_width,
+                                rotation_src_height,
+                                args.rotate,
+                                width,
+                                height)
 
     pixels = add_border_noise(pixels, width, height, args.border_thickness, args.border_density, args.seed)
     blot_color = parse_color(args.ink_blot_color)
