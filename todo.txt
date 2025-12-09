@@ -1,9 +1,4 @@
 - Decoding
- - Remove these headers first:
-  - # rotation_deg 1
-  - # rotation_src_width 1860
-  - # rotation_src_height 1860
-  - # rotation_margin 0
  - Remove all headers from encoding, one by one and fix decoding for each one.
   - # MAKOCODE_PAGE_COUNT 1
   - # MAKOCODE_PAGE_INDEX 1

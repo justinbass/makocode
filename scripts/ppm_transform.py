@@ -71,10 +71,6 @@ def format_float(value: float) -> str:
 
 def strip_geometry_comments(comments):
     prefixes = (
-        '# rotation_deg',
-        '# rotation_src_width',
-        '# rotation_src_height',
-        '# rotation_margin',
         '# skew_src_width',
         '# skew_src_height',
         '# skew_margin_x',
