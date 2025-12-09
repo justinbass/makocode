@@ -12504,48 +12504,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char page_count_tag[] = "MAKOCODE_PAGE_COUNT";
-    const usize page_count_tag_len = (usize)sizeof(page_count_tag) - 1u;
-    if ((length - index) >= page_count_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < page_count_tag_len; ++i) {
-            if (comment[index + i] != page_count_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += page_count_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_count = true;
-                    state.page_count_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
     const char page_bits_tag[] = "MAKOCODE_PAGE_BITS";
     const usize page_bits_tag_len = (usize)sizeof(page_bits_tag) - 1u;
     if ((length - index) >= page_bits_tag_len) {
@@ -16506,7 +16464,7 @@ static void update_stripe_metadata_field(const char* label,
 static void apply_footer_stripe_metadata(PpmParserState& state,
                                          const FooterStripe::Values& values) {
     update_stripe_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, values.page_bits);
-    update_stripe_metadata_field("MAKOCODE_PAGE_COUNT", state.has_page_count, state.page_count_value, values.page_count);
+    update_stripe_metadata_field("page_count", state.has_page_count, state.page_count_value, values.page_count);
     update_stripe_metadata_field("MAKOCODE_PAGE_INDEX", state.has_page_index, state.page_index_value, values.page_index);
     update_stripe_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, values.footer_rows);
     update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
@@ -16971,11 +16929,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_ecc_original_bytes) {
         if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", state.ecc_original_bytes_value)) {
-            return false;
-        }
-    }
-    if (state.has_page_count) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", state.page_count_value)) {
             return false;
         }
     }
@@ -18038,9 +17991,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (!append_comment_number(output, "MAKOCODE_ECC", 0u)) {
             return false;
         }
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_COUNT", page_count)) {
-        return false;
     }
     if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
         return false;

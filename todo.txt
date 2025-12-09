@@ -1,6 +1,5 @@
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
-  - # MAKOCODE_PAGE_COUNT 1
   - # MAKOCODE_PAGE_INDEX 1
   - # MAKOCODE_ECC 1
   - # MAKOCODE_ECC_BLOCK_DATA 70
