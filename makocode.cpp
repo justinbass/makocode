@@ -11643,7 +11643,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     }
     const char bytes_tag[] = "MAKOCODE_BYTES";
     const char bits_tag[] = "MAKOCODE_BITS";
-    const char ecc_tag[] = "MAKOCODE_ECC";
     const char ecc_block_tag[] = "MAKOCODE_ECC_BLOCK_DATA";
     const char ecc_parity_tag[] = "MAKOCODE_ECC_PARITY";
     const char ecc_block_count_tag[] = "MAKOCODE_ECC_BLOCK_COUNT";
@@ -11659,7 +11658,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
     const char subgrid_row_offsets_tag[] = "MAKOCODE_SUBGRID_ROW_OFFSETS";
     const usize bytes_tag_len = (usize)sizeof(bytes_tag) - 1u;
     const usize bits_tag_len = (usize)sizeof(bits_tag) - 1u;
-    const usize ecc_tag_len = (usize)sizeof(ecc_tag) - 1u;
     const usize ecc_block_tag_len = (usize)sizeof(ecc_block_tag) - 1u;
     const usize ecc_parity_tag_len = (usize)sizeof(ecc_parity_tag) - 1u;
     const usize ecc_block_count_tag_len = (usize)sizeof(ecc_block_count_tag) - 1u;
@@ -11745,55 +11743,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    if ((length - index) >= ecc_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < ecc_tag_len; ++i) {
-            if (comment[index + i] != ecc_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            usize next = index + ecc_tag_len;
-            if (next < length) {
-                char next_char = comment[next];
-                if (next_char != ' ' && next_char != '\t') {
-                    match = false;
-                }
-            }
-        }
-        if (match) {
-            index += ecc_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_ecc_flag = true;
-                    state.ecc_flag_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
     if ((length - index) >= ecc_block_tag_len) {
         bool match = true;
         for (usize i = 0u; i < ecc_block_tag_len; ++i) {
@@ -11830,6 +11779,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_ecc_block_data = true;
                     state.ecc_block_data_value = value;
+                    state.has_ecc_flag = true;
+                    state.ecc_flag_value = 1u;
                 }
             }
             return;
@@ -11879,6 +11830,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_ecc_parity = true;
                     state.ecc_parity_value = value;
+                    state.has_ecc_flag = true;
+                    state.ecc_flag_value = 1u;
                 }
             }
             return;
@@ -11928,6 +11881,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_ecc_block_count = true;
                     state.ecc_block_count_value = value;
+                    state.has_ecc_flag = true;
+                    state.ecc_flag_value = 1u;
                 }
             }
             return;
@@ -11977,6 +11932,8 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_ecc_original_bytes = true;
                     state.ecc_original_bytes_value = value;
+                    state.has_ecc_flag = true;
+                    state.ecc_flag_value = 1u;
                 }
             }
             return;
@@ -16899,11 +16856,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
             return false;
         }
     }
-    if (state.has_ecc_flag) {
-        if (!append_comment_number(output, "MAKOCODE_ECC", state.ecc_flag_value)) {
-            return false;
-        }
-    }
     if (state.has_ecc_block_data) {
         if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", state.ecc_block_data_value)) {
             return false;
@@ -16943,11 +16895,11 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", state.footer_rows_value)) {
             return false;
         }
-    if (state.has_font_size) {
-        if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
-            return false;
+        if (state.has_font_size) {
+            if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
+                return false;
+            }
         }
-    }
     } else if (state.has_font_size) {
         if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
             return false;
@@ -17959,9 +17911,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     if (ecc_summary && ecc_summary->enabled) {
-        if (!append_comment_number(output, "MAKOCODE_ECC", 1u)) {
-            return false;
-        }
         if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", (u64)ecc_summary->block_data_symbols)) {
             return false;
         }
@@ -17972,10 +17921,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             return false;
         }
         if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", ecc_summary->original_bytes)) {
-            return false;
-        }
-    } else {
-        if (!append_comment_number(output, "MAKOCODE_ECC", 0u)) {
             return false;
         }
     }
