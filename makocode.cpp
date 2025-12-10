@@ -9694,14 +9694,18 @@ namespace FooterStripe {
     static const u32 Rows = 4u;
     static const u32 GapPixels = ModulePitch;
     static const u32 QuietModules = 2u;
-    static const u32 SentinelModules = 8u;
+    // Sync structure: Barker-11 (framing) + 6-bit 1010 timing per side.
+    static const u32 BarkerModules = 11u;
+    static const u32 TimingModules = 6u;
     static const u32 ParitySymbols = 8u;
     static const u32 MetadataBytes = 20u;
     static const u32 DataBits = (MetadataBytes + ParitySymbols) * 8u;
-    static const u32 MaxRowDataBits = (DataBits + Rows - 1u) / Rows;
-    static const u32 ModuleCount = QuietModules * 2u + SentinelModules * 2u + MaxRowDataBits;
+    static const u32 MaxRowDataBits = (DataBits + Rows - 1u) / Rows; // 56
+    static const u32 GuardModules = BarkerModules + TimingModules;   // 17 per side
+    static const u32 ModuleCount = QuietModules * 2u + GuardModules * 2u + MaxRowDataBits; // 94
     static const u32 PixelWidth = ModuleCount * ModulePitch;
-    static const u8 SentinelPattern[SentinelModules] = {1u, 1u, 1u, 0u, 0u, 1u, 1u, 1u};
+    static const u8 Barker11[BarkerModules] = {1u,1u,1u,0u,0u,1u,1u,0u,1u,0u,1u};
+    static const u8 TimingPattern[TimingModules] = {1u,0u,1u,0u,1u,0u};
 
     struct Values {
         u64 page_bits;
@@ -9917,12 +9921,18 @@ namespace FooterStripe {
             }
             row_buffer.size = ModuleCount;
             u32 module_index = 0u;
+            // Quiet zone
             for (u32 i = 0u; i < QuietModules; ++i) {
                 row_buffer.data[module_index++] = 0u;
             }
-            for (u32 i = 0u; i < SentinelModules; ++i) {
-                row_buffer.data[module_index++] = SentinelPattern[i];
+            // Left guard: Barker-11 then timing 1010..
+            for (u32 i = 0u; i < BarkerModules; ++i) {
+                row_buffer.data[module_index++] = Barker11[i];
             }
+            for (u32 i = 0u; i < TimingModules; ++i) {
+                row_buffer.data[module_index++] = TimingPattern[i];
+            }
+            // Data payload bits
             u32 bits_in_row = row_data_bits(row);
             for (u32 i = 0u; i < MaxRowDataBits; ++i) {
                 u8 module_bit = 0u;
@@ -9934,9 +9944,14 @@ namespace FooterStripe {
                 }
                 row_buffer.data[module_index++] = module_bit;
             }
-            for (u32 i = 0u; i < SentinelModules; ++i) {
-                row_buffer.data[module_index++] = SentinelPattern[i];
+            // Right guard: timing then Barker-11
+            for (u32 i = 0u; i < TimingModules; ++i) {
+                row_buffer.data[module_index++] = TimingPattern[i];
             }
+            for (u32 i = 0u; i < BarkerModules; ++i) {
+                row_buffer.data[module_index++] = Barker11[i];
+            }
+            // Trailing quiet zone
             for (u32 i = 0u; i < QuietModules; ++i) {
                 row_buffer.data[module_index++] = 0u;
             }
@@ -9956,18 +9971,29 @@ namespace FooterStripe {
         if (module_bits.size < expected_size) {
             return false;
         }
-        u32 data_start = QuietModules + SentinelModules;
+        u32 data_start = QuietModules + GuardModules;
         u32 max_data = MaxRowDataBits;
         u32 trailing_start = data_start + max_data;
         for (u32 row = 0u; row < Rows; ++row) {
             u32 row_offset = row * modules_per_row;
-            for (u32 i = 0u; i < SentinelModules; ++i) {
-                if (module_bits.data[row_offset + QuietModules + i] != SentinelPattern[i]) {
+            // Validate Barker + timing on both sides for framing and pitch sanity.
+            for (u32 i = 0u; i < BarkerModules; ++i) {
+                if (module_bits.data[row_offset + QuietModules + i] != Barker11[i]) {
                     return false;
                 }
             }
-            for (u32 i = 0u; i < SentinelModules; ++i) {
-                if (module_bits.data[row_offset + trailing_start + i] != SentinelPattern[i]) {
+            for (u32 i = 0u; i < TimingModules; ++i) {
+                if (module_bits.data[row_offset + QuietModules + BarkerModules + i] != TimingPattern[i]) {
+                    return false;
+                }
+            }
+            for (u32 i = 0u; i < TimingModules; ++i) {
+                if (module_bits.data[row_offset + trailing_start + i] != TimingPattern[i]) {
+                    return false;
+                }
+            }
+            for (u32 i = 0u; i < BarkerModules; ++i) {
+                if (module_bits.data[row_offset + trailing_start + TimingModules + i] != Barker11[i]) {
                     return false;
                 }
             }
@@ -10029,13 +10055,13 @@ namespace FooterStripe {
         return true;
     }
 
-    static bool capture_module_row(const u8* pixels,
-                                   u32 width,
-                                   u32 height,
-                                   u32 stripe_top,
-                                   u32 start_column,
-                                   u32 row_index,
-                                   u8* row_storage) {
+static bool capture_module_row(const u8* pixels,
+                               u32 width,
+                               u32 height,
+                               u32 stripe_top,
+                               u32 start_column,
+                               u32 row_index,
+                               u8* row_storage) {
         u32 module_pitch = ModulePitch;
         u32 sample_row = stripe_top + row_index * module_pitch + (module_pitch / 2u);
         if (sample_row >= height) {
@@ -10065,32 +10091,40 @@ namespace FooterStripe {
         for (u32 i = 0u; i < QuietModules; ++i) {
             add_background(i);
         }
-        u32 trailing_start = QuietModules + SentinelModules + MaxRowDataBits;
+        u32 trailing_start = QuietModules + GuardModules + MaxRowDataBits + GuardModules;
         for (u32 i = 0u; i < QuietModules; ++i) {
             add_background(trailing_start + i);
         }
-        u32 sentinel_sum = 0u;
-        u32 sentinel_count = 0u;
-        u32 sentinel_start = QuietModules;
-        u32 sentinel_end = QuietModules + SentinelModules + MaxRowDataBits;
-        for (u32 i = 0u; i < SentinelModules; ++i) {
-            if (SentinelPattern[i]) {
-                if (sentinel_start + i < ModuleCount) {
-                    sentinel_sum += brightness[sentinel_start + i];
-                    ++sentinel_count;
+        auto guard_bit = [](u32 idx) -> u8 {
+            if (idx < BarkerModules) return Barker11[idx];
+            idx -= BarkerModules;
+            if (idx < TimingModules) return TimingPattern[idx];
+            return 0u;
+        };
+        u32 guard_sum = 0u;
+        u32 guard_count = 0u;
+        u32 guard_start_left = QuietModules;
+        u32 guard_start_right = QuietModules + GuardModules + MaxRowDataBits;
+        for (u32 i = 0u; i < GuardModules; ++i) {
+            if (guard_bit(i)) {
+                u32 pos_left = guard_start_left + i;
+                u32 pos_right = guard_start_right + i;
+                if (pos_left < ModuleCount) {
+                    guard_sum += brightness[pos_left];
+                    ++guard_count;
                 }
-                if (sentinel_end + i < ModuleCount) {
-                    sentinel_sum += brightness[sentinel_end + i];
-                    ++sentinel_count;
+                if (pos_right < ModuleCount) {
+                    guard_sum += brightness[pos_right];
+                    ++guard_count;
                 }
             }
         }
         u32 threshold = 384u;
-        if (background_count > 0u && sentinel_count > 0u) {
+        if (background_count > 0u && guard_count > 0u) {
             u32 background_avg = background_sum / background_count;
-            u32 sentinel_avg = sentinel_sum / sentinel_count;
-            if (sentinel_avg < background_avg) {
-                threshold = (background_avg + sentinel_avg) / 2u;
+            u32 guard_avg = guard_sum / guard_count;
+            if (guard_avg < background_avg) {
+                threshold = (background_avg + guard_avg) / 2u;
             } else if (background_avg > 0u) {
                 threshold = background_avg / 2u;
             }
@@ -10341,7 +10375,7 @@ static bool compute_footer_layout(u32 page_width_pixels,
     layout.stripe_height_pixels = FooterStripe::Rows * FooterStripe::ModulePitch;
     layout.stripe_data_bits = FooterStripe::DataBits;
     layout.stripe_quiet_modules = FooterStripe::QuietModules;
-    layout.stripe_sentinel_modules = FooterStripe::SentinelModules;
+    layout.stripe_sentinel_modules = FooterStripe::GuardModules;
     layout.stripe_module_count = FooterStripe::ModuleCount;
     layout.stripe_pixel_width = FooterStripe::PixelWidth;
     if ((u64)layout.stripe_pixel_width > page_width_pixels) {
@@ -12449,48 +12483,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
                 if (ascii_to_u64(comment + number_start, number_length, &value)) {
                     state.has_page_height_pixels = true;
                     state.page_height_pixels_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
-    const char page_index_tag[] = "MAKOCODE_PAGE_INDEX";
-    const usize page_index_tag_len = (usize)sizeof(page_index_tag) - 1u;
-    if ((length - index) >= page_index_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < page_index_tag_len; ++i) {
-            if (comment[index + i] != page_index_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += page_index_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_index = true;
-                    state.page_index_value = value;
                 }
             }
             return;
@@ -16465,7 +16457,7 @@ static void apply_footer_stripe_metadata(PpmParserState& state,
                                          const FooterStripe::Values& values) {
     update_stripe_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, values.page_bits);
     update_stripe_metadata_field("page_count", state.has_page_count, state.page_count_value, values.page_count);
-    update_stripe_metadata_field("MAKOCODE_PAGE_INDEX", state.has_page_index, state.page_index_value, values.page_index);
+    update_stripe_metadata_field("page_index", state.has_page_index, state.page_index_value, values.page_index);
     update_stripe_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, values.footer_rows);
     update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
     if (values.ecc_enabled) {
@@ -16929,11 +16921,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_ecc_original_bytes) {
         if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", state.ecc_original_bytes_value)) {
-            return false;
-        }
-    }
-    if (state.has_page_index) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", state.page_index_value)) {
             return false;
         }
     }
@@ -17991,9 +17978,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (!append_comment_number(output, "MAKOCODE_ECC", 0u)) {
             return false;
         }
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_INDEX", page_index)) {
-        return false;
     }
     if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
         return false;
