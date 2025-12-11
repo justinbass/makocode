@@ -1,6 +1,5 @@
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
-  - # MAKOCODE_ECC_BLOCK_COUNT 475
   - # MAKOCODE_ECC_ORIGINAL_BYTES 33249
  - Add to footer stripe before removing:
   - # MAKOCODE_PALETTE
@@ -33,6 +32,8 @@
 
 - Features
  - Fiducial markings appear in footer barcode when it's above the fbottom footer row due to collision with the title. Doesn't appear to affect decoding but it's incorrect.
+ - Test to write every title character out, fix some (like g)
+ - Some colored images seem to have 2 pixels of whitespace above footer, below barcode
  - Improve overlay up to 50% ECC for each, including ignore.
  - ECC target 100% should work.
  - Invalid ECC should fail.
