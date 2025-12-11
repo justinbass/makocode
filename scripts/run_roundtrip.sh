@@ -330,11 +330,7 @@ if [[ -n $password ]]; then
     decode_cmd+=("--password=$password")
 fi
 decode_cmd+=("--output-dir=$baseline_decode_dir")
-if [[ $multi_page -eq 1 ]]; then
-    decode_cmd+=("${baseline_targets[@]}")
-else
-    decode_cmd+=("${baseline_targets[0]}")
-fi
+decode_cmd+=("${baseline_targets[@]}")
 print_makocode_cmd "decode" "${decode_cmd[@]}"
 "${decode_cmd[@]}" >/dev/null
 

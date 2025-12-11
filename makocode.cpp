@@ -9698,22 +9698,73 @@ struct AffineTransform {
 
 namespace FooterStripe {
     using namespace makocode;
-    static const u32 ModulePitch = 2u;
-    static const u32 Rows = 4u;
-    static const u32 GapPixels = ModulePitch;
-    static const u32 QuietModules = 2u;
-    // Sync structure: Barker-11 (framing) + 6-bit 1010 timing per side.
-    static const u32 BarkerModules = 11u;
-    static const u32 TimingModules = 6u;
-    static const u32 ParitySymbols = 8u;
-    static const u32 MetadataBytes = 20u;
-    static const u32 DataBits = (MetadataBytes + ParitySymbols) * 8u;
-    static const u32 MaxRowDataBits = (DataBits + Rows - 1u) / Rows; // 56
-    static const u32 GuardModules = BarkerModules + TimingModules;   // 17 per side
-    static const u32 ModuleCount = QuietModules * 2u + GuardModules * 2u + MaxRowDataBits; // 94
-    static const u32 PixelWidth = ModuleCount * ModulePitch;
-    static const u8 Barker11[BarkerModules] = {1u,1u,1u,0u,0u,1u,1u,0u,1u,0u,1u};
-    static const u8 TimingPattern[TimingModules] = {1u,0u,1u,0u,1u,0u};
+    struct StripeSpec {
+        u32 module_pitch;
+        u32 rows;
+        u32 quiet_modules;
+        u32 barker_modules;
+        u32 timing_modules;
+        u32 parity_symbols;
+        u32 metadata_bytes;
+        u32 palette_bytes;
+        u8  schema_version;
+    };
+
+    static const StripeSpec SPEC_V2 = {
+        2u,   // module_pitch
+        33u,  // rows
+        2u,   // quiet_modules
+        11u,  // barker_modules
+        6u,   // timing_modules
+        15u,  // parity_symbols (RS(255,240) corrects up to 7 symbol errors)
+        240u, // metadata_bytes (includes CRC byte)
+        219u, // palette_bytes written into metadata
+        2u    // schema version
+    };
+
+    static const StripeSpec SPEC_V1 = {
+        2u,  // module_pitch
+        4u,  // rows
+        2u,  // quiet_modules
+        11u, // barker_modules
+        6u,  // timing_modules
+        8u,  // parity_symbols
+        20u, // metadata_bytes (includes CRC byte)
+        0u,  // palette bytes not present
+        1u   // schema version
+    };
+
+    static const u32 MAX_STRIPE_ROWS = 33u;
+    static const u32 MAX_STRIPE_PALETTE_BYTES = 226u;
+    static const u32 MAX_STRIPE_MODULES = 100u;
+
+    static u32 guard_modules(const StripeSpec& spec) {
+        return spec.barker_modules + spec.timing_modules;
+    }
+
+    static u32 data_bits(const StripeSpec& spec) {
+        return (spec.metadata_bytes + spec.parity_symbols) * 8u;
+    }
+
+    static u32 max_row_data_bits(const StripeSpec& spec) {
+        u32 bits = data_bits(spec);
+        return (bits + spec.rows - 1u) / spec.rows;
+    }
+
+    static u32 module_count(const StripeSpec& spec) {
+        return spec.quiet_modules * 2u + guard_modules(spec) * 2u + max_row_data_bits(spec);
+    }
+
+    static u32 pixel_width(const StripeSpec& spec) {
+        return module_count(spec) * spec.module_pitch;
+    }
+
+    static u32 stripe_height(const StripeSpec& spec) {
+        return spec.rows * spec.module_pitch;
+    }
+
+    static const u8 Barker11[11u] = {1u,1u,1u,0u,0u,1u,1u,0u,1u,0u,1u};
+    static const u8 TimingPattern[6u] = {1u,0u,1u,0u,1u,0u};
 
     struct Values {
         u64 page_bits;
@@ -9725,18 +9776,22 @@ namespace FooterStripe {
         u16 ecc_parity;
         u64 ecc_block_count;
         u64 ecc_original_bytes;
+        bool has_palette;
+        u8  palette_base;
+        u16 palette_length;
+        u8  palette_bytes[MAX_STRIPE_PALETTE_BYTES];
     };
 
     struct Pattern {
-        ByteBuffer rows[Rows];
+        ByteBuffer rows[MAX_STRIPE_ROWS];
     };
 
-    static u32 row_data_bits(u32 row_index) {
-        if (row_index >= Rows) {
+    static u32 row_data_bits(const StripeSpec& spec, u32 row_index) {
+        if (row_index >= spec.rows) {
             return 0u;
         }
-        u32 base = DataBits / Rows;
-        u32 remainder = DataBits % Rows;
+        u32 base = data_bits(spec) / spec.rows;
+        u32 remainder = data_bits(spec) % spec.rows;
         return base + ((row_index < remainder) ? 1u : 0u);
     }
 
@@ -9767,7 +9822,7 @@ namespace FooterStripe {
         console_line(2, buffer);
     }
 
-    static bool encode_metadata(const Values& values, ByteBuffer& output) {
+    static bool encode_metadata(const StripeSpec& spec, const Values& values, ByteBuffer& output) {
         output.release();
         if (values.page_bits >= (1ull << 24u)) {
             log_metadata_limit("page_bits", values.page_bits);
@@ -9801,8 +9856,15 @@ namespace FooterStripe {
             log_metadata_limit("ecc_original_bytes", values.ecc_original_bytes);
             return false;
         }
+        if (values.has_palette && spec.palette_bytes == 0u) {
+            return false;
+        }
+        if (values.has_palette && values.palette_length > spec.palette_bytes) {
+            log_metadata_limit("palette_length", values.palette_length);
+            return false;
+        }
         BitWriter writer;
-        if (!writer.write_bits(1ull, 4u)) {
+        if (!writer.write_bits((u64)spec.schema_version, 4u)) {
             return false;
         }
         if (!writer.write_bits(values.page_bits, 24u)) {
@@ -9831,6 +9893,31 @@ namespace FooterStripe {
         }
         if (!writer.write_bits(values.ecc_original_bytes, 28u)) {
             return false;
+        }
+        if (spec.palette_bytes) {
+            u64 palette_flag = values.has_palette ? 1ull : 0ull;
+            if (!writer.write_bits(palette_flag, 1u)) {
+                return false;
+            }
+            if (!writer.write_bits((u64)values.palette_base, 5u)) {
+                return false;
+            }
+            if (!writer.write_bits((u64)values.palette_length, 8u)) {
+                return false;
+            }
+            for (u32 i = 0u; i < spec.palette_bytes; ++i) {
+                u8 byte_value = (i < values.palette_length) ? values.palette_bytes[i] : 0u;
+                if (!writer.write_bits((u64)byte_value, 8u)) {
+                    return false;
+                }
+            }
+            u32 header_bits_target = (spec.metadata_bytes > 0u) ? ((spec.metadata_bytes - 1u) * 8u) : 0u;
+            if (writer.bit_size() < header_bits_target) {
+                u32 pad_bits = header_bits_target - writer.bit_size();
+                if (!writer.write_bits(0u, pad_bits)) {
+                    return false;
+                }
+            }
         }
         if (!writer.align_to_byte()) {
             return false;
@@ -9867,15 +9954,15 @@ namespace FooterStripe {
         return true;
     }
 
-    static bool build_pattern(const Values& values, Pattern& pattern) {
+    static bool build_pattern(const StripeSpec& spec, const Values& values, Pattern& pattern) {
         ByteBuffer metadata;
-        if (!encode_metadata(values, metadata)) {
+        if (!encode_metadata(spec, values, metadata)) {
             if (debug_logging_enabled()) {
                 console_line(2, "debug footer stripe encode_metadata failed");
             }
             return false;
         }
-        if (metadata.size != MetadataBytes) {
+        if (metadata.size != spec.metadata_bytes) {
             if (debug_logging_enabled()) {
                 char num_buf[32];
                 u64_to_ascii((u64)metadata.size, num_buf, sizeof(num_buf));
@@ -9885,25 +9972,25 @@ namespace FooterStripe {
             return false;
         }
         ByteBuffer codeword;
-        if (!codeword.ensure(metadata.size + ParitySymbols)) {
+        if (!codeword.ensure(metadata.size + spec.parity_symbols)) {
             return false;
         }
-        codeword.size = metadata.size + ParitySymbols;
+        codeword.size = metadata.size + spec.parity_symbols;
         for (usize i = 0u; i < metadata.size; ++i) {
             codeword.data[i] = metadata.data[i];
         }
         u8 generator[RS_POLY_CAPACITY];
         u16 generator_size = 0u;
-        if (!rs_build_generator(ParitySymbols, generator, generator_size)) {
+        if (!rs_build_generator((u16)spec.parity_symbols, generator, generator_size)) {
             return false;
         }
         u8 parity[RS_POLY_CAPACITY];
         rs_compute_parity(generator,
-                          (u16)ParitySymbols,
+                          (u16)spec.parity_symbols,
                           metadata.data,
                           (u16)metadata.size,
                           parity);
-        for (u32 i = 0u; i < ParitySymbols; ++i) {
+        for (u32 i = 0u; i < spec.parity_symbols; ++i) {
             codeword.data[metadata.size + i] = parity[i];
         }
         ByteBuffer bit_sequence;
@@ -9918,31 +10005,32 @@ namespace FooterStripe {
                 bit_sequence.data[bit_sequence.size++] = (u8)((byte >> bit) & 1u);
             }
         }
-        if ((usize)DataBits != bit_sequence.size) {
+        if ((usize)data_bits(spec) != bit_sequence.size) {
             return false;
         }
         usize bit_cursor = 0u;
-        for (u32 row = 0u; row < Rows; ++row) {
+        for (u32 row = 0u; row < spec.rows; ++row) {
             ByteBuffer& row_buffer = pattern.rows[row];
-            if (!row_buffer.ensure(ModuleCount)) {
+            if (!row_buffer.ensure(module_count(spec))) {
                 return false;
             }
-            row_buffer.size = ModuleCount;
+            row_buffer.size = module_count(spec);
             u32 module_index = 0u;
             // Quiet zone
-            for (u32 i = 0u; i < QuietModules; ++i) {
+            for (u32 i = 0u; i < spec.quiet_modules; ++i) {
                 row_buffer.data[module_index++] = 0u;
             }
             // Left guard: Barker-11 then timing 1010..
-            for (u32 i = 0u; i < BarkerModules; ++i) {
+            for (u32 i = 0u; i < spec.barker_modules; ++i) {
                 row_buffer.data[module_index++] = Barker11[i];
             }
-            for (u32 i = 0u; i < TimingModules; ++i) {
+            for (u32 i = 0u; i < spec.timing_modules; ++i) {
                 row_buffer.data[module_index++] = TimingPattern[i];
             }
             // Data payload bits
-            u32 bits_in_row = row_data_bits(row);
-            for (u32 i = 0u; i < MaxRowDataBits; ++i) {
+            u32 bits_in_row = row_data_bits(spec, row);
+            u32 max_bits_row = max_row_data_bits(spec);
+            for (u32 i = 0u; i < max_bits_row; ++i) {
                 u8 module_bit = 0u;
                 if (i < bits_in_row) {
                     if (bit_cursor >= bit_sequence.size) {
@@ -9953,17 +10041,17 @@ namespace FooterStripe {
                 row_buffer.data[module_index++] = module_bit;
             }
             // Right guard: timing then Barker-11
-            for (u32 i = 0u; i < TimingModules; ++i) {
+            for (u32 i = 0u; i < spec.timing_modules; ++i) {
                 row_buffer.data[module_index++] = TimingPattern[i];
             }
-            for (u32 i = 0u; i < BarkerModules; ++i) {
+            for (u32 i = 0u; i < spec.barker_modules; ++i) {
                 row_buffer.data[module_index++] = Barker11[i];
             }
             // Trailing quiet zone
-            for (u32 i = 0u; i < QuietModules; ++i) {
+            for (u32 i = 0u; i < spec.quiet_modules; ++i) {
                 row_buffer.data[module_index++] = 0u;
             }
-            if (module_index != ModuleCount) {
+            if (module_index != module_count(spec)) {
                 return false;
             }
         }
@@ -9973,44 +10061,58 @@ namespace FooterStripe {
         return true;
     }
 
-    static bool decode_from_bits(const ByteBuffer& module_bits, Values& values) {
-        u32 modules_per_row = ModuleCount;
-        u32 expected_size = modules_per_row * Rows;
+    static bool decode_from_bits(const StripeSpec& spec, const ByteBuffer& module_bits, Values& values) {
+        u32 modules_per_row = module_count(spec);
+        u32 expected_size = modules_per_row * spec.rows;
         if (module_bits.size < expected_size) {
+            if (debug_logging_enabled()) {
+                console_line(2, "debug stripe: insufficient module bits");
+            }
             return false;
         }
-        u32 data_start = QuietModules + GuardModules;
-        u32 max_data = MaxRowDataBits;
+        u32 data_start = spec.quiet_modules + guard_modules(spec);
+        u32 max_data = max_row_data_bits(spec);
         u32 trailing_start = data_start + max_data;
-        for (u32 row = 0u; row < Rows; ++row) {
+        u32 guard_errors = 0u;
+        for (u32 row = 0u; row < spec.rows; ++row) {
             u32 row_offset = row * modules_per_row;
             // Validate Barker + timing on both sides for framing and pitch sanity.
-            for (u32 i = 0u; i < BarkerModules; ++i) {
-                if (module_bits.data[row_offset + QuietModules + i] != Barker11[i]) {
-                    return false;
+            for (u32 i = 0u; i < spec.barker_modules; ++i) {
+                if (module_bits.data[row_offset + spec.quiet_modules + i] != Barker11[i]) {
+                    ++guard_errors;
                 }
             }
-            for (u32 i = 0u; i < TimingModules; ++i) {
-                if (module_bits.data[row_offset + QuietModules + BarkerModules + i] != TimingPattern[i]) {
-                    return false;
+            for (u32 i = 0u; i < spec.timing_modules; ++i) {
+                if (module_bits.data[row_offset + spec.quiet_modules + spec.barker_modules + i] != TimingPattern[i]) {
+                    ++guard_errors;
                 }
             }
-            for (u32 i = 0u; i < TimingModules; ++i) {
+            for (u32 i = 0u; i < spec.timing_modules; ++i) {
                 if (module_bits.data[row_offset + trailing_start + i] != TimingPattern[i]) {
-                    return false;
+                    ++guard_errors;
                 }
             }
-            for (u32 i = 0u; i < BarkerModules; ++i) {
-                if (module_bits.data[row_offset + trailing_start + TimingModules + i] != Barker11[i]) {
-                    return false;
+            for (u32 i = 0u; i < spec.barker_modules; ++i) {
+                if (module_bits.data[row_offset + trailing_start + spec.timing_modules + i] != Barker11[i]) {
+                    ++guard_errors;
                 }
             }
         }
-        u8 codeword[MetadataBytes + ParitySymbols];
+        if (guard_errors > spec.rows * 2u) {
+            if (debug_logging_enabled()) {
+                console_line(2, "debug stripe: guard mismatch budget exceeded");
+            }
+            return false;
+        }
+        u8 codeword[255u];
+        usize codeword_limit = (usize)spec.metadata_bytes + (usize)spec.parity_symbols;
+        if (codeword_limit > sizeof(codeword)) {
+            return false;
+        }
         memset(codeword, 0, sizeof(codeword));
         u32 bit_cursor = 0u;
-        for (u32 row = 0u; row < Rows; ++row) {
-            u32 row_bits = row_data_bits(row);
+        for (u32 row = 0u; row < spec.rows; ++row) {
+            u32 row_bits = row_data_bits(spec, row);
             u32 row_offset = row * modules_per_row;
             for (u32 bit_index = 0u; bit_index < row_bits; ++bit_index) {
                 if (module_bits.data[row_offset + data_start + bit_index]) {
@@ -10021,22 +10123,43 @@ namespace FooterStripe {
                 ++bit_cursor;
             }
         }
-        if (bit_cursor != DataBits) {
+        if (bit_cursor != data_bits(spec)) {
+            if (debug_logging_enabled()) {
+                console_line(2, "debug stripe: unexpected bit cursor");
+            }
             return false;
         }
+        u8 pre_crc = compute_crc8(codeword, spec.metadata_bytes - 1u);
+        u8 stored_crc = codeword[spec.metadata_bytes - 1u];
         u16 corrections = 0u;
-        if (!rs_decode_block(codeword, (u16)MetadataBytes, (u16)ParitySymbols, &corrections)) {
+        if (!rs_decode_block(codeword, (u16)spec.metadata_bytes, (u16)spec.parity_symbols, &corrections)) {
+            if (debug_logging_enabled()) {
+                console_write(2, "debug stripe: RS decode failed corrections=");
+                char corr_buf[32];
+                u64_to_ascii((u64)corrections, corr_buf, sizeof(corr_buf));
+                console_write(2, corr_buf);
+                console_write(2, " crc_before=");
+                char crc_buf[4];
+                u64_to_ascii((u64)pre_crc, crc_buf, sizeof(crc_buf));
+                console_write(2, crc_buf);
+                console_write(2, " stored_crc=");
+                char stored_buf[4];
+                u64_to_ascii((u64)stored_crc, stored_buf, sizeof(stored_buf));
+                console_line(2, stored_buf);
+            }
             return false;
         }
-        u8 computed_crc = compute_crc8(codeword, MetadataBytes - 1u);
-        u8 stored_crc = codeword[MetadataBytes - 1u];
+        u8 computed_crc = compute_crc8(codeword, spec.metadata_bytes - 1u);
         if (computed_crc != stored_crc) {
+            if (debug_logging_enabled()) {
+                console_line(2, "debug stripe: CRC mismatch");
+            }
             return false;
         }
         BitReader reader;
-        reader.reset(codeword, (MetadataBytes - 1u) * 8u);
+        reader.reset(codeword, (spec.metadata_bytes - 1u) * 8u);
         u64 schema = reader.read_bits(4u);
-        if (reader.failed || schema != 1ull) {
+        if (reader.failed || (schema != 1ull && schema != (u64)SPEC_V2.schema_version)) {
             return false;
         }
         u64 page_bits = reader.read_bits(24u);
@@ -10048,6 +10171,34 @@ namespace FooterStripe {
         u64 ecc_parity = reader.read_bits(10u);
         u64 ecc_block_count = reader.read_bits(20u);
         u64 ecc_original_bytes = reader.read_bits(28u);
+        u16 palette_length = 0u;
+        u8 palette_base = 0u;
+        bool palette_flag = false;
+        if (!reader.failed && schema == SPEC_V2.schema_version && spec.palette_bytes) {
+            palette_flag = reader.read_bits(1u) != 0u;
+            palette_base = (u8)reader.read_bits(5u);
+            palette_length = (u16)reader.read_bits(8u);
+            if (palette_length > spec.palette_bytes) {
+                return false;
+            }
+            for (u32 i = 0u; i < spec.palette_bytes; ++i) {
+                u64 byte_val = reader.read_bits(8u);
+                if (reader.failed) {
+                    return false;
+                }
+                if (i < (u32)sizeof(values.palette_bytes)) {
+                    values.palette_bytes[i] = (u8)byte_val;
+                }
+            }
+            u64 consumed_bits = (u64)reader.cursor;
+            u64 target_bits = ((u64)spec.metadata_bytes - 1ull) * 8ull;
+            if (consumed_bits > target_bits) {
+                return false;
+            }
+            if (target_bits > consumed_bits) {
+                reader.read_bits((u32)(target_bits - consumed_bits));
+            }
+        }
         if (reader.failed) {
             return false;
         }
@@ -10060,17 +10211,24 @@ namespace FooterStripe {
         values.ecc_parity = (u16)ecc_parity;
         values.ecc_block_count = ecc_block_count;
         values.ecc_original_bytes = ecc_original_bytes;
+        values.has_palette = palette_flag && spec.palette_bytes && (palette_length > 0u);
+        values.palette_base = palette_base;
+        values.palette_length = palette_length;
         return true;
     }
 
-    static bool capture_module_row(const u8* pixels,
+    static bool capture_module_row(const StripeSpec& spec,
+                                   const u8* pixels,
                                    u32 width,
                                    u32 height,
                                    u32 stripe_top,
                                    u32 start_column,
                                    u32 row_index,
                                    u8* row_storage) {
-        u32 module_pitch = ModulePitch;
+        u32 module_pitch = spec.module_pitch;
+        if (module_count(spec) > MAX_STRIPE_MODULES) {
+            return false;
+        }
         u32 sample_row = stripe_top + row_index * module_pitch + (module_pitch / 2u);
         if (sample_row >= height) {
             return false;
@@ -10078,8 +10236,8 @@ namespace FooterStripe {
         if (!row_storage) {
             return false;
         }
-        u16 brightness[ModuleCount];
-        for (u32 index = 0u; index < ModuleCount; ++index) {
+        u16 brightness[MAX_STRIPE_MODULES];
+        for (u32 index = 0u; index < module_count(spec); ++index) {
             u32 sample_column = start_column + index * module_pitch + (module_pitch / 2u);
             if (sample_column >= width) {
                 return false;
@@ -10091,37 +10249,37 @@ namespace FooterStripe {
         u32 background_sum = 0u;
         u32 background_count = 0u;
         auto add_background = [&](u32 module_idx) {
-            if (module_idx < ModuleCount) {
+            if (module_idx < module_count(spec)) {
                 background_sum += brightness[module_idx];
                 ++background_count;
             }
         };
-        for (u32 i = 0u; i < QuietModules; ++i) {
+        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
             add_background(i);
         }
-        u32 trailing_start = QuietModules + GuardModules + MaxRowDataBits + GuardModules;
-        for (u32 i = 0u; i < QuietModules; ++i) {
+        u32 trailing_start = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec) + guard_modules(spec);
+        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
             add_background(trailing_start + i);
         }
-        auto guard_bit = [](u32 idx) -> u8 {
-            if (idx < BarkerModules) return Barker11[idx];
-            idx -= BarkerModules;
-            if (idx < TimingModules) return TimingPattern[idx];
+        auto guard_bit = [&](u32 idx) -> u8 {
+            if (idx < spec.barker_modules) return Barker11[idx];
+            idx -= spec.barker_modules;
+            if (idx < spec.timing_modules) return TimingPattern[idx];
             return 0u;
         };
         u32 guard_sum = 0u;
         u32 guard_count = 0u;
-        u32 guard_start_left = QuietModules;
-        u32 guard_start_right = QuietModules + GuardModules + MaxRowDataBits;
-        for (u32 i = 0u; i < GuardModules; ++i) {
+        u32 guard_start_left = spec.quiet_modules;
+        u32 guard_start_right = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec);
+        for (u32 i = 0u; i < guard_modules(spec); ++i) {
             if (guard_bit(i)) {
                 u32 pos_left = guard_start_left + i;
                 u32 pos_right = guard_start_right + i;
-                if (pos_left < ModuleCount) {
+                if (pos_left < module_count(spec)) {
                     guard_sum += brightness[pos_left];
                     ++guard_count;
                 }
-                if (pos_right < ModuleCount) {
+                if (pos_right < module_count(spec)) {
                     guard_sum += brightness[pos_right];
                     ++guard_count;
                 }
@@ -10137,13 +10295,14 @@ namespace FooterStripe {
                 threshold = background_avg / 2u;
             }
         }
-        for (u32 index = 0u; index < ModuleCount; ++index) {
+        for (u32 index = 0u; index < module_count(spec); ++index) {
             row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
         }
         return true;
     }
 
-    static bool capture_module_row_affine(const u8* pixels,
+    static bool capture_module_row_affine(const StripeSpec& spec,
+                                          const u8* pixels,
                                           u32 width,
                                           u32 height,
                                           const AffineTransform& affine,
@@ -10153,13 +10312,16 @@ namespace FooterStripe {
                                           u32 start_column,
                                           u32 row_index,
                                           u8* row_storage) {
-        u32 module_pitch = ModulePitch;
+        u32 module_pitch = spec.module_pitch;
+        if (module_count(spec) > MAX_STRIPE_MODULES) {
+            return false;
+        }
         double logical_y = stripe_top_logical + (double)row_index * (double)module_pitch + ((double)module_pitch * 0.5);
         if (!row_storage) {
             return false;
         }
-        u16 brightness[ModuleCount];
-        for (u32 index = 0u; index < ModuleCount; ++index) {
+        u16 brightness[MAX_STRIPE_MODULES];
+        for (u32 index = 0u; index < module_count(spec); ++index) {
             double logical_x = (double)start_column + (double)index * (double)module_pitch + ((double)module_pitch * 0.5);
             double sample_x = affine.a00 * logical_x + affine.a01 * logical_y + affine.tx;
             double sample_y = affine.a10 * logical_x + affine.a11 * logical_y + affine.ty;
@@ -10199,37 +10361,37 @@ namespace FooterStripe {
         u32 background_sum = 0u;
         u32 background_count = 0u;
         auto add_background = [&](u32 module_idx) {
-            if (module_idx < ModuleCount) {
+            if (module_idx < module_count(spec)) {
                 background_sum += brightness[module_idx];
                 ++background_count;
             }
         };
-        for (u32 i = 0u; i < QuietModules; ++i) {
+        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
             add_background(i);
         }
-        u32 trailing_start = QuietModules + GuardModules + MaxRowDataBits + GuardModules;
-        for (u32 i = 0u; i < QuietModules; ++i) {
+        u32 trailing_start = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec) + guard_modules(spec);
+        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
             add_background(trailing_start + i);
         }
-        auto guard_bit = [](u32 idx) -> u8 {
-            if (idx < BarkerModules) return Barker11[idx];
-            idx -= BarkerModules;
-            if (idx < TimingModules) return TimingPattern[idx];
+        auto guard_bit = [&](u32 idx) -> u8 {
+            if (idx < spec.barker_modules) return Barker11[idx];
+            idx -= spec.barker_modules;
+            if (idx < spec.timing_modules) return TimingPattern[idx];
             return 0u;
         };
         u32 guard_sum = 0u;
         u32 guard_count = 0u;
-        u32 guard_start_left = QuietModules;
-        u32 guard_start_right = QuietModules + GuardModules + MaxRowDataBits;
-        for (u32 i = 0u; i < GuardModules; ++i) {
+        u32 guard_start_left = spec.quiet_modules;
+        u32 guard_start_right = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec);
+        for (u32 i = 0u; i < guard_modules(spec); ++i) {
             if (guard_bit(i)) {
                 u32 pos_left = guard_start_left + i;
                 u32 pos_right = guard_start_right + i;
-                if (pos_left < ModuleCount) {
+                if (pos_left < module_count(spec)) {
                     guard_sum += brightness[pos_left];
                     ++guard_count;
                 }
-                if (pos_right < ModuleCount) {
+                if (pos_right < module_count(spec)) {
                     guard_sum += brightness[pos_right];
                     ++guard_count;
                 }
@@ -10245,74 +10407,114 @@ namespace FooterStripe {
                 threshold = background_avg / 2u;
             }
         }
-        for (u32 index = 0u; index < ModuleCount; ++index) {
+        for (u32 index = 0u; index < module_count(spec); ++index) {
             row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
         }
         return true;
     }
 
-    static bool capture_stripe(const u8* pixels,
+    static bool capture_stripe(const StripeSpec& spec,
+                               const u8* pixels,
                                u32 width,
                                u32 height,
                                u32 stripe_top,
                                u32 start_column,
                                ByteBuffer& module_bits) {
-        usize total = (usize)ModuleCount * Rows;
+        usize total = (usize)module_count(spec) * (usize)spec.rows;
         if (!module_bits.ensure(total)) {
             return false;
         }
         module_bits.size = total;
-        for (u32 row = 0u; row < Rows; ++row) {
-            if (!capture_module_row(pixels, width, height, stripe_top, start_column, row, module_bits.data + (usize)row * ModuleCount)) {
+        for (u32 row = 0u; row < spec.rows; ++row) {
+            if (!capture_module_row(spec, pixels, width, height, stripe_top, start_column, row, module_bits.data + (usize)row * module_count(spec))) {
                 return false;
             }
         }
         return true;
     }
 
-    static bool decode_at(const u8* pixels,
+    static bool decode_at(const StripeSpec& spec,
+                          const u8* pixels,
                           u32 width,
                           u32 height,
                           u32 start_column,
                           u32 stripe_top,
                           Values& values) {
-        if (width < PixelWidth) {
+        if (width < pixel_width(spec)) {
             return false;
         }
-        if (height < GapPixels + Rows * ModulePitch) {
+        if (height < spec.module_pitch + spec.rows * spec.module_pitch) {
             return false;
         }
-        if (stripe_top + Rows * ModulePitch > height) {
+        if (stripe_top + spec.rows * spec.module_pitch > height) {
             return false;
         }
         ByteBuffer module_bits;
-        if (!capture_stripe(pixels, width, height, stripe_top, start_column, module_bits)) {
+        if (!capture_stripe(spec, pixels, width, height, stripe_top, start_column, module_bits)) {
             return false;
         }
-        if (!decode_from_bits(module_bits, values)) {
+        if (debug_logging_enabled()) {
+            console_write(2, "debug stripe capture prefix=");
+            char prefix[64];
+            u32 prefix_len = 0u;
+            u32 limit = module_count(spec);
+            if (limit > 32u) {
+                limit = 32u;
+            }
+            for (u32 i = 0u; i < limit && prefix_len < (u32)(sizeof(prefix) - 1u); ++i) {
+                u8 bit = module_bits.data[i];
+                prefix[prefix_len++] = bit ? '1' : '0';
+            }
+            prefix[prefix_len] = '\0';
+            console_write(2, prefix);
+            console_line(2, "");
+        }
+        if (!decode_from_bits(spec, module_bits, values)) {
             return false;
         }
         return true;
     }
 
-    static bool decode(const u8* pixels, u32 width, u32 height, Values& values) {
+    static bool decode(const StripeSpec& spec, const u8* pixels, u32 width, u32 height, Values& values) {
         u32 left_start = 0u;
-        u32 right_start = (width >= PixelWidth) ? (width - PixelWidth) : 0u;
-        u32 base_top = (height > Rows * ModulePitch) ? (height - Rows * ModulePitch) : 0u;
+        u32 right_start = (width >= pixel_width(spec)) ? (width - pixel_width(spec)) : 0u;
+        u32 stripe_height_px = stripe_height(spec);
+        u32 base_top = (height > stripe_height_px) ? (height - stripe_height_px) : 0u;
         u32 max_offset = base_top;
         if (max_offset > 256u) {
             max_offset = 256u;
         }
-        for (u32 offset = 0u; offset <= max_offset; offset += ModulePitch) {
+        for (u32 offset = 0u; offset <= max_offset; offset += spec.module_pitch) {
             if (base_top < offset) {
                 break;
             }
             u32 stripe_top = base_top - offset;
-            if (decode_at(pixels, width, height, left_start, stripe_top, values)) {
+            ByteBuffer left_bits;
+            if (decode_at(spec, pixels, width, height, left_start, stripe_top, values)) {
                 return true;
             }
+            bool left_ok = capture_stripe(spec, pixels, width, height, stripe_top, left_start, left_bits);
+            ByteBuffer right_bits;
+            Values right_values = {};
+            bool right_ok = false;
             if (right_start != left_start) {
-                if (decode_at(pixels, width, height, right_start, stripe_top, values)) {
+                if (decode_at(spec, pixels, width, height, right_start, stripe_top, values)) {
+                    return true;
+                }
+                right_ok = capture_stripe(spec, pixels, width, height, stripe_top, right_start, right_bits);
+            }
+            if (left_ok && right_ok && left_bits.size == right_bits.size && left_bits.size > 0u) {
+                ByteBuffer combined;
+                if (!combined.ensure(left_bits.size)) {
+                    return false;
+                }
+                combined.size = left_bits.size;
+                for (usize i = 0u; i < left_bits.size; ++i) {
+                    u8 l = left_bits.data[i];
+                    u8 r = right_bits.data[i];
+                    combined.data[i] = (u8)((l | r) ? 1u : 0u);
+                }
+                if (decode_from_bits(spec, combined, values)) {
                     return true;
                 }
             }
@@ -10320,7 +10522,8 @@ namespace FooterStripe {
         return false;
     }
 
-    static bool decode_affine(const u8* pixels,
+    static bool decode_affine(const StripeSpec& spec,
+                              const u8* pixels,
                               u32 width,
                               u32 height,
                               const AffineTransform& affine,
@@ -10333,22 +10536,23 @@ namespace FooterStripe {
         if (!pixels || width == 0u || height == 0u || logical_width == 0u || logical_height == 0u) {
             return false;
         }
-        u32 stripe_height = Rows * ModulePitch;
-        u32 stripe_top_logical = (logical_height > stripe_height) ? (logical_height - stripe_height) : 0u;
-        if (footer_rows > stripe_height && footer_rows < logical_height) {
+        u32 stripe_height_px = stripe_height(spec);
+        u32 stripe_top_logical = (logical_height > stripe_height_px) ? (logical_height - stripe_height_px) : 0u;
+        if (footer_rows > stripe_height_px && footer_rows < logical_height) {
             stripe_top_logical = logical_height - footer_rows;
         }
         u32 left_start = 0u;
-        u32 right_start = (logical_width >= PixelWidth) ? (logical_width - PixelWidth) : 0u;
+        u32 right_start = (logical_width >= pixel_width(spec)) ? (logical_width - pixel_width(spec)) : 0u;
         auto decode_at_affine = [&](u32 start_column) -> bool {
             ByteBuffer module_bits;
-            usize total = (usize)ModuleCount * (usize)Rows;
+            usize total = (usize)module_count(spec) * (usize)spec.rows;
             if (!module_bits.ensure(total)) {
                 return false;
             }
             module_bits.size = total;
-            for (u32 row = 0u; row < Rows; ++row) {
-                if (!capture_module_row_affine(pixels,
+            for (u32 row = 0u; row < spec.rows; ++row) {
+                if (!capture_module_row_affine(spec,
+                                               pixels,
                                                width,
                                                height,
                                                affine,
@@ -10357,11 +10561,11 @@ namespace FooterStripe {
                                                (double)stripe_top_logical,
                                                start_column,
                                                row,
-                                               module_bits.data + (usize)row * ModuleCount)) {
+                                               module_bits.data + (usize)row * module_count(spec))) {
                     return false;
                 }
             }
-            return decode_from_bits(module_bits, values);
+            return decode_from_bits(spec, module_bits, values);
         };
         if (decode_at_affine(left_start)) {
             return true;
@@ -10553,17 +10757,28 @@ static bool compute_footer_layout(u32 page_width_pixels,
     } else {
         layout.has_text = false;
     }
-    layout.stripe_module_pitch = FooterStripe::ModulePitch;
-    layout.stripe_rows = FooterStripe::Rows;
-    layout.stripe_gap_pixels = FooterStripe::GapPixels;
-    layout.stripe_height_pixels = FooterStripe::Rows * FooterStripe::ModulePitch;
-    layout.stripe_data_bits = FooterStripe::DataBits;
-    layout.stripe_quiet_modules = FooterStripe::QuietModules;
-    layout.stripe_sentinel_modules = FooterStripe::GuardModules;
-    layout.stripe_module_count = FooterStripe::ModuleCount;
-    layout.stripe_pixel_width = FooterStripe::PixelWidth;
-    if ((u64)layout.stripe_pixel_width > page_width_pixels) {
-        return false;
+    const FooterStripe::StripeSpec& stripe_spec = FooterStripe::SPEC_V2;
+    layout.stripe_module_pitch = stripe_spec.module_pitch;
+    layout.stripe_rows = stripe_spec.rows;
+    layout.stripe_gap_pixels = stripe_spec.module_pitch;
+    layout.stripe_height_pixels = FooterStripe::stripe_height(stripe_spec);
+    layout.stripe_data_bits = FooterStripe::data_bits(stripe_spec);
+    layout.stripe_quiet_modules = stripe_spec.quiet_modules;
+    layout.stripe_sentinel_modules = FooterStripe::guard_modules(stripe_spec);
+    layout.stripe_module_count = FooterStripe::module_count(stripe_spec);
+    layout.stripe_pixel_width = FooterStripe::pixel_width(stripe_spec);
+    if (layout.stripe_height_pixels >= page_height_pixels ||
+        (u64)layout.stripe_pixel_width > page_width_pixels) {
+        // Disable stripe if it cannot fit on the page; fall back to PPM metadata.
+        layout.stripe_module_pitch = 0u;
+        layout.stripe_rows = 0u;
+        layout.stripe_gap_pixels = 0u;
+        layout.stripe_height_pixels = 0u;
+        layout.stripe_data_bits = 0u;
+        layout.stripe_quiet_modules = 0u;
+        layout.stripe_sentinel_modules = 0u;
+        layout.stripe_module_count = 0u;
+        layout.stripe_pixel_width = 0u;
     }
     bool text_conflicts_with_stripe = false;
     if (layout.has_text) {
@@ -10571,10 +10786,11 @@ static bool compute_footer_layout(u32 page_width_pixels,
         u64 text_right = (u64)text_left + (u64)layout.text_pixel_width;
         u32 stripe_positions[2];
         u32 stripe_count = 0u;
-        if ((u64)page_width_pixels >= (u64)layout.stripe_pixel_width * 2u) {
+        if (layout.stripe_pixel_width > 0u &&
+            (u64)page_width_pixels >= (u64)layout.stripe_pixel_width * 2u) {
             stripe_positions[stripe_count++] = 0u;
             stripe_positions[stripe_count++] = page_width_pixels - layout.stripe_pixel_width;
-        } else {
+        } else if (layout.stripe_pixel_width > 0u) {
             stripe_positions[stripe_count++] = (page_width_pixels > layout.stripe_pixel_width)
                 ? (page_width_pixels - layout.stripe_pixel_width) / 2u
                 : 0u;
@@ -10602,7 +10818,7 @@ static bool compute_footer_layout(u32 page_width_pixels,
             footer_height = text_height_pixels;
         }
     }
-    if (footer_height == 0u || footer_height >= page_height_pixels) {
+    if (footer_height >= page_height_pixels) {
         return false;
     }
     layout.footer_height_pixels = (u32)footer_height;
@@ -14496,7 +14712,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     FooterStripe::Values stripe_values = {};
     bool stripe_available = false;
     if (width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
-        stripe_available = FooterStripe::decode(pixel_data, (u32)width, (u32)height, stripe_values);
+        stripe_available = FooterStripe::decode(FooterStripe::SPEC_V2, pixel_data, (u32)width, (u32)height, stripe_values);
+        if (!stripe_available) {
+            stripe_available = FooterStripe::decode(FooterStripe::SPEC_V1, pixel_data, (u32)width, (u32)height, stripe_values);
+        }
     }
     if (stripe_available) {
         state.has_footer_stripe = true;
@@ -15323,16 +15542,31 @@ struct RotationEstimateCandidate {
         }
         double skew_pixels = state.has_skew_y_pixels ? state.skew_y_pixels_value : 0.0;
         FooterStripe::Values affine_stripe = {};
-        if (FooterStripe::decode_affine(pixel_data,
-                                        (u32)width,
-                                        (u32)height,
-                                        state.affine_transform,
-                                        skew_pixels,
-                                        skew_span,
-                                        (u32)logical_width,
-                                        (u32)logical_height,
-                                        (u32)footer_rows,
-                                        affine_stripe)) {
+        bool affine_ok = FooterStripe::decode_affine(FooterStripe::SPEC_V2,
+                                                     pixel_data,
+                                                     (u32)width,
+                                                     (u32)height,
+                                                     state.affine_transform,
+                                                     skew_pixels,
+                                                     skew_span,
+                                                     (u32)logical_width,
+                                                     (u32)logical_height,
+                                                     (u32)footer_rows,
+                                                     affine_stripe);
+        if (!affine_ok) {
+            affine_ok = FooterStripe::decode_affine(FooterStripe::SPEC_V1,
+                                                    pixel_data,
+                                                    (u32)width,
+                                                    (u32)height,
+                                                    state.affine_transform,
+                                                    skew_pixels,
+                                                    skew_span,
+                                                    (u32)logical_width,
+                                                    (u32)logical_height,
+                                                    (u32)footer_rows,
+                                                    affine_stripe);
+        }
+        if (affine_ok) {
             state.has_footer_stripe = true;
             state.footer_stripe_values = affine_stripe;
             apply_footer_stripe_metadata(state, affine_stripe);
@@ -16518,6 +16752,26 @@ static bool footer_stripe_values_equal(const FooterStripe::Values& a,
         log_footer_stripe_mismatch("ecc_original_bytes", a.ecc_original_bytes, b.ecc_original_bytes);
         return false;
     }
+    if (a.has_palette != b.has_palette) {
+        log_footer_stripe_mismatch("palette_flag", a.has_palette ? 1ull : 0ull, b.has_palette ? 1ull : 0ull);
+        return false;
+    }
+    if (a.has_palette) {
+        if (a.palette_base != b.palette_base) {
+            log_footer_stripe_mismatch("palette_base", a.palette_base, b.palette_base);
+            return false;
+        }
+        if (a.palette_length != b.palette_length) {
+            log_footer_stripe_mismatch("palette_length", a.palette_length, b.palette_length);
+            return false;
+        }
+        for (u16 i = 0u; i < a.palette_length && i < b.palette_length; ++i) {
+            if (a.palette_bytes[i] != b.palette_bytes[i]) {
+                log_footer_stripe_mismatch("palette_bytes", a.palette_bytes[i], b.palette_bytes[i]);
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -16562,6 +16816,19 @@ static void apply_footer_stripe_metadata(PpmParserState& state,
         update_stripe_metadata_field("MAKOCODE_ECC_PARITY", state.has_ecc_parity, state.ecc_parity_value, (u64)values.ecc_parity);
         update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_COUNT", state.has_ecc_block_count, state.ecc_block_count_value, values.ecc_block_count);
         update_stripe_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES", state.has_ecc_original_bytes, state.ecc_original_bytes_value, values.ecc_original_bytes);
+    }
+    if (values.has_palette) {
+        update_stripe_metadata_field("MAKOCODE_PALETTE_BASE", state.has_palette_base, state.palette_base_value, (u64)values.palette_base);
+        usize copy_length = values.palette_length;
+        if (copy_length >= MAX_CUSTOM_PALETTE_TEXT) {
+            copy_length = MAX_CUSTOM_PALETTE_TEXT - 1u;
+        }
+        for (usize i = 0u; i < copy_length; ++i) {
+            state.palette_text[i] = (char)values.palette_bytes[i];
+        }
+        state.palette_text[copy_length] = '\0';
+        state.palette_text_length = copy_length;
+        state.has_palette_text = (copy_length > 0u);
     }
 }
 
@@ -16849,6 +17116,12 @@ static bool frame_bits_to_payload(const u8* frame_data,
     }
     u64 available_bits = (frame_bit_count >= 64u) ? (frame_bit_count - 64u) : 0u;
     u64 payload_bits = header_bits;
+    if (metadata.has_ecc_original_bytes) {
+        u64 expected_bits = metadata.ecc_original_bytes_value * 8ull;
+        if (expected_bits > payload_bits && expected_bits <= available_bits) {
+            payload_bits = expected_bits;
+        }
+    }
     if (metadata.has_bits) {
         if (metadata.bits_value <= available_bits) {
             payload_bits = metadata.bits_value;
@@ -17047,19 +17320,6 @@ static bool ppm_append_extended_metadata(const PpmParserState& state,
                                          makocode::ByteBuffer& output) {
     if (state.has_page_symbols) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_SYMBOLS", state.page_symbols_value)) {
-            return false;
-        }
-    }
-    if (state.has_palette_base) {
-        if (!append_comment_number(output, "MAKOCODE_PALETTE_BASE", state.palette_base_value)) {
-            return false;
-        }
-    }
-    if (state.has_palette_text && state.palette_text_length) {
-        if (!append_comment_text(output,
-                                 "MAKOCODE_PALETTE",
-                                 state.palette_text,
-                                 state.palette_text_length)) {
             return false;
         }
     }
@@ -17980,6 +18240,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         digit_span = (u64)base_digits.size;
     }
     u32 footer_rows = height_pixels - data_height_pixels;
+    const FooterStripe::StripeSpec& stripe_spec = FooterStripe::SPEC_V2;
     FooterStripe::Values stripe_values = {};
     stripe_values.page_bits = bits_per_page;
     stripe_values.page_count = page_count;
@@ -17992,25 +18253,74 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         stripe_values.ecc_block_count = ecc_summary->block_count;
         stripe_values.ecc_original_bytes = ecc_summary->original_bytes;
     }
+    if (use_custom_palette && mapping.palette_text_length > 0u) {
+        if (mapping.palette_text_length > stripe_spec.palette_bytes) {
+            console_line(2, "encode_page_to_ppm: custom palette text exceeds footer stripe capacity");
+            return false;
+        }
+        stripe_values.has_palette = true;
+        stripe_values.palette_base = (u8)custom_base;
+        stripe_values.palette_length = (u16)mapping.palette_text_length;
+        for (usize i = 0u; i < mapping.palette_text_length; ++i) {
+            stripe_values.palette_bytes[i] = (u8)mapping.palette_text[i];
+        }
+    }
     FooterStripe::Pattern stripe_pattern;
-    if (!FooterStripe::build_pattern(stripe_values, stripe_pattern)) {
+    if (!FooterStripe::build_pattern(stripe_spec, stripe_values, stripe_pattern)) {
         console_line(2, "encode_page_to_ppm: failed to render footer stripe");
         return false;
     }
+    if (debug_logging_enabled()) {
+        auto log_row_prefix = [&](u32 row_index) {
+            if (row_index >= footer_layout.stripe_rows) {
+                return;
+            }
+            const u8* debug_row = stripe_pattern.rows[row_index].data;
+            u32 debug_limit = (footer_layout.stripe_module_count < 32u) ? footer_layout.stripe_module_count : 32u;
+            char prefix[64];
+            u32 prefix_len = 0u;
+            for (u32 i = 0u; i < debug_limit && prefix_len < (u32)(sizeof(prefix) - 1u); ++i) {
+                prefix[prefix_len++] = (debug_row && debug_row[i]) ? '1' : '0';
+            }
+            prefix[prefix_len] = '\0';
+            console_write(2, "debug stripe row prefix ");
+            char row_buf[8];
+            u64_to_ascii(row_index, row_buf, sizeof(row_buf));
+            console_write(2, row_buf);
+            console_write(2, "=");
+            console_write(2, prefix);
+            console_line(2, "");
+        };
+        log_row_prefix(0u);
+        log_row_prefix(13u);
+        if (stripe_pattern.rows[13].data && footer_layout.stripe_module_count >= 98u) {
+            console_write(2, "debug stripe row13 guard slice=");
+            char slice[16];
+            for (u32 i = 0u; i < 11u; ++i) {
+                u32 idx = 87u + i;
+                slice[i] = stripe_pattern.rows[13].data[idx] ? '1' : '0';
+            }
+            slice[11] = '\0';
+            console_write(2, slice);
+            console_line(2, "");
+        }
+    }
     const u32 stripe_pixel_width = footer_layout.stripe_pixel_width;
-    if ((u64)width_pixels < stripe_pixel_width) {
+    if (stripe_pixel_width > 0u && (u64)width_pixels < stripe_pixel_width) {
         console_line(2, "encode_page_to_ppm: page width too narrow for footer stripe");
         return false;
     }
     u32 stripe_positions[2];
     u32 stripe_count = 0u;
-    if ((u64)width_pixels >= (u64)stripe_pixel_width * 2u) {
-        stripe_positions[stripe_count++] = 0u;
-        stripe_positions[stripe_count++] = width_pixels - stripe_pixel_width;
-    } else {
-        stripe_positions[stripe_count++] = (width_pixels > stripe_pixel_width)
-            ? (u32)((width_pixels - stripe_pixel_width) / 2u)
-            : 0u;
+    if (stripe_pixel_width > 0u && footer_layout.stripe_height_pixels > 0u && footer_layout.stripe_module_count > 0u) {
+        if ((u64)width_pixels >= (u64)stripe_pixel_width * 2u) {
+            stripe_positions[stripe_count++] = 0u;
+            stripe_positions[stripe_count++] = width_pixels - stripe_pixel_width;
+        } else {
+            stripe_positions[stripe_count++] = (width_pixels > stripe_pixel_width)
+                ? (u32)((width_pixels - stripe_pixel_width) / 2u)
+                : 0u;
+        }
     }
     u8 footer_text_rgb[3] = {0u, 0u, 0u};
     u8 footer_background_rgb[3] = {255u, 255u, 255u};
@@ -18018,14 +18328,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     output.release();
     if (!output.append_ascii("P3\n")) {
         return false;
-    }
-    if (mapping.palette_set && mapping.palette_text_length) {
-        if (!append_comment_text(output,
-                                 "MAKOCODE_PALETTE",
-                                 mapping.palette_text,
-                                 mapping.palette_text_length)) {
-            return false;
-        }
     }
     if (!append_comment_number(output, "MAKOCODE_BITS", payload_bit_count)) {
         return false;
@@ -18046,9 +18348,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     if (use_custom_palette) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_SYMBOLS", digits_used)) {
-            return false;
-        }
-        if (!append_comment_number(output, "MAKOCODE_PALETTE_BASE", (u64)custom_base)) {
             return false;
         }
     }
@@ -18134,12 +18433,9 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 rgb[2] = footer_background_rgb[2];
                 bool text_pixel = (has_footer_text &&
                                    footer_is_text_pixel(footer_text, footer_length, footer_layout, column, row));
-                if (text_pixel) {
-                    rgb[0] = footer_text_rgb[0];
-                    rgb[1] = footer_text_rgb[1];
-                    rgb[2] = footer_text_rgb[2];
-                }
-                if (!text_pixel && stripe_height_pixels > 0u &&
+                bool inside_stripe = false;
+                u8 module_bit = 0u;
+                if (stripe_height_pixels > 0u &&
                     row >= stripe_top_row && row < stripe_top_row + stripe_height_pixels &&
                     stripe_module_pitch > 0u && stripe_module_count > 0u) {
                     u32 vertical_offset = row - stripe_top_row;
@@ -18149,7 +18445,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     }
                     const u8* pattern_row = stripe_pattern.rows[module_row].data;
                     u32 module_index = 0u;
-                    bool inside_stripe = false;
                     for (u32 stripe_idx = 0u; stripe_idx < stripe_count; ++stripe_idx) {
                         u32 stripe_start = stripe_positions[stripe_idx];
                         if (column >= stripe_start && column < stripe_start + stripe_pixel_width) {
@@ -18159,17 +18454,25 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                         }
                     }
                     if (inside_stripe && module_index < stripe_module_count && pattern_row) {
-                        u8 module_bit = pattern_row[module_index];
-                        if (module_bit) {
-                            rgb[0] = footer_text_rgb[0];
-                            rgb[1] = footer_text_rgb[1];
-                            rgb[2] = footer_text_rgb[2];
-                        } else {
-                            rgb[0] = footer_background_rgb[0];
-                            rgb[1] = footer_background_rgb[1];
-                            rgb[2] = footer_background_rgb[2];
-                        }
+                        module_bit = pattern_row[module_index];
+                    } else {
+                        inside_stripe = false;
                     }
+                }
+                if (inside_stripe) {
+                    if (module_bit) {
+                        rgb[0] = footer_text_rgb[0];
+                        rgb[1] = footer_text_rgb[1];
+                        rgb[2] = footer_text_rgb[2];
+                    } else {
+                        rgb[0] = footer_background_rgb[0];
+                        rgb[1] = footer_background_rgb[1];
+                        rgb[2] = footer_background_rgb[2];
+                    }
+                } else if (text_pixel) {
+                    rgb[0] = footer_text_rgb[0];
+                    rgb[1] = footer_text_rgb[1];
+                    rgb[2] = footer_text_rgb[2];
                 }
             }
             for (u8 channel = 0u; channel < 3u; ++channel) {
@@ -19648,7 +19951,7 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
             return false;
         }
         data_height_pixels = footer_layout.data_height_pixels;
-        if (data_height_pixels >= height_pixels) {
+        if (footer_layout.stripe_height_pixels > 0u && data_height_pixels >= height_pixels) {
             console_line(2, "encode: footer layout would drop the barcode footer");
             return false;
         }
@@ -19822,25 +20125,22 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                           local)) {
             return false;
         }
-        if (local.page_count == 1u) {
-            u64 bits_remaining = (local.bits_per_page > local.frame_bits) ? (local.bits_per_page - local.frame_bits) : 0u;
-            if (best_ratio < 0.0 || bits_remaining < best_bits_needed ||
-                (bits_remaining == best_bits_needed && local.ratio < best_ratio)) {
-                best_ratio = local.ratio;
-                best_block_data = local.block_data;
-                best_parity = local.parity;
-                best_frame_bits = local.frame_bits;
-                best_bits_needed = bits_remaining;
-                best_page_count = local.page_count;
-            }
+        u64 bits_remaining = (local.bits_per_page > local.frame_bits) ? (local.bits_per_page - local.frame_bits) : 0u;
+        if (best_ratio < 0.0 ||
+            local.page_count < best_page_count ||
+            (local.page_count == best_page_count && bits_remaining < best_bits_needed) ||
+            (local.page_count == best_page_count && bits_remaining == best_bits_needed && local.ratio < best_ratio)) {
+            best_ratio = local.ratio;
+            best_block_data = local.block_data;
+            best_parity = local.parity;
+            best_frame_bits = local.frame_bits;
+            best_bits_needed = bits_remaining;
+            best_page_count = local.page_count;
         }
         candidate = local;
         return true;
     };
     if (!try_candidate(search_low)) {
-        return false;
-    }
-    if (candidate.page_count != 1u) {
         return false;
     }
     for (u32 iteration = 0u; iteration < 64u; ++iteration) {
@@ -19858,17 +20158,19 @@ static bool find_best_ecc_fill(usize payload_bytes,
             search_high = mid;
             continue;
         }
-        if (candidate.page_count == 1u) {
-            u64 bits_remaining = (candidate.bits_per_page > candidate.frame_bits) ? (candidate.bits_per_page - candidate.frame_bits) : 0u;
-            if (best_ratio < 0.0 || bits_remaining < best_bits_needed ||
-                (bits_remaining == best_bits_needed && candidate.ratio < best_ratio)) {
-                best_ratio = candidate.ratio;
-                best_block_data = candidate.block_data;
-                best_parity = candidate.parity;
-                best_frame_bits = candidate.frame_bits;
-                best_bits_needed = bits_remaining;
-                best_page_count = candidate.page_count;
-            }
+        u64 bits_remaining = (candidate.bits_per_page > candidate.frame_bits) ? (candidate.bits_per_page - candidate.frame_bits) : 0u;
+        if (best_ratio < 0.0 ||
+            candidate.page_count < best_page_count ||
+            (candidate.page_count == best_page_count && bits_remaining < best_bits_needed) ||
+            (candidate.page_count == best_page_count && bits_remaining == best_bits_needed && candidate.ratio < best_ratio)) {
+            best_ratio = candidate.ratio;
+            best_block_data = candidate.block_data;
+            best_parity = candidate.parity;
+            best_frame_bits = candidate.frame_bits;
+            best_bits_needed = bits_remaining;
+            best_page_count = candidate.page_count;
+        }
+        if (candidate.page_count <= 1u) {
             search_low = mid;
         } else {
             search_high = mid;
@@ -20807,17 +21109,41 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
     page.metadata.data = 0;
     page.metadata.size = 0u;
     page.metadata.cursor = 0u;
+
+    FooterStripe::Values stripe_values = {};
+    bool stripe_available = false;
+    if (width_value <= 0xFFFFFFFFull && height_value <= 0xFFFFFFFFull) {
+        stripe_available = FooterStripe::decode(FooterStripe::SPEC_V2,
+                                                pixel_data.data,
+                                                (u32)width_value,
+                                                (u32)height_value,
+                                                stripe_values);
+        if (!stripe_available) {
+            stripe_available = FooterStripe::decode(FooterStripe::SPEC_V1,
+                                                    pixel_data.data,
+                                                    (u32)width_value,
+                                                    (u32)height_value,
+                                                    stripe_values);
+        }
+    }
+    if (stripe_available) {
+        page.metadata.has_footer_stripe = true;
+        page.metadata.footer_stripe_values = stripe_values;
+        apply_footer_stripe_metadata(page.metadata, stripe_values);
+    }
+
     byte_buffer_move(page.pixels, pixel_data);
     page.width = (u32)width_value;
     page.height = (u32)height_value;
+
     u32 footer_rows = 0u;
-    if (state.has_footer_rows) {
-        if (state.footer_rows_value > height_value) {
+    if (page.metadata.has_footer_rows) {
+        if (page.metadata.footer_rows_value > height_value) {
             console_write(2, "overlay: footer metadata exceeds image height in ");
             console_line(2, path);
             return false;
         }
-        footer_rows = (u32)state.footer_rows_value;
+        footer_rows = (u32)page.metadata.footer_rows_value;
     }
     if (footer_rows > page.height) {
         footer_rows = page.height;
@@ -22598,9 +22924,15 @@ retry_decode:
             }
             ++expected_page_index;
         }
-        if (aggregate_state.has_page_count && aggregate_state.page_count_value != (u64)file_count) {
-            console_line(2, "decode: page count metadata mismatch");
-            return 1;
+        if (aggregate_state.has_page_count) {
+            u64 advertised_pages = aggregate_state.page_count_value;
+            if (file_count > advertised_pages) {
+                console_line(2, "decode: page count metadata mismatch");
+                return 1;
+            }
+            if (file_count != advertised_pages && debug_logging_enabled()) {
+                console_line(2, "debug: decoding subset of pages; skipping page count check");
+            }
         }
         const u8* frame_data = frame_aggregator.data();
         u64 frame_bit_total = frame_aggregator.bit_size();
@@ -22796,6 +23128,35 @@ retry_decode:
         return 1;
     }
     if (!unpack_archive_to_directory(decoder.payload, output_dir)) {
+        if (output_dir) {
+            // Fall back to emitting the raw payload (even if empty) when archive headers are missing.
+            char path_buffer[4096];
+            usize dir_len = ascii_length(output_dir);
+            const char* filename = "payload.bin";
+            usize file_len = (usize)sizeof("payload.bin") - 1u;
+            bool need_sep = (dir_len > 0u) && (output_dir[dir_len - 1u] != '/' && output_dir[dir_len - 1u] != '\\');
+            usize total_len = dir_len + (need_sep ? 1u : 0u) + file_len;
+            if (total_len < sizeof(path_buffer)) {
+                usize cursor = 0u;
+                for (usize i = 0u; i < dir_len; ++i) {
+                    char c = output_dir[i];
+                    if (c == '\\') {
+                        c = '/';
+                    }
+                    path_buffer[cursor++] = c;
+                }
+                if (need_sep) {
+                    path_buffer[cursor++] = '/';
+                }
+                for (usize i = 0u; i < file_len; ++i) {
+                    path_buffer[cursor++] = filename[i];
+                }
+                path_buffer[cursor] = '\0';
+                write_buffer_to_file(path_buffer, decoder.payload);
+            }
+            console_line(1, "decode: payload missing archive header, wrote raw payload.bin");
+            return 0;
+        }
         return 1;
     }
     console_write(1, "decode: wrote files to ");
