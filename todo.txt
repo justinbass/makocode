@@ -28,7 +28,6 @@
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 
 - Features
- - Fiducial markings appear in footer barcode when it's above the fbottom footer row due to collision with the title. Doesn't appear to affect decoding but it's incorrect.
  - Test to write every title character out, fix some (like g)
  - Some colored images seem to have 2 pixels of whitespace above footer, below barcode
  - Improve overlay up to 50% ECC for each, including ignore.

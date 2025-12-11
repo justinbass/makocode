@@ -15081,15 +15081,23 @@ struct RotationEstimateCandidate {
                                               : 1.0;
             double* centers_x = 0;
             double* centers_y = 0;
+            u32 sample_height = height;
+            if (state.has_footer_rows && state.footer_rows_value < sample_height) {
+                sample_height -= (u32)state.footer_rows_value;
+            }
+            u64 expected_height_eff = expected_height;
+            if (state.has_footer_rows && expected_height_eff > state.footer_rows_value) {
+                expected_height_eff -= state.footer_rows_value;
+            }
             if (sample_fiducial_centers(pixel_data,
                                         width,
-                                        height,
+                                        sample_height,
                                         fiducial_columns,
                                         fiducial_rows,
                                         fiducial_margin,
                                         fiducial_size_pixels,
                                         expected_width,
-                                        expected_height,
+                                        expected_height_eff,
                                         centers_x,
                                         centers_y)) {
                 double rotation_degrees_est = 0.0;
@@ -15102,10 +15110,10 @@ struct RotationEstimateCandidate {
                                                                             fiducial_columns,
                                                                             fiducial_rows,
                                                                             expected_width,
-                                                                            expected_height,
+                                                                            expected_height_eff,
                                                                             fiducial_margin,
                                                                             width,
-                                                                            height,
+                                                                            sample_height,
                                                                             state,
                                                                             rotation_degrees_est,
                                                                             rotation_width_est,
@@ -17372,6 +17380,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      u32 grid_columns,
                                      u32 grid_rows,
                                      u32 margin_pixels,
+                                     u32 grid_height_limit,
                                      makocode::ByteBuffer& output) {
     if (!input.data || input.size == 0u) {
         return false;
@@ -17431,6 +17440,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     if (marker_size > width_px || marker_size > height_px) {
         return false;
     }
+    u32 draw_height = (grid_height_limit > 0u && grid_height_limit < height_px) ? grid_height_limit : height_px;
     state.has_fiducial_size = true;
     state.fiducial_size_value = marker_size;
     state.has_fiducial_columns = true;
@@ -17441,9 +17451,10 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     state.fiducial_margin_value = margin_pixels;
 
     u64 logical_width = width;
-    u64 logical_height = height;
+    u64 logical_height = (u64)draw_height;
+    // When clipping is requested, treat the clipped height as pure data area (no footer).
     u64 footer_rows_value = 0u;
-    if (state.has_footer_rows && state.footer_rows_value <= logical_height) {
+    if (grid_height_limit == 0u && state.has_footer_rows && state.footer_rows_value <= logical_height) {
         footer_rows_value = state.footer_rows_value;
     }
     u64 data_height = (logical_height >= footer_rows_value) ? (logical_height - footer_rows_value) : logical_height;
@@ -17454,9 +17465,9 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     double min_x = (margin_pixels < width_px) ? (double)margin_pixels : 0.0;
     double max_x = (width_px > margin_pixels) ? (double)(width_px - 1u - margin_pixels)
                                               : (width_px ? (double)(width_px - 1u) : 0.0);
-    double min_y = (margin_pixels < height_px) ? (double)margin_pixels : 0.0;
-    double max_y = (height_px > margin_pixels) ? (double)(height_px - 1u - margin_pixels)
-                                               : (height_px ? (double)(height_px - 1u) : 0.0);
+    double min_y = (margin_pixels < draw_height) ? (double)margin_pixels : 0.0;
+    double max_y = (draw_height > margin_pixels) ? (double)(draw_height - 1u - margin_pixels)
+                                                 : (draw_height ? (double)(draw_height - 1u) : 0.0);
     if (max_x < min_x) {
         max_x = min_x;
     }
@@ -17590,7 +17601,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
             int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
             for (u32 dy = 0u; dy < marker_size; ++dy) {
                 int pixel_y = start_y + (int)dy;
-                if (pixel_y < 0 || pixel_y >= (int)height_px) {
+                if (pixel_y < 0 || pixel_y >= (int)draw_height) {
                     continue;
                 }
                 for (u32 dx = 0u; dx < marker_size; ++dx) {
@@ -17707,8 +17718,11 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
     return true;
 }
 
+// Place the default fiducial grid. Optional data_height_pixels clips the grid
+// so markers stay above the footer stripe.
 static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
-                                        makocode::ByteBuffer& output) {
+                                        makocode::ByteBuffer& output,
+                                        u32 data_height_pixels = 0u) {
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
@@ -17730,10 +17744,14 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     if (max_x < min_x) {
         max_x = min_x;
     }
-    double min_y = (fiducial_margin < height_pixels) ? (double)fiducial_margin : 0.0;
-    double max_y = (height_pixels > fiducial_margin)
-                       ? (double)(height_pixels - 1u - fiducial_margin)
-                       : (height_pixels ? (double)(height_pixels - 1u) : 0.0);
+    u32 grid_height = height_pixels;
+    if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
+        grid_height = data_height_pixels;
+    }
+    double min_y = (fiducial_margin < grid_height) ? (double)fiducial_margin : 0.0;
+    double max_y = (grid_height > fiducial_margin)
+                       ? (double)(grid_height - 1u - fiducial_margin)
+                       : (grid_height ? (double)(grid_height - 1u) : 0.0);
     if (max_y < min_y) {
         max_y = min_y;
     }
@@ -17791,6 +17809,7 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                     fiducial_columns,
                                     fiducial_rows,
                                     fiducial_margin,
+                                    grid_height,
                                     output);
 }
 
@@ -17836,6 +17855,10 @@ static bool compute_fiducial_reservation(u32 width_pixels,
     if (marker_size == 0u) {
         return true;
     }
+    u32 draw_height = height_pixels;
+    if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
+        draw_height = data_height_pixels;
+    }
     u32 spacing = g_fiducial_defaults.spacing_pixels;
     if (spacing == 0u) {
         spacing = marker_size;
@@ -17848,10 +17871,10 @@ static bool compute_fiducial_reservation(u32 width_pixels,
     if (max_x < min_x) {
         max_x = min_x;
     }
-    double min_y = (margin < height_pixels) ? (double)margin : 0.0;
-    double max_y = (height_pixels > margin)
-                       ? (double)(height_pixels - 1u - margin)
-                       : (height_pixels ? (double)(height_pixels - 1u) : 0.0);
+    double min_y = (margin < draw_height) ? (double)margin : 0.0;
+    double max_y = (draw_height > margin)
+                       ? (double)(draw_height - 1u - margin)
+                       : (draw_height ? (double)(draw_height - 1u) : 0.0);
     if (max_y < min_y) {
         max_y = min_y;
     }
@@ -17916,7 +17939,7 @@ static bool compute_fiducial_reservation(u32 width_pixels,
             int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
             for (u32 dy = 0u; dy < marker_size; ++dy) {
                 int pixel_y = start_y + (int)dy;
-                if (pixel_y < 0 || pixel_y >= (int)height_pixels) {
+                if (pixel_y < 0 || pixel_y >= (int)draw_height) {
                     continue;
                 }
                 bool within_data = ((u32)pixel_y < data_height_pixels);
@@ -20808,7 +20831,8 @@ static int command_encode(int arg_count, char** args) {
            return 1;
        }
         makocode::ByteBuffer fiducial_page;
-        if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
+        // Clip fiducials to the data area so they don't land on the footer stripe.
+        if (!apply_default_fiducial_grid(page_output, fiducial_page, footer_layout.data_height_pixels)) {
             console_line(2, "encode: failed to embed fiducial grid");
             return 1;
         }
@@ -20865,7 +20889,8 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             makocode::ByteBuffer fiducial_page;
-            if (!apply_default_fiducial_grid(page_output, fiducial_page)) {
+            // Clip fiducials to the data area so they don't land on the footer stripe.
+            if (!apply_default_fiducial_grid(page_output, fiducial_page, footer_layout.data_height_pixels)) {
                 console_line(2, "encode: failed to embed fiducial grid");
                 return 1;
             }
@@ -21193,6 +21218,10 @@ static bool build_overlay_mask(const OverlayPage& page,
     if (marker_size == 0u) {
         return true;
     }
+    u32 draw_height = page.height;
+    if (page.data_height > 0u && page.data_height < page.height) {
+        draw_height = page.data_height;
+    }
     u32 margin = g_fiducial_defaults.margin_pixels;
     if (page.metadata.has_fiducial_margin && page.metadata.fiducial_margin_value <= 0xFFFFFFFFull) {
         margin = (u32)page.metadata.fiducial_margin_value;
@@ -21204,10 +21233,10 @@ static bool build_overlay_mask(const OverlayPage& page,
     if (max_x < min_x) {
         max_x = min_x;
     }
-    double min_y = (margin < page.height) ? (double)margin : 0.0;
-    double max_y = (page.height > margin)
-                       ? (double)(page.height - 1u - margin)
-                       : (page.height ? (double)(page.height - 1u) : 0.0);
+    double min_y = (margin < draw_height) ? (double)margin : 0.0;
+    double max_y = (draw_height > margin)
+                       ? (double)(draw_height - 1u - margin)
+                       : (draw_height ? (double)(draw_height - 1u) : 0.0);
     if (max_y < min_y) {
         max_y = min_y;
     }
@@ -21269,7 +21298,7 @@ static bool build_overlay_mask(const OverlayPage& page,
             int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
             for (u32 dy = 0u; dy < marker_size; ++dy) {
                 int pixel_y = start_y + (int)dy;
-                if (pixel_y < 0 || pixel_y >= (int)page.height) {
+                if (pixel_y < 0 || pixel_y >= (int)draw_height) {
                     continue;
                 }
                 bool within_data = ((u32)pixel_y < page.data_height);
