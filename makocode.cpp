@@ -10495,7 +10495,6 @@ namespace FooterStripe {
             }
             bool left_ok = capture_stripe(spec, pixels, width, height, stripe_top, left_start, left_bits);
             ByteBuffer right_bits;
-            Values right_values = {};
             bool right_ok = false;
             if (right_start != left_start) {
                 if (decode_at(spec, pixels, width, height, right_start, stripe_top, values)) {
@@ -17217,31 +17216,6 @@ static bool append_comment_list(makocode::ByteBuffer& buffer,
     return buffer.append_char('\n');
 }
 
-static bool append_comment_text(makocode::ByteBuffer& buffer,
-                                const char* tag,
-                                const char* text,
-                                usize length) {
-    if (!tag || !text || length == 0u) {
-        return false;
-    }
-    if (!buffer.append_char('#') ||
-        !buffer.append_char(' ') ||
-        !buffer.append_ascii(tag) ||
-        !buffer.append_char(' ')) {
-        return false;
-    }
-    for (usize i = 0u; i < length; ++i) {
-        char c = text[i];
-        if (c == '\r' || c == '\n') {
-            return false;
-        }
-        if (!buffer.append_char(c)) {
-            return false;
-        }
-    }
-    return buffer.append_char('\n');
-}
-
 static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
                                       u64 value,
                                       u32 width) {
@@ -23001,10 +22975,14 @@ retry_decode:
                                  aggregate_state.has_ecc_parity &&
                                  aggregate_state.has_ecc_block_count &&
                                  aggregate_state.has_ecc_original_bytes;
+    // Only surface the absence of ECC when the user explicitly requests debug
+    // logging; tests intentionally encode payloads without ECC and should not
+    // emit warnings during normal operation.
     if (have_metadata &&
         aggregate_state.has_ecc_flag &&
-        !aggregate_state.ecc_flag_value) {
-        console_line(2, "decode: warning: payload was encoded without ECC protection");
+        !aggregate_state.ecc_flag_value &&
+        debug_logging_enabled()) {
+        console_line(1, "decode: note: payload was encoded without ECC protection");
     }
     if (!bitstream_header_valid) {
         if (ecc_metadata_complete &&
