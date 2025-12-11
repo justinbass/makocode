@@ -16996,11 +16996,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
             return false;
         }
     }
-    if (state.has_ecc_original_bytes) {
-        if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", state.ecc_original_bytes_value)) {
-            return false;
-        }
-    }
     if (state.has_page_bits) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", state.page_bits_value)) {
             return false;
@@ -18037,9 +18032,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     if (ecc_summary && ecc_summary->enabled) {
         if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
-            return false;
-        }
-        if (!append_comment_number(output, "MAKOCODE_ECC_ORIGINAL_BYTES", ecc_summary->original_bytes)) {
             return false;
         }
     }

@@ -1,6 +1,4 @@
 - Decoding
- - Remove all headers from encoding, one by one and fix decoding for each one.
-  - # MAKOCODE_ECC_ORIGINAL_BYTES 33249
  - Add to footer stripe before removing:
   - # MAKOCODE_PALETTE
   - # MAKOCODE_OVERLAY_FRACTION 9/20
@@ -39,7 +37,7 @@
  - Invalid ECC should fail.
  - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions)!
  - Color channels non-base-2, works but slow
- - Interleave footer barcode with data grid to avoid needing it at all?
+ - Interleave footer barcode with data grid to avoid needing it at all? Or maybe a recovery mode to brute force guess it (exponentially difficult)
 
 - Finalize
  - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)
