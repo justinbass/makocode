@@ -1,6 +1,5 @@
 - Decoding
  - Remove all headers from encoding, one by one and fix decoding for each one.
-  - # MAKOCODE_ECC_PARITY 184
   - # MAKOCODE_ECC_BLOCK_COUNT 475
   - # MAKOCODE_ECC_ORIGINAL_BYTES 33249
  - Add to footer stripe before removing:
