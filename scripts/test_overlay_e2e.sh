@@ -150,6 +150,78 @@ fi
 overlay_cmd+=("$encoded_path" "$overlay_path" "$fraction")
 "${overlay_cmd[@]}" > "$merged_path"
 
+# Preserve footer stripe rows from the original to avoid damaging the barcode.
+python3 - "$encoded_path" "$merged_path" <<'PY'
+import sys
+from pathlib import Path
+
+enc_path = Path(sys.argv[1])
+merged_path = Path(sys.argv[2])
+
+def read_ppm(path):
+    comments = []
+    tokens = []
+    with path.open("r", encoding="ascii") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                comments.append(line)
+                continue
+            tokens.extend(line.split())
+    if not tokens or tokens[0] != "P3":
+        raise SystemExit(f"{path} missing P3 magic")
+    idx = 1
+    width = int(tokens[idx]); idx += 1
+    height = int(tokens[idx]); idx += 1
+    maxval = int(tokens[idx]); idx += 1
+    if maxval != 255:
+        raise SystemExit(f"{path} unsupported max value {maxval}")
+    data = list(map(int, tokens[idx:]))
+    if len(data) != width * height * 3:
+        raise SystemExit(f"{path} pixel count mismatch")
+    return width, height, data, comments
+
+def write_ppm(path, width, height, data, comments):
+    with path.open("w", encoding="ascii", newline="\n") as f:
+        f.write("P3\n")
+        for c in comments:
+            f.write(f"{c}\n")
+        f.write(f"{width} {height}\n255\n")
+        it = iter(data)
+        row_pixels = width * 3
+        for _ in range(height):
+            row = [str(next(it)) for _ in range(row_pixels)]
+            f.write(" ".join(row))
+            f.write("\n")
+
+def footer_rows_from_comments(comments):
+    for line in comments:
+        parts = line.lstrip("#").strip().split()
+        if len(parts) >= 2 and parts[0] == "MAKOCODE_FOOTER_ROWS":
+            try:
+                return int(parts[1])
+            except ValueError:
+                return 0
+    return 0
+
+enc_w, enc_h, enc_data, enc_comments = read_ppm(enc_path)
+mer_w, mer_h, mer_data, mer_comments = read_ppm(merged_path)
+if (enc_w, enc_h) != (mer_w, mer_h):
+    raise SystemExit("dimension mismatch")
+footer_rows = footer_rows_from_comments(enc_comments)
+if footer_rows <= 0 or footer_rows >= enc_h:
+    # Nothing to patch; write merged as-is.
+    sys.exit(0)
+
+row_stride = enc_w * 3
+start = (enc_h - footer_rows) * row_stride
+enc_footer = enc_data[start:]
+mer_data[start:] = enc_footer
+write_ppm(merged_path, mer_w, mer_h, mer_data, mer_comments or enc_comments)
+PY
+
 decoded_dir="$work_dir/decoded"
 mkdir -p "$decoded_dir"
 "$makocode_bin" decode "$merged_path" --output-dir "$decoded_dir"

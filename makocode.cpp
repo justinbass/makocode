@@ -9688,6 +9688,14 @@ struct FooterLayout {
           stripe_sentinel_modules(0u) {}
 };
 
+struct AffineTransform {
+    // 2x2 matrix (row-major) and translation
+    double a00, a01, a10, a11, tx, ty;
+
+    AffineTransform()
+        : a00(1.0), a01(0.0), a10(0.0), a11(1.0), tx(0.0), ty(0.0) {}
+};
+
 namespace FooterStripe {
     using namespace makocode;
     static const u32 ModulePitch = 2u;
@@ -10055,13 +10063,13 @@ namespace FooterStripe {
         return true;
     }
 
-static bool capture_module_row(const u8* pixels,
-                               u32 width,
-                               u32 height,
-                               u32 stripe_top,
-                               u32 start_column,
-                               u32 row_index,
-                               u8* row_storage) {
+    static bool capture_module_row(const u8* pixels,
+                                   u32 width,
+                                   u32 height,
+                                   u32 stripe_top,
+                                   u32 start_column,
+                                   u32 row_index,
+                                   u8* row_storage) {
         u32 module_pitch = ModulePitch;
         u32 sample_row = stripe_top + row_index * module_pitch + (module_pitch / 2u);
         if (sample_row >= height) {
@@ -10079,6 +10087,114 @@ static bool capture_module_row(const u8* pixels,
             usize pixel_index = ((usize)sample_row * (usize)width + (usize)sample_column) * 3u;
             u32 value = (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
             brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
+        }
+        u32 background_sum = 0u;
+        u32 background_count = 0u;
+        auto add_background = [&](u32 module_idx) {
+            if (module_idx < ModuleCount) {
+                background_sum += brightness[module_idx];
+                ++background_count;
+            }
+        };
+        for (u32 i = 0u; i < QuietModules; ++i) {
+            add_background(i);
+        }
+        u32 trailing_start = QuietModules + GuardModules + MaxRowDataBits + GuardModules;
+        for (u32 i = 0u; i < QuietModules; ++i) {
+            add_background(trailing_start + i);
+        }
+        auto guard_bit = [](u32 idx) -> u8 {
+            if (idx < BarkerModules) return Barker11[idx];
+            idx -= BarkerModules;
+            if (idx < TimingModules) return TimingPattern[idx];
+            return 0u;
+        };
+        u32 guard_sum = 0u;
+        u32 guard_count = 0u;
+        u32 guard_start_left = QuietModules;
+        u32 guard_start_right = QuietModules + GuardModules + MaxRowDataBits;
+        for (u32 i = 0u; i < GuardModules; ++i) {
+            if (guard_bit(i)) {
+                u32 pos_left = guard_start_left + i;
+                u32 pos_right = guard_start_right + i;
+                if (pos_left < ModuleCount) {
+                    guard_sum += brightness[pos_left];
+                    ++guard_count;
+                }
+                if (pos_right < ModuleCount) {
+                    guard_sum += brightness[pos_right];
+                    ++guard_count;
+                }
+            }
+        }
+        u32 threshold = 384u;
+        if (background_count > 0u && guard_count > 0u) {
+            u32 background_avg = background_sum / background_count;
+            u32 guard_avg = guard_sum / guard_count;
+            if (guard_avg < background_avg) {
+                threshold = (background_avg + guard_avg) / 2u;
+            } else if (background_avg > 0u) {
+                threshold = background_avg / 2u;
+            }
+        }
+        for (u32 index = 0u; index < ModuleCount; ++index) {
+            row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
+        }
+        return true;
+    }
+
+    static bool capture_module_row_affine(const u8* pixels,
+                                          u32 width,
+                                          u32 height,
+                                          const AffineTransform& affine,
+                                          double skew_y_pixels,
+                                          double skew_span,
+                                          double stripe_top_logical,
+                                          u32 start_column,
+                                          u32 row_index,
+                                          u8* row_storage) {
+        u32 module_pitch = ModulePitch;
+        double logical_y = stripe_top_logical + (double)row_index * (double)module_pitch + ((double)module_pitch * 0.5);
+        if (!row_storage) {
+            return false;
+        }
+        u16 brightness[ModuleCount];
+        for (u32 index = 0u; index < ModuleCount; ++index) {
+            double logical_x = (double)start_column + (double)index * (double)module_pitch + ((double)module_pitch * 0.5);
+            double sample_x = affine.a00 * logical_x + affine.a01 * logical_y + affine.tx;
+            double sample_y = affine.a10 * logical_x + affine.a11 * logical_y + affine.ty;
+            if (skew_span > 0.0 && skew_y_pixels != 0.0) {
+                double norm_col = sample_x / skew_span;
+                if (norm_col < 0.0) norm_col = 0.0;
+                if (norm_col > 1.0) norm_col = 1.0;
+                sample_y += skew_y_pixels * norm_col;
+            }
+            if (sample_x < 0.0) sample_x = 0.0;
+            if (sample_y < 0.0) sample_y = 0.0;
+            double max_x = (width > 0u) ? (double)(width - 1u) : 0.0;
+            double max_y = (height > 0u) ? (double)(height - 1u) : 0.0;
+            if (sample_x > max_x) sample_x = max_x;
+            if (sample_y > max_y) sample_y = max_y;
+            unsigned x0 = (unsigned)floor(sample_x);
+            unsigned y0 = (unsigned)floor(sample_y);
+            unsigned x1 = (x0 + 1u < width) ? (x0 + 1u) : x0;
+            unsigned y1 = (y0 + 1u < height) ? (y0 + 1u) : y0;
+            double fx = sample_x - (double)x0;
+            double fy = sample_y - (double)y0;
+            usize idx00 = ((usize)y0 * (usize)width + (usize)x0) * 3u;
+            usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
+            usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;
+            usize idx11 = ((usize)y1 * (usize)width + (usize)x1) * 3u;
+            double rgb00 = (double)pixels[idx00] + (double)pixels[idx00 + 1u] + (double)pixels[idx00 + 2u];
+            double rgb10 = (double)pixels[idx10] + (double)pixels[idx10 + 1u] + (double)pixels[idx10 + 2u];
+            double rgb01 = (double)pixels[idx01] + (double)pixels[idx01 + 1u] + (double)pixels[idx01 + 2u];
+            double rgb11 = (double)pixels[idx11] + (double)pixels[idx11 + 1u] + (double)pixels[idx11 + 2u];
+            double top = rgb00 + (rgb10 - rgb00) * fx;
+            double bottom = rgb01 + (rgb11 - rgb01) * fx;
+            double value = top + (bottom - top) * fy;
+            if (value < 0.0) value = 0.0;
+            if (value > 765.0) value = 765.0;
+            brightness[index] = (u16)(value + 0.5);
         }
         u32 background_sum = 0u;
         u32 background_count = 0u;
@@ -10158,6 +10274,7 @@ static bool capture_module_row(const u8* pixels,
                           u32 width,
                           u32 height,
                           u32 start_column,
+                          u32 stripe_top,
                           Values& values) {
         if (width < PixelWidth) {
             return false;
@@ -10165,7 +10282,9 @@ static bool capture_module_row(const u8* pixels,
         if (height < GapPixels + Rows * ModulePitch) {
             return false;
         }
-        u32 stripe_top = height - Rows * ModulePitch;
+        if (stripe_top + Rows * ModulePitch > height) {
+            return false;
+        }
         ByteBuffer module_bits;
         if (!capture_stripe(pixels, width, height, stripe_top, start_column, module_bits)) {
             return false;
@@ -10179,11 +10298,76 @@ static bool capture_module_row(const u8* pixels,
     static bool decode(const u8* pixels, u32 width, u32 height, Values& values) {
         u32 left_start = 0u;
         u32 right_start = (width >= PixelWidth) ? (width - PixelWidth) : 0u;
-        if (decode_at(pixels, width, height, left_start, values)) {
+        u32 base_top = (height > Rows * ModulePitch) ? (height - Rows * ModulePitch) : 0u;
+        u32 max_offset = base_top;
+        if (max_offset > 256u) {
+            max_offset = 256u;
+        }
+        for (u32 offset = 0u; offset <= max_offset; offset += ModulePitch) {
+            if (base_top < offset) {
+                break;
+            }
+            u32 stripe_top = base_top - offset;
+            if (decode_at(pixels, width, height, left_start, stripe_top, values)) {
+                return true;
+            }
+            if (right_start != left_start) {
+                if (decode_at(pixels, width, height, right_start, stripe_top, values)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static bool decode_affine(const u8* pixels,
+                              u32 width,
+                              u32 height,
+                              const AffineTransform& affine,
+                              double skew_y_pixels,
+                              double skew_span,
+                              u32 logical_width,
+                              u32 logical_height,
+                              u32 footer_rows,
+                              Values& values) {
+        if (!pixels || width == 0u || height == 0u || logical_width == 0u || logical_height == 0u) {
+            return false;
+        }
+        u32 stripe_height = Rows * ModulePitch;
+        u32 stripe_top_logical = (logical_height > stripe_height) ? (logical_height - stripe_height) : 0u;
+        if (footer_rows > stripe_height && footer_rows < logical_height) {
+            stripe_top_logical = logical_height - footer_rows;
+        }
+        u32 left_start = 0u;
+        u32 right_start = (logical_width >= PixelWidth) ? (logical_width - PixelWidth) : 0u;
+        auto decode_at_affine = [&](u32 start_column) -> bool {
+            ByteBuffer module_bits;
+            usize total = (usize)ModuleCount * (usize)Rows;
+            if (!module_bits.ensure(total)) {
+                return false;
+            }
+            module_bits.size = total;
+            for (u32 row = 0u; row < Rows; ++row) {
+                if (!capture_module_row_affine(pixels,
+                                               width,
+                                               height,
+                                               affine,
+                                               skew_y_pixels,
+                                               skew_span,
+                                               (double)stripe_top_logical,
+                                               start_column,
+                                               row,
+                                               module_bits.data + (usize)row * ModuleCount)) {
+                    return false;
+                }
+            }
+            return decode_from_bits(module_bits, values);
+        };
+        if (decode_at_affine(left_start)) {
             return true;
         }
         if (right_start != left_start) {
-            if (decode_at(pixels, width, height, right_start, values)) {
+            if (decode_at_affine(right_start)) {
                 return true;
             }
         }
@@ -11456,14 +11640,6 @@ static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& b
 
 
 static const u32 MAX_FIDUCIAL_SUBGRID_ENTRIES = 1024u;
-
-struct AffineTransform {
-    // 2x2 matrix (row-major) and translation
-    double a00, a01, a10, a11, tx, ty;
-
-    AffineTransform()
-        : a00(1.0), a01(0.0), a10(0.0), a11(1.0), tx(0.0), ty(0.0) {}
-};
 
 struct PpmParserState {
     const u8* data;
@@ -14424,6 +14600,26 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         state.has_footer_stripe = true;
         state.footer_stripe_values = stripe_values;
         apply_footer_stripe_metadata(state, stripe_values);
+        if (debug_logging_enabled()) {
+            console_write(2, "debug footer stripe: ecc=");
+            console_write(2, stripe_values.ecc_enabled ? "1" : "0");
+            console_write(2, " block_data=");
+            char buf_block[32];
+            char buf_parity[32];
+            char buf_blocks[32];
+            char buf_orig[32];
+            u64_to_ascii((u64)stripe_values.ecc_block_data, buf_block, sizeof(buf_block));
+            u64_to_ascii((u64)stripe_values.ecc_parity, buf_parity, sizeof(buf_parity));
+            u64_to_ascii(stripe_values.ecc_block_count, buf_blocks, sizeof(buf_blocks));
+            u64_to_ascii(stripe_values.ecc_original_bytes, buf_orig, sizeof(buf_orig));
+            console_write(2, buf_block);
+            console_write(2, " parity=");
+            console_write(2, buf_parity);
+            console_write(2, " blocks=");
+            console_write(2, buf_blocks);
+            console_write(2, " orig=");
+            console_line(2, buf_orig);
+        }
     } else {
         console_line(1, "decode: footer stripe unreadable, falling back to PPM headers");
     }
@@ -15217,6 +15413,48 @@ struct RotationEstimateCandidate {
         console_write(2, dh_buf);
         console_write(2, " footer_rows=");
         console_line(2, foot_buf);
+    }
+    if (!state.has_footer_stripe && state.has_affine_transform) {
+        double skew_span = state.has_skew_src_width ? (double)state.skew_src_width_value : (double)width;
+        if (skew_span <= 0.0) {
+            skew_span = (double)width;
+        }
+        double skew_pixels = state.has_skew_y_pixels ? state.skew_y_pixels_value : 0.0;
+        FooterStripe::Values affine_stripe = {};
+        if (FooterStripe::decode_affine(pixel_data,
+                                        (u32)width,
+                                        (u32)height,
+                                        state.affine_transform,
+                                        skew_pixels,
+                                        skew_span,
+                                        (u32)logical_width,
+                                        (u32)logical_height,
+                                        (u32)footer_rows,
+                                        affine_stripe)) {
+            state.has_footer_stripe = true;
+            state.footer_stripe_values = affine_stripe;
+            apply_footer_stripe_metadata(state, affine_stripe);
+            if (debug_logging_enabled()) {
+                console_write(2, "debug footer stripe (affine): ecc=");
+                console_write(2, affine_stripe.ecc_enabled ? "1" : "0");
+                console_write(2, " block_data=");
+                char buf_block[32];
+                char buf_parity[32];
+                char buf_blocks[32];
+                char buf_orig[32];
+                u64_to_ascii((u64)affine_stripe.ecc_block_data, buf_block, sizeof(buf_block));
+                u64_to_ascii((u64)affine_stripe.ecc_parity, buf_parity, sizeof(buf_parity));
+                u64_to_ascii(affine_stripe.ecc_block_count, buf_blocks, sizeof(buf_blocks));
+                u64_to_ascii(affine_stripe.ecc_original_bytes, buf_orig, sizeof(buf_orig));
+                console_write(2, buf_block);
+                console_write(2, " parity=");
+                console_write(2, buf_parity);
+                console_write(2, " blocks=");
+                console_write(2, buf_blocks);
+                console_write(2, " orig=");
+                console_line(2, buf_orig);
+            }
+        }
     }
     makocode::ByteBuffer fiducial_mask;
     u64 reserved_data_pixels = 0u;
@@ -16856,11 +17094,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
             return false;
         }
     }
-    if (state.has_ecc_block_data) {
-        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", state.ecc_block_data_value)) {
-            return false;
-        }
-    }
     if (state.has_ecc_parity) {
         if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", state.ecc_parity_value)) {
             return false;
@@ -17911,9 +18144,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     if (ecc_summary && ecc_summary->enabled) {
-        if (!append_comment_number(output, "MAKOCODE_ECC_BLOCK_DATA", (u64)ecc_summary->block_data_symbols)) {
-            return false;
-        }
         if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
             return false;
         }

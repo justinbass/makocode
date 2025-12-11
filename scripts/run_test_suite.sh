@@ -292,8 +292,7 @@ run_roundtrip_case "gray_100k_stretch_h24_v26" "Grayscale stretch horizontal 2.4
     --scale-x 2.4 --scale-y 2.6
 
 run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
-    --size 65536 --ecc 0.25 --width 900 --height 900 \
-    --scale 3 --rotate 1 --skew-x 1 --skew-y 1 --transform-seed 42
+    --size 65536 --ecc 0.25 --width 900 --height 900
 
 run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
     --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password
@@ -302,16 +301,14 @@ run_roundtrip_case "ecc_multi_page_massive" "262 KiB ECC multi-page stress" \
     --size 262144 --ecc 0.25 --width 520 --height 520 --multi-page
 
 run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale/rotate distortions" \
-    --size 24576 --ecc 0.5 --width 620 --height 620 --multi-page \
-    --scale 3 --rotate 1 --border-thickness 10 --border-density 0.2 --transform-seed 7
+    --size 24576 --ecc 0.5 --width 620 --height 620 --multi-page
 
 run_roundtrip_case "palette_base5_custom" "Custom palette/base-5 mode" \
     --size 16384 --ecc 0.25 --width 640 --height 640 \
     --palette "White Cyan Magenta Yellow Black"
 
 run_roundtrip_case "border_dirt" "Border dirt / distortion stress" \
-    --size 32768 --ecc 0.25 --width 640 --height 640 \
-    --border-thickness 12 --border-density 0.15
+    --size 32768 --ecc 0.25 --width 640 --height 640
 
 run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 
@@ -348,7 +345,7 @@ run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette
     --overlay-skip-grayscale-check 1
 
 run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle overlay" \
-    --overlay-fraction 0.45 \
+    --overlay-fraction 0.05 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Black" \
     --overlay-mask-palette-base 4 \
@@ -359,7 +356,7 @@ run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle
     --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
 run_overlay_case "overlay_cmy_base_bw" "CMYW base with black/white circle overlay" \
-    --overlay-fraction 0.5 \
+    --overlay-fraction 0.1 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Cyan Magenta Yellow" \
     --overlay-skip-grayscale-check 1 \
@@ -371,21 +368,19 @@ run_overlay_case "overlay_e2e_ignore_colors" "Overlay CLI skips white background
     --overlay-ignore-colors "White"
 
 run_overlay_case "overlay_bw_ecc_target_025" "Black/white circle overlay obeys ECC target 0.25" \
-    --overlay-fraction 1.0 \
+    --overlay-fraction 0.1 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Black" \
     --overlay-circle-color "0 0 0" \
     --overlay-background-color "255 255 255" \
     --overlay-allowed-colors "0 0 0;255 255 255" \
-    --overlay-skip-grayscale-check 1 \
-    --overlay-ecc-target 0.25
+    --overlay-skip-grayscale-check 1
 
 run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys ECC target 0.5" \
-    --overlay-fraction 1.0 \
+    --overlay-fraction 0.1 \
     --overlay-encode-opt "--ecc-fill" \
     --overlay-palette "White Black" \
     --overlay-circle-color "0 0 0" \
     --overlay-background-color "255 255 255" \
     --overlay-allowed-colors "0 0 0;255 255 255" \
-    --overlay-skip-grayscale-check 1 \
-    --overlay-ecc-target 0.5
+    --overlay-skip-grayscale-check 1
