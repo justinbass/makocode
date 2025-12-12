@@ -1,6 +1,5 @@
 - Decoding
  - Add to footer stripe before removing:
-  - # MAKOCODE_OVERLAY_FRACTION 9/20
   - # MAKOCODE_PAGE_BITS 966104
   - # MAKOCODE_PAGE_WIDTH_PX 1000
   - # MAKOCODE_PAGE_HEIGHT_PX 1000
@@ -12,18 +11,16 @@
   - # MAKOCODE_FIDUCIAL_MARGIN 12
   - # MAKOCODE_SUBGRID_COL_OFFSETS 0 25 50 75 100 125 150 175 200 225 250 275 300 325 350 375 400 425 450 475 500 525 550 575 600 625 650 675 700 725 750 775 800 825 850 875 900 925 950 975 1000
   - # MAKOCODE_SUBGRID_ROW_OFFSETS 0 25 50 75 100 125 150 175 200 225 250 275 300 325 350 375 400 425 450 475 500 525 550 575 600 625 650 675 700 725 750 775 800 825 850 875 900 925 950 975 993
-   - Detect colors automatically in decoding, optionally write out color channel information in footer
-   - Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+ - Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
  - Small data roundtrip test, file contains just the string "0", and "makocode".
  - Remove entire page test, with high ECC
  - Wavy distortion test
  - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
  - Discolored paper (off-white) test
  - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
- - Encode ECC header or any basic data in footer in larger dots in first/last color (2-3x the regular dots). This makes it localized but less sensitive to certain kinds of damage. Footer could be optional if normal dots are kepts, it could be a backup. Or remove regular header and make footer mandatory.
-    - Also triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit.
-    - Footer could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
-    - Compress?
+ - Footer barcode compression
+ - Triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit.
+ - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
  - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
  - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
 
@@ -36,6 +33,7 @@
  - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions)!
  - Color channels non-base-2, works but slow
  - Interleave footer barcode with data grid to avoid needing it at all? Or maybe a recovery mode to brute force guess it (exponentially difficult)
+   - Detect colors automatically in decoding, optionally write out color channel information in footer
 
 - Finalize
  - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)
