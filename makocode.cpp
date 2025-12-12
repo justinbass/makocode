@@ -11130,45 +11130,49 @@ namespace FooterStripe {
                 if (idx < V3_TIMING_MODULES) return TimingPattern[idx];
                 return 0u;
             };
+            u32 background_sum = 0u;
+            u32 background_count = 0u;
+            auto add_background = [&](u32 module_idx) {
+                if (module_idx < V3_MODULE_COUNT) {
+                    background_sum += brightness[module_idx];
+                    ++background_count;
+                }
+            };
+            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
+                add_background(i);
+            }
+            u32 trailing_start = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES + V3_GUARD_MODULES;
+            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
+                add_background(trailing_start + i);
+            }
             u32 guard_start_left = V3_QUIET_MODULES;
             u32 guard_start_right = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES;
-            u16 min_b = 0xFFFFu;
-            u16 max_b = 0u;
-            for (u32 i = 0u; i < V3_MODULE_COUNT; ++i) {
-                if (brightness[i] < min_b) min_b = brightness[i];
-                if (brightness[i] > max_b) max_b = brightness[i];
-            }
-            if (min_b > max_b) {
-                return false;
-            }
-            u32 best_threshold = 384u;
-            u32 best_errors = 0xFFFFFFFFu;
-            u32 span = (u32)(max_b - min_b + 1u);
-            u32 steps = (span / 32u) + 1u;
-            if (steps < 8u) steps = 8u;
-            if (steps > 64u) steps = 64u;
-            for (u32 step = 0u; step < steps; ++step) {
-                u32 threshold = min_b + (step * span) / steps;
-                u32 guard_errors = 0u;
-                for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
+            u32 guard_sum = 0u;
+            u32 guard_count = 0u;
+            for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
+                if (guard_bit(i)) {
                     u32 pos_left = guard_start_left + i;
                     u32 pos_right = guard_start_right + i;
-                    u8 expected = guard_bit(i);
                     if (pos_left < V3_MODULE_COUNT) {
-                        u8 bit = (brightness[pos_left] < threshold) ? 1u : 0u;
-                        if (bit != expected) ++guard_errors;
+                        guard_sum += brightness[pos_left];
+                        ++guard_count;
                     }
                     if (pos_right < V3_MODULE_COUNT) {
-                        u8 bit = (brightness[pos_right] < threshold) ? 1u : 0u;
-                        if (bit != expected) ++guard_errors;
+                        guard_sum += brightness[pos_right];
+                        ++guard_count;
                     }
                 }
-                if (guard_errors < best_errors) {
-                    best_errors = guard_errors;
-                    best_threshold = threshold;
+            }
+            u32 threshold = 384u;
+            if (background_count > 0u && guard_count > 0u) {
+                u32 background_avg = background_sum / background_count;
+                u32 guard_avg = guard_sum / guard_count;
+                if (guard_avg < background_avg) {
+                    threshold = (background_avg + guard_avg) / 2u;
+                } else if (background_avg > 0u) {
+                    threshold = background_avg / 2u;
                 }
             }
-            u32 threshold = best_threshold;
             u8* row_storage = module_bits.data + (usize)row * V3_MODULE_COUNT;
             for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
                 row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
@@ -11293,83 +11297,114 @@ namespace FooterStripe {
     }
 
     static bool decode_v3(const u8* pixels, u32 width, u32 height, Values& values) {
-        const u32 module_pitch_x_candidates[] = {V3_MODULE_PITCH, 3u, 4u, 5u, 6u, 8u, 10u, 12u};
-        const u32 module_pitch_y_candidates[] = {V3_MODULE_PITCH, 3u, 4u, 5u, 6u, 8u, 10u, 12u};
-        u32 max_offset = height;
-        if (max_offset > 512u) {
-            max_offset = 512u;
+        if (!pixels || width == 0u || height == 0u) {
+            return false;
         }
-        for (u32 rows = 1u; rows <= V3_MAX_ROWS; ++rows) {
-            for (u32 mp_y_index = 0u; mp_y_index < (u32)(sizeof(module_pitch_y_candidates) / sizeof(module_pitch_y_candidates[0])); ++mp_y_index) {
-                u32 module_pitch_y = module_pitch_y_candidates[mp_y_index];
+
+        auto try_decode_at_pitch = [&](u32 module_pitch_x,
+                                       u32 module_pitch_y,
+                                       u32 max_offset,
+                                       u32 offset_step,
+                                       u32 max_starts,
+                                       const u32* start_candidates) -> bool {
+            if (module_pitch_x == 0u || module_pitch_y == 0u) {
+                return false;
+            }
+            if (offset_step == 0u) {
+                offset_step = 1u;
+            }
+            u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
+            if (pixel_width == 0u || pixel_width > width) {
+                return false;
+            }
+            ByteBuffer module_bits;
+            for (u32 rows = 1u; rows <= V3_MAX_ROWS; ++rows) {
                 u32 stripe_height_px = rows * module_pitch_y;
                 if (stripe_height_px == 0u || stripe_height_px > height) {
                     continue;
                 }
                 u32 base_top = (height > stripe_height_px) ? (height - stripe_height_px) : 0u;
-                for (u32 mp_x_index = 0u; mp_x_index < (u32)(sizeof(module_pitch_x_candidates) / sizeof(module_pitch_x_candidates[0])); ++mp_x_index) {
-                    u32 module_pitch_x = module_pitch_x_candidates[mp_x_index];
-                    u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
-                    if (pixel_width == 0u || pixel_width > width) {
-                        continue;
+                for (u32 offset = 0u; offset <= max_offset; offset += offset_step) {
+                    if (base_top < offset) {
+                        break;
                     }
-                    u32 left_start = 0u;
-                    u32 right_start = (width >= pixel_width) ? (width - pixel_width) : 0u;
-                    u32 center_start = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
-                    u32 start_limit = (width > pixel_width) ? (width - pixel_width) : 0u;
-                    u32 start_step = (module_pitch_x > 1u) ? module_pitch_x : 1u;
-                    u32 offset_step = (module_pitch_y > 1u) ? (module_pitch_y / 2u) : 1u;
-                    for (u32 offset = 0u; offset <= max_offset; offset += offset_step) {
-                        if (base_top < offset) {
-                            break;
+                    u32 stripe_top = base_top - offset;
+                    for (u32 i = 0u; i < max_starts; ++i) {
+                        u32 start = start_candidates[i];
+                        if (start + pixel_width > width) {
+                            continue;
                         }
-                        u32 stripe_top = base_top - offset;
-                        u32 start_candidates[64];
-                        u32 candidate_count = 0u;
-                        auto add_start = [&](u32 start) {
-                            if (start + pixel_width > width) {
-                                return;
-                            }
-                            for (u32 i = 0u; i < candidate_count; ++i) {
-                                if (start_candidates[i] == start) {
-                                    return;
-                                }
-                            }
-                            if (candidate_count < (u32)(sizeof(start_candidates) / sizeof(start_candidates[0]))) {
-                                start_candidates[candidate_count++] = start;
-                            }
-                        };
-                        add_start(left_start);
-                        add_start(center_start);
-                        add_start(right_start);
-                        for (int delta = -8; delta <= 8; ++delta) {
-                            i64 start = (i64)center_start + (i64)delta * (i64)start_step;
-                            if (start < 0) start = 0;
-                            if ((u32)start <= start_limit) {
-                                add_start((u32)start);
-                            }
-                        }
-                        for (u32 delta = 0u; delta <= 8u; ++delta) {
-                            u32 start = delta * start_step;
-                            if (start <= start_limit) {
-                                add_start(start);
-                            }
-                            if (start_limit >= delta * start_step) {
-                                add_start(start_limit - delta * start_step);
-                            }
-                        }
-                        for (u32 i = 0u; i < candidate_count; ++i) {
-                            u32 start = start_candidates[i];
-                            ByteBuffer module_bits;
-                            if (capture_stripe_v3(pixels, width, height, rows, stripe_top, start, module_pitch_x, module_pitch_y, module_bits) &&
-                                decode_from_bits_v3(module_bits, rows, values)) {
-                                return true;
-                            }
+                        if (capture_stripe_v3(pixels, width, height, rows, stripe_top, start, module_pitch_x, module_pitch_y, module_bits) &&
+                            decode_from_bits_v3(module_bits, rows, values)) {
+                            return true;
                         }
                     }
                 }
             }
+            return false;
+        };
+
+        // Fast path: assume unscaled V3 pitch and common left/center/right alignment.
+        {
+            const u32 module_pitch_x = V3_MODULE_PITCH;
+            const u32 module_pitch_y = V3_MODULE_PITCH;
+            const u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
+            if (pixel_width > 0u && pixel_width <= width) {
+                u32 starts[3];
+                starts[0] = 0u;
+                starts[1] = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
+                starts[2] = (width >= pixel_width) ? (width - pixel_width) : 0u;
+                u32 max_offset = height;
+                if (max_offset > 512u) max_offset = 512u;
+                if (try_decode_at_pitch(module_pitch_x, module_pitch_y, max_offset, V3_MODULE_PITCH, 3u, starts)) {
+                    return true;
+                }
+            }
         }
+
+        // Slow path (budgeted): try a small set of integer pitch candidates with a small alignment neighborhood.
+        // This is intentionally conservative to avoid pathological runtimes on images where the stripe is absent
+        // or badly distorted. More robust recovery is expected to occur later via affine-based decoding.
+        const u32 pitch_candidates[] = {3u, 4u, 5u, 6u, 8u, 10u, 12u};
+        u32 max_offset = height;
+        if (max_offset > 512u) max_offset = 512u;
+        if (max_offset > 128u) max_offset = 128u;
+
+        for (u32 py_i = 0u; py_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++py_i) {
+            u32 module_pitch_y = pitch_candidates[py_i];
+            for (u32 px_i = 0u; px_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++px_i) {
+                u32 module_pitch_x = pitch_candidates[px_i];
+                u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
+                if (pixel_width == 0u || pixel_width > width) {
+                    continue;
+                }
+                u32 center_start = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
+                u32 right_start = (width >= pixel_width) ? (width - pixel_width) : 0u;
+                u32 starts[9];
+                u32 start_count = 0u;
+                auto add_start = [&](u32 start) {
+                    for (u32 i = 0u; i < start_count; ++i) {
+                        if (starts[i] == start) return;
+                    }
+                    if (start_count < (u32)(sizeof(starts) / sizeof(starts[0]))) {
+                        starts[start_count++] = start;
+                    }
+                };
+                add_start(0u);
+                add_start(center_start);
+                add_start(right_start);
+                add_start((center_start > module_pitch_x) ? (center_start - module_pitch_x) : 0u);
+                add_start(center_start + module_pitch_x);
+                add_start((center_start > 2u * module_pitch_x) ? (center_start - 2u * module_pitch_x) : 0u);
+                add_start(center_start + 2u * module_pitch_x);
+
+                u32 offset_step = (module_pitch_y > 1u) ? (module_pitch_y / 2u) : 1u;
+                if (try_decode_at_pitch(module_pitch_x, module_pitch_y, max_offset, offset_step, start_count, starts)) {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
