@@ -13592,40 +13592,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char page_bits_tag[] = "MAKOCODE_PAGE_BITS";
-    const usize page_bits_tag_len = (usize)sizeof(page_bits_tag) - 1u;
-    if ((length - index) >= page_bits_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < page_bits_tag_len; ++i) {
-            if (comment[index + i] != page_bits_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += page_bits_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_bits = true;
-                    state.page_bits_value = value;
-                }
-            }
-            return;
-        }
-    }
     index = 0u;
     while (index < length) {
         char c = comment[index];
@@ -16533,12 +16499,7 @@ struct RotationEstimateCandidate {
         reserved_bits = capacity_without_reserve;
     }
     u64 capacity_with_reserve = capacity_without_reserve - reserved_bits;
-    bool skip_reserved_pixels = false;
-    if (reserved_data_pixels > 0u && state.has_page_bits) {
-        if (capacity_with_reserve > 0u && state.page_bits_value <= capacity_with_reserve) {
-            skip_reserved_pixels = true;
-        }
-    }
+    bool skip_reserved_pixels = (reserved_data_pixels > 0u);
     makocode::ByteBuffer custom_digits;
     u64 digits_target = 0u;
     if (use_custom_palette) {
@@ -18112,11 +18073,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
             return false;
         }
     }
-    if (state.has_page_bits) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", state.page_bits_value)) {
-            return false;
-        }
-    }
     if (state.has_page_width_pixels) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", state.page_width_pixels_value)) {
             return false;
@@ -19243,9 +19199,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
             return false;
         }
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_BITS", bits_per_page)) {
-        return false;
     }
     if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels)) {
         return false;

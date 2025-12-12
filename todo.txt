@@ -1,6 +1,5 @@
 - Decoding
  - Add to footer stripe before removing:
-  - # MAKOCODE_PAGE_BITS 966104
   - # MAKOCODE_PAGE_WIDTH_PX 1000
   - # MAKOCODE_PAGE_HEIGHT_PX 1000
   - # MAKOCODE_FOOTER_ROWS 7
