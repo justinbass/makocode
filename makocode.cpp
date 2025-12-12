@@ -9594,6 +9594,36 @@ static bool compute_page_dimensions(const ImageMappingConfig& config,
     return true;
 }
 
+static u64 estimate_square_page_from_image(u64 image_width, u64 image_height) {
+    if (image_width == 0u || image_height == 0u) {
+        return 0u;
+    }
+    double best_score = 1e9;
+    u64 best_guess = 0u;
+    for (u64 candidate = 400u; candidate <= 3200u; candidate += 10u) {
+        double sx = (double)image_width / (double)candidate;
+        double sy = (double)image_height / (double)candidate;
+        if (sx < 1.05 || sy < 1.05 || sx > 6.0 || sy > 6.0) {
+            continue;
+        }
+        double diff = sx - sy;
+        if (diff < 0.0) diff = -diff;
+        if (diff > 0.6) {
+            continue;
+        }
+        double frac_x = sx - (double)((u64)sx);
+        if (frac_x < 0.0) frac_x = -frac_x;
+        double frac_y = sy - (double)((u64)sy);
+        if (frac_y < 0.0) frac_y = -frac_y;
+        double score = diff + (frac_x + frac_y) * 0.05;
+        if (score < best_score) {
+            best_score = score;
+            best_guess = candidate;
+        }
+    }
+    return best_guess;
+}
+
 static const u32 FOOTER_BASE_GLYPH_WIDTH  = 5u;
 static const u32 FOOTER_BASE_GLYPH_HEIGHT = 8u;
 
@@ -9778,7 +9808,12 @@ namespace FooterStripe {
 
     static u32 footer_v3_payload_bytes(u32 palette_length, bool has_palette) {
         // Payload fields only (page/ecc/palette data). Header size is fixed separately.
-        const u32 fixed_payload_bits = 24u + 20u + 20u + 8u + 1u + 10u + 10u + 20u + 28u; // 141 bits
+        // Fields: page_bits(24) + page_count(20) + page_index(20) + footer_rows(8) +
+        //         ecc_flag(1) + ecc_block_data(10) + ecc_parity(10) +
+        //         ecc_block_count(20) + ecc_original_bytes(28) +
+        //         page_width_px(16) + page_height_px(16) +
+        //         palette bytes (optional, length * 8)
+        const u32 fixed_payload_bits = 24u + 20u + 20u + 8u + 1u + 10u + 10u + 20u + 28u + 16u + 16u; // 173 bits
         u64 bits = (u64)fixed_payload_bits;
         if (has_palette) {
             bits += (u64)palette_length * 8ull;
@@ -9847,6 +9882,8 @@ namespace FooterStripe {
         u64 page_bits;
         u64 page_count;
         u64 page_index;
+        u32 page_width_pixels;
+        u32 page_height_pixels;
         u64 footer_rows;
         bool ecc_enabled;
         u16 ecc_block_data;
@@ -9957,6 +9994,8 @@ namespace FooterStripe {
         if (!write_limited(values.ecc_parity, 10u, "ecc_parity")) return false;
         if (!write_limited(values.ecc_block_count, 20u, "ecc_block_count")) return false;
         if (!write_limited(values.ecc_original_bytes, 28u, "ecc_original_bytes")) return false;
+        if (!write_limited(values.page_width_pixels, 16u, "page_width_px")) return false;
+        if (!write_limited(values.page_height_pixels, 16u, "page_height_px")) return false;
         // Palette bytes inline
         if (values.has_palette && values.palette_length > 0u) {
             for (u32 i = 0u; i < values.palette_length; ++i) {
@@ -10514,7 +10553,7 @@ namespace FooterStripe {
                 }
             }
         }
-        if (guard_errors > rows * 4u) {
+        if (guard_errors > rows * 80u) {
             if (debug_logging_enabled()) {
                 console_write(2, "debug v3 stripe: guard errors rows=");
                 char row_buf[8];
@@ -10705,6 +10744,8 @@ namespace FooterStripe {
         u64 ecc_parity = reader.read_bits(10u);
         u64 ecc_block_count = reader.read_bits(20u);
         u64 ecc_original_bytes = reader.read_bits(28u);
+        u64 page_width_px = reader.read_bits(16u);
+        u64 page_height_px = reader.read_bits(16u);
         if (reader.failed) {
             return false;
         }
@@ -10733,6 +10774,8 @@ namespace FooterStripe {
         values.ecc_parity = (u16)ecc_parity;
         values.ecc_block_count = ecc_block_count;
         values.ecc_original_bytes = ecc_original_bytes;
+        values.page_width_pixels = (u32)page_width_px;
+        values.page_height_pixels = (u32)page_height_px;
         values.has_palette = has_palette;
         values.palette_base = (u8)pal_base;
         values.palette_length = (u16)pal_length;
@@ -11055,6 +11098,8 @@ namespace FooterStripe {
                                   u32 row_count,
                                   u32 stripe_top,
                                   u32 start_column,
+                                  u32 module_pitch_x,
+                                  u32 module_pitch_y,
                                   ByteBuffer& module_bits) {
         usize total = (usize)V3_MODULE_COUNT * (usize)row_count;
         if (row_count == 0u || row_count > V3_MAX_ROWS) {
@@ -11065,13 +11110,13 @@ namespace FooterStripe {
         }
         module_bits.size = total;
         for (u32 row = 0u; row < row_count; ++row) {
-            u32 sample_row = stripe_top + row * V3_MODULE_PITCH + (V3_MODULE_PITCH / 2u);
+            u32 sample_row = stripe_top + row * module_pitch_y + (module_pitch_y / 2u);
             if (sample_row >= height) {
                 return false;
             }
             u16 brightness[MAX_STRIPE_MODULES];
             for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-                u32 sample_column = start_column + index * V3_MODULE_PITCH + (V3_MODULE_PITCH / 2u);
+                u32 sample_column = start_column + index * module_pitch_x + (module_pitch_x / 2u);
                 if (sample_column >= width) {
                     return false;
                 }
@@ -11079,55 +11124,51 @@ namespace FooterStripe {
                 u32 value = (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
                 brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
             }
-            u32 background_sum = 0u;
-            u32 background_count = 0u;
-            auto add_background = [&](u32 module_idx) {
-                if (module_idx < V3_MODULE_COUNT) {
-                    background_sum += brightness[module_idx];
-                    ++background_count;
-                }
-            };
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                add_background(i);
-            }
-            u32 trailing_start = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES + V3_GUARD_MODULES;
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                add_background(trailing_start + i);
-            }
             auto guard_bit = [&](u32 idx) -> u8 {
                 if (idx < V3_BARKER_MODULES) return Barker11[idx];
                 idx -= V3_BARKER_MODULES;
                 if (idx < V3_TIMING_MODULES) return TimingPattern[idx];
                 return 0u;
             };
-            u32 guard_sum = 0u;
-            u32 guard_count = 0u;
             u32 guard_start_left = V3_QUIET_MODULES;
             u32 guard_start_right = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES;
-            for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
-                if (guard_bit(i)) {
+            u16 min_b = 0xFFFFu;
+            u16 max_b = 0u;
+            for (u32 i = 0u; i < V3_MODULE_COUNT; ++i) {
+                if (brightness[i] < min_b) min_b = brightness[i];
+                if (brightness[i] > max_b) max_b = brightness[i];
+            }
+            if (min_b > max_b) {
+                return false;
+            }
+            u32 best_threshold = 384u;
+            u32 best_errors = 0xFFFFFFFFu;
+            u32 span = (u32)(max_b - min_b + 1u);
+            u32 steps = (span / 32u) + 1u;
+            if (steps < 8u) steps = 8u;
+            if (steps > 64u) steps = 64u;
+            for (u32 step = 0u; step < steps; ++step) {
+                u32 threshold = min_b + (step * span) / steps;
+                u32 guard_errors = 0u;
+                for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
                     u32 pos_left = guard_start_left + i;
                     u32 pos_right = guard_start_right + i;
+                    u8 expected = guard_bit(i);
                     if (pos_left < V3_MODULE_COUNT) {
-                        guard_sum += brightness[pos_left];
-                        ++guard_count;
+                        u8 bit = (brightness[pos_left] < threshold) ? 1u : 0u;
+                        if (bit != expected) ++guard_errors;
                     }
                     if (pos_right < V3_MODULE_COUNT) {
-                        guard_sum += brightness[pos_right];
-                        ++guard_count;
+                        u8 bit = (brightness[pos_right] < threshold) ? 1u : 0u;
+                        if (bit != expected) ++guard_errors;
                     }
                 }
-            }
-            u32 threshold = 384u;
-            if (background_count > 0u && guard_count > 0u) {
-                u32 background_avg = background_sum / background_count;
-                u32 guard_avg = guard_sum / guard_count;
-                if (guard_avg < background_avg) {
-                    threshold = (background_avg + guard_avg) / 2u;
-                } else if (background_avg > 0u) {
-                    threshold = background_avg / 2u;
+                if (guard_errors < best_errors) {
+                    best_errors = guard_errors;
+                    best_threshold = threshold;
                 }
             }
+            u32 threshold = best_threshold;
             u8* row_storage = module_bits.data + (usize)row * V3_MODULE_COUNT;
             for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
                 row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
@@ -11252,40 +11293,80 @@ namespace FooterStripe {
     }
 
     static bool decode_v3(const u8* pixels, u32 width, u32 height, Values& values) {
-        u32 pixel_width = V3_MODULE_COUNT * V3_MODULE_PITCH;
-        u32 left_start = 0u;
-        u32 right_start = (width >= pixel_width) ? (width - pixel_width) : 0u;
-        u32 center_start = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
+        const u32 module_pitch_x_candidates[] = {V3_MODULE_PITCH, 3u, 4u, 5u, 6u, 8u, 10u, 12u};
+        const u32 module_pitch_y_candidates[] = {V3_MODULE_PITCH, 3u, 4u, 5u, 6u, 8u, 10u, 12u};
         u32 max_offset = height;
         if (max_offset > 512u) {
             max_offset = 512u;
         }
         for (u32 rows = 1u; rows <= V3_MAX_ROWS; ++rows) {
-            u32 stripe_height_px = rows * V3_MODULE_PITCH;
-            if (stripe_height_px == 0u || stripe_height_px > height) {
-                continue;
-            }
-            u32 base_top = (height > stripe_height_px) ? (height - stripe_height_px) : 0u;
-            for (u32 offset = 0u; offset <= max_offset; offset += V3_MODULE_PITCH) {
-                if (base_top < offset) {
-                    break;
+            for (u32 mp_y_index = 0u; mp_y_index < (u32)(sizeof(module_pitch_y_candidates) / sizeof(module_pitch_y_candidates[0])); ++mp_y_index) {
+                u32 module_pitch_y = module_pitch_y_candidates[mp_y_index];
+                u32 stripe_height_px = rows * module_pitch_y;
+                if (stripe_height_px == 0u || stripe_height_px > height) {
+                    continue;
                 }
-                u32 stripe_top = base_top - offset;
-                ByteBuffer module_bits;
-                if (capture_stripe_v3(pixels, width, height, rows, stripe_top, left_start, module_bits)) {
-                    if (decode_from_bits_v3(module_bits, rows, values)) {
-                        return true;
+                u32 base_top = (height > stripe_height_px) ? (height - stripe_height_px) : 0u;
+                for (u32 mp_x_index = 0u; mp_x_index < (u32)(sizeof(module_pitch_x_candidates) / sizeof(module_pitch_x_candidates[0])); ++mp_x_index) {
+                    u32 module_pitch_x = module_pitch_x_candidates[mp_x_index];
+                    u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
+                    if (pixel_width == 0u || pixel_width > width) {
+                        continue;
                     }
-                }
-                if (right_start != left_start &&
-                    capture_stripe_v3(pixels, width, height, rows, stripe_top, right_start, module_bits) &&
-                    decode_from_bits_v3(module_bits, rows, values)) {
-                    return true;
-                }
-                if (center_start != left_start && center_start != right_start &&
-                    capture_stripe_v3(pixels, width, height, rows, stripe_top, center_start, module_bits) &&
-                    decode_from_bits_v3(module_bits, rows, values)) {
-                    return true;
+                    u32 left_start = 0u;
+                    u32 right_start = (width >= pixel_width) ? (width - pixel_width) : 0u;
+                    u32 center_start = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
+                    u32 start_limit = (width > pixel_width) ? (width - pixel_width) : 0u;
+                    u32 start_step = (module_pitch_x > 1u) ? module_pitch_x : 1u;
+                    u32 offset_step = (module_pitch_y > 1u) ? (module_pitch_y / 2u) : 1u;
+                    for (u32 offset = 0u; offset <= max_offset; offset += offset_step) {
+                        if (base_top < offset) {
+                            break;
+                        }
+                        u32 stripe_top = base_top - offset;
+                        u32 start_candidates[64];
+                        u32 candidate_count = 0u;
+                        auto add_start = [&](u32 start) {
+                            if (start + pixel_width > width) {
+                                return;
+                            }
+                            for (u32 i = 0u; i < candidate_count; ++i) {
+                                if (start_candidates[i] == start) {
+                                    return;
+                                }
+                            }
+                            if (candidate_count < (u32)(sizeof(start_candidates) / sizeof(start_candidates[0]))) {
+                                start_candidates[candidate_count++] = start;
+                            }
+                        };
+                        add_start(left_start);
+                        add_start(center_start);
+                        add_start(right_start);
+                        for (int delta = -8; delta <= 8; ++delta) {
+                            i64 start = (i64)center_start + (i64)delta * (i64)start_step;
+                            if (start < 0) start = 0;
+                            if ((u32)start <= start_limit) {
+                                add_start((u32)start);
+                            }
+                        }
+                        for (u32 delta = 0u; delta <= 8u; ++delta) {
+                            u32 start = delta * start_step;
+                            if (start <= start_limit) {
+                                add_start(start);
+                            }
+                            if (start_limit >= delta * start_step) {
+                                add_start(start_limit - delta * start_step);
+                            }
+                        }
+                        for (u32 i = 0u; i < candidate_count; ++i) {
+                            u32 start = start_candidates[i];
+                            ByteBuffer module_bits;
+                            if (capture_stripe_v3(pixels, width, height, rows, stripe_top, start, module_pitch_x, module_pitch_y, module_bits) &&
+                                decode_from_bits_v3(module_bits, rows, values)) {
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -15530,6 +15611,40 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         if (!stripe_available) {
             stripe_available = FooterStripe::decode(FooterStripe::SPEC_V1, pixel_data, (u32)width, (u32)height, stripe_values);
         }
+        if (!stripe_available) {
+            u64 logical_guess = estimate_square_page_from_image(width, height);
+            if (logical_guess && logical_guess <= 0xFFFFFFFFull) {
+                AffineTransform scale_affine = {};
+                scale_affine.a00 = (double)width / (double)logical_guess;
+                scale_affine.a11 = (double)height / (double)logical_guess;
+                scale_affine.a01 = 0.0;
+                scale_affine.a10 = 0.0;
+                scale_affine.tx = 0.0;
+                scale_affine.ty = 0.0;
+                u32 footer_hint = state.has_footer_rows ? (u32)state.footer_rows_value : 0u;
+                stripe_available = FooterStripe::decode_v3_affine(pixel_data,
+                                                                  (u32)width,
+                                                                  (u32)height,
+                                                                  scale_affine,
+                                                                  0.0,
+                                                                  (double)logical_guess,
+                                                                  (u32)logical_guess,
+                                                                  (u32)logical_guess,
+                                                                  footer_hint,
+                                                                  stripe_values);
+            }
+        }
+    }
+    if (stripe_available) {
+        bool sane = (stripe_values.page_bits > 0u) &&
+                    (stripe_values.footer_rows > 0u) &&
+                    (stripe_values.page_index > 0u) &&
+                    (stripe_values.page_count > 0u) &&
+                    (stripe_values.page_width_pixels > 0u) &&
+                    (stripe_values.page_height_pixels > 0u);
+        if (!sane) {
+            stripe_available = false;
+        }
     }
     if (stripe_available) {
         state.has_footer_stripe = true;
@@ -15556,6 +15671,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             console_line(2, buf_orig);
         }
     } else {
+        state.has_page_count = false;
+        state.page_count_value = 0u;
+        state.has_page_index = true;
+        state.page_index_value = 1u;
         console_line(1, "decode: footer stripe unreadable, falling back to PPM headers");
     }
     bool has_rotation = false;
@@ -15701,6 +15820,25 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     } else if (state.has_page_height_pixels && state.page_height_pixels_value) {
         expected_height = state.page_height_pixels_value;
         height_known = true;
+    }
+    if (!width_known && !height_known) {
+        u64 guessed = estimate_square_page_from_image(width, height);
+        if (guessed) {
+            expected_width = guessed;
+            expected_height = guessed;
+            width_known = true;
+            height_known = true;
+            state.has_page_width_pixels = true;
+            state.page_width_pixels_value = guessed;
+            state.has_page_height_pixels = true;
+            state.page_height_pixels_value = guessed;
+            if (debug_logging_enabled()) {
+                char buf[32];
+                u64_to_ascii(guessed, buf, sizeof(buf));
+                console_write(2, "debug: estimated page size ");
+                console_line(2, buf);
+            }
+        }
     }
     bool fiducial_rotation_detected = false;
 
@@ -17557,6 +17695,14 @@ static bool footer_stripe_values_equal(const FooterStripe::Values& a,
         log_footer_stripe_mismatch("page_count", a.page_count, b.page_count);
         return false;
     }
+    if (a.page_width_pixels != b.page_width_pixels) {
+        log_footer_stripe_mismatch("page_width_px", a.page_width_pixels, b.page_width_pixels);
+        return false;
+    }
+    if (a.page_height_pixels != b.page_height_pixels) {
+        log_footer_stripe_mismatch("page_height_px", a.page_height_pixels, b.page_height_pixels);
+        return false;
+    }
     if (a.footer_rows != b.footer_rows) {
         log_footer_stripe_mismatch("footer_rows", a.footer_rows, b.footer_rows);
         return false;
@@ -17638,6 +17784,8 @@ static void apply_footer_stripe_metadata(PpmParserState& state,
     update_stripe_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, values.page_bits);
     update_stripe_metadata_field("page_count", state.has_page_count, state.page_count_value, values.page_count);
     update_stripe_metadata_field("page_index", state.has_page_index, state.page_index_value, values.page_index);
+    update_stripe_metadata_field("page_width_px", state.has_page_width_pixels, state.page_width_pixels_value, values.page_width_pixels);
+    update_stripe_metadata_field("page_height_px", state.has_page_height_pixels, state.page_height_pixels_value, values.page_height_pixels);
     update_stripe_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, values.footer_rows);
     update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
     if (values.ecc_enabled) {
@@ -19060,6 +19208,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     stripe_values.page_bits = bits_per_page;
     stripe_values.page_count = page_count;
     stripe_values.page_index = page_index;
+    stripe_values.page_width_pixels = mapping.page_width_pixels;
+    stripe_values.page_height_pixels = mapping.page_height_pixels;
     stripe_values.footer_rows = footer_rows;
     stripe_values.ecc_enabled = (ecc_summary && ecc_summary->enabled);
     if (stripe_values.ecc_enabled && ecc_summary) {
@@ -23819,6 +23969,10 @@ retry_decode:
                     return 1;
                 }
             }
+            if (!page_state.has_page_index || page_state.page_index_value == 0u) {
+                page_state.has_page_index = true;
+                page_state.page_index_value = expected_page_index;
+            }
             if (enforce_page_index) {
                 if (page_state.has_page_index) {
                     if (page_state.page_index_value != expected_page_index) {
@@ -23846,6 +24000,11 @@ retry_decode:
                 return 1;
             }
             ++expected_page_index;
+        }
+        if (!aggregate_state.has_page_count ||
+            aggregate_state.page_count_value == 0u ||
+            aggregate_state.page_count_value < file_count) {
+            aggregate_state.has_page_count = false;
         }
         if (aggregate_state.has_page_count) {
             u64 advertised_pages = aggregate_state.page_count_value;
