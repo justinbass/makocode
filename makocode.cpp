@@ -13039,8 +13039,6 @@ struct PpmParserState {
     u64 footer_rows_value;
     bool has_footer_stripe;
     FooterStripe::Values footer_stripe_values;
-    bool has_font_size;
-    u64 font_size_value;
     bool has_rotation_degrees;
     double rotation_degrees_value;
     bool has_rotation_width;
@@ -13116,8 +13114,6 @@ struct PpmParserState {
           footer_rows_value(0u),
           has_footer_stripe(false),
           footer_stripe_values(),
-          has_font_size(false),
-          font_size_value(0u),
           has_rotation_degrees(false),
           rotation_degrees_value(0.0),
           has_rotation_width(false),
@@ -13847,57 +13843,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
             break;
         }
         ++index;
-    }
-    const char font_size_tag[] = "MAKOCODE_FONT_SIZE";
-    const usize font_size_tag_len = (usize)sizeof(font_size_tag) - 1u;
-    const char legacy_font_tag[] = "MAKOCODE_TITLE_FONT";
-    const usize legacy_font_tag_len = (usize)sizeof(legacy_font_tag) - 1u;
-    bool matched_font_tag = false;
-    if ((length - index) >= font_size_tag_len) {
-        matched_font_tag = true;
-        for (usize i = 0u; i < font_size_tag_len; ++i) {
-            if (comment[index + i] != font_size_tag[i]) {
-                matched_font_tag = false;
-                break;
-            }
-        }
-        if (matched_font_tag) {
-            index += font_size_tag_len;
-        }
-    }
-    if (!matched_font_tag && (length - index) >= legacy_font_tag_len) {
-        matched_font_tag = true;
-        for (usize i = 0u; i < legacy_font_tag_len; ++i) {
-            if (comment[index + i] != legacy_font_tag[i]) {
-                matched_font_tag = false;
-                break;
-            }
-        }
-        if (matched_font_tag) {
-            index += legacy_font_tag_len;
-        }
-    }
-    if (matched_font_tag) {
-        while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-            ++index;
-        }
-        usize number_start = index;
-        while (index < length) {
-            char c = comment[index];
-            if (c < '0' || c > '9') {
-                break;
-            }
-            ++index;
-        }
-        usize number_length = index - number_start;
-        if (number_length) {
-            u64 value = 0u;
-            if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                state.has_font_size = true;
-                state.font_size_value = value;
-            }
-        }
-        return;
     }
     index = 0u;
     while (index < length) {
@@ -18170,13 +18115,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_footer_stripe = true;
         dest.footer_stripe_values = src.footer_stripe_values;
     }
-    if (src.has_font_size) {
-        if (dest.has_font_size && dest.font_size_value != src.font_size_value) {
-            return false;
-        }
-        dest.has_font_size = true;
-        dest.font_size_value = src.font_size_value;
-    }
     if (src.has_skew_src_width) {
         if (dest.has_skew_src_width && dest.skew_src_width_value != src.skew_src_width_value) {
             return false;
@@ -18387,15 +18325,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
     }
     if (state.has_footer_rows) {
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", state.footer_rows_value)) {
-            return false;
-        }
-        if (state.has_font_size) {
-            if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
-                return false;
-            }
-        }
-    } else if (state.has_font_size) {
-        if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", state.font_size_value)) {
             return false;
         }
     }
@@ -19512,11 +19441,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (footer_rows) {
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", (u64)footer_rows)) {
             return false;
-        }
-        if (footer_layout.has_text) {
-            if (!append_comment_number(output, "MAKOCODE_FONT_SIZE", (u64)footer_layout.font_size)) {
-                return false;
-            }
         }
     }
     if (!buffer_append_number(output, (u64)width_pixels) || !output.append_char(' ')) {

@@ -1,7 +1,6 @@
 - Decoding
  - Add to footer stripe before removing:
   - # MAKOCODE_FOOTER_ROWS 7
-  - # MAKOCODE_FONT_SIZE 1
   - # MAKOCODE_FIDUCIAL_SIZE 4
   - # MAKOCODE_FIDUCIAL_COLUMNS 41
   - # MAKOCODE_FIDUCIAL_ROWS 41
