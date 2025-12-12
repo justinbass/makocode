@@ -21870,6 +21870,41 @@ struct OverlayIgnoreColorList {
     usize count;
 };
 
+// The overlay PPM that carries the mask rarely encodes layout metadata such as
+// footer rows or fiducial sizing. When that metadata is absent we still need the
+// overlay to line up pixel-for-pixel with the base page so that the merged image
+// doesn't appear shifted. Synchronize the layout-critical fields from the base
+// page onto the overlay before we build masks or gather bits.
+static void overlay_apply_base_layout(const OverlayPage& base, OverlayPage& overlay) {
+    overlay.footer_rows = base.footer_rows;
+    if (overlay.footer_rows > overlay.height) {
+        overlay.footer_rows = overlay.height;
+    }
+    overlay.data_height = (overlay.height >= overlay.footer_rows)
+                              ? (overlay.height - overlay.footer_rows)
+                              : overlay.height;
+    if (base.metadata.has_footer_rows) {
+        overlay.metadata.has_footer_rows = true;
+        overlay.metadata.footer_rows_value = base.metadata.footer_rows_value;
+    }
+    if (base.metadata.has_fiducial_size) {
+        overlay.metadata.has_fiducial_size = true;
+        overlay.metadata.fiducial_size_value = base.metadata.fiducial_size_value;
+    }
+    if (base.metadata.has_fiducial_margin) {
+        overlay.metadata.has_fiducial_margin = true;
+        overlay.metadata.fiducial_margin_value = base.metadata.fiducial_margin_value;
+    }
+    if (base.metadata.has_fiducial_columns) {
+        overlay.metadata.has_fiducial_columns = true;
+        overlay.metadata.fiducial_columns_value = base.metadata.fiducial_columns_value;
+    }
+    if (base.metadata.has_fiducial_rows) {
+        overlay.metadata.has_fiducial_rows = true;
+        overlay.metadata.fiducial_rows_value = base.metadata.fiducial_rows_value;
+    }
+}
+
 static bool overlay_ignore_char_is_delimiter(char c) {
     switch (c) {
         case ' ':
@@ -23309,6 +23344,8 @@ static int command_overlay(int arg_count, char** args) {
         console_line(2, "overlay: ppm images must have identical dimensions");
         return 1;
     }
+    // Align overlay layout to the base so fiducial/data regions match pixel-for-pixel.
+    overlay_apply_base_layout(base_page, overlay_page);
     makocode::ByteBuffer base_mask;
     makocode::ByteBuffer overlay_mask;
     u64 base_reserved = 0u;

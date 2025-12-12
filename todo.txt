@@ -1,5 +1,4 @@
 - Decoding
- - Fix overlay
  - Add to footer stripe before removing:
   - # MAKOCODE_OVERLAY_FRACTION 9/20
   - # MAKOCODE_PAGE_BITS 966104
