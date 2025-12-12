@@ -11092,15 +11092,15 @@ namespace FooterStripe {
         return false;
     }
 
-    static bool capture_stripe_v3(const u8* pixels,
-                                  u32 width,
-                                  u32 height,
-                                  u32 row_count,
-                                  u32 stripe_top,
-                                  u32 start_column,
-                                  u32 module_pitch_x,
-                                  u32 module_pitch_y,
-                                  ByteBuffer& module_bits) {
+	    static bool capture_stripe_v3(const u8* pixels,
+	                                  u32 width,
+	                                  u32 height,
+	                                  u32 row_count,
+	                                  u32 stripe_top,
+	                                  u32 start_column,
+	                                  u32 module_pitch_x,
+	                                  u32 module_pitch_y,
+	                                  ByteBuffer& module_bits) {
         usize total = (usize)V3_MODULE_COUNT * (usize)row_count;
         if (row_count == 0u || row_count > V3_MAX_ROWS) {
             return false;
@@ -11178,14 +11178,131 @@ namespace FooterStripe {
                 row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
             }
         }
-        return true;
-    }
+	        return true;
+	    }
 
-    static bool capture_stripe_v3_affine(const u8* pixels,
-                                         u32 width,
-                                         u32 height,
-                                         u32 row_count,
-                                         const AffineTransform& affine,
+	    static bool capture_stripe_v3_float(const u8* pixels,
+	                                        u32 width,
+	                                        u32 height,
+	                                        u32 row_count,
+	                                        double stripe_top,
+	                                        double start_column,
+	                                        double module_pitch_x,
+	                                        double module_pitch_y,
+	                                        ByteBuffer& module_bits) {
+	        if (!pixels || width == 0u || height == 0u) {
+	            return false;
+	        }
+	        if (row_count == 0u || row_count > V3_MAX_ROWS) {
+	            return false;
+	        }
+	        if (!(module_pitch_x > 0.0) || !(module_pitch_y > 0.0)) {
+	            return false;
+	        }
+	        usize total = (usize)V3_MODULE_COUNT * (usize)row_count;
+	        if (!module_bits.ensure(total)) {
+	            return false;
+	        }
+	        module_bits.size = total;
+	        double max_x = (width > 0u) ? (double)(width - 1u) : 0.0;
+	        double max_y = (height > 0u) ? (double)(height - 1u) : 0.0;
+	        const double taps[] = {0.25, 0.5, 0.75};
+	        for (u32 row = 0u; row < row_count; ++row) {
+	            u16 brightness[MAX_STRIPE_MODULES];
+	            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
+	                double y0 = stripe_top + (double)row * module_pitch_y;
+	                double x0 = start_column + (double)index * module_pitch_x;
+	                u32 value_sum = 0u;
+	                u32 sample_count = 0u;
+	                for (u32 ty = 0u; ty < 3u; ++ty) {
+	                    double sample_row = y0 + module_pitch_y * taps[ty];
+	                    if (sample_row < 0.0) sample_row = 0.0;
+	                    if (sample_row > max_y) sample_row = max_y;
+	                    u32 sample_row_i = (u32)(sample_row + 0.5);
+	                    if (sample_row_i >= height) {
+	                        continue;
+	                    }
+	                    for (u32 tx = 0u; tx < 3u; ++tx) {
+	                        double sample_col = x0 + module_pitch_x * taps[tx];
+	                        if (sample_col < 0.0) sample_col = 0.0;
+	                        if (sample_col > max_x) sample_col = max_x;
+	                        u32 sample_col_i = (u32)(sample_col + 0.5);
+	                        if (sample_col_i >= width) {
+	                            continue;
+	                        }
+	                        usize pixel_index = ((usize)sample_row_i * (usize)width + (usize)sample_col_i) * 3u;
+	                        value_sum += (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
+	                        ++sample_count;
+	                    }
+	                }
+	                if (sample_count == 0u) {
+	                    return false;
+	                }
+	                u32 value = value_sum / sample_count;
+	                brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
+	            }
+	            auto guard_bit = [&](u32 idx) -> u8 {
+	                if (idx < V3_BARKER_MODULES) return Barker11[idx];
+	                idx -= V3_BARKER_MODULES;
+	                if (idx < V3_TIMING_MODULES) return TimingPattern[idx];
+	                return 0u;
+	            };
+	            u32 background_sum = 0u;
+	            u32 background_count = 0u;
+	            auto add_background = [&](u32 module_idx) {
+	                if (module_idx < V3_MODULE_COUNT) {
+	                    background_sum += brightness[module_idx];
+	                    ++background_count;
+	                }
+	            };
+	            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
+	                add_background(i);
+	            }
+	            u32 trailing_start = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES + V3_GUARD_MODULES;
+	            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
+	                add_background(trailing_start + i);
+	            }
+	            u32 guard_start_left = V3_QUIET_MODULES;
+	            u32 guard_start_right = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES;
+	            u32 guard_sum = 0u;
+	            u32 guard_count = 0u;
+	            for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
+	                if (guard_bit(i)) {
+	                    u32 pos_left = guard_start_left + i;
+	                    u32 pos_right = guard_start_right + i;
+	                    if (pos_left < V3_MODULE_COUNT) {
+	                        guard_sum += brightness[pos_left];
+	                        ++guard_count;
+	                    }
+	                    if (pos_right < V3_MODULE_COUNT) {
+	                        guard_sum += brightness[pos_right];
+	                        ++guard_count;
+	                    }
+	                }
+	            }
+	            u32 threshold = 384u;
+	            if (background_count > 0u && guard_count > 0u) {
+	                u32 background_avg = background_sum / background_count;
+	                u32 guard_avg = guard_sum / guard_count;
+	                if (guard_avg < background_avg) {
+	                    threshold = (background_avg + guard_avg) / 2u;
+	                } else if (background_avg > 0u) {
+	                    threshold = background_avg / 2u;
+	                }
+	            }
+	            u8* row_storage = module_bits.data + (usize)row * V3_MODULE_COUNT;
+	            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
+	                row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
+	            }
+	        }
+	        return true;
+	    }
+
+	    static bool capture_stripe_v3_affine(const u8* pixels,
+	                                         u32 width,
+	                                         u32 height,
+	                                         u32 row_count,
+	                                         const AffineTransform& affine,
                                          double skew_y_pixels,
                                          double skew_span,
                                          double stripe_top_logical,
@@ -11370,10 +11487,10 @@ namespace FooterStripe {
         if (max_offset > 512u) max_offset = 512u;
         if (max_offset > 128u) max_offset = 128u;
 
-        for (u32 py_i = 0u; py_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++py_i) {
-            u32 module_pitch_y = pitch_candidates[py_i];
-            for (u32 px_i = 0u; px_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++px_i) {
-                u32 module_pitch_x = pitch_candidates[px_i];
+	        for (u32 py_i = 0u; py_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++py_i) {
+	            u32 module_pitch_y = pitch_candidates[py_i];
+	            for (u32 px_i = 0u; px_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++px_i) {
+	                u32 module_pitch_x = pitch_candidates[px_i];
                 u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
                 if (pixel_width == 0u || pixel_width > width) {
                     continue;
@@ -11402,11 +11519,76 @@ namespace FooterStripe {
                 if (try_decode_at_pitch(module_pitch_x, module_pitch_y, max_offset, offset_step, start_count, starts)) {
                     return true;
                 }
-            }
-        }
+	            }
+	        }
 
-        return false;
-    }
+	        // Float pitch path (budgeted): supports non-integer rescaling (e.g. 2.6x/2.4x).
+	        // Kept conservative to avoid reintroducing pathological runtimes.
+	        {
+	            const double aspect = (width > 0u) ? ((double)height / (double)width) : 1.0;
+	            const u32 rows_limit = 12u;
+	            u32 max_offset_f = height;
+	            if (max_offset_f > 256u) max_offset_f = 256u;
+	            const u32 offset_step = 2u;
+	            const double base_pitches[] = {2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0};
+	            const double deltas[] = {-0.4, -0.2, 0.0, 0.2, 0.4};
+	            const double y_ratios[] = {0.90, 1.00, 1.10};
+	            const double start_shifts[] = {0.0, 0.5};
+	            for (u32 b = 0u; b < (u32)(sizeof(base_pitches) / sizeof(base_pitches[0])); ++b) {
+	                for (u32 d = 0u; d < (u32)(sizeof(deltas) / sizeof(deltas[0])); ++d) {
+	                    double pitch_x = base_pitches[b] + deltas[d];
+	                    if (!(pitch_x > 0.9)) {
+	                        continue;
+	                    }
+	                    double pixel_width_f = pitch_x * (double)V3_MODULE_COUNT;
+	                    if (!(pixel_width_f > 0.0) || pixel_width_f > (double)width) {
+	                        continue;
+	                    }
+	                    double starts[3];
+	                    starts[0] = 0.0;
+	                    starts[1] = ((double)width > pixel_width_f) ? (((double)width - pixel_width_f) * 0.5) : 0.0;
+	                    starts[2] = ((double)width >= pixel_width_f) ? ((double)width - pixel_width_f) : 0.0;
+	                    for (u32 yr = 0u; yr < (u32)(sizeof(y_ratios) / sizeof(y_ratios[0])); ++yr) {
+	                        double pitch_y = pitch_x * aspect * y_ratios[yr];
+	                        if (!(pitch_y > 0.9)) {
+	                            continue;
+	                        }
+	                        for (u32 rows = 1u; rows <= rows_limit; ++rows) {
+	                            double stripe_height_f = (double)rows * pitch_y;
+	                            if (!(stripe_height_f > 0.0) || stripe_height_f > (double)height) {
+	                                continue;
+	                            }
+	                            double base_top_f = ((double)height > stripe_height_f) ? ((double)height - stripe_height_f) : 0.0;
+	                            for (u32 offset = 0u; offset <= max_offset_f; offset += offset_step) {
+	                                double stripe_top_f = base_top_f - (double)offset;
+	                                if (stripe_top_f < 0.0) {
+	                                    break;
+	                                }
+	                                for (u32 si = 0u; si < 3u; ++si) {
+	                                    for (u32 sh = 0u; sh < (u32)(sizeof(start_shifts) / sizeof(start_shifts[0])); ++sh) {
+	                                        double start_f = starts[si] + start_shifts[sh] * pitch_x;
+	                                        if (start_f < 0.0) {
+	                                            continue;
+	                                        }
+	                                        if (start_f + pixel_width_f > (double)width + 0.5) {
+	                                            continue;
+	                                        }
+	                                        ByteBuffer module_bits;
+	                                        if (capture_stripe_v3_float(pixels, width, height, rows, stripe_top_f, start_f, pitch_x, pitch_y, module_bits) &&
+	                                            decode_from_bits_v3(module_bits, rows, values)) {
+	                                            return true;
+	                                        }
+	                                    }
+	                                }
+	                            }
+	                        }
+	                    }
+	                }
+	            }
+	        }
+
+	        return false;
+	    }
 
     static bool decode_v3_affine(const u8* pixels,
                                  u32 width,
@@ -13624,98 +13806,6 @@ static void ppm_consume_comment(PpmParserState& state, usize start, usize length
         }
         ++index;
     }
-    const char width_tag[] = "MAKOCODE_PAGE_WIDTH_PX";
-    const usize width_tag_len = (usize)sizeof(width_tag) - 1u;
-    if ((length - index) >= width_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < width_tag_len; ++i) {
-            if (comment[index + i] != width_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += width_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_width_pixels = true;
-                    state.page_width_pixels_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
-    const char height_tag[] = "MAKOCODE_PAGE_HEIGHT_PX";
-    const usize height_tag_len = (usize)sizeof(height_tag) - 1u;
-    if ((length - index) >= height_tag_len) {
-        bool match = true;
-        for (usize i = 0u; i < height_tag_len; ++i) {
-            if (comment[index + i] != height_tag[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            index += height_tag_len;
-            while (index < length && (comment[index] == ' ' || comment[index] == '\t')) {
-                ++index;
-            }
-            usize number_start = index;
-            while (index < length) {
-                char c = comment[index];
-                if (c < '0' || c > '9') {
-                    break;
-                }
-                ++index;
-            }
-            usize number_length = index - number_start;
-            if (number_length) {
-                u64 value = 0u;
-                if (ascii_to_u64(comment + number_start, number_length, &value)) {
-                    state.has_page_height_pixels = true;
-                    state.page_height_pixels_value = value;
-                }
-            }
-            return;
-        }
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
-    index = 0u;
-    while (index < length) {
-        char c = comment[index];
-        if (c != ' ' && c != '\t') {
-            break;
-        }
-        ++index;
-    }
     const char footer_rows_tag[] = "MAKOCODE_FOOTER_ROWS";
     const usize footer_rows_tag_len = (usize)sizeof(footer_rows_tag) - 1u;
     if ((length - index) >= footer_rows_tag_len) {
@@ -15856,13 +15946,52 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         expected_height = state.page_height_pixels_value;
         height_known = true;
     }
-    if (!width_known && !height_known) {
-        u64 guessed = estimate_square_page_from_image(width, height);
-        if (guessed) {
-            expected_width = guessed;
-            expected_height = guessed;
-            width_known = true;
-            height_known = true;
+	    if (!width_known && !height_known) {
+	        u64 inferred_width = 0u;
+	        u64 inferred_height = 0u;
+	        if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count >= 2u) {
+	            u64 last = state.fiducial_col_offsets[state.fiducial_col_offset_count - 1u];
+	            if (last) {
+	                inferred_width = last;
+	            }
+	        }
+	        if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count >= 2u) {
+	            u64 last = state.fiducial_row_offsets[state.fiducial_row_offset_count - 1u];
+	            if (last) {
+	                inferred_height = last;
+	                if (state.has_footer_rows && state.footer_rows_value) {
+	                    inferred_height += state.footer_rows_value;
+	                }
+	            }
+	        }
+	        if (inferred_width && inferred_height) {
+	            expected_width = inferred_width;
+	            expected_height = inferred_height;
+	            width_known = true;
+	            height_known = true;
+	            state.has_page_width_pixels = true;
+	            state.page_width_pixels_value = inferred_width;
+	            state.has_page_height_pixels = true;
+	            state.page_height_pixels_value = inferred_height;
+	            if (debug_logging_enabled()) {
+	                char buf_w[32];
+	                char buf_h[32];
+	                u64_to_ascii(inferred_width, buf_w, sizeof(buf_w));
+	                u64_to_ascii(inferred_height, buf_h, sizeof(buf_h));
+	                console_write(2, "debug: inferred page size from fiducials ");
+	                console_write(2, buf_w);
+	                console_write(2, "x");
+	                console_line(2, buf_h);
+	            }
+	        }
+	    }
+	    if (!width_known && !height_known) {
+	        u64 guessed = estimate_square_page_from_image(width, height);
+	        if (guessed) {
+	            expected_width = guessed;
+	            expected_height = guessed;
+	            width_known = true;
+	            height_known = true;
             state.has_page_width_pixels = true;
             state.page_width_pixels_value = guessed;
             state.has_page_height_pixels = true;
@@ -18256,16 +18385,6 @@ static bool ppm_write_metadata_header(const PpmParserState& state,
             return false;
         }
     }
-    if (state.has_page_width_pixels) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", state.page_width_pixels_value)) {
-            return false;
-        }
-    }
-    if (state.has_page_height_pixels) {
-        if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", state.page_height_pixels_value)) {
-            return false;
-        }
-    }
     if (state.has_footer_rows) {
         if (!append_comment_number(output, "MAKOCODE_FOOTER_ROWS", state.footer_rows_value)) {
             return false;
@@ -19384,12 +19503,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (!append_comment_number(output, "MAKOCODE_ECC_PARITY", (u64)ecc_summary->parity_symbols)) {
             return false;
         }
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_WIDTH_PX", (u64)mapping.page_width_pixels)) {
-        return false;
-    }
-    if (!append_comment_number(output, "MAKOCODE_PAGE_HEIGHT_PX", (u64)mapping.page_height_pixels)) {
-        return false;
     }
     if (use_custom_palette) {
         if (!append_comment_number(output, "MAKOCODE_PAGE_SYMBOLS", digits_used)) {
