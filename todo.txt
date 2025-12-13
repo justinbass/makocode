@@ -1,12 +1,4 @@
 - Decoding
- - Add to footer stripe before removing:
-  - # MAKOCODE_FOOTER_ROWS 7
-  - # MAKOCODE_FIDUCIAL_SIZE 4
-  - # MAKOCODE_FIDUCIAL_COLUMNS 41
-  - # MAKOCODE_FIDUCIAL_ROWS 41
-  - # MAKOCODE_FIDUCIAL_MARGIN 12
-  - # MAKOCODE_SUBGRID_COL_OFFSETS 0 25 50 75 100 125 150 175 200 225 250 275 300 325 350 375 400 425 450 475 500 525 550 575 600 625 650 675 700 725 750 775 800 825 850 875 900 925 950 975 1000
-  - # MAKOCODE_SUBGRID_ROW_OFFSETS 0 25 50 75 100 125 150 175 200 225 250 275 300 325 350 375 400 425 450 475 500 525 550 575 600 625 650 675 700 725 750 775 800 825 850 875 900 925 950 975 993
  - Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
  - Small data roundtrip test, file contains just the string "0", and "makocode".
  - Remove entire page test, with high ECC
@@ -14,7 +6,6 @@
  - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
  - Discolored paper (off-white) test
  - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
- - Footer barcode compression
  - Triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit.
  - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
  - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
@@ -30,6 +21,7 @@
  - Color channels non-base-2, works but slow
  - Interleave footer barcode with data grid to avoid needing it at all? Or maybe a recovery mode to brute force guess it (exponentially difficult)
    - Detect colors automatically in decoding, optionally write out color channel information in footer
+   - If it's not possible (or too slow) to fully remove, compress the footer barcode
 
 - Finalize
  - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)

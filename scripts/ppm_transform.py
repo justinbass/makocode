@@ -154,12 +154,22 @@ def scale_image(pixels, width, height, scale_x, scale_y):
     inv_y = 1.0 / scale_y
     new_pixels = [255] * (new_width * new_height * 3)
     for row in range(new_height):
-        src_y = ((row + 0.5) * inv_y) - 0.5
+        # Nearest-neighbor preserves barcode/fiducial module edges far better than
+        # bilinear interpolation (which can destroy high-frequency patterns).
+        src_y = int(round(((row + 0.5) * inv_y) - 0.5))
+        if src_y < 0:
+            src_y = 0
+        if src_y >= height:
+            src_y = height - 1
         for col in range(new_width):
-            src_x = ((col + 0.5) * inv_x) - 0.5
-            sample = bilinear_sample(pixels, width, height, src_x, src_y)
-            base = (row * new_width + col) * 3
-            new_pixels[base: base + 3] = sample
+            src_x = int(round(((col + 0.5) * inv_x) - 0.5))
+            if src_x < 0:
+                src_x = 0
+            if src_x >= width:
+                src_x = width - 1
+            src_idx = (src_y * width + src_x) * 3
+            dst_idx = (row * new_width + col) * 3
+            new_pixels[dst_idx: dst_idx + 3] = pixels[src_idx: src_idx + 3]
     return new_width, new_height, new_pixels
 
 
