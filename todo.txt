@@ -1,37 +1,39 @@
-- Decoding
- - Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
- - Small data roundtrip test, file contains just the string "0", and "makocode".
- - Remove entire page test, with high ECC
- - Wavy distortion test
- - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
- - Discolored paper (off-white) test
- - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
- - Triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit.
- - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
- - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
- - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
+Very Easy
+- Test: Small data, file contains just the string "0", and "makocode".
+- Test: Write every title character out, fix some (like g)
+- Test: Too much damage fails to decode (expected failure)
+- Remove python dependency (scripts/ppm_transform.py), convert to C++?
+- Dependencies section (C++, G++, Shell/Linux, Python for testing unless removed)
 
-- Features
- - Test to write every title character out, fix some (like g)
- - Some colored images seem to have 2 pixels of whitespace above footer, below barcode
- - Improve overlay up to 50% ECC for each, including ignore.
- - ECC target 100% should work.
- - Invalid ECC should fail.
- - Overlay to use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions)!
- - Color channels non-base-2, works but slow
+Easy
+- Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
+- Test: Discolored paper (off-white)
+- Test: Wavy distortion test
+- Test: All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
+- Color channels non-base-2 works but is slow, improve speed
+- Test: Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
+- Test: Remove entire page test, with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+- Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2). C++/GCC specs?
+
+Hard
+- Test: ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
+- Overlay improvements
+ - Use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions).
+ - Improve overlay up to 50% ECC for each, including ignore - or 100% if possible.
+- Footer barcode improvements
+ - Triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit. What if we moved if to the footer barcode?
  - Interleave footer barcode with data grid to avoid needing it at all? Or maybe a recovery mode to brute force guess it (exponentially difficult)
-   - Detect colors automatically in decoding, optionally write out color channel information in footer
-   - If it's not possible (or too slow) to fully remove, compress the footer barcode
+ - Rather than double up footer barcode, provide 100% ECC so it's more robust
+ - Detect colors automatically in decoding, optionally write out color channel information in footer
+ - If it's not possible (or too slow) to fully remove, compress the footer barcode
+ - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
+ - Test: Remove footer barcode completely
 
-- Finalize
- - Arbitrary encoding constants for all, defined by a simple static barcode in footer (if missing, default assumed)
- - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
- - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
- - Determine proper defaults
- - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere code, it still should be readable
- - Dependencies section (C++, G++, Shell/Linux, Python for testing)
- - Much better documentation, or a spec
- - Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2)
- - Basic random data test with many iterations (to ensure consistency of result under many conditions)
- - Remove python dependency (scripts/ppm_transform.py), convert to C++?
- - 100% branch coverage, test parameterization of each combination of options
+Finalize
+- One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
+- Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
+- Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
+- Determine proper defaults
+- Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere code, it still should be readable
+- Much better documentation, or a spec
+- 100% branch coverage, test parameterization of each combination of options
