@@ -18821,9 +18821,9 @@ static bool buffer_append_number(makocode::ByteBuffer& buffer, u64 value) {
     return buffer.append_ascii(digits);
 }
 
-static bool append_comment_number(makocode::ByteBuffer& buffer,
-                                  const char* tag,
-                                  u64 value) {
+[[maybe_unused]] static bool append_comment_number(makocode::ByteBuffer& buffer,
+                                                   const char* tag,
+                                                   u64 value) {
     if (!tag) {
         return false;
     }
@@ -18845,10 +18845,10 @@ static bool append_comment_number(makocode::ByteBuffer& buffer,
     return buffer.append_char('\n');
 }
 
-static bool append_comment_list(makocode::ByteBuffer& buffer,
-                                const char* tag,
-                                const u64* values,
-                                u32 count) {
+[[maybe_unused]] static bool append_comment_list(makocode::ByteBuffer& buffer,
+                                                 const char* tag,
+                                                 const u64* values,
+                                                 u32 count) {
     if (!tag || !values || count == 0u) {
         return false;
     }
@@ -18890,6 +18890,7 @@ static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
 
 static bool ppm_write_metadata_header(const PpmParserState& state,
                                       makocode::ByteBuffer& output) {
+    (void)state;
     if (!output.append_ascii("P3\n")) {
         return false;
     }

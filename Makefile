@@ -6,7 +6,7 @@ LCOV_REPORT ?= test/makocode.info
 LCOV_HTML_DIR ?= test/coverage
 LCOV_FLAGS ?= --ignore-errors inconsistent,unsupported,format
 LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
-GENHTML_FLAGS ?= --ignore-errors inconsistent,unsupported,corrupt,category
+GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category
 
 STATUS ?= ./scripts/make_step.sh
 
