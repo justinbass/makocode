@@ -36,6 +36,9 @@ Required:
   --width PX            Page width in pixels.
   --height PX           Page height in pixels.
 
+Payload:
+  --payload-literal TEXT  Use TEXT bytes as the payload instead of random data.
+
 Layout:
   --palette "..."       Custom palette passed to encode/decode.
   --title TEXT          Footer title (forwarded to encode).
@@ -73,6 +76,7 @@ size=""
 ecc=""
 width=""
 height=""
+payload_literal=""
 multi_page=0
 palette=""
 password=""
@@ -111,6 +115,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --height)
             height=${2:-}
+            shift 2
+            ;;
+        --payload-literal)
+            payload_literal=${2:-}
             shift 2
             ;;
         --palette)
@@ -263,7 +271,16 @@ rm -f "$payload_final" "$decoded_payload_target" "$transformed_decoded_target"
 rm -f "${encoded_prefix}.ppm" ${encoded_prefix}_*.ppm 2>/dev/null || true
 rm -f "${transformed_prefix}.ppm" ${transformed_prefix}_*.ppm 2>/dev/null || true
 
-head -c "$size" /dev/urandom > "$payload_final"
+if [[ -n $payload_literal ]]; then
+    payload_len=$(python3 -c 'import sys; print(len(sys.argv[1].encode("utf-8")))' "$payload_literal")
+    if [[ $payload_len -ne $size ]]; then
+        echo "run_roundtrip: --size ($size) must match --payload-literal byte length ($payload_len)" >&2
+        exit 1
+    fi
+    printf '%s' "$payload_literal" > "$payload_final"
+else
+    head -c "$size" /dev/urandom > "$payload_final"
+fi
 cp "$payload_final" "$payload_work"
 
 encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=$ecc" "--page-width=$width" "--page-height=$height" "--output-dir=$work_dir")

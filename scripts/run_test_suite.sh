@@ -16,7 +16,7 @@ if [[ ! -x $suite_bin ]]; then
     exit 1
 fi
 
-case_counter=1
+case_counter=2
 first_case=1
 
 if [[ ${MAKE_STEP_LINE_OPEN:-0} -eq 1 ]]; then
@@ -232,6 +232,25 @@ run_overlay_case() {
         execute_case "$new_label" "$description" "$overlay_test" "$new_label"
     fi
 }
+
+run_roundtrip_label_case() {
+    local label=$1
+    local description=$2
+    shift 2
+    execute_case "$label" "$description" "$suite_bin" --label "$label" "$@"
+}
+
+run_roundtrip_label_case "0000_tiny_0" "1 byte payload literal '0' baseline" \
+    --size 1 --ecc 0 --width 200 --height 64 \
+    --encode-opt "--no-filename" \
+    --encode-opt "--no-page-count" \
+    --payload-literal "0"
+
+run_roundtrip_label_case "0001_tiny_makocode" "8 byte payload literal 'makocode' baseline" \
+    --size 8 --ecc 0 --width 200 --height 64 \
+    --encode-opt "--no-filename" \
+    --encode-opt "--no-page-count" \
+    --payload-literal "makocode"
 
 run_roundtrip_case "baseline_8k_ecc_050" "8 KiB payload, ECC 0.5 baseline" \
     --size 8192 --ecc 0.5 --width 500 --height 500

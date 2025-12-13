@@ -1,11 +1,11 @@
 Very Easy
-- Test: Small data, file contains just the string "0", and "makocode".
 - Test: Write every title character out, fix some (like g)
 - Test: Too much damage fails to decode (expected failure)
 - Remove python dependency (scripts/ppm_transform.py), convert to C++?
 - Dependencies section (C++, G++, Shell/Linux, Python for testing unless removed)
 
 Easy
+- Small data test should be more compact, there's a ton of whitespace after the data
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Test: Discolored paper (off-white)
 - Test: Wavy distortion test
@@ -37,3 +37,4 @@ Finalize
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere code, it still should be readable
 - Much better documentation, or a spec
 - 100% branch coverage, test parameterization of each combination of options
+- Reorganize tests logically from simple to complex, and document each one in full.
