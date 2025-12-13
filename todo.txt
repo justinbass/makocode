@@ -1,11 +1,10 @@
-Very Easy
-- Test: Write every title character out, fix some (like g)
+Easy
+- Looking at test 0014, fix some characters: / appears twice, g, j, y. Single whitespace row beneath this title.
+- Title wrap in footer, confirm page-height/width applies as a hard limit
+- Small data test should be more compact, there's a ton of whitespace after the data
 - Test: Too much damage fails to decode (expected failure)
 - Remove python dependency (scripts/ppm_transform.py), convert to C++?
 - Dependencies section (C++, G++, Shell/Linux, Python for testing unless removed)
-
-Easy
-- Small data test should be more compact, there's a ton of whitespace after the data
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Test: Discolored paper (off-white)
 - Test: Wavy distortion test
@@ -21,6 +20,7 @@ Hard
  - Use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions).
  - Improve overlay up to 50% ECC for each, including ignore - or 100% if possible.
 - Footer barcode improvements
+ - Rename to "metadata"
  - Triple ECC header redundancy is probably not shuffled based on whitespace at beginning of block before/after the triple commit. What if we moved if to the footer barcode?
  - Interleave footer barcode with data grid to avoid needing it at all? Or maybe a recovery mode to brute force guess it (exponentially difficult)
  - Rather than double up footer barcode, provide 100% ECC so it's more robust
@@ -28,6 +28,7 @@ Hard
  - If it's not possible (or too slow) to fully remove, compress the footer barcode
  - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
  - Test: Remove footer barcode completely
+ - Test: Page height or width too small for title or footer barcode, fails to encode
 
 Finalize
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference

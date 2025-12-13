@@ -11,6 +11,20 @@ overlay_test="$repo_root/scripts/test_overlay_e2e.sh"
 palette_test="$repo_root/scripts/test_palette_metadata.sh"
 password_fail_test="$repo_root/scripts/test_password_failures.sh"
 
+# Full footer font charset, in `FOOTER_GLYPHS` order (makocode.cpp).
+footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
+footer_charset_font_size=2
+footer_charset_filename="random.bin"
+footer_charset_page_stub="Page 1/1"
+footer_charset_title_len=${#footer_charset_title}
+footer_charset_filename_len=${#footer_charset_filename}
+footer_charset_page_len=${#footer_charset_page_stub}
+footer_charset_text_len=$((footer_charset_title_len + 3 + footer_charset_filename_len + 3 + footer_charset_page_len))
+footer_charset_glyph_width=$((5 * footer_charset_font_size))
+footer_charset_char_spacing=$((footer_charset_font_size))
+footer_charset_text_px=$((footer_charset_text_len * footer_charset_glyph_width + (footer_charset_text_len - 1) * footer_charset_char_spacing))
+footer_charset_width=$((footer_charset_text_px + 64))
+
 if [[ ! -x $suite_bin ]]; then
     echo "run_test_suite: missing $suite_bin" >&2
     exit 1
@@ -292,9 +306,9 @@ run_roundtrip_case "low_ecc_fiducial" "Low ECC fiducial reservation, tiny pages"
     --encode-opt "--no-page-count"
 
 run_roundtrip_case "footer_metadata" "Footer metadata rendering stress" \
-    --size 65536 --ecc 0.25 --width 1300 --height 800 \
-    --title "MAKOCODE FOOTER TITLE WITH DUST IGNORED 2025-11-09 >>>" \
-    --font-size 2
+    --size 65536 --ecc 0.25 --width "$footer_charset_width" --height 800 \
+    --title "$footer_charset_title" \
+    --font-size "$footer_charset_font_size"
 
 run_roundtrip_case "gray_100k_single" "100 KiB grayscale single page baseline" \
     --size 102400 --ecc 0 --width 1100 --height 1100

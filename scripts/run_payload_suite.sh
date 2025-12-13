@@ -8,6 +8,20 @@ if [[ ! -x $suite_bin ]]; then
     exit 1
 fi
 
+# Full footer font charset, in `FOOTER_GLYPHS` order (makocode.cpp).
+footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
+footer_charset_font_size=2
+footer_charset_filename="random.bin"
+footer_charset_page_stub="Page 1/1"
+footer_charset_title_len=${#footer_charset_title}
+footer_charset_filename_len=${#footer_charset_filename}
+footer_charset_page_len=${#footer_charset_page_stub}
+footer_charset_text_len=$((footer_charset_title_len + 3 + footer_charset_filename_len + 3 + footer_charset_page_len))
+footer_charset_glyph_width=$((5 * footer_charset_font_size))
+footer_charset_char_spacing=$((footer_charset_font_size))
+footer_charset_text_px=$((footer_charset_text_len * footer_charset_glyph_width + (footer_charset_text_len - 1) * footer_charset_char_spacing))
+footer_charset_width=$((footer_charset_text_px + 64))
+
 run_case() {
     local label=$1
     shift
@@ -23,9 +37,9 @@ run_case 1023_low_ecc \
 
 # Footer title / metadata heavy footer rendering.
 run_case 1022_footer_title \
-    --size 65536 --ecc 0.25 --width 1300 --height 800 \
-    --title "MAKOCODE FOOTER TITLE WITH DUST IGNORED 2025-11-09 >>>" \
-    --font-size 2
+    --size 65536 --ecc 0.25 --width "$footer_charset_width" --height 800 \
+    --title "$footer_charset_title" \
+    --font-size "$footer_charset_font_size"
 
 # 100 KiB grayscale payload single page baseline.
 run_case 2001_payload_gray_100k \
