@@ -9,7 +9,7 @@ if [[ ! -x $suite_bin ]]; then
 fi
 
 # Full footer font charset, in `FOOTER_GLYPHS` order (makocode.cpp).
-footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
+footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
 footer_charset_font_size=2
 footer_charset_filename="random.bin"
 footer_charset_page_stub="Page 1/1"

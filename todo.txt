@@ -1,6 +1,5 @@
 Easy
-- Looking at test 0014, fix some characters: / appears twice, g, j, y. Single whitespace row beneath this title.
-- Title wrap in footer, confirm page-height/width applies as a hard limit
+- Warnings in 'make coverage', at beginning and end
 - Small data test should be more compact, there's a ton of whitespace after the data
 - Test: Too much damage fails to decode (expected failure)
 - Remove python dependency (scripts/ppm_transform.py), convert to C++?
@@ -26,7 +25,9 @@ Hard
  - Rather than double up footer barcode, provide 100% ECC so it's more robust
  - Detect colors automatically in decoding, optionally write out color channel information in footer
  - If it's not possible (or too slow) to fully remove, compress the footer barcode
- - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically, adjust text then, could we scale it up for free?
+ - Footer barcode could dynamically fill the horizontal space allowed, then stretch vertically
+ - Adjust footer text depending on barcode solution, could we scale it up or down as needed? Wrap it inside footer? Clean it up.
+ - Title wrap in footer, confirm page-height/width applies as a hard limit
  - Test: Remove footer barcode completely
  - Test: Page height or width too small for title or footer barcode, fails to encode
 

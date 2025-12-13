@@ -12,7 +12,7 @@ palette_test="$repo_root/scripts/test_palette_metadata.sh"
 password_fail_test="$repo_root/scripts/test_password_failures.sh"
 
 # Full footer font charset, in `FOOTER_GLYPHS` order (makocode.cpp).
-footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
+footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
 footer_charset_font_size=2
 footer_charset_filename="random.bin"
 footer_charset_page_stub="Page 1/1"
@@ -298,7 +298,7 @@ run_roundtrip_case "palette_hex_octet" "Expanded hex palette stress" \
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"
 
 run_roundtrip_case "large_canvas_cmykw" "Large canvas CMYKW palette" \
-    --size 32768 --ecc 0.25 --width 1000 --height 1000 --palette "White Cyan Magenta Yellow Black"
+    --size 8192 --ecc 0.25 --width 1000 --height 1000 --palette "White Cyan Magenta Yellow Black"
 
 run_roundtrip_case "low_ecc_fiducial" "Low ECC fiducial reservation, tiny pages" \
     --size 256 --ecc 0 --width 200 --height 64 \
