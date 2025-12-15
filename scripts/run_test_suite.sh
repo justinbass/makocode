@@ -258,12 +258,14 @@ run_roundtrip_label_case "0000_tiny_0" "1 byte payload literal '0' baseline" \
     --size 1 --ecc 0 --width 200 --height 64 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
+    --encode-opt "--compact-page" \
     --payload-literal "0"
 
 run_roundtrip_label_case "0001_tiny_makocode" "8 byte payload literal 'makocode' baseline" \
     --size 8 --ecc 0 --width 200 --height 64 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
+    --encode-opt "--compact-page" \
     --payload-literal "makocode"
 
 run_roundtrip_case "baseline_8k_ecc_050" "8 KiB payload, ECC 0.5 baseline" \

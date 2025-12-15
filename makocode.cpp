@@ -19864,8 +19864,11 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     stripe_values.page_bits = payload_bit_count;
     stripe_values.page_count = page_count;
     stripe_values.page_index = page_index;
-    stripe_values.page_width_pixels = mapping.page_width_pixels;
-    stripe_values.page_height_pixels = mapping.page_height_pixels;
+    // Use the actual output dimensions for the stripe metadata (these can differ
+    // from the mapping defaults when the encoder outputs a compact single-page
+    // image).
+    stripe_values.page_width_pixels = width_pixels;
+    stripe_values.page_height_pixels = height_pixels;
     stripe_values.footer_rows = footer_rows;
     // Only the fiducial marker size is encoded into the footer stripe; the
     // remaining fiducial grid geometry is derived from the page geometry.
@@ -20020,6 +20023,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     usize mask_size = fiducial_mask.size;
     u64 bit_cursor = bit_offset;
     u64 digit_index = 0u;
+
     for (u32 row = 0u; row < height_pixels; ++row) {
         bool is_footer_row = (row >= data_height_pixels);
         for (u32 column = 0u; column < width_pixels; ++column) {
@@ -21321,6 +21325,7 @@ static void write_encode_help() {
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
     console_line(1, "  --page-width PX      Override page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
+    console_line(1, "  --compact-page       Shrink single-page output height to minimal fit (disables fixed barcode placement).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
     console_line(1, "");
     console_line(1, "ECC & security:");
@@ -21854,6 +21859,7 @@ static int command_encode(int arg_count, char** args) {
     bool have_output_dir = false;
     bool have_prefix = false;
     bool ecc_fill_requested = false;
+    bool compact_page = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "encode", &handled)) {
@@ -21976,6 +21982,10 @@ static int command_encode(int arg_count, char** args) {
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-page-count")) {
             footer_config.display_page_info = false;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--compact-page")) {
+            compact_page = true;
             continue;
         }
         const char ecc_prefix[] = "--ecc=";
@@ -22436,34 +22446,102 @@ static int command_encode(int arg_count, char** args) {
     makocode::ByteBuffer footer_text_buffer;
     const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
     if (page_count == 1u) {
+        u32 output_height_pixels = height_pixels;
+        FooterLayout output_footer_layout = footer_layout;
+        u32 output_data_height_pixels = layout_data_height;
+        u64 output_bits_per_page = bits_per_page;
+
+        if (compact_page && footer_layout.has_text) {
+            console_line(2, "encode: --compact-page requires the footer text to be disabled (use --no-filename and --no-page-count, and omit --title)");
+            return 1;
+        }
+        if (compact_page && footer_layout.stripe_height_pixels == 0u) {
+            console_line(2, "encode: --compact-page requires the footer stripe to be enabled");
+            return 1;
+        }
+
+        // For single-page outputs with no footer text, allow the footer stripe to
+        // sit closer to the last needed data row (adding extra padding below it)
+        // to avoid a large empty band before the stripe on tiny payloads.
+        if (compact_page && !footer_layout.has_text && footer_layout.stripe_height_pixels > 0u && layout_data_height > 0u) {
+            double bits_per_pixel = mapping_bits_per_data_pixel(mapping);
+            if (bits_per_pixel > 0.0) {
+                u32 max_data_height = layout_data_height;
+                u32 stripe_height = footer_layout.stripe_height_pixels;
+                u32 stripe_limited = (height_pixels > stripe_height) ? (height_pixels - stripe_height) : 0u;
+                if (stripe_limited > 0u && stripe_limited < max_data_height) {
+                    max_data_height = stripe_limited;
+                }
+                if (max_data_height > 0u) {
+                    u32 low = 1u;
+                    u32 high = max_data_height;
+                    u32 best = max_data_height;
+                    u64 best_bits = 0u;
+                    while (low <= high) {
+                        u32 mid = low + (high - low) / 2u;
+                        u64 candidate_bits = 0u;
+                        if (compute_bits_per_page(width_pixels,
+                                                  height_pixels,
+                                                  mid,
+                                                  bits_per_pixel,
+                                                  candidate_bits,
+                                                  0) &&
+                            candidate_bits >= frame_bit_count) {
+                            best = mid;
+                            best_bits = candidate_bits;
+                            if (mid == 1u) {
+                                break;
+                            }
+                            high = mid - 1u;
+                        } else {
+                            low = mid + 1u;
+                        }
+                    }
+                    // Only apply if it meaningfully reduces the unused band.
+                    if (best_bits > 0u && best + 4u < layout_data_height) {
+                        u32 minimal_height = best + stripe_height;
+                        if (minimal_height >= best && minimal_height <= height_pixels) {
+                            output_height_pixels = minimal_height;
+                        }
+                        output_footer_layout.data_height_pixels = best;
+                        output_footer_layout.stripe_top_row = best;
+                        output_footer_layout.footer_height_pixels = stripe_height;
+                        output_data_height_pixels = best;
+                        // Bits-per-page depends on data_height; keep it consistent with
+                        // the chosen data height even when we shrink the output image.
+                        output_bits_per_page = best_bits;
+                    }
+                }
+            }
+        }
         makocode::ByteBuffer page_output;
         if (!footer_build_page_text(footer_config, 1u, page_count, footer_text_buffer)) {
             console_line(2, "encode: failed to build footer text");
             return 1;
         }
-        const char* footer_text = footer_layout.has_text ? (const char*)footer_text_buffer.data : 0;
-        usize footer_length = footer_layout.has_text ? footer_text_buffer.size : 0u;
+        const char* footer_text = output_footer_layout.has_text ? (const char*)footer_text_buffer.data : 0;
+        usize footer_length = output_footer_layout.has_text ? footer_text_buffer.size : 0u;
         if (!encode_page_to_ppm(mapping,
                                 frame_bits,
                                 frame_bit_count,
                                 0u,
                                 width_pixels,
-                                height_pixels,
+                                output_height_pixels,
                                 1u,
                                 1u,
-                                bits_per_page,
+                                output_bits_per_page,
                                 payload_bit_count,
                                 ecc_summary,
                                 footer_text,
                                 footer_length,
-                                footer_layout,
+                                output_footer_layout,
                                 page_output)) {
            console_line(2, "encode: failed to format ppm");
            return 1;
        }
         makocode::ByteBuffer fiducial_page;
         // Clip fiducials to the data area so they don't land on the footer stripe.
-        if (!apply_default_fiducial_grid(page_output, fiducial_page, footer_layout.data_height_pixels)) {
+        if (!apply_default_fiducial_grid(page_output, fiducial_page, output_data_height_pixels)) {
             console_line(2, "encode: failed to embed fiducial grid");
             return 1;
         }
@@ -24856,6 +24934,12 @@ retry_decode:
         if (decoder.password_auth_failed()) {
             console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
             return 1;
+        }
+        if (!decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
+            console_line(2, "decode: parse failure; retrying without fiducial subgrid");
+            force_disable_subgrid = true;
+            retried_subgrid = true;
+            goto retry_decode;
         }
         if (decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
             console_line(2, "decode: ECC could not repair the payload; retrying without fiducial subgrid");
