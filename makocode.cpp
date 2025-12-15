@@ -24987,8 +24987,10 @@ retry_decode:
         return 1;
     }
     if (!unpack_archive_to_directory(decoder.payload, output_dir)) {
-        if (output_dir) {
-            // Fall back to emitting the raw payload (even if empty) when archive headers are missing.
+        const char* raw_fallback = getenv("MAKOCODE_DECODE_RAW_FALLBACK");
+        bool allow_raw_fallback = (raw_fallback && *raw_fallback && raw_fallback[0] != '0');
+        if (allow_raw_fallback && output_dir) {
+            // Fall back to emitting the raw payload (even if empty) only when explicitly enabled.
             char path_buffer[4096];
             usize dir_len = ascii_length(output_dir);
             const char* filename = "payload.bin";
@@ -25013,7 +25015,7 @@ retry_decode:
                 path_buffer[cursor] = '\0';
                 write_buffer_to_file(path_buffer, decoder.payload);
             }
-            console_line(1, "decode: payload missing archive header, wrote raw payload.bin");
+            console_line(1, "decode: wrote raw payload.bin (MAKOCODE_DECODE_RAW_FALLBACK enabled)");
             return 0;
         }
         return 1;

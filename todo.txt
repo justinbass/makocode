@@ -1,5 +1,4 @@
 Features
-- Test: Too much damage fails to decode (expected failure)
 - Remove python dependency (scripts/ppm_transform.py), convert to C++?
 - Dependencies section (C++, G++, Shell/Linux, Python for testing unless removed)
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?

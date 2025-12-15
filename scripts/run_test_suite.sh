@@ -91,10 +91,11 @@ run_cli_case() {
 run_decode_case() {
     local slug=$1
     local description=$2
+    shift 2
     local new_label
     printf -v new_label "%04d_%s" "$case_counter" "$slug"
     case_counter=$((case_counter + 1))
-    execute_case "$new_label" "$description" "$decode_test" --label "$new_label"
+    execute_case "$new_label" "$description" "$decode_test" --label "$new_label" "$@"
 }
 
 run_script_case() {
@@ -347,7 +348,26 @@ run_roundtrip_case "border_dirt" "Border dirt / distortion stress" \
 
 run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 
-run_decode_case "decode_failures" "Decoder rejects malformed PPM inputs"
+run_decode_case "decode_wrong_depth" "Decoder rejects malformed PPM (wrong maxval)" \
+    --case wrong_depth
+
+run_decode_case "decode_invalid_magic" "Decoder rejects malformed PPM (bad magic)" \
+    --case invalid_magic
+
+run_decode_case "decode_all_black" "Decoder rejects all-black image (no barcode)" \
+    --case all_black
+
+run_decode_case "decode_all_white" "Decoder rejects all-white image (no barcode)" \
+    --case all_white
+
+run_decode_case "decode_random_noise" "Decoder rejects random noise image" \
+    --case random_noise
+
+run_decode_case "decode_footer_data_destroyed" "Decoder rejects page with footer but destroyed data region" \
+    --case footer_data_destroyed
+
+run_decode_case "decode_footer_valid_data_too_corrupt" "Decoder rejects page with valid footer but ECC-overwhelmed data region" \
+    --case footer_valid_data_too_corrupt
 
 #run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
 #    --mode auto
