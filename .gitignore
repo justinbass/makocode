@@ -8,3 +8,4 @@ makocode_minified.cpp
 *.gcno
 *.dSYM/
 *__pycache__*
+scripts/ppm_transform

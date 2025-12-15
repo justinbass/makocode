@@ -1,14 +1,9 @@
 Features
-- Remove python dependency (scripts/ppm_transform.py), convert to C++?
-- Also remove some shell dependencies (head -c ... /dev/urandom, sort).
-- Dependencies section (C++, G++, Shell/Linux, Python for testing unless removed)
-- Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Test: Discolored paper (off-white)
 - Test: Wavy distortion test
 - Test: All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - Test: Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Test: Remove entire page test, with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
-- Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2). C++/GCC specs?
 - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
 - Test: ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
 - Overlay improvements
@@ -33,6 +28,9 @@ Finalize
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
 - Determine proper defaults
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere code, it still should be readable. Remove --ignore-errors.
+- Remove all external dependencies (shell: head -c ... /dev/urandom, sort).
+- Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Much better documentation, or a spec
 - 100% branch coverage, test parameterization of each combination of options
 - Reorganize tests logically from simple to complex, and document each one in full.
+- Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2). C++/GCC specs?

@@ -4,9 +4,14 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 makocode_bin="$repo_root/makocode"
+ppm_transform_bin="$repo_root/scripts/ppm_transform"
 
 if [[ ! -x "$makocode_bin" ]]; then
     echo "test_overlay_e2e: makocode binary not found at $makocode_bin" >&2
+    exit 1
+fi
+if [[ ! -x "$ppm_transform_bin" ]]; then
+    echo "test_overlay_e2e: ppm_transform helper not found at $ppm_transform_bin" >&2
     exit 1
 fi
 
@@ -84,60 +89,12 @@ mv -f "${ppms[0]}" "$encoded_path"
 
 circle_color="${MAKO_OVERLAY_CIRCLE_COLOR:-0 0 0}"
 background_color="${MAKO_OVERLAY_BACKGROUND_COLOR:-255 255 255}"
-OVERLAY_PPM="$overlay_path" python3 - "$circle_color" "$background_color" <<'PY'
-import math, os, sys
-
-path = os.environ.get("OVERLAY_PPM")
-if not path:
-    raise SystemExit("overlay: missing OVERLAY_PPM environment")
-w = h = 1000
-cx = cy = w // 2
-radius = int(w * 0.45)
-circle_color = sys.argv[1]
-background_color = sys.argv[2]
-circle_colors_text = os.environ.get("MAKO_OVERLAY_CIRCLE_COLORS")
-circle_palette = []
-if circle_colors_text:
-    for segment in circle_colors_text.split(";"):
-        segment = segment.strip()
-        if not segment:
-            continue
-        parts = segment.split()
-        if len(parts) != 3:
-            raise SystemExit("overlay: invalid circle palette entry")
-        circle_palette.append(" ".join(parts))
-overlay_palette_base = os.environ.get("MAKO_OVERLAY_MASK_PALETTE_BASE")
-overlay_palette_text = os.environ.get("MAKO_OVERLAY_MASK_PALETTE_TEXT")
-with open(path, "w", encoding="ascii", newline="\n") as f:
-    f.write("P3\n")
-    if overlay_palette_base:
-        f.write(f"# MAKOCODE_PALETTE_BASE {overlay_palette_base}\n")
-    if overlay_palette_text:
-        sanitized = overlay_palette_text.replace("\n", " ")
-        f.write(f"# MAKOCODE_PALETTE {sanitized}\n")
-    f.write(f"{w} {h}\n")
-    f.write("255\n")
-    for y in range(h):
-        row = []
-        for x in range(w):
-            dx = x - cx
-            dy = y - cy
-            inside = (dx * dx + dy * dy) <= radius * radius
-            if inside:
-                if circle_palette:
-                    angle = math.atan2(dy, dx)
-                    if angle < 0.0:
-                        angle += 2.0 * math.pi
-                    segment_index = int((angle / (2.0 * math.pi)) * len(circle_palette))
-                    segment_index %= len(circle_palette)
-                    row.append(circle_palette[segment_index])
-                else:
-                    row.append(circle_color)
-            else:
-                row.append(background_color)
-        f.write(" ".join(row))
-        f.write("\n")
-PY
+"$ppm_transform_bin" overlay-mask \
+    --output "$overlay_path" \
+    --circle-color "$circle_color" \
+    --background-color "$background_color" \
+    --width 1000 \
+    --height 1000
 
 fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 overlay_cmd=("$makocode_bin" overlay)
@@ -151,76 +108,7 @@ overlay_cmd+=("$encoded_path" "$overlay_path" "$fraction")
 "${overlay_cmd[@]}" > "$merged_path"
 
 # Preserve footer stripe rows from the original to avoid damaging the barcode.
-python3 - "$encoded_path" "$merged_path" <<'PY'
-import sys
-from pathlib import Path
-
-enc_path = Path(sys.argv[1])
-merged_path = Path(sys.argv[2])
-
-def read_ppm(path):
-    comments = []
-    tokens = []
-    with path.open("r", encoding="ascii") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                comments.append(line)
-                continue
-            tokens.extend(line.split())
-    if not tokens or tokens[0] != "P3":
-        raise SystemExit(f"{path} missing P3 magic")
-    idx = 1
-    width = int(tokens[idx]); idx += 1
-    height = int(tokens[idx]); idx += 1
-    maxval = int(tokens[idx]); idx += 1
-    if maxval != 255:
-        raise SystemExit(f"{path} unsupported max value {maxval}")
-    data = list(map(int, tokens[idx:]))
-    if len(data) != width * height * 3:
-        raise SystemExit(f"{path} pixel count mismatch")
-    return width, height, data, comments
-
-def write_ppm(path, width, height, data, comments):
-    with path.open("w", encoding="ascii", newline="\n") as f:
-        f.write("P3\n")
-        for c in comments:
-            f.write(f"{c}\n")
-        f.write(f"{width} {height}\n255\n")
-        it = iter(data)
-        row_pixels = width * 3
-        for _ in range(height):
-            row = [str(next(it)) for _ in range(row_pixels)]
-            f.write(" ".join(row))
-            f.write("\n")
-
-def footer_rows_from_comments(comments):
-    for line in comments:
-        parts = line.lstrip("#").strip().split()
-        if len(parts) >= 2 and parts[0] == "MAKOCODE_FOOTER_ROWS":
-            try:
-                return int(parts[1])
-            except ValueError:
-                return 0
-    return 0
-
-enc_w, enc_h, enc_data, enc_comments = read_ppm(enc_path)
-mer_w, mer_h, mer_data, mer_comments = read_ppm(merged_path)
-if (enc_w, enc_h) != (mer_w, mer_h):
-    raise SystemExit("dimension mismatch")
-footer_rows = footer_rows_from_comments(enc_comments)
-if footer_rows <= 0 or footer_rows >= enc_h:
-    # Nothing to patch; write merged as-is.
-    sys.exit(0)
-
-row_stride = enc_w * 3
-start = (enc_h - footer_rows) * row_stride
-enc_footer = enc_data[start:]
-mer_data[start:] = enc_footer
-write_ppm(merged_path, mer_w, mer_h, mer_data, mer_comments or enc_comments)
-PY
+"$ppm_transform_bin" copy-footer-rows --encoded "$encoded_path" --merged "$merged_path"
 
 decoded_dir="$work_dir/decoded"
 mkdir -p "$decoded_dir"
@@ -234,75 +122,6 @@ cmp --silent "$payload_path" "$decoded_source"
 mv "$decoded_source" "$decoded_path"
 
 skip_grayscale="${MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK:-0}"
-python3 - "$encoded_path" "$merged_path" "$skip_grayscale" <<'PY'
-import os, pathlib, sys
-
-base = pathlib.Path(sys.argv[1])
-merged = pathlib.Path(sys.argv[2])
-skip_grayscale = bool(int(sys.argv[3]))
-
-def read_ppm(path):
-    tokens = []
-    with path.open('r', encoding='ascii') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            tokens.extend(line.split())
-    if not tokens or tokens[0] != 'P3':
-        raise SystemExit(f"{path} missing P3 header")
-    idx = 1
-    width = int(tokens[idx]); idx += 1
-    height = int(tokens[idx]); idx += 1
-    maxval = int(tokens[idx]); idx += 1
-    nums = list(map(int, tokens[idx:]))
-    if len(nums) != width * height * 3:
-        raise SystemExit(f"{path} pixel count mismatch")
-    return width, height, nums
-
-w, h, base_nums = read_ppm(base)
-w2, h2, merged_nums = read_ppm(merged)
-if (w, h) != (w2, h2):
-    raise SystemExit('dimension mismatch')
-
-allowed_colors_text = os.environ.get('MAKO_OVERLAY_ALLOWED_COLORS')
-allowed_colors = None
-if allowed_colors_text:
-    allowed_colors = set()
-    for entry in allowed_colors_text.split(';'):
-        entry = entry.strip()
-        if not entry:
-            continue
-        parts = entry.split()
-        if len(parts) != 3:
-            raise SystemExit("overlay: invalid allowed color entry")
-        try:
-            channels = tuple(int(part) for part in parts)
-        except ValueError:
-            raise SystemExit("overlay: invalid allowed color entry")
-        if any(channel < 0 or channel > 255 for channel in channels):
-            raise SystemExit("overlay: allowed color values must be 0-255")
-        allowed_colors.add(channels)
-
-pixels = w * h
-diff = 0
-for i in range(pixels):
-    r, g, b = merged_nums[i*3:(i+1)*3]
-    if merged_nums[i*3:(i+1)*3] != base_nums[i*3:(i+1)*3]:
-        diff += 1
-    if allowed_colors and (r, g, b) not in allowed_colors:
-        raise SystemExit(f"pixel {r} {g} {b} at index {i} not in allowed palette")
-    if not skip_grayscale:
-        if not (r == g == b):
-            raise SystemExit(f"non-grayscale pixel {r} {g} {b} at index {i}")
-        if r not in (0, 255):
-            raise SystemExit(f"pixel {r} {g} {b} is not pure black or white at index {i}")
-
-if diff == 0:
-    raise SystemExit('overlay did not modify any pixels')
-
-ratio = diff / pixels
-print(f"overlay pixels modified: {diff} ({ratio:.6f})")
-PY
+"$ppm_transform_bin" overlay-check --base "$encoded_path" --merged "$merged_path" --skip-grayscale "$skip_grayscale"
 
 echo "overlay e2e ok (label=$label, artifacts prefix ${label}_overlay_*)"

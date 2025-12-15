@@ -6,6 +6,10 @@ Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu,
 
 Written entirely with codex-gpt-5.
 
+## Dependencies
+
+Totally standalone for future-proofing, c++ and g++ required for compiling. CLI tests require bash.
+
 ## Usage
 
 ```

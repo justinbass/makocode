@@ -22,7 +22,10 @@ all: makocode
 makocode: makocode.cpp
 	@$(STATUS) build "compile makocode" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test: makocode
+scripts/ppm_transform: scripts/ppm_transform.cpp
+	@$(STATUS) build "compile ppm_transform" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+
+test: makocode scripts/ppm_transform
 	@$(STATUS) test "ensure test dir" mkdir -p test
 	@$(STATUS) test "run test suite" ./scripts/run_test_suite.sh
 
@@ -37,6 +40,7 @@ clean:
 	@$(STATUS) --note clean "cleanup start"
 	@$(STATUS) clean "binary" rm -f makocode
 	@$(STATUS) clean "debug symbols" rm -rf makocode.dSYM
+	@$(STATUS) clean "ppm_transform helper" rm -f scripts/ppm_transform
 	@$(STATUS) clean "test artifacts" rm -rf test
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
 	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno $(LCOV_REPORT)

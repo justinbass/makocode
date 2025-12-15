@@ -272,7 +272,7 @@ rm -f "${encoded_prefix}.ppm" ${encoded_prefix}_*.ppm 2>/dev/null || true
 rm -f "${transformed_prefix}.ppm" ${transformed_prefix}_*.ppm 2>/dev/null || true
 
 if [[ -n $payload_literal ]]; then
-    payload_len=$(python3 -c 'import sys; print(len(sys.argv[1].encode("utf-8")))' "$payload_literal")
+    payload_len=$("$repo_root/scripts/ppm_transform" bytes-len "$payload_literal")
     if [[ $payload_len -ne $size ]]; then
         echo "run_roundtrip: --size ($size) must match --payload-literal byte length ($payload_len)" >&2
         exit 1
@@ -380,7 +380,7 @@ if [[ $transform_needed -eq 1 ]]; then
     for ppm in "${ppm_targets[@]}"; do
         base_name=$(basename "$ppm")
         transformed_path="$work_dir/${base_name%.*}_transformed.ppm"
-        python3 "$repo_root/scripts/ppm_transform.py" \
+        "$repo_root/scripts/ppm_transform" transform \
             --input "$ppm" \
             --output "$transformed_path" \
             --scale-x "$scale_x" \

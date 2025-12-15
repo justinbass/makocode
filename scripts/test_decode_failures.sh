@@ -97,6 +97,11 @@ if [[ ! -x $makocode_bin ]]; then
     echo "test_decode_failures: makocode binary not found at $makocode_bin" >&2
     exit 1
 fi
+ppm_transform_bin="$repo_root/scripts/ppm_transform"
+if [[ ! -x $ppm_transform_bin ]]; then
+    echo "test_decode_failures: ppm_transform helper not found at $ppm_transform_bin" >&2
+    exit 1
+fi
 
 test_dir="$repo_root/test"
 mkdir -p "$test_dir"
@@ -139,25 +144,7 @@ write_solid_ppm() {
     local r=$4
     local g=$5
     local b=$6
-    python3 - "$path" "$width" "$height" "$r" "$g" "$b" <<'PY'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-width = int(sys.argv[2])
-height = int(sys.argv[3])
-r = int(sys.argv[4])
-g = int(sys.argv[5])
-b = int(sys.argv[6])
-
-path.parent.mkdir(parents=True, exist_ok=True)
-with path.open("w", encoding="ascii") as fh:
-    fh.write("P3\n")
-    fh.write(f"{width} {height}\n")
-    fh.write("255\n")
-    for _ in range(width * height):
-        fh.write(f"{r} {g} {b}\n")
-PY
+    "$ppm_transform_bin" solid --output "$path" --width "$width" --height "$height" --r "$r" --g "$g" --b "$b"
 }
 
 # 1) Totally black, no barcode present.
@@ -177,28 +164,7 @@ write_noise_ppm() {
     local width=$2
     local height=$3
     local seed=$4
-    python3 - "$path" "$width" "$height" "$seed" <<'PY'
-import random
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-width = int(sys.argv[2])
-height = int(sys.argv[3])
-seed = int(sys.argv[4])
-
-rng = random.Random(seed)
-path.parent.mkdir(parents=True, exist_ok=True)
-with path.open("w", encoding="ascii") as fh:
-    fh.write("P3\n")
-    fh.write(f"{width} {height}\n")
-    fh.write("255\n")
-    for _ in range(width * height):
-        r = rng.randrange(0, 256)
-        g = rng.randrange(0, 256)
-        b = rng.randrange(0, 256)
-        fh.write(f"{r} {g} {b}\n")
-PY
+    "$ppm_transform_bin" noise --output "$path" --width "$width" --height "$height" --seed "$seed"
 }
 
 # 3) Random noise image (deterministic seed).
@@ -242,67 +208,9 @@ run_case_footer_data_destroyed() {
         echo "test_decode_failures: footer corruption case expected 1 page, got ${#ppm_paths[@]}" >&2
         exit 1
     fi
-
-    python3 - "${ppm_paths[0]}" "$footer_data_destroyed" <<'PY'
-import random
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-
-with src.open("r", encoding="ascii") as fh:
-    if fh.readline().strip() != "P3":
-        raise SystemExit("footer_corrupt: expected P3 PPM")
-    tokens = []
-    while len(tokens) < 3:
-        line = fh.readline()
-        if not line:
-            raise SystemExit("footer_corrupt: truncated header")
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        tokens.extend(stripped.split())
-    width = int(tokens[0])
-    height = int(tokens[1])
-    maxval = int(tokens[2])
-    if maxval != 255:
-        raise SystemExit(f"footer_corrupt: expected maxval 255, got {maxval}")
-    pixels = []
-    for line in fh:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        pixels.extend(int(value) for value in stripped.split())
-
-expected = width * height * 3
-if len(pixels) != expected:
-    raise SystemExit(f"footer_corrupt: pixel count mismatch (wanted {expected}, got {len(pixels)})")
-
-# Default palette with no custom palette text -> V3 footer rows are stable:
-# payload bytes=23, metadata bytes=34, parity bytes=8, total bytes=42 => rows=6.
-footer_height_px = 12
-if height <= footer_height_px:
-    raise SystemExit(f"footer_corrupt: image too short ({height}px) for footer stripe height {footer_height_px}px")
-
-rng = random.Random(424242)
-stripe_top = height - footer_height_px
-for y in range(stripe_top):
-    row_base = y * width * 3
-    for x in range(width):
-        idx = row_base + x * 3
-        pixels[idx] = rng.randrange(0, 256)
-        pixels[idx + 1] = rng.randrange(0, 256)
-        pixels[idx + 2] = rng.randrange(0, 256)
-
-dst.parent.mkdir(parents=True, exist_ok=True)
-with dst.open("w", encoding="ascii") as fh:
-    fh.write("P3\n")
-    fh.write(f"{width} {height}\n")
-    fh.write("255\n")
-    for idx in range(0, len(pixels), 3):
-        fh.write(f"{pixels[idx]} {pixels[idx+1]} {pixels[idx+2]}\n")
-PY
+    "$ppm_transform_bin" corrupt-footer-data-destroyed \
+        --input "${ppm_paths[0]}" \
+        --output "$footer_data_destroyed"
 
     run_expect_failure "decode-footer-present-data-destroyed" "$makocode_bin" decode "$footer_data_destroyed"
     rm -rf "$work_dir"
@@ -344,74 +252,9 @@ run_case_footer_valid_data_too_corrupt() {
         echo "test_decode_failures: ECC overwhelm case expected 1 page, got ${#ppm_paths[@]}" >&2
         exit 1
     fi
-
-    python3 - "${ppm_paths[0]}" "$footer_valid_data_too_corrupt" <<'PY'
-import random
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-
-with src.open("r", encoding="ascii") as fh:
-    if fh.readline().strip() != "P3":
-        raise SystemExit("ecc_overwhelm: expected P3 PPM")
-    tokens = []
-    while len(tokens) < 3:
-        line = fh.readline()
-        if not line:
-            raise SystemExit("ecc_overwhelm: truncated header")
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        tokens.extend(stripped.split())
-    width = int(tokens[0])
-    height = int(tokens[1])
-    maxval = int(tokens[2])
-    if maxval != 255:
-        raise SystemExit(f"ecc_overwhelm: expected maxval 255, got {maxval}")
-    pixels = []
-    for line in fh:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        pixels.extend(int(value) for value in stripped.split())
-
-expected = width * height * 3
-if len(pixels) != expected:
-    raise SystemExit(f"ecc_overwhelm: pixel count mismatch (wanted {expected}, got {len(pixels)})")
-
-# Preserve footer stripe by leaving the last 12px untouched (V3 rows=6 => 12px at 2px pitch
-# when no footer text is present). Also preserve a generous border/margin so fiducials remain.
-footer_height_px = 12
-border_keep = 80
-data_bottom = height - footer_height_px
-if data_bottom <= border_keep + 1:
-    raise SystemExit("ecc_overwhelm: image too short for chosen keep margins")
-
-rng = random.Random(20251215)
-
-y0 = border_keep
-y1 = max(y0 + 1, data_bottom - border_keep)
-x0 = border_keep
-x1 = max(x0 + 1, width - border_keep)
-
-for y in range(y0, y1):
-    row_base = y * width * 3
-    for x in range(x0, x1):
-        idx = row_base + x * 3
-        pixels[idx] = rng.randrange(0, 256)
-        pixels[idx + 1] = rng.randrange(0, 256)
-        pixels[idx + 2] = rng.randrange(0, 256)
-
-dst.parent.mkdir(parents=True, exist_ok=True)
-with dst.open("w", encoding="ascii") as fh:
-    fh.write("P3\n")
-    fh.write(f"{width} {height}\n")
-    fh.write("255\n")
-    for idx in range(0, len(pixels), 3):
-        fh.write(f"{pixels[idx]} {pixels[idx+1]} {pixels[idx+2]}\n")
-PY
+    "$ppm_transform_bin" corrupt-footer-valid-data-too-corrupt \
+        --input "${ppm_paths[0]}" \
+        --output "$footer_valid_data_too_corrupt"
 
     run_expect_failure "decode-footer-valid-data-too-corrupt" "$makocode_bin" decode "$footer_valid_data_too_corrupt"
     rm -rf "$work_dir"
