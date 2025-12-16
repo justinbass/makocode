@@ -22938,6 +22938,24 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
         } else {
             page.color_mode = 1u;
         }
+    } else if (page.pixels.data && page.pixels.size >= (usize)page.width * (usize)page.height * 3u) {
+        // When palette metadata is unavailable (e.g., synthetic overlay masks),
+        // infer whether the image uses chroma at all. Overlay behavior only
+        // needs a coarse "grayscale vs. color" distinction to decide between
+        // raw-pixel overlay and data-bit overlay. Avoid depending on PPM header
+        // comments, which are not preserved across print/scan workflows.
+        usize total_pixels = (usize)page.width * (usize)page.height;
+        bool has_color = false;
+        for (usize i = 0u; i < total_pixels; ++i) {
+            const u8* rgb = page.pixels.data + i * 3u;
+            if (rgb[0] != rgb[1] || rgb[1] != rgb[2]) {
+                has_color = true;
+                break;
+            }
+        }
+        if (has_color) {
+            page.color_mode = 2u;
+        }
     }
     return true;
 }

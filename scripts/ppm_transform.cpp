@@ -914,31 +914,10 @@ static void cmd_overlay_mask(int argc, char** argv) {
     if (!parse_rgb_triplet(circle_color_text, circle_color)) die("ppm_transform: overlay-mask invalid --circle-color");
     if (!parse_rgb_triplet(background_color_text, bg_color)) die("ppm_transform: overlay-mask invalid --background-color");
 
+    // Intentionally do not emit any PPM header comment lines. Metadata must be
+    // carried in pixels (e.g., footer stripe) rather than file headers, since
+    // print/scan workflows discard container headers entirely.
     StrVec comments;
-    const char* palette_base = getenv("MAKO_OVERLAY_MASK_PALETTE_BASE");
-    const char* palette_text = getenv("MAKO_OVERLAY_MASK_PALETTE_TEXT");
-    if (palette_base && *palette_base) {
-        size_t cap = strlen(palette_base) + 32;
-        char* line = (char*)malloc(cap);
-        if (!line) die("ppm_transform: OOM");
-        snprintf(line, cap, "# MAKOCODE_PALETTE_BASE %s", palette_base);
-        strvec_push(&comments, line);
-        free(line);
-    }
-    if (palette_text && *palette_text) {
-        size_t n = strlen(palette_text);
-        char* sanitized = (char*)malloc(n + 1);
-        if (!sanitized) die("ppm_transform: OOM");
-        for (size_t i = 0; i < n; i++) sanitized[i] = (palette_text[i] == '\n') ? ' ' : palette_text[i];
-        sanitized[n] = '\0';
-        size_t cap = strlen(sanitized) + 24;
-        char* line = (char*)malloc(cap);
-        if (!line) die("ppm_transform: OOM");
-        snprintf(line, cap, "# MAKOCODE_PALETTE %s", sanitized);
-        strvec_push(&comments, line);
-        free(line);
-        free(sanitized);
-    }
 
     // Optional per-segment circle palette via env var.
     uint32_t* circle_palette = nullptr;
