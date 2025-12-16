@@ -1,5 +1,4 @@
 Features
-- Test: Discolored paper (off-white)
 - Test: Wavy distortion test
 - Test: All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - Test: Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.

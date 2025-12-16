@@ -513,6 +513,18 @@ static void add_border_noise_in_place(IntVec* pixels, int width, int height, int
     }
 }
 
+static int clamp_u8(int v) {
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return v;
+}
+
+static double clamp_unit(double v) {
+    if (v < 0.0) return 0.0;
+    if (v > 1.0) return 1.0;
+    return v;
+}
+
 static int parse_color_rgb(const char* value, int out_rgb[3]) {
     if (!value) return 0;
     const char* s = value;
@@ -554,6 +566,95 @@ static int parse_color_rgb(const char* value, int out_rgb[3]) {
     out_rgb[1] = hex_byte(2);
     out_rgb[2] = hex_byte(4);
     return 1;
+}
+
+static void apply_paper_tint_in_place(IntVec* pixels,
+                                      int width,
+                                      int height,
+                                      const int paper_rgb[3],
+                                      double paper_alpha,
+                                      double splotch_alpha,
+                                      double splotch_shade,
+                                      int splotch_px,
+                                      int seed) {
+    if (!pixels || !pixels->data) return;
+    if (width <= 0 || height <= 0) return;
+    paper_alpha = clamp_unit(paper_alpha);
+    splotch_alpha = clamp_unit(splotch_alpha);
+    splotch_shade = clamp_unit(splotch_shade);
+    if (paper_alpha <= 0.0 && splotch_alpha <= 0.0 && splotch_shade <= 0.0) return;
+
+    // No splotch field: apply uniform tint/shade.
+    if (splotch_px <= 0) {
+        double alpha = paper_alpha;
+        double shade = 1.0;
+        for (size_t i = 0; i + 2 < pixels->size; i += 3) {
+            for (int c = 0; c < 3; c++) {
+                double v = pixels->data[i + (size_t)c];
+                double mixed = v * (1.0 - alpha) + (double)paper_rgb[c] * alpha;
+                mixed *= shade;
+                pixels->data[i + (size_t)c] = clamp_u8((int)llround(mixed));
+            }
+        }
+        return;
+    }
+
+    int cell = splotch_px;
+    if (cell < 1) cell = 1;
+    int grid_w = width / cell + 2;
+    int grid_h = height / cell + 2;
+    size_t grid_sz = (size_t)grid_w * (size_t)grid_h;
+    uint8_t* grid = (uint8_t*)malloc(grid_sz);
+    if (!grid) die("ppm_transform: OOM");
+
+    uint32_t rng = (uint32_t)seed ^ 0xBADC0FFEu;
+    for (size_t i = 0; i < grid_sz; i++) grid[i] = (uint8_t)rand_u8(&rng);
+
+    int denom = cell * cell;
+    if (denom <= 0) denom = 1;
+
+    for (int y = 0; y < height; y++) {
+        int gy = y / cell;
+        int ry = y - gy * cell;
+        int wy1 = ry;
+        int wy0 = cell - ry;
+        if (gy + 1 >= grid_h) gy = grid_h - 2;
+        size_t row_base = (size_t)y * (size_t)width * 3;
+        for (int x = 0; x < width; x++) {
+            int gx = x / cell;
+            int rx = x - gx * cell;
+            int wx1 = rx;
+            int wx0 = cell - rx;
+            if (gx + 1 >= grid_w) gx = grid_w - 2;
+
+            size_t idx00 = (size_t)gy * (size_t)grid_w + (size_t)gx;
+            size_t idx10 = idx00 + 1;
+            size_t idx01 = idx00 + (size_t)grid_w;
+            size_t idx11 = idx01 + 1;
+
+            int w00 = wx0 * wy0;
+            int w10 = wx1 * wy0;
+            int w01 = wx0 * wy1;
+            int w11 = wx1 * wy1;
+            int acc = (int)grid[idx00] * w00 + (int)grid[idx10] * w10 + (int)grid[idx01] * w01 + (int)grid[idx11] * w11;
+            double n = (double)acc / ((double)denom * 255.0);
+            if (n < 0.0) n = 0.0;
+            if (n > 1.0) n = 1.0;
+
+            double alpha = clamp_unit(paper_alpha + splotch_alpha * n);
+            double shade = clamp_unit(1.0 - splotch_shade * n);
+
+            size_t px = row_base + (size_t)x * 3;
+            for (int c = 0; c < 3; c++) {
+                double v = pixels->data[px + (size_t)c];
+                double mixed = v * (1.0 - alpha) + (double)paper_rgb[c] * alpha;
+                mixed *= shade;
+                pixels->data[px + (size_t)c] = clamp_u8((int)llround(mixed));
+            }
+        }
+    }
+
+    free(grid);
 }
 
 static void apply_ink_blot_in_place(IntVec* pixels, int width, int height, int radius, const int* rgb_or_null) {
@@ -624,6 +725,8 @@ static void usage() {
             "  ppm_transform transform --input IN --output OUT [--scale-x F] [--scale-y F] [--rotate DEG]\n"
             "                       [--skew-x PX] [--skew-y PX] [--border-thickness PX] [--border-density R]\n"
             "                       [--seed N] [--ink-blot-radius PX] [--ink-blot-color C]\n"
+            "                       [--paper-color C] [--paper-alpha A] [--paper-splotch-alpha A]\n"
+            "                       [--paper-splotch-shade A] [--paper-splotch-px PX]\n"
             "  ppm_transform solid --output OUT --width W --height H --r R --g G --b B\n"
             "  ppm_transform noise --output OUT --width W --height H --seed N\n"
             "  ppm_transform corrupt-footer-data-destroyed --input IN --output OUT [--seed N] [--footer-height-px N]\n"
@@ -1035,6 +1138,11 @@ static void cmd_transform(int argc, char** argv) {
     int seed = 0;
     int ink_blot_radius = 0;
     const char* ink_blot_color = "";
+    const char* paper_color = "";
+    double paper_alpha = 0.0;
+    double paper_splotch_alpha = 0.0;
+    double paper_splotch_shade = 0.0;
+    int paper_splotch_px = 0;
 
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
@@ -1054,6 +1162,11 @@ static void cmd_transform(int argc, char** argv) {
         else if (strcmp(arg, "--seed") == 0) seed = parse_i32(require_value("--seed"), "seed");
         else if (strcmp(arg, "--ink-blot-radius") == 0) ink_blot_radius = parse_i32(require_value("--ink-blot-radius"), "ink-blot-radius");
         else if (strcmp(arg, "--ink-blot-color") == 0) ink_blot_color = require_value("--ink-blot-color");
+        else if (strcmp(arg, "--paper-color") == 0) paper_color = require_value("--paper-color");
+        else if (strcmp(arg, "--paper-alpha") == 0) paper_alpha = parse_f64(require_value("--paper-alpha"), "paper-alpha");
+        else if (strcmp(arg, "--paper-splotch-alpha") == 0) paper_splotch_alpha = parse_f64(require_value("--paper-splotch-alpha"), "paper-splotch-alpha");
+        else if (strcmp(arg, "--paper-splotch-shade") == 0) paper_splotch_shade = parse_f64(require_value("--paper-splotch-shade"), "paper-splotch-shade");
+        else if (strcmp(arg, "--paper-splotch-px") == 0) paper_splotch_px = parse_i32(require_value("--paper-splotch-px"), "paper-splotch-px");
         else die2("ppm_transform: unknown flag ", arg);
     }
 
@@ -1128,8 +1241,41 @@ static void cmd_transform(int argc, char** argv) {
     if (ink_blot_radius > 0 && !have_blot) die("ppm_transform: --ink-blot-radius requires --ink-blot-color");
     apply_ink_blot_in_place(&current, w, h, ink_blot_radius, have_blot ? blot_rgb : nullptr);
 
+    int paper_rgb[3] = {255, 255, 255};
+    int have_paper = parse_color_rgb(paper_color, paper_rgb);
+    if ((paper_alpha > 0.0 || paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0) && !have_paper) {
+        die("ppm_transform: --paper-alpha/--paper-splotch-* require --paper-color (White/Black or RRGGBB hex)");
+    }
+    apply_paper_tint_in_place(&current,
+                              w,
+                              h,
+                              paper_rgb,
+                              paper_alpha,
+                              paper_splotch_alpha,
+                              paper_splotch_shade,
+                              paper_splotch_px,
+                              seed);
+
     if (metadata.size > 0) {
         for (size_t i = 0; i < metadata.size; i++) strvec_push(&comments, metadata.data[i]);
+    }
+
+    if (have_paper && (paper_alpha > 0.0 || paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0)) {
+        char buf[64] = {0};
+        char line[256] = {0};
+        snprintf(line, sizeof(line), "# paper_color %02X%02X%02X", paper_rgb[0], paper_rgb[1], paper_rgb[2]);
+        strvec_push(&comments, line);
+        format_float(paper_alpha, buf);
+        snprintf(line, sizeof(line), "# paper_alpha %s", buf);
+        strvec_push(&comments, line);
+        format_float(paper_splotch_alpha, buf);
+        snprintf(line, sizeof(line), "# paper_splotch_alpha %s", buf);
+        strvec_push(&comments, line);
+        format_float(paper_splotch_shade, buf);
+        snprintf(line, sizeof(line), "# paper_splotch_shade %s", buf);
+        strvec_push(&comments, line);
+        snprintf(line, sizeof(line), "# paper_splotch_px %d", paper_splotch_px);
+        strvec_push(&comments, line);
     }
 
     write_ppm_p3_ascii(output, &comments, w, h, &current, 0);

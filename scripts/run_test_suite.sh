@@ -439,3 +439,22 @@ run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys E
     --overlay-background-color "255 255 255" \
     --overlay-allowed-colors "0 0 0;255 255 255" \
     --overlay-skip-grayscale-check 1
+
+run_roundtrip_case "paper_offwhite_bw" "Slightly off-white, splotchy paper tint (BW)" \
+    --size 8192 --ecc 0.5 --width 600 --height 600 --palette "White Black" \
+    --transform-seed 424242 \
+    --paper-color "FFF3D6" --paper-alpha 0.105 \
+    --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
+
+run_roundtrip_case "paper_offwhite_cmyk" "Slightly off-white, splotchy paper tint (CMYK)" \
+    --size 8192 --ecc 0.5 --width 640 --height 640 --palette "White Cyan Magenta Yellow" \
+    --transform-seed 424242 \
+    --paper-color "FFF3D6" --paper-alpha 0.105 \
+    --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
+
+run_roundtrip_case "paper_offwhite_cmykwrbg" "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
+    --size 8192 --ecc 0.5 --width 720 --height 720 \
+    --palette "FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00" \
+    --transform-seed 424242 \
+    --paper-color "FFF3D6" --paper-alpha 0.105 \
+    --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96

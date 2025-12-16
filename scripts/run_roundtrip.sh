@@ -62,6 +62,11 @@ Distortions (applied after baseline roundtrip when requested):
   --transform-seed N    Seed for deterministic distortions (default 0).
   --ink-blot-radius PX  Draw a circular blot of radius PX at the page center (requires color).
   --ink-blot-color C    Blot color name (White/Black) or RRGGBB hex.
+  --paper-color C       Paper tint color (White/Black) or RRGGBB hex.
+  --paper-alpha A       Uniform paper blend (0-1).
+  --paper-splotch-alpha A  Extra paper blend from a splotchy field (0-1).
+  --paper-splotch-shade A  Splotchy shading/dimming (0-1).
+  --paper-splotch-px PX    Splotch patch size in pixels.
 
 General:
   --help                Show this help message.
@@ -94,6 +99,11 @@ border_density="0.35"
 transform_seed="0"
 ink_blot_radius="0"
 ink_blot_color=""
+paper_color=""
+paper_alpha="0"
+paper_splotch_alpha="0"
+paper_splotch_shade="0"
+paper_splotch_px="0"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -202,6 +212,26 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ink-blot-color)
             ink_blot_color=${2:-}
+            shift 2
+            ;;
+        --paper-color)
+            paper_color=${2:-}
+            shift 2
+            ;;
+        --paper-alpha)
+            paper_alpha=${2:-}
+            shift 2
+            ;;
+        --paper-splotch-alpha)
+            paper_splotch_alpha=${2:-}
+            shift 2
+            ;;
+        --paper-splotch-shade)
+            paper_splotch_shade=${2:-}
+            shift 2
+            ;;
+        --paper-splotch-px)
+            paper_splotch_px=${2:-}
             shift 2
             ;;
         --help)
@@ -366,6 +396,9 @@ fi
 if (( ink_blot_radius > 0 )); then
     transform_needed=1
 fi
+if [[ $paper_alpha != 0 || $paper_splotch_alpha != 0 || $paper_splotch_shade != 0 || $paper_splotch_px != 0 ]]; then
+    transform_needed=1
+fi
 
 # Reuse the archived baseline artifacts when building transformed copies
 ppm_targets=("${baseline_targets[@]}")
@@ -392,7 +425,12 @@ if [[ $transform_needed -eq 1 ]]; then
             --border-density "$border_density" \
             --seed "$transform_seed" \
             --ink-blot-radius "$ink_blot_radius" \
-            --ink-blot-color "$ink_blot_color"
+            --ink-blot-color "$ink_blot_color" \
+            --paper-color "$paper_color" \
+            --paper-alpha "$paper_alpha" \
+            --paper-splotch-alpha "$paper_splotch_alpha" \
+            --paper-splotch-shade "$paper_splotch_shade" \
+            --paper-splotch-px "$paper_splotch_px"
         transform_outputs+=("$transformed_path")
         idx=$((idx + 1))
     done
