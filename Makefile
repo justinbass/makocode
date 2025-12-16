@@ -43,5 +43,5 @@ clean:
 	@$(STATUS) clean "ppm_transform helper" rm -f scripts/ppm_transform
 	@$(STATUS) clean "test artifacts" rm -rf test
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
-	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno $(LCOV_REPORT)
+	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno scripts/*.gcda scripts/*.gcno $(LCOV_REPORT)
 	@$(STATUS) --note clean "cleanup complete"

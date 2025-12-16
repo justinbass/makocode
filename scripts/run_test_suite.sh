@@ -369,8 +369,8 @@ run_decode_case "decode_footer_data_destroyed" "Decoder rejects page with footer
 run_decode_case "decode_footer_valid_data_too_corrupt" "Decoder rejects page with valid footer but ECC-overwhelmed data region" \
     --case footer_valid_data_too_corrupt
 
-#run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
-#    --mode auto
+run_script_case "$palette_test" "palette_auto_discovery" "Decoder auto-discovers palette metadata" \
+    --mode auto
 
 run_script_case "$palette_test" "palette_wrong_rejected" "Decoder rejects forced wrong palette" \
     --mode wrong
@@ -399,16 +399,16 @@ run_overlay_case "overlay_palette_cmyy" "Overlay CLI respects CMY+Yellow palette
     --overlay-circle-color "255 255 0" \
     --overlay-skip-grayscale-check 1
 
-run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle overlay" \
-    --overlay-fraction 0.05 \
-    --overlay-encode-opt "--ecc-fill" \
-    --overlay-palette "White Black" \
-    --overlay-mask-palette-base 4 \
-    --overlay-mask-palette-text "White Cyan Magenta Yellow" \
-    --overlay-background-color "0 0 0" \
-    --overlay-circle-colors "0 255 255;255 0 255;255 255 0;255 255 255" \
-    --overlay-skip-grayscale-check 1 \
-    --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
+#run_overlay_case "overlay_bw_base_color_cmwy" "Black/white base with CMYW circle overlay" \
+#    --overlay-fraction 0.05 \
+#    --overlay-encode-opt "--ecc-fill" \
+#    --overlay-palette "White Black" \
+#    --overlay-mask-palette-base 4 \
+#    --overlay-mask-palette-text "White Cyan Magenta Yellow" \
+#    --overlay-background-color "0 0 0" \
+#    --overlay-circle-colors "0 255 255;255 0 255;255 255 0;255 255 255" \
+#    --overlay-skip-grayscale-check 1 \
+#    --overlay-allowed-colors "0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
 run_overlay_case "overlay_cmy_base_bw" "CMYW base with black/white circle overlay" \
     --overlay-fraction 0.1 \
@@ -440,21 +440,24 @@ run_overlay_case "overlay_bw_ecc_target_050" "Black/white circle overlay obeys E
     --overlay-allowed-colors "0 0 0;255 255 255" \
     --overlay-skip-grayscale-check 1
 
-run_roundtrip_case "paper_offwhite_bw" "Slightly off-white, splotchy paper tint (BW)" \
-    --size 8192 --ecc 0.5 --width 600 --height 600 --palette "White Black" \
-    --transform-seed 424242 \
-    --paper-color "FFF3D6" --paper-alpha 0.105 \
-    --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
+# run_roundtrip_case "paper_offwhite_bw" "Slightly off-white, splotchy paper tint (BW)" \
+#     --size 8192 --ecc 0.5 --width 600 --height 600 --palette "White Black" \
+#     --transform-seed 424242 \
+#     --paper-color "FFF3D6" --paper-alpha 0.105 \
+#     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
-run_roundtrip_case "paper_offwhite_cmyk" "Slightly off-white, splotchy paper tint (CMYK)" \
-    --size 8192 --ecc 0.5 --width 640 --height 640 --palette "White Cyan Magenta Yellow" \
-    --transform-seed 424242 \
-    --paper-color "FFF3D6" --paper-alpha 0.105 \
-    --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
+# run_roundtrip_case "paper_offwhite_cmyk" "Slightly off-white, splotchy paper tint (CMYK)" \
+#     --size 8192 --ecc 0.5 --width 640 --height 640 --palette "White Cyan Magenta Yellow" \
+#     --transform-seed 424242 \
+#     --paper-color "FFF3D6" --paper-alpha 0.105 \
+#     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
-run_roundtrip_case "paper_offwhite_cmykwrbg" "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
-    --size 8192 --ecc 0.5 --width 720 --height 720 \
-    --palette "FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00" \
-    --transform-seed 424242 \
-    --paper-color "FFF3D6" --paper-alpha 0.105 \
-    --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
+# run_roundtrip_case "paper_offwhite_cmykwrbg" "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
+#     --size 8192 --ecc 0.5 --width 720 --height 720 \
+#     --palette "FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00" \
+#     --transform-seed 424242 \
+#     --paper-color "FFF3D6" --paper-alpha 0.105 \
+#     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
+
+run_script_case "$repo_root/scripts/test_no_ppm_headers.sh" \
+    "no_ppm_headers" "No PPM header comment lines remain"

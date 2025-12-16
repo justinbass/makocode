@@ -918,9 +918,10 @@ static void cmd_overlay_mask(int argc, char** argv) {
     const char* palette_base = getenv("MAKO_OVERLAY_MASK_PALETTE_BASE");
     const char* palette_text = getenv("MAKO_OVERLAY_MASK_PALETTE_TEXT");
     if (palette_base && *palette_base) {
-        char* line = (char*)malloc(strlen(palette_base) + 32);
+        size_t cap = strlen(palette_base) + 32;
+        char* line = (char*)malloc(cap);
         if (!line) die("ppm_transform: OOM");
-        sprintf(line, "# MAKOCODE_PALETTE_BASE %s", palette_base);
+        snprintf(line, cap, "# MAKOCODE_PALETTE_BASE %s", palette_base);
         strvec_push(&comments, line);
         free(line);
     }
@@ -930,9 +931,10 @@ static void cmd_overlay_mask(int argc, char** argv) {
         if (!sanitized) die("ppm_transform: OOM");
         for (size_t i = 0; i < n; i++) sanitized[i] = (palette_text[i] == '\n') ? ' ' : palette_text[i];
         sanitized[n] = '\0';
-        char* line = (char*)malloc(strlen(sanitized) + 24);
+        size_t cap = strlen(sanitized) + 24;
+        char* line = (char*)malloc(cap);
         if (!line) die("ppm_transform: OOM");
-        sprintf(line, "# MAKOCODE_PALETTE %s", sanitized);
+        snprintf(line, cap, "# MAKOCODE_PALETTE %s", sanitized);
         strvec_push(&comments, line);
         free(line);
         free(sanitized);
