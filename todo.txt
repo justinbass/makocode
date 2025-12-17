@@ -1,6 +1,5 @@
 Features
-- Fix PPM headers
-- Test: Wavy distortion test
+- Test: Wavy distortion test. Note, footer barcode would be distorted too. This will fail currently.
 - Test: All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - Test: Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Test: Remove entire page test, with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.

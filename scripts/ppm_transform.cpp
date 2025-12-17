@@ -256,7 +256,7 @@ static void write_ppm_p3_ascii(const char* path,
     fclose(f);
 }
 
-static StrVec strip_geometry_comments(const StrVec* comments) {
+[[maybe_unused]] static StrVec strip_geometry_comments(const StrVec* comments) {
     static const char* prefixes[] = {
         "# skew_src_width",
         "# skew_src_height",
@@ -1154,7 +1154,8 @@ static void cmd_transform(int argc, char** argv) {
     if (!input || !output) die("ppm_transform: --input and --output are required");
 
     Ppm ppm = read_ppm_p3_ascii(input);
-    StrVec comments = strip_geometry_comments(&ppm.comments);
+    // Never emit PPM comment header lines in outputs (they will be lost in print/scan workflows).
+    StrVec comments;
     StrVec metadata;
 
     int w = ppm.width;
@@ -1236,28 +1237,6 @@ static void cmd_transform(int argc, char** argv) {
                               paper_splotch_shade,
                               paper_splotch_px,
                               seed);
-
-    if (metadata.size > 0) {
-        for (size_t i = 0; i < metadata.size; i++) strvec_push(&comments, metadata.data[i]);
-    }
-
-    if (have_paper && (paper_alpha > 0.0 || paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0)) {
-        char buf[64] = {0};
-        char line[256] = {0};
-        snprintf(line, sizeof(line), "# paper_color %02X%02X%02X", paper_rgb[0], paper_rgb[1], paper_rgb[2]);
-        strvec_push(&comments, line);
-        format_float(paper_alpha, buf);
-        snprintf(line, sizeof(line), "# paper_alpha %s", buf);
-        strvec_push(&comments, line);
-        format_float(paper_splotch_alpha, buf);
-        snprintf(line, sizeof(line), "# paper_splotch_alpha %s", buf);
-        strvec_push(&comments, line);
-        format_float(paper_splotch_shade, buf);
-        snprintf(line, sizeof(line), "# paper_splotch_shade %s", buf);
-        strvec_push(&comments, line);
-        snprintf(line, sizeof(line), "# paper_splotch_px %d", paper_splotch_px);
-        strvec_push(&comments, line);
-    }
 
     write_ppm_p3_ascii(output, &comments, w, h, &current, 0);
 
