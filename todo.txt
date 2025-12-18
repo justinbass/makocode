@@ -16,6 +16,8 @@ Features
  - Use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions).
  - Improve overlay up to 50% ECC for each, including ignore - or 100% if possible.
 - Metadata recovery mode to brute force guess it if missing, exponentially difficult
+ - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
+ - What if white/black or light/dark are inverted for the metadata?
 
 Finalize
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
