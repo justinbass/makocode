@@ -525,6 +525,53 @@ static double clamp_unit(double v) {
     return v;
 }
 
+static int compute_metadata_guard(int width,
+                                  int height,
+                                  int footer_height_px,
+                                  int* x0,
+                                  int* y0,
+                                  int* x1,
+                                  int* y1) {
+    if (!x0 || !y0 || !x1 || !y1) return 0;
+    if (width <= 0 || height <= 0) return 0;
+    int usable_height = height - (footer_height_px > 0 ? footer_height_px : 0);
+    if (usable_height <= 0) return 0;
+    int side = 96; // Protect metadata tile (~48px) plus margin.
+    if (side > width) side = width;
+    if (side > usable_height) side = usable_height;
+    if (side <= 0) return 0;
+    int cx = width / 2;
+    int cy = usable_height / 2;
+    int half = side / 2;
+    *x0 = cx - half;
+    *y0 = cy - half;
+    *x1 = *x0 + side;
+    *y1 = *y0 + side;
+    if (*x0 < 0) {
+        int delta = -*x0;
+        *x0 = 0;
+        *x1 += delta;
+    }
+    if (*y0 < 0) {
+        int delta = -*y0;
+        *y0 = 0;
+        *y1 += delta;
+    }
+    if (*x1 > width) {
+        int delta = *x1 - width;
+        *x1 = width;
+        *x0 -= delta;
+        if (*x0 < 0) *x0 = 0;
+    }
+    if (*y1 > usable_height) {
+        int delta = *y1 - usable_height;
+        *y1 = usable_height;
+        *y0 -= delta;
+        if (*y0 < 0) *y0 = 0;
+    }
+    return (*x1 > *x0) && (*y1 > *y0);
+}
+
 static int parse_color_rgb(const char* value, int out_rgb[3]) {
     if (!value) return 0;
     const char* s = value;
@@ -659,6 +706,8 @@ static void apply_paper_tint_in_place(IntVec* pixels,
 
 static void apply_ink_blot_in_place(IntVec* pixels, int width, int height, int radius, const int* rgb_or_null) {
     if (radius <= 0 || !rgb_or_null || width <= 0 || height <= 0) return;
+    int guard_x0 = 0, guard_y0 = 0, guard_x1 = 0, guard_y1 = 0;
+    int have_guard = compute_metadata_guard(width, height, 0, &guard_x0, &guard_y0, &guard_x1, &guard_y1);
     double radius_sq = (double)radius * (double)radius;
     double cx = (width - 1) / 2.0;
     double cy = (height - 1) / 2.0;
@@ -668,7 +717,8 @@ static void apply_ink_blot_in_place(IntVec* pixels, int width, int height, int r
         size_t row_base = (size_t)y * width * 3;
         for (int x = 0; x < width; x++) {
             double dx = x - cx;
-            if (dx * dx + dy_sq <= radius_sq) {
+            int protect = have_guard && x >= guard_x0 && x < guard_x1 && y >= guard_y0 && y < guard_y1;
+            if (!protect && (dx * dx + dy_sq <= radius_sq)) {
                 size_t idx = row_base + (size_t)x * 3;
                 pixels->data[idx] = rgb_or_null[0];
                 pixels->data[idx + 1] = rgb_or_null[1];
@@ -811,7 +861,7 @@ static void cmd_corrupt_footer_data_destroyed(int argc, char** argv) {
     const char* input = nullptr;
     const char* output = nullptr;
     int seed = 424242;
-    int footer_height_px = 12;
+    int footer_height_px = 0;
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
         auto require_value = [&](const char* flag) -> const char* {
@@ -829,9 +879,12 @@ static void cmd_corrupt_footer_data_destroyed(int argc, char** argv) {
     if (ppm.height <= footer_height_px) die("ppm_transform: corrupt-footer-data-destroyed: image too short");
     uint32_t rng = (uint32_t)seed ^ 0x12345678u;
     int stripe_top = ppm.height - footer_height_px;
+    int guard_x0 = 0, guard_y0 = 0, guard_x1 = 0, guard_y1 = 0;
+    int have_guard = compute_metadata_guard(ppm.width, ppm.height, footer_height_px, &guard_x0, &guard_y0, &guard_x1, &guard_y1);
     for (int y = 0; y < stripe_top; y++) {
         size_t row_base = (size_t)y * ppm.width * 3;
         for (int x = 0; x < ppm.width; x++) {
+            if (have_guard && x >= guard_x0 && x < guard_x1 && y >= guard_y0 && y < guard_y1) continue;
             size_t idx = row_base + (size_t)x * 3;
             ppm.pixels.data[idx] = rand_u8(&rng);
             ppm.pixels.data[idx + 1] = rand_u8(&rng);
@@ -846,7 +899,7 @@ static void cmd_corrupt_footer_valid_data_too_corrupt(int argc, char** argv) {
     const char* input = nullptr;
     const char* output = nullptr;
     int seed = 20251215;
-    int footer_height_px = 12;
+    int footer_height_px = 0;
     int border_keep = 80;
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
@@ -871,10 +924,13 @@ static void cmd_corrupt_footer_valid_data_too_corrupt(int argc, char** argv) {
     int x0 = border_keep;
     int x1 = ppm.width - border_keep;
     if (x1 < x0 + 1) x1 = x0 + 1;
+    int guard_x0 = 0, guard_y0 = 0, guard_x1 = 0, guard_y1 = 0;
+    int have_guard = compute_metadata_guard(ppm.width, ppm.height, footer_height_px, &guard_x0, &guard_y0, &guard_x1, &guard_y1);
     uint32_t rng = (uint32_t)seed ^ 0xDEADBEEFu;
     for (int y = y0; y < y1; y++) {
         size_t row_base = (size_t)y * ppm.width * 3;
         for (int x = x0; x < x1; x++) {
+            if (have_guard && x >= guard_x0 && x < guard_x1 && y >= guard_y0 && y < guard_y1) continue;
             size_t idx = row_base + (size_t)x * 3;
             ppm.pixels.data[idx] = rand_u8(&rng);
             ppm.pixels.data[idx + 1] = rand_u8(&rng);
