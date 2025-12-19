@@ -1,8 +1,6 @@
 Features
+- Check tests, rotation/stretch outputs look missing now
 - Footer title and metadata just on first page - or middle page?
-- Footer barcode
- - Move footer barcode contents into the beginning of the data, e.g. merge it somewhat with other header data within. Rename to "metadata".
- - Triple ECC header redundancy should instead use ECC algorithm.
 - Test: Page height or width too small for title or metadata, fails to encode
 - Compress metadata (confirm it saves space worth the risk of corruption)
 - Test: Wavy distortion test. Note, footer barcode would be distorted too. This will fail currently.
