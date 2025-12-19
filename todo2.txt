@@ -1,0 +1,341 @@
+MakoCode “Metadata” Refactor Plan (v0 — implement-from-scratch notes)
+====================================================================
+
+Goal
+----
+Eliminate dependence on a dedicated footer barcode/stripe region by moving all
+critical “footer barcode contents” into a unified concept called “metadata”.
+Increase data density and reduce edge-region dependence. Replace “triple
+redundancy header” with RS-based ECC (high ECC) and a coherent bootstrap flow
+that avoids chicken/egg problems.
+
+This plan is written so someone can implement it without prior context.
+
+
+Key constraints + context (from discussion)
+-------------------------------------------
+- Primary real-world distortion: print/scan introduces full 2D warp unevenly
+  across the page (not localized). Also dust/artifacts and occasional row
+  skipping.
+- Existing system uses Barker code (Barker-11 + timing 101010) to find/align a
+  footer barcode stripe today; this creates a chicken/egg if the footer is
+  wavy/distorted and cannot be decoded, since it currently carries decode
+  parameters.
+- The project already has Reed–Solomon GF(2^8) tables and uses RS for ECC.
+- We want to rename/replace “triple redundancy header” with “metadata” protected
+  by RS with high ECC. Erasure detection is NOT implemented yet; defer it.
+- Palette autodetection must come from metadata. Metadata itself should be
+  2-color to bootstrap detection.
+- Metadata is unencrypted even when payload encryption exists (security vector
+  not a concern here).
+- Footer text (human-readable title/filename/page) remains a feature but is
+  optional and must not be required for decoding.
+- Multi-page must always be supported (metadata must include page_count/index).
+- Compatibility with old formats is NOT required (project not released); OK to
+  break old pages/decoders and delete old footer stripe code entirely.
+- Default: NO replication/redundancy via multiple metadata instances yet (N=1).
+  Replication can be added later if needed.
+- Pages are generally large (often >100kB data/page); overhead tolerance:
+  ideally <5% reserved/metadata, but correctness/sanity matters more than
+  compactness.
+- Very small payloads (1 byte, even 0 bytes) are allowed; it’s OK if the minimum
+  page size grows to accommodate mandatory fiducials + metadata. Optimize for
+  large pages; tiny pages are obscure.
+
+
+Current code findings (before refactor)
+---------------------------------------
+- In-band frame header is minimal: the payload stream begins with a 64-bit
+  “payload bit count” value; there is effectively no “triple header” in the
+  payload stream today.
+- Most “on paper” decode-critical parameters currently live in a footer stripe
+  region (“FooterStripe”), including:
+  - page_bits (payload bit count), page_count, page_index
+  - ECC layout (enabled, block sizes/parity/count, original bytes)
+  - page dimensions
+  - fiducial marker size
+  - optionally palette bytes (custom palette text bytes)
+- Footer stripe sampling uses 2-color high-contrast and per-row Barker/timing
+  guards for robust alignment.
+- Decoder currently attempts to decode the footer stripe early in PPM parsing
+  to discover metadata; this is the “edge dependency” we’re removing.
+
+
+High-level design: separate bootstrap acquisition from metadata bytes
+---------------------------------------------------------------------
+Core principle to avoid chicken/egg:
+  Acquisition (find grid, estimate warp, sample modules) MUST NOT depend on
+  decoding metadata bytes first.
+
+Given mandatory fiducials, the new bootstrap is:
+  1) Find fiducials in the scan/image.
+  2) Use fiducials to estimate warp (ideally non-affine over time; for now, at
+     least good enough to sample a local region).
+  3) Use fiducials to locate a “metadata tile” region.
+  4) Sample the metadata tile (2-color) and RS-decode metadata bytes.
+  5) Use decoded metadata (palette, ECC layout, page counts, etc.) to decode the
+     payload area.
+
+
+Chosen approach: “Option B” metadata tile (fixed outer frame + dynamic inner)
+----------------------------------------------------------------------------
+User selected Option B explicitly.
+
+Option B summary:
+- A single “metadata tile” is rendered on each page at a location anchored to
+  the centermost fiducial.
+- The tile has:
+  - Fixed-size outer frame used only for detection/orientation/phase sanity.
+  - A small fixed header inside that frame which encodes the inner payload size
+    (or payload byte count) and schema/version.
+  - A variable-size inner payload area which stores the actual RS-protected
+    metadata bytes.
+- The encoder masks/reserves the tile area so payload bits never land there.
+
+
+Concrete tile decisions (locked)
+--------------------------------
+- Tile size: 48×48 logical modules.
+- Module pitch: 1×1 (max density).
+- Tile colors: exactly 2 colors from the palette:
+  - “light” = palette[0] (“first” color; assumed usually white)
+  - “dark”  = palette[last] (“last” color; assumed darker)
+- Encode-time requirement: enforce a minimum contrast/luminance gap between
+  palette[0] and palette[last]; fail encode if too low.
+  - Rationale: decoder bootstraps metadata by thresholding these two colors; if
+    they’re too close (e.g., white vs very light pink), bootstrap becomes
+    fragile. A TODO exists to improve this later.
+- Replication: NONE for now (N=1 metadata tile per page).
+- ECC for metadata: Reed–Solomon parity fixed at 32 bytes (RS parity bytes).
+- Decoder supports only 48×48 for now (no 64×64 fallback).
+- Remove footer stripe entirely; no compatibility. Keep footer text feature
+  (optional).
+
+
+Metadata contents (what must be carried)
+----------------------------------------
+Metadata must contain everything required for decode, plus palette sanity, and
+ multi-page indexing:
+
+Per-page decode-critical:
+- schema/version (metadata tile schema)
+- page_count (total pages)
+- page_index (1-based or 0-based; pick one; be consistent)
+- page_bits or payload bit count (the same concept as existing 64-bit header)
+- ECC layout describing how payload ECC is arranged:
+  - ecc_enabled flag
+  - ecc_block_data symbols
+  - ecc_parity symbols
+  - ecc_block_count
+  - ecc_original_bytes
+- page geometry:
+  - page_width_pixels
+  - page_height_pixels
+- fiducial parameters required to sample correctly:
+  - fiducial_marker_size_pixels
+  - (other grid properties are derived today; keep derived approach)
+
+Palette sanity (always included):
+- Store palette as binary data (NOT original text):
+  - palette_count (2..16)
+  - list of RGB triples in palette order (count * 3 bytes)
+  - (optional) per-color “named-color id” if you want to preserve the idea of
+    named colors; not required per user, “as long as it works”.
+  - This allows verifying intended palette even if most users use B/W.
+
+Footer text handling (open detail):
+- Footer text remains optional, but the tile must not depend on footer region.
+- Decision pending: include “footer_rows” (or footer height) in metadata to
+  preserve exact data vs footer split when footer text is enabled.
+  - Option 1: Include footer_rows and keep “data_height = height - footer_rows”
+    as before, so the decoder knows where payload area ends.
+  - Option 2: Eliminate footer_rows concept entirely; treat footer text as
+    decoration in a reserved region determined solely by encoder config or by
+    “reserved pixels in mask”. This risks mismatch if printing/scan changes or
+    if overlay modifies output.
+  - Given prior behavior relied on footer rows on-paper (not comments), Option 1
+    is recommended initially to preserve deterministic data area.
+
+
+Tile encoding format (recommended blueprint)
+--------------------------------------------
+This section describes a concrete approach but is not yet implemented.
+
+Definitions:
+- 48×48 logical modules around the chosen fiducial center.
+- Two-color bit per module: 0 = light, 1 = dark.
+
+Outer frame:
+- Fixed pattern (e.g., a 1–2 module thick ring with a known alternating pattern,
+  plus corner markers) to:
+  - confirm orientation (rotations)
+  - confirm sampling phase/pitch locally
+  - help reject false positives
+- Keep this pattern independent of metadata bytes; it is “bootstrap”.
+
+Fixed header region (inside outer frame):
+- Very small header protected by repetition/simple checks (not RS).
+- Contains:
+  - schema version
+  - inner payload byte count or inner side-length
+  - RS parity bytes (fixed 32 for now, but can be stored for future flexibility)
+  - CRC of header region (optional)
+
+Inner payload region:
+- Byte-pack metadata fields (bit-packed, little-endian or explicit) into a
+  contiguous metadata byte buffer.
+- Append CRC (CRC-8 is already in code; CRC-16 also acceptable).
+- RS-encode: metadata_bytes + 32 parity bytes (must fit within GF(256) codeword
+  length constraints; typical RS(255,k)). Ensure metadata bytes + parity <= 255.
+- Map RS codeword bits into inner modules (LSB-first per byte is already used in
+  footer stripe; keep consistent).
+
+Important sizing note:
+- Custom palette “text” previously allowed up to ~255 bytes; that is too large
+  to include in a single RS(255,*) block along with other fields + 32 parity.
+- We are NOT storing palette text; we store palette RGB triples (max 48 bytes),
+  which makes a single RS block feasible.
+
+
+Tile placement and fiducial anchoring
+-------------------------------------
+Placement rule:
+- Choose the fiducial closest to the page center (“centermost fiducial”).
+- Center the 48×48 tile on that fiducial (or place with a defined offset).
+- The tile must not overlap fiducial pixels. Ensure a margin (in modules/pixels)
+  so the fiducial marker remains intact and detectable.
+
+Coordinate system:
+- Use fiducial grid detection to determine local axes and scale:
+  - Determine vector to neighbor fiducials in X/Y direction to estimate module
+    basis vectors in pixel space (u, v).
+  - Use these to sample the tile region robustly under 2D warp.
+
+Masking:
+- The tile region must be reserved so payload is not written there.
+- Reservation should be done in the same way fiducials are reserved (mask).
+
+
+Decoder algorithm outline
+-------------------------
+1) Parse PPM into pixel buffer.
+2) Detect fiducials (mandatory).
+3) Estimate page geometry/warp from fiducials (at least local transforms).
+4) Identify centermost fiducial and derive a local basis.
+5) Sample the 48×48 tile modules into a bit grid:
+   - Threshold using 2-color palette endpoints (or luminance cut).
+   - Use outer frame pattern to determine orientation/phase sanity.
+6) Read fixed header, determine inner payload size.
+7) Read inner payload bits and reconstruct RS codeword bytes.
+8) RS-decode with parity=32; validate CRC.
+9) Populate “metadata state” used for:
+   - page_count/index ordering
+   - payload bit count
+   - ECC layout for payload decode
+   - palette (binary) and/or palette mapping config
+   - footer_rows (if retained)
+10) Decode payload area using extracted metadata.
+
+Notes:
+- No erasure decoding yet; treat all errors as symbol errors.
+- If metadata tile fails, decode fails (no replication/fallback).
+
+
+Encoder algorithm outline
+-------------------------
+1) Build payload bitstream as before (compression/encryption/ECC for payload).
+2) Determine page layout (width/height).
+3) Place fiducials (mandatory).
+4) Construct metadata bytes from encoder config + ECC summary + palette:
+   - Use binary palette from ImageMappingConfig.custom_palette[]
+5) RS-encode metadata bytes with 32 parity bytes; append CRC.
+6) Place metadata tile around centermost fiducial:
+   - Outer frame + header + payload mapping into modules.
+7) Reserve/mask tile modules and fiducial modules so payload does not overwrite.
+8) Render payload into remaining data modules.
+9) Render optional footer text (if enabled), but no barcode.
+10) Enforce palette[0]/palette[last] contrast requirement for tile colors.
+
+
+Implementation steps (code-level tasks)
+---------------------------------------
+These are concrete tasks to apply in the codebase (makocode.cpp monolith).
+
+0) Terminology:
+   - Rename concept: “footer barcode contents” -> “metadata”
+   - Remove “triple redundancy header” idea; use RS(32 parity bytes) on metadata.
+
+1) Delete footer stripe subsystem:
+   - Remove FooterStripe namespace and all encode/decode functions:
+     - SPEC_V1/V2/V3, build_pattern*, decode_v3*, etc.
+   - Remove all uses from:
+     - encode_page_to_ppm (currently builds and draws footer stripe)
+     - ppm_extract_frame_bits (currently tries to decode footer stripe early)
+     - fiducial embedding helper that uses stripe to determine data height
+       (write_ppm_with_fiducials_to_file)
+   - Remove related tests/scripts that corrupt/copy footer stripe rows.
+
+2) Add MetadataTile subsystem:
+   - New structs:
+     - MetadataTile::Values (decoded fields)
+     - MetadataTile::Encoded (buffers, sizes)
+   - Encoder:
+     - encode_metadata_bytes(values, out_bytes)
+     - rs_encode_bytes(bytes, parity=32, out_codeword)
+     - render_tile(tile_bits, 48×48, two colors)
+   - Decoder:
+     - locate_tile_from_fiducials(...)
+     - sample_tile_bits(...)
+     - parse header -> determine inner payload size
+     - rs_decode(parity=32) + CRC validate -> Values
+
+3) Reserve/mask tile area:
+   - Update reservation mask logic to account for metadata tile pixels.
+   - Ensure compute_bits_per_page and payload mapping exclude masked pixels.
+   - Keep fiducial reservation as-is; combine masks (fiducial OR tile OR footer
+     text reserved area).
+
+4) Palette handling:
+   - Always include palette in metadata as binary RGB list.
+   - On decode, compare decoded palette vs forced palette (if user supplied) or
+     use it to configure palette mapping.
+   - Metadata tile rendering uses palette[0] and palette[last] colors.
+   - Add encode-time contrast check between these endpoints and error if too low.
+
+5) Footer text:
+   - Retain rendering of footer text (title/filename/page) as optional.
+   - Decide/implement whether footer_rows is still computed/stored in metadata.
+   - Ensure decoder can determine “data area height” when footer text is present
+     without relying on PPM comments.
+
+6) Multi-page:
+   - Ensure metadata includes page_count/page_index always.
+   - Decoder uses these to assemble multi-page payload.
+
+7) Update CLI + docs:
+   - Remove any user-facing “footer stripe” options; keep footer text options.
+   - Document that metadata is now in-tile around centermost fiducial.
+
+8) Tests:
+   - Remove footer-stripe-specific transform tests (corrupt-footer-...).
+   - Add/adjust tests to:
+     - damage the metadata tile region (should fail, since no replication yet)
+     - wavy distortion tests should no longer rely on footer stripe survival
+       (but still will fail if warp sampling is insufficient; improve later).
+
+
+Future work (explicitly deferred)
+--------------------------------
+- Replication: configurable N metadata tiles around multiple fiducials.
+  - Default discussed: 1 for now; later can do 2+ (center + farthest).
+  - Decoder can be designed so it doesn’t need to know N in advance by making
+    each tile self-identifying and stopping after first valid decode.
+- Erasure detection: later add symbol confidence and RS erasures to improve
+  robustness against blur/dust/row skips.
+- Palette endpoint robustness:
+  - Currently assume palette[0] is lightest and palette[last] is darkest; later
+    compute luminance ordering or choose best-contrast pair automatically.
+- Improved non-affine warp estimation:
+  - Use fiducials to fit piecewise transforms; improves sampling of 1×1 modules.
+- Multi-page missing/out-of-order recovery improvements beyond basic index/count.
+
