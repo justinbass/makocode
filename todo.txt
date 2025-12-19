@@ -1,4 +1,5 @@
 Features
+- Footer title and metadata just on first page - or middle page?
 - Footer barcode
  - Move footer barcode contents into the beginning of the data, e.g. merge it somewhat with other header data within. Rename to "metadata".
  - Triple ECC header redundancy should instead use ECC algorithm.
