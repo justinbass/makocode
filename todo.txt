@@ -1,5 +1,5 @@
 Features
-- Check tests, rotation/stretch outputs look missing now
+- Check tests, rotation/stretch outputs are not blurry
 - Footer title and metadata just on first page - or middle page?
 - Test: Page height or width too small for title or metadata, fails to encode
 - Compress metadata (confirm it saves space worth the risk of corruption)
