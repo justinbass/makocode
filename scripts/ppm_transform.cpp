@@ -325,27 +325,24 @@ static void scale_image(const IntVec* in, int width, int height, double scale_x,
     int new_h = (int)llround(height * scale_y);
     if (new_w < 1) new_w = 1;
     if (new_h < 1) new_h = 1;
-    double inv_x = 1.0 / scale_x;
-    double inv_y = 1.0 / scale_y;
     size_t out_sz = (size_t)new_w * (size_t)new_h * 3;
     out->data = (int*)malloc(out_sz * sizeof(int));
     if (!out->data) die("ppm_transform: OOM");
     out->size = out_sz;
     out->cap = out_sz;
     for (size_t i = 0; i < out_sz; i++) out->data[i] = 255;
+    double inv_x = 1.0 / scale_x;
+    double inv_y = 1.0 / scale_y;
+    int sample[3] = {255, 255, 255};
     for (int row = 0; row < new_h; row++) {
-        int src_y = (int)llround(((row + 0.5) * inv_y) - 0.5);
-        if (src_y < 0) src_y = 0;
-        if (src_y >= height) src_y = height - 1;
+        double src_y = ((row + 0.5) * inv_y) - 0.5;
         for (int col = 0; col < new_w; col++) {
-            int src_x = (int)llround(((col + 0.5) * inv_x) - 0.5);
-            if (src_x < 0) src_x = 0;
-            if (src_x >= width) src_x = width - 1;
-            size_t src_idx = ((size_t)src_y * width + (size_t)src_x) * 3;
+            double src_x = ((col + 0.5) * inv_x) - 0.5;
+            bilinear_sample(in->data, width, height, src_x, src_y, sample);
             size_t dst_idx = ((size_t)row * new_w + (size_t)col) * 3;
-            out->data[dst_idx] = in->data[src_idx];
-            out->data[dst_idx + 1] = in->data[src_idx + 1];
-            out->data[dst_idx + 2] = in->data[src_idx + 2];
+            out->data[dst_idx] = sample[0];
+            out->data[dst_idx + 1] = sample[1];
+            out->data[dst_idx + 2] = sample[2];
         }
     }
     *out_w = new_w;

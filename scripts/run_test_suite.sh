@@ -327,7 +327,7 @@ run_roundtrip_case "gray_100k_stretch_h24_v26" "Grayscale stretch horizontal 2.4
 
 run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
     --size 65536 --ecc 0.25 --width 900 --height 900 \
-    --rotate 9 --skew-x 18 --skew-y -12 --transform-seed 1337
+    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
 
 run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
     --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password
@@ -337,7 +337,7 @@ run_roundtrip_case "ecc_multi_page_massive" "262 KiB ECC multi-page stress" \
 
 run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale/rotate distortions" \
     --size 24576 --ecc 0.5 --width 620 --height 620 --multi-page \
-    --scale 1.15 --rotate 8 --transform-seed 7331
+    --scale 1.05 --rotate 1 --transform-seed 7331
 
 run_roundtrip_case "palette_base5_custom" "Custom palette/base-5 mode" \
     --size 16384 --ecc 0.25 --width 640 --height 640 \

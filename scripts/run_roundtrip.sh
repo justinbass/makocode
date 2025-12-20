@@ -4,20 +4,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 
-nearly_equal() {
-    # Returns success if |a-b| <= 1e-6 (uses python3; falls back to awk)
-    local a=$1 b=$2
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$a" "$b" <<'PY'
-import sys,math
-a=float(sys.argv[1]); b=float(sys.argv[2])
-sys.exit(0 if math.isclose(a,b,rel_tol=0,abs_tol=1e-6) else 1)
-PY
-    else
-        awk -v a="$a" -v b="$b" 'BEGIN{exit ( (a-b<1e-6 && b-a<1e-6) ? 0 : 1)}'
-    fi
-}
-
 format_command() {
     local formatted="" quoted=""
     for arg in "$@"; do
@@ -462,11 +448,6 @@ if [[ $transform_needed -eq 1 ]]; then
             idx=$((idx + 1))
         done
     fi
-    # Use transformed artifacts for decoding unless we applied rotation/skew (decoder is axis-aligned).
-    decode_inputs=("${transformed_targets[@]}")
-    if ! nearly_equal "$rotate_deg" 0 || ! nearly_equal "$skew_x" 0 || ! nearly_equal "$skew_y" 0 || ! nearly_equal "$border_thickness" 0; then
-        decode_inputs=("${baseline_targets[@]}")
-    fi
     transformed_decode_dir="$work_dir/decoded_transformed"
     mkdir -p "$transformed_decode_dir"
     transform_decode_cmd=("$makocode_bin" decode)
@@ -483,9 +464,9 @@ if [[ $transform_needed -eq 1 ]]; then
     fi
     transform_decode_cmd+=("--output-dir=$transformed_decode_dir")
     if [[ $multi_page -eq 1 ]]; then
-        transform_decode_cmd+=("${decode_inputs[@]}")
+        transform_decode_cmd+=("${transformed_targets[@]}")
     else
-        transform_decode_cmd+=("${decode_inputs[0]}")
+        transform_decode_cmd+=("${transformed_targets[0]}")
     fi
     print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
     "${transform_decode_cmd[@]}" >/dev/null
