@@ -506,6 +506,10 @@ static bool utc_timestamp_string(char* buffer, usize capacity) {
     return true;
 }
 
+// Footer stripes were removed from the format; keep a single switch to hard-disable
+// any legacy probing while the code remains compiled for now.
+static constexpr bool kFooterStripeEnabled = false;
+
 namespace makocode {
 
 namespace image {
@@ -16817,7 +16821,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
 
     FooterStripe::Values stripe_values = {};
     bool stripe_available = false;
-    if (width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
+    if (kFooterStripeEnabled && width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
         if (!tile_available) {
             stripe_available = FooterStripe::decode_v3(pixel_data, (u32)width, (u32)height, stripe_values);
             if (!stripe_available) {
@@ -17124,17 +17128,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             console_line(2, buf_orig);
         }
     } else if (!tile_available) {
-        state.has_page_count = false;
-        state.page_count_value = 0u;
-        state.has_page_index = true;
-        state.page_index_value = 1u;
-        // With no metadata tile or footer stripe, fall back to the PPM header
-        // dimensions to avoid guessing an incorrect logical size.
-        state.has_page_width_pixels = true;
-        state.page_width_pixels_value = (u64)width;
-        state.has_page_height_pixels = true;
-        state.page_height_pixels_value = (u64)height;
-        console_line(1, "decode: footer stripe unreadable, falling back to PPM headers");
+        // No metadata tile (and footer stripes are disabled): cannot recover layout.
+        console_line(1, "decode: metadata tile missing; aborting (no PPM header fallback)");
+        return 1;
     }
     if (!state.has_footer_rows && !tile_available && !stripe_available) {
         auto row_black_count = [&](u64 row_index) -> u64 {
@@ -18121,7 +18117,7 @@ struct RotationEstimateCandidate {
         console_write(2, " footer_rows=");
         console_line(2, foot_buf);
     }
-    if (!state.has_footer_stripe && state.has_affine_transform) {
+    if (kFooterStripeEnabled && !state.has_footer_stripe && state.has_affine_transform) {
         double skew_span = state.has_skew_src_width ? (double)state.skew_src_width_value : (double)width;
         if (skew_span <= 0.0) {
             skew_span = (double)width;
@@ -20374,9 +20370,8 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         return false;
     }
     u32 draw_height = (grid_height_limit > 0u && grid_height_limit < height_px) ? grid_height_limit : height_px;
-    // Prefer the footer stripe for footer sizing; PPM comments are not preserved
-    // across print/scan and may be absent.
-    if (!state.has_footer_rows) {
+    // Footer stripes are disabled; rely on metadata tile or defaults for footer sizing.
+    if (kFooterStripeEnabled && !state.has_footer_rows) {
         FooterStripe::Values stripe_values = {};
         bool stripe_ok = FooterStripe::decode_v3(pixel_data, width_px, height_px, stripe_values);
         if (!stripe_ok) {
@@ -20755,11 +20750,9 @@ static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::B
     if (!ppm_measure_dimensions(buffer, width_pixels, height_pixels)) {
         return false;
     }
-    // Prefer the footer stripe to determine where the data region ends so the
-    // fiducial grid geometry matches the encoder/decoder (PPM comment headers
-    // are not preserved across print/scan).
+    // Footer stripes are disabled; rely on metadata tile or defaults.
     u32 data_height_pixels = 0u;
-    if (buffer.data && buffer.size > 0u && width_pixels > 0u && height_pixels > 0u) {
+    if (kFooterStripeEnabled && buffer.data && buffer.size > 0u && width_pixels > 0u && height_pixels > 0u) {
         PpmParserState state;
         state.data = buffer.data;
         state.size = buffer.size;
@@ -24335,7 +24328,7 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
 
     FooterStripe::Values stripe_values = {};
     bool stripe_available = false;
-    if (width_value <= 0xFFFFFFFFull && height_value <= 0xFFFFFFFFull) {
+    if (kFooterStripeEnabled && width_value <= 0xFFFFFFFFull && height_value <= 0xFFFFFFFFull) {
         stripe_available = FooterStripe::decode_v3(pixel_data.data,
                                                    (u32)width_value,
                                                    (u32)height_value,
