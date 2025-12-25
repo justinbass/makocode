@@ -17161,7 +17161,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     } else if (!tile_available) {
         // No metadata tile (and footer stripes are disabled): cannot recover layout.
-        console_line(1, "decode: metadata tile missing; aborting (no PPM header fallback)");
+        console_line(1, "decode: metadata tile missing; aborting (no metadata available)");
         return 1;
     }
     if (!state.has_footer_rows && !tile_available && !stripe_available) {
@@ -24466,7 +24466,7 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
         // When palette metadata is unavailable (e.g., synthetic overlay masks),
         // infer whether the image uses chroma at all. Overlay behavior only
         // needs a coarse "grayscale vs. color" distinction to decide between
-        // raw-pixel overlay and data-bit overlay. Avoid depending on PPM header
+    // raw-pixel overlay and data-bit overlay. Avoid depending on container metadata
         // comments, which are not preserved across print/scan workflows.
         usize total_pixels = (usize)page.width * (usize)page.height;
         bool has_color = false;
