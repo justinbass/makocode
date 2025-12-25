@@ -16952,16 +16952,39 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             }
             downsampled_pixels.size = (usize)target_w * (usize)target_h * 3u;
             for (u32 y = 0u; y < target_h; ++y) {
-                u32 src_y = (u32)(((u64)y * base_height + ((u64)target_h >> 1)) / (u64)target_h);
-                if (src_y >= base_height) src_y = (u32)base_height - 1u;
+                double y0 = ((double)y * (double)base_height) / (double)target_h;
+                double y1 = ((double)(y + 1u) * (double)base_height) / (double)target_h;
+                u32 iy0 = (u32)floor(y0);
+                u32 iy1 = (u32)ceil(y1);
+                if (iy1 > base_height) iy1 = (u32)base_height;
                 for (u32 x = 0u; x < target_w; ++x) {
-                    u32 src_x = (u32)(((u64)x * base_width + ((u64)target_w >> 1)) / (u64)target_w);
-                    if (src_x >= base_width) src_x = (u32)base_width - 1u;
-                    usize src_idx = ((usize)src_y * (usize)base_width + (usize)src_x) * 3u;
+                    double x0 = ((double)x * (double)base_width) / (double)target_w;
+                    double x1 = ((double)(x + 1u) * (double)base_width) / (double)target_w;
+                    u32 ix0 = (u32)floor(x0);
+                    u32 ix1 = (u32)ceil(x1);
+                    if (ix1 > base_width) ix1 = (u32)base_width;
+                    u64 sum_r = 0u, sum_g = 0u, sum_b = 0u;
+                    u64 count = 0u;
+                    for (u32 sy = iy0; sy < iy1; ++sy) {
+                        double cy = (double)sy + 0.5;
+                        if (cy < y0 || cy >= y1) continue;
+                        for (u32 sx = ix0; sx < ix1; ++sx) {
+                            double cx = (double)sx + 0.5;
+                            if (cx < x0 || cx >= x1) continue;
+                            usize src_idx = ((usize)sy * (usize)base_width + (usize)sx) * 3u;
+                            sum_r += (u64)pixel_buffer.data[src_idx + 0u];
+                            sum_g += (u64)pixel_buffer.data[src_idx + 1u];
+                            sum_b += (u64)pixel_buffer.data[src_idx + 2u];
+                            ++count;
+                        }
+                    }
+                    if (count == 0u) {
+                        count = 1u;
+                    }
                     usize dst_idx = ((usize)y * (usize)target_w + (usize)x) * 3u;
-                    downsampled_pixels.data[dst_idx + 0u] = pixel_buffer.data[src_idx + 0u];
-                    downsampled_pixels.data[dst_idx + 1u] = pixel_buffer.data[src_idx + 1u];
-                    downsampled_pixels.data[dst_idx + 2u] = pixel_buffer.data[src_idx + 2u];
+                    downsampled_pixels.data[dst_idx + 0u] = (u8)((sum_r + (count / 2u)) / count);
+                    downsampled_pixels.data[dst_idx + 1u] = (u8)((sum_g + (count / 2u)) / count);
+                    downsampled_pixels.data[dst_idx + 2u] = (u8)((sum_b + (count / 2u)) / count);
                 }
             }
             binarize_downsampled(downsampled_pixels.data, target_w, target_h);
@@ -17090,6 +17113,15 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 height = downsample_buffer_h;
                 data_height_hint = downsample_buffer_h;
             }
+        }
+        // If metadata was found via downsample, revert to full-resolution pixels for payload sampling.
+        if (tile_available) {
+            pixel_data = pixel_buffer.data;
+            width = base_width;
+            height = base_height;
+            data_height_hint = (u32)((state.has_footer_rows && state.footer_rows_value < base_height)
+                                         ? (base_height - state.footer_rows_value)
+                                         : base_height);
         }
     }
     if (stripe_available) {
@@ -19026,6 +19058,51 @@ struct RotationEstimateCandidate {
             u8 affine_rgb[3];
             u8 rotated_rgb[3];
             u8 skew_rgb[3];
+            u8 averaged_rgb[3];
+            // Fast path: undistorted scale-only pages benefit from box averaging over each
+            // logical cell to survive print/scan blur (e.g., 2.5x stretch in case 0016).
+            if (!has_rotation &&
+                !has_skew &&
+                !state.has_affine_transform &&
+                scale_xd > 1.01 &&
+                scale_yd > 1.01 &&
+                analysis_width > 0u &&
+                analysis_height > 0u) {
+                double cell_x0 = (double)logical_col * scale_xd;
+                double cell_x1 = (double)(logical_col + 1u) * scale_xd;
+                double cell_y0 = (double)logical_row * scale_yd;
+                double cell_y1 = (double)(logical_row + 1u) * scale_yd;
+                int xi0 = (int)floor(cell_x0);
+                int xi1 = (int)ceil(cell_x1);
+                int yi0 = (int)floor(cell_y0);
+                int yi1 = (int)ceil(cell_y1);
+                if (xi0 < 0) xi0 = 0;
+                if (yi0 < 0) yi0 = 0;
+                if (xi1 > (int)analysis_width) xi1 = (int)analysis_width;
+                if (yi1 > (int)analysis_height) yi1 = (int)analysis_height;
+                u64 sum_r = 0u, sum_g = 0u, sum_b = 0u;
+                u64 count = 0u;
+                for (int yy = yi0; yy < yi1; ++yy) {
+                    double cy = (double)yy + 0.5;
+                    if (cy < cell_y0 || cy >= cell_y1) continue;
+                    for (int xx = xi0; xx < xi1; ++xx) {
+                        double cx = (double)xx + 0.5;
+                        if (cx < cell_x0 || cx >= cell_x1) continue;
+                        usize idx = ((usize)yy * (usize)pixel_stride + (usize)xx) * 3u;
+                        sum_r += (u64)pixel_data[idx + 0u];
+                        sum_g += (u64)pixel_data[idx + 1u];
+                        sum_b += (u64)pixel_data[idx + 2u];
+                        ++count;
+                    }
+                }
+                if (count > 0u) {
+                    averaged_rgb[0] = (u8)((sum_r + (count / 2u)) / count);
+                    averaged_rgb[1] = (u8)((sum_g + (count / 2u)) / count);
+                    averaged_rgb[2] = (u8)((sum_b + (count / 2u)) / count);
+                    rgb = averaged_rgb;
+                }
+            }
+
             if (state.has_affine_transform) {
                 double lx = ((double)logical_col + 0.5);
                 double ly = ((double)logical_row + 0.5);
