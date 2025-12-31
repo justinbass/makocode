@@ -16857,7 +16857,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     // If both metadata tile and footer stripe are missing, try a simple nearest-neighbor
     // downsample to an estimated logical square page size, then retry metadata tile decode.
-    if (!tile_available && !stripe_available) {
+        if (!tile_available && !stripe_available) {
         bool downsample_buffer_ready = false;
         u32 downsample_buffer_w = 0u;
         u32 downsample_buffer_h = 0u;
@@ -16990,45 +16990,76 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             binarize_downsampled(downsampled_pixels.data, target_w, target_h);
             return true;
         };
+        auto attempt_downsample = [&](u32 target_w, u32 target_h, const char* label) -> bool {
+            if (target_w < MetadataTile::TILE_SIDE || target_h < MetadataTile::TILE_SIDE) {
+                return false;
+            }
+            if (!fill_downsample(target_w, target_h)) {
+                return false;
+            }
+            downsample_buffer_ready = true;
+            downsample_buffer_w = target_w;
+            downsample_buffer_h = target_h;
+            double candidate_score = fabs((double)target_w - (double)target_h);
+            if (logical_guess > 0u) {
+                double lg = (double)logical_guess;
+                candidate_score += fabs((double)target_w - lg) * 0.5;
+            }
+            if (candidate_score < best_downsample_score &&
+                best_downsample.ensure((usize)target_w * (usize)target_h * 3u)) {
+                best_downsample.size = (usize)target_w * (usize)target_h * 3u;
+                memcpy(best_downsample.data, downsampled_pixels.data, best_downsample.size);
+                best_downsample_score = candidate_score;
+                best_downsample_w = target_w;
+                best_downsample_h = target_h;
+                downsample_buffer_w = target_w;
+                downsample_buffer_h = target_h;
+            }
+            if (try_decode_shifted_tile(downsampled_pixels.data, target_w, target_h, label)) {
+                pixel_data = downsampled_pixels.data;
+                width = target_w;
+                height = target_h;
+                data_height_hint = target_h;
+                tile_available = true;
+                apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+                if (debug_logging_enabled()) {
+                    console_write(2, "debug metadata tile: decoded after ");
+                    console_line(2, label);
+                }
+                return true;
+            }
+            return false;
+        };
         if (logical_guess > 0u && logical_guess < base_width && logical_guess < base_height) {
             u32 target_w = (u32)logical_guess;
             u32 target_h = (u32)logical_guess;
             if (target_w >= MetadataTile::TILE_SIDE && target_h >= MetadataTile::TILE_SIDE) {
-                if (fill_downsample(target_w, target_h)) {
-                    downsample_buffer_ready = true;
-                    downsample_buffer_w = target_w;
-                    downsample_buffer_h = target_h;
-                    double candidate_score = fabs((double)target_w - (double)target_h);
-                    if (logical_guess > 0u) {
-                        double lg = (double)logical_guess;
-                        candidate_score += fabs((double)target_w - lg) * 0.5;
-                    }
-                    if (candidate_score < best_downsample_score &&
-                        best_downsample.ensure((usize)target_w * (usize)target_h * 3u)) {
-                        best_downsample.size = (usize)target_w * (usize)target_h * 3u;
-                        memcpy(best_downsample.data, downsampled_pixels.data, best_downsample.size);
-                        best_downsample_score = candidate_score;
-                        best_downsample_w = target_w;
-                        best_downsample_h = target_h;
-                        downsample_buffer_w = target_w;
-                        downsample_buffer_h = target_h;
-                    }
-                    if (try_decode_shifted_tile(downsampled_pixels.data, target_w, target_h, "logical downsample")) {
-                        pixel_data = downsampled_pixels.data;
-                        width = target_w;
-                        height = target_h;
-                        data_height_hint = target_h;
-                        if (debug_logging_enabled()) {
-                            console_write(2, "debug downsample logical guess=");
-                            char guess_buf[32];
-                            u64_to_ascii(logical_guess, guess_buf, sizeof(guess_buf));
-                            console_line(2, guess_buf);
-                            console_line(2, "debug metadata tile: decoded after downsample");
-                        }
-                        tile_available = true;
-                        apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+                if (attempt_downsample(target_w, target_h, "logical downsample")) {
+                    if (debug_logging_enabled()) {
+                        console_write(2, "debug downsample logical guess=");
+                        char guess_buf[32];
+                        u64_to_ascii(logical_guess, guess_buf, sizeof(guess_buf));
+                        console_line(2, guess_buf);
                     }
                 }
+            }
+        }
+        // Sweep around the best logical guess to catch non-integer scale factors (e.g., 3.03x upscales)
+        // before falling back to coarse factor guesses.
+        if (!tile_available && logical_guess > 0u) {
+            u32 sweep_min = logical_guess > 0u ? (u32)((logical_guess * 60ull) / 100ull) : MetadataTile::TILE_SIDE;
+            u32 sweep_max = logical_guess > 0u ? (u32)((logical_guess * 115ull) / 100ull) : (u32)base_width;
+            if (sweep_min < MetadataTile::TILE_SIDE) sweep_min = MetadataTile::TILE_SIDE;
+            if (sweep_max > base_width) sweep_max = (u32)base_width;
+            for (u32 target_w = sweep_min; target_w <= sweep_max && !tile_available; target_w += 20u) {
+                if (target_w > base_height) break;
+                if (debug_logging_enabled()) {
+                    console_write(2, "debug downsample sweep size=");
+                    char bufw[32];
+                    u64_to_ascii(target_w, bufw, sizeof(bufw));
+                    console_line(2, bufw);
+                }
+                attempt_downsample(target_w, target_w, "logical sweep");
             }
         }
         // Try simple downsample factors (integer and common fractional) when guessing fails to reveal metadata.
@@ -17042,9 +17073,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     if (factor_x <= 1.0 || factor_y <= 1.0) continue;
                     u32 target_w = (u32)floor(((double)base_width / factor_x) + 0.5);
                     u32 target_h = (u32)floor(((double)base_height / factor_y) + 0.5);
-                    if (target_w < MetadataTile::TILE_SIDE || target_h < MetadataTile::TILE_SIDE) {
-                        continue;
-                    }
                     if (debug_logging_enabled()) {
                         console_write(2, "debug downsample factor attempt=");
                         char bufx[32], bufy[32];
@@ -17054,44 +17082,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                         console_write(2, "/");
                         console_line(2, bufy);
                     }
-                    if (!fill_downsample(target_w, target_h)) {
-                        continue;
-                    }
-                    downsample_buffer_ready = true;
-                    downsample_buffer_w = target_w;
-                    downsample_buffer_h = target_h;
-                    double candidate_score = fabs((double)target_w - (double)target_h);
-                    if (logical_guess > 0u) {
-                        double lg = (double)logical_guess;
-                        candidate_score += fabs((double)target_w - lg) * 0.5;
-                    }
-                    if (candidate_score < best_downsample_score &&
-                        best_downsample.ensure((usize)target_w * (usize)target_h * 3u)) {
-                        best_downsample.size = (usize)target_w * (usize)target_h * 3u;
-                        memcpy(best_downsample.data, downsampled_pixels.data, best_downsample.size);
-                        best_downsample_score = candidate_score;
-                        best_downsample_w = target_w;
-                        best_downsample_h = target_h;
-                        downsample_buffer_w = target_w;
-                        downsample_buffer_h = target_h;
-                    }
-                    if (try_decode_shifted_tile(downsampled_pixels.data, target_w, target_h, "factor downsample")) {
-                        pixel_data = downsampled_pixels.data;
-                        width = target_w;
-                        height = target_h;
-                        data_height_hint = target_h;
-                        tile_available = true;
-                        apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
-                        if (debug_logging_enabled()) {
-                            console_write(2, "debug metadata tile: decoded after factor downsample ");
-                            char bufx[16], bufy[16];
-                            u64_to_ascii((u64)(factor_x * 100.0 + 0.5), bufx, sizeof(bufx));
-                            u64_to_ascii((u64)(factor_y * 100.0 + 0.5), bufy, sizeof(bufy));
-                            console_write(2, bufx);
-                            console_write(2, "/");
-                            console_write(2, bufy);
-                            console_line(2, "/100");
-                        }
+                    if (attempt_downsample(target_w, target_h, "factor downsample")) {
                         factor_success = true;
                         break;
                     }
@@ -17960,6 +17951,25 @@ struct RotationEstimateCandidate {
             } else {
                 scale_y_integer = false;
             }
+        }
+    }
+    // Avoid snapping to an integer scale if it would drift the logical size away from
+    // the metadata-provided page dimensions. This guards cases like 3.03x upscales
+    // that land near (but not exactly at) an integer scale after heavy blur.
+    if (scale_x_integer && expected_width) {
+        double logical_w_if_snapped = (double)analysis_width / (double)scale_x_int;
+        if (fabs(logical_w_if_snapped - (double)expected_width) > 0.5) {
+            scale_x_integer = false;
+            scale_x_int = 0u;
+            scale_x = (double)analysis_width / (double)expected_width;
+        }
+    }
+    if (scale_y_integer && expected_height) {
+        double logical_h_if_snapped = (double)analysis_height / (double)scale_y_int;
+        if (fabs(logical_h_if_snapped - (double)expected_height) > 0.5) {
+            scale_y_integer = false;
+            scale_y_int = 0u;
+            scale_y = (double)analysis_height / (double)expected_height;
         }
     }
     if (scale_x_integer) {

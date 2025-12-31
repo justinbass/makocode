@@ -325,10 +325,10 @@ run_roundtrip_case "gray_100k_stretch_h24_v26" "Grayscale stretch horizontal 2.4
     --size 102400 --ecc 0 --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
-#run_roundtrip_case "gray_scale_303_blur" "Grayscale upsample 3.03x (blur/no-rotation stress)" \
-#    --size 65536 --ecc 0.25 --width 900 --height 900 \
-#    --scale 3.03
-#
+run_roundtrip_case "gray_scale_303_blur" "Grayscale upsample 3.03x (blur/no-rotation stress)" \
+    --size 65536 --ecc 0.25 --width 900 --height 900 \
+    --scale 3.03
+
 #run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
 #    --size 65536 --ecc 0.25 --width 900 --height 900 \
 #    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
