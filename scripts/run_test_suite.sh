@@ -329,10 +329,22 @@ run_roundtrip_case "gray_scale_303_blur" "Grayscale upsample 3.03x (blur/no-rota
     --size 65536 --ecc 0.25 --width 900 --height 900 \
     --scale 3.03
 
+#run_roundtrip_case "gray_rotate_seeded" "Grayscale rotate/skew with deterministic seed" \
+#    --size 65536 --ecc 0.25 --width 900 --height 900 \
+#    --scale 3.0 --rotate 1
+
+#run_roundtrip_case "gray_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
+#    --size 65536 --ecc 0.25 --width 900 --height 900 \
+#    --scale 3.0 --skew-x 5 --skew-y -5
+
 #run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
 #    --size 65536 --ecc 0.25 --width 900 --height 900 \
-#    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
-#
+#    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5
+
+#run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
+#    --size 65536 --ecc 0.25 --width 900 --height 900 \
+#    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5
+
 run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
     --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password
 
