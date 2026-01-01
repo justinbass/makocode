@@ -1,6 +1,6 @@
 Features
+- Fix all tests
 - FooterStripe still present?
-- Check tests, rotation/stretch outputs are not blurry, apparently decoding is falling back to untransformed images! Remove cheats and triple check tests before continuing.
 - Footer title and metadata just on first page - or middle page?
 - Test: Page height or width too small for title or metadata, fails to encode
 - Compress metadata (confirm it saves space worth the risk of corruption)
