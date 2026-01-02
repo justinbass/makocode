@@ -329,9 +329,9 @@ run_roundtrip_case "gray_scale_303_blur" "Grayscale upsample 3.03x (blur/no-rota
     --size 65536 --ecc 0.25 --width 900 --height 900 \
     --scale 3.03
 
-#run_roundtrip_case "gray_rotate_seeded" "Grayscale rotate/skew with deterministic seed" \
-#    --size 65536 --ecc 0.25 --width 900 --height 900 \
-#    --scale 3.0 --rotate 1
+run_roundtrip_case "gray_rotate_seeded" "Grayscale rotate/skew with deterministic seed" \
+    --size 65536 --ecc 0.25 --width 900 --height 900 \
+    --scale 3.0 --rotate 1
 
 #run_roundtrip_case "gray_skew_seeded" "Grayscale rotate/skew with deterministic seed" \
 #    --size 65536 --ecc 0.25 --width 900 --height 900 \

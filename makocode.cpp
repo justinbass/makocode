@@ -15005,6 +15005,8 @@ struct PpmParserState {
     bool has_fiducial_row_offsets;
     u32 fiducial_row_offset_count;
     u64 fiducial_row_offsets[MAX_FIDUCIAL_SUBGRID_ENTRIES];
+    bool has_tile_pitch;
+    double tile_pitch_value;
 
     PpmParserState()
         : data(0),
@@ -15078,6 +15080,8 @@ struct PpmParserState {
           fiducial_col_offset_count(0u),
           has_fiducial_row_offsets(false),
           fiducial_row_offset_count(0u) {
+        has_tile_pitch = false;
+        tile_pitch_value = 0.0;
         palette_text[0] = '\0';
         for (u32 i = 0u; i < MAX_FIDUCIAL_SUBGRID_ENTRIES; ++i) {
             fiducial_col_offsets[i] = 0u;
@@ -16822,19 +16826,79 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         if (!(direct > 0.0)) {
             return candidate;
         }
-        double candidate_err = (candidate > 0.0) ? fabs(candidate - 1.0) : 1e9;
-        double direct_err = fabs(direct - 1.0);
-        // Snap to the dimensional scale when it is within 5% of ideal and is clearly closer.
-        if (direct_err < 0.05 && direct_err * 0.7 <= candidate_err) {
+        if (candidate <= 0.0) {
             return direct;
         }
-        if (candidate <= 0.0) {
+        double rel_gap = fabs(candidate - direct) / direct;
+        // If dimensional estimate is reasonably close (<=8%) and closer to an integer snap, prefer it.
+        if (rel_gap <= 0.08) {
+            double cand_round = floor(candidate + 0.5);
+            double direct_round = floor(direct + 0.5);
+            double cand_snap_gap = fabs(candidate - cand_round);
+            double direct_snap_gap = fabs(direct - direct_round);
+            if (direct_snap_gap * 0.8 <= cand_snap_gap) {
+                return direct;
+            }
+        }
+        // If candidate is way off (>12%) choose the dimensional scale.
+        if (rel_gap > 0.12) {
             return direct;
         }
         return candidate;
     };
+
+    // Build per-cell pitch map for additional robustness.
+    double median_pitch_x = scale_x;
+    double median_pitch_y = scale_y;
+    if (fiducial_columns >= 2u && fiducial_rows >= 2u) {
+        // Collect pitches between adjacent fiducials.
+        const usize cell_count = (usize)(fiducial_columns - 1u) * (usize)(fiducial_rows - 1u);
+        double* pitches_x = (double*)malloc(cell_count * sizeof(double));
+        double* pitches_y = (double*)malloc(cell_count * sizeof(double));
+        usize idx = 0u;
+        if (pitches_x && pitches_y) {
+            for (u32 r = 0u; r + 1u < fiducial_rows; ++r) {
+                for (u32 c = 0u; c + 1u < fiducial_columns; ++c) {
+                    double cx0 = centers_x[(usize)r * fiducial_columns + c];
+                    double cy0 = centers_y[(usize)r * fiducial_columns + c];
+                    double cx1 = centers_x[(usize)r * fiducial_columns + (c + 1u)];
+                    double cy1 = centers_y[(usize)r * fiducial_columns + (c + 1u)];
+                    double cx2 = centers_x[(usize)(r + 1u) * fiducial_columns + c];
+                    double cy2 = centers_y[(usize)(r + 1u) * fiducial_columns + c];
+                    double dx = sqrt((cx1 - cx0) * (cx1 - cx0) + (cy1 - cy0) * (cy1 - cy0));
+                    double dy = sqrt((cx2 - cx0) * (cx2 - cx0) + (cy2 - cy0) * (cy2 - cy0));
+                    pitches_x[idx] = dx;
+                    pitches_y[idx] = dy;
+                    ++idx;
+                }
+            }
+            auto median_inplace = [](double* arr, usize n) -> double {
+                if (!arr || n == 0u) return 0.0;
+                // simple selection sort for small n
+                for (usize i = 0; i < n; ++i) {
+                    usize min_i = i;
+                    for (usize j = i + 1; j < n; ++j) {
+                        if (arr[j] < arr[min_i]) min_i = j;
+                    }
+                    double tmp = arr[i]; arr[i] = arr[min_i]; arr[min_i] = tmp;
+                }
+                if (n & 1u) return arr[n/2u];
+                return 0.5 * (arr[n/2u - 1u] + arr[n/2u]);
+            };
+            median_pitch_x = median_inplace(pitches_x, idx);
+            median_pitch_y = median_inplace(pitches_y, idx);
+        }
+        if (pitches_x) free(pitches_x);
+        if (pitches_y) free(pitches_y);
+    }
+
+    scale_x = median_pitch_x;
+    scale_y = median_pitch_y;
     scale_x = prefer_dimension_scale(scale_x, dim_scale_x);
     scale_y = prefer_dimension_scale(scale_y, dim_scale_y);
+
+    // If metadata tile provided an affine pitch, force scale to that pitch (pixels per module).
+    // Defer calling until analysis_width/height exist.
     if (debug_logging_enabled()) {
         char lsx_buf[32], lsy_buf[32], asx_buf[32], asy_buf[32], sx_buf[32], sy_buf[32];
         format_fixed_3(logical_span_x, lsx_buf, sizeof(lsx_buf));
@@ -17763,6 +17827,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             if (metadata_tile_plausible(tile_values, (u32)width, (u32)height)) {
                 tile_available = true;
                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+                if (found_ptr) {
+                    state.has_tile_pitch = true;
+                    state.tile_pitch_value = found_affine.pitch_pixels;
+                }
             }
         } else if (debug_logging_enabled()) {
             console_line(2, "debug metadata tile: affine search failed");
@@ -18487,7 +18555,74 @@ struct RotationEstimateCandidate {
         }
     };
 
-    auto apply_rotation_candidate = [&](const RotationEstimateCandidate& candidate) -> bool {
+    auto clamp_candidate_scale = [&](RotationEstimateCandidate& candidate,
+                                     u64 expected_width_px,
+                                     u64 expected_height_px) {
+        if (!candidate.valid || expected_width_px == 0u || expected_height_px == 0u) {
+            return;
+        }
+        double sx = (double)candidate.width / (double)expected_width_px;
+        double sy = (double)candidate.height / (double)expected_height_px;
+        if (!(sx > 0.0) || !(sy > 0.0)) {
+            return;
+        }
+        double diff = fabs(sx - sy);
+        double worst = (sx > sy) ? sx : sy;
+        if (worst > 0.0) {
+            double rel = diff / worst;
+            // Instead of discarding high anisotropy (common with rotated crops),
+            // clamp both axes to the mean scale.
+            if (rel > 0.03) {
+                double mean = (sx + sy) * 0.5;
+                candidate.width  = (u64)((double)expected_width_px  * mean + 0.5);
+                candidate.height = (u64)((double)expected_height_px * mean + 0.5);
+                if (candidate.width == 0u) candidate.width = 1u;
+                if (candidate.height == 0u) candidate.height = 1u;
+                if (debug_logging_enabled()) {
+                    char rel_buf[32];
+                    char mean_buf[32];
+                    format_fixed_3(rel * 100.0, rel_buf, sizeof(rel_buf));
+                    format_fixed_3(mean, mean_buf, sizeof(mean_buf));
+                    console_write(2, "debug rotation: anisotropy ");
+                    console_write(2, rel_buf);
+                    console_write(2, "%; clamped scale=");
+                    console_line(2, mean_buf);
+                }
+            }
+        }
+        // Snap to nearest integer magnification when close (all magnifications, not just ~1x).
+        const double integer_snap_tolerance = 0.08; // reused tolerances elsewhere
+        double scale_avg = ((double)candidate.width / (double)expected_width_px +
+                            (double)candidate.height / (double)expected_height_px) * 0.5;
+        double rounded = floor(scale_avg + 0.5);
+        if (rounded >= 1.0 && fabs(scale_avg - rounded) < integer_snap_tolerance) {
+            candidate.width  = (u64)(rounded * (double)expected_width_px  + 0.5);
+            candidate.height = (u64)(rounded * (double)expected_height_px + 0.5);
+            if (debug_logging_enabled()) {
+                char scale_buf[32];
+                char round_buf[32];
+                format_fixed_3(scale_avg, scale_buf, sizeof(scale_buf));
+                format_fixed_3(rounded, round_buf, sizeof(round_buf));
+                console_write(2, "debug rotation: snapped scale ");
+                console_write(2, scale_buf);
+                console_write(2, " -> ");
+                console_line(2, round_buf);
+            }
+        }
+    };
+
+    auto apply_rotation_candidate = [&](const RotationEstimateCandidate& candidate_raw) -> bool {
+        if (!candidate_raw.valid) {
+            return false;
+        }
+        RotationEstimateCandidate candidate = candidate_raw;
+        // Keep scales coherent before committing.
+        if (width_known && height_known) {
+            clamp_candidate_scale(candidate, expected_width, expected_height);
+            if (!candidate.valid) {
+                return false;
+            }
+        }
         if (!candidate.valid) {
             return false;
         }
@@ -18779,43 +18914,69 @@ struct RotationEstimateCandidate {
             }
         }
     }
+    // Prefer higher-quality sources: metadata/fiducials > gradient > auto.
     if (fiducial_candidate.valid) {
         apply_rotation_candidate(fiducial_candidate);
-    } else if (!has_rotation && gradient_candidate.valid) {
+    }
+    if (!has_rotation && gradient_candidate.valid) {
         apply_rotation_candidate(gradient_candidate);
-    } else if (!has_rotation && auto_candidate.valid) {
+    }
+    if (!has_rotation && auto_candidate.valid) {
         apply_rotation_candidate(auto_candidate);
     }
-    if (has_rotation &&
-        fabs(state.rotation_degrees_value) < 0.1 &&
-        !(state.has_skew_y_pixels && fabs(state.skew_y_pixels_value) >= 0.8)) {
-        bool switched = false;
-        if (auto_candidate.valid && fabs(auto_candidate.angle_deg) >= 0.5) {
+    // If auto/gradient had a larger angle but fiducials/meta give the scale, blend them: keep angle, take fiducial/meta scale.
+    if (has_rotation && fiducial_candidate.valid) {
+        bool angle_small = fabs(state.rotation_degrees_value) < 0.5;
+        if (angle_small && auto_candidate.valid && fabs(auto_candidate.angle_deg) >= 0.5) {
             RotationEstimateCandidate temp = auto_candidate;
-            if (fiducial_candidate.valid) {
-                temp.width = fiducial_candidate.width;
-                temp.height = fiducial_candidate.height;
-                temp.margin = compute_rotation_margin_from_geometry((unsigned)temp.width,
-                                                                    (unsigned)temp.height,
-                                                                    temp.angle_deg,
-                                                                    (unsigned)width,
-                                                                    (unsigned)height);
-                if (fiducial_candidate.has_affine) {
-                    temp.has_affine = true;
-                    temp.affine = fiducial_candidate.affine;
-                }
+            temp.width = fiducial_candidate.width;
+            temp.height = fiducial_candidate.height;
+            temp.margin = compute_rotation_margin_from_geometry((unsigned)temp.width,
+                                                                (unsigned)temp.height,
+                                                                temp.angle_deg,
+                                                                (unsigned)width,
+                                                                (unsigned)height);
+            if (fiducial_candidate.has_affine) {
+                temp.has_affine = true;
+                temp.affine = fiducial_candidate.affine;
             }
-            if (apply_rotation_candidate(temp)) {
-                switched = true;
-            }
+            apply_rotation_candidate(temp);
+        } else if (!fiducial_rotation_detected) {
+            // If we never applied fiducials (e.g., auto won first) but they exist, re-apply to replace scale.
+            apply_rotation_candidate(fiducial_candidate);
         }
-        if (!switched) {
-            state.has_rotation_degrees = false;
-            state.has_rotation_width = false;
-            state.has_rotation_height = false;
-            state.has_rotation_margin = false;
-            state.has_affine_transform = false;
+        // Force trusted fiducial scale even if angle comes from another candidate.
+        if (has_rotation && fiducial_candidate.valid) {
+            double angle_keep = state.rotation_degrees_value;
+            u64 forced_w = fiducial_candidate.width;
+            u64 forced_h = fiducial_candidate.height;
+            double forced_margin = compute_rotation_margin_from_geometry((unsigned)forced_w,
+                                                                        (unsigned)forced_h,
+                                                                        angle_keep,
+                                                                        (unsigned)width,
+                                                                        (unsigned)height);
+            state.has_rotation_degrees = true;
+            state.rotation_degrees_value = angle_keep;
+            state.has_rotation_width = true;
+            state.rotation_width_value = forced_w;
+            state.has_rotation_height = true;
+            state.rotation_height_value = forced_h;
+            state.has_rotation_margin = true;
+            state.rotation_margin_value = (forced_margin > 0.0) ? forced_margin : 0.0;
+            if (fiducial_candidate.has_affine) {
+                state.has_affine_transform = true;
+                state.affine_transform = fiducial_candidate.affine;
+            }
             refresh_rotation_state();
+            if (debug_logging_enabled()) {
+                char wbuf[32], hbuf[32];
+                u64_to_ascii(forced_w, wbuf, sizeof(wbuf));
+                u64_to_ascii(forced_h, hbuf, sizeof(hbuf));
+                console_write(2, "debug rotation: forced fiducial scale width=");
+                console_write(2, wbuf);
+                console_write(2, " height=");
+                console_line(2, hbuf);
+            }
         }
     }
     if (has_rotation &&
@@ -18839,6 +19000,42 @@ struct RotationEstimateCandidate {
 
     u64 analysis_width = has_rotation ? (u64)rotation_width : width;
     u64 analysis_height = has_rotation ? (u64)rotation_height : height;
+    if (debug_logging_enabled()) {
+        char rot_w_buf[32], rot_h_buf[32];
+        u64_to_ascii(state.has_rotation_width ? state.rotation_width_value : 0u, rot_w_buf, sizeof(rot_w_buf));
+        u64_to_ascii(state.has_rotation_height ? state.rotation_height_value : 0u, rot_h_buf, sizeof(rot_h_buf));
+        console_write(2, "debug rotation-state: has_rot=");
+        console_write(2, has_rotation ? "yes" : "no");
+        console_write(2, " angle_deg=");
+        char ang_buf[32]; format_fixed_3(state.has_rotation_degrees ? state.rotation_degrees_value : 0.0, ang_buf, sizeof(ang_buf));
+        console_write(2, ang_buf);
+        console_write(2, " width=");
+        console_write(2, rot_w_buf);
+        console_write(2, " height=");
+        console_write(2, rot_h_buf);
+        console_line(2, "");
+    }
+    if (state.has_tile_pitch && state.tile_pitch_value > 0.0 && expected_width > 0u && expected_height > 0u) {
+        double fx = state.tile_pitch_value;
+        double fy = state.tile_pitch_value;
+        double rx = floor(fx + 0.5);
+        double ry = floor(fy + 0.5);
+        if (fabs(fx - rx) < 0.02) fx = rx;
+        if (fabs(fy - ry) < 0.02) fy = ry;
+        scale_x = fx;
+        scale_y = fy;
+        analysis_width = (u64)((double)expected_width * scale_x + 0.5);
+        analysis_height = (u64)((double)expected_height * scale_y + 0.5);
+        if (debug_logging_enabled()) {
+            char px_buf[32], py_buf[32];
+            format_fixed_3(fx, px_buf, sizeof(px_buf));
+            format_fixed_3(fy, py_buf, sizeof(py_buf));
+            console_write(2, "debug scale: forced tile pitch sx=");
+            console_write(2, px_buf);
+            console_write(2, " sy=");
+            console_line(2, py_buf);
+        }
+    }
     if (debug_logging_enabled()) {
         char ppm_w[32];
         char ppm_h[32];
@@ -18881,6 +19078,21 @@ struct RotationEstimateCandidate {
         analysis_width = skew_src_width;
         analysis_height = skew_src_height;
     }
+    if (debug_logging_enabled()) {
+        char aw_buf[32], ah_buf[32], ew_buf[32], eh_buf[32];
+        u64_to_ascii(analysis_width, aw_buf, sizeof(aw_buf));
+        u64_to_ascii(analysis_height, ah_buf, sizeof(ah_buf));
+        u64_to_ascii(expected_width, ew_buf, sizeof(ew_buf));
+        u64_to_ascii(expected_height, eh_buf, sizeof(eh_buf));
+        console_write(2, "debug scale-pre: analysis_w=");
+        console_write(2, aw_buf);
+        console_write(2, " analysis_h=");
+        console_write(2, ah_buf);
+        console_write(2, " expected_w=");
+        console_write(2, ew_buf);
+        console_write(2, " expected_h=");
+        console_line(2, eh_buf);
+    }
     if (width_known && expected_width) {
         double ratio_x = (double)analysis_width / (double)expected_width;
         if (ratio_x > 0.0) {
@@ -18892,6 +19104,17 @@ struct RotationEstimateCandidate {
                 scale_x_integer = true;
             } else {
                 scale_x_integer = false;
+            }
+            if (debug_logging_enabled()) {
+                char ratio_buf[32], round_buf[32];
+                format_fixed_3(ratio_x, ratio_buf, sizeof(ratio_buf));
+                u64_to_ascii((u64)rounded_ratio_x, round_buf, sizeof(round_buf));
+                console_write(2, "debug scale-ratio-x: ratio=");
+                console_write(2, ratio_buf);
+                console_write(2, " rounded=");
+                console_write(2, round_buf);
+                console_write(2, " integer_flag=");
+                console_line(2, scale_x_integer ? "yes" : "no");
             }
         }
     }
@@ -19006,7 +19229,8 @@ struct RotationEstimateCandidate {
             scale_y = (double)detected_y;
         }
     }
-    if (!has_rotation && !has_skew && scale_x_integer && scale_y_integer) {
+    bool skip_integer_validation = state.has_tile_pitch || state.has_affine_transform;
+    if (!has_rotation && !has_skew && scale_x_integer && scale_y_integer && !skip_integer_validation) {
         if (!validate_integer_scale(pixel_data, width, height, scale_x_int, scale_y_int, detection_color_mode, &active_mapping)) {
             scale_x = 1.0;
             scale_y = 1.0;
