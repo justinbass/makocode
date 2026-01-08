@@ -13195,6 +13195,8 @@ namespace MetadataTile {
                                           u32 height_pixels,
                                           u32 data_height_pixels,
                                           double max_abs_angle_degrees,
+                                          u32 expected_logical_width,
+                                          u32 expected_logical_height,
                                           Values& out_values,
                                           ByteBuffer& out_palette_text,
                                           AffineParams* found_affine_out = 0) {
@@ -13206,13 +13208,20 @@ namespace MetadataTile {
         double base_center_x = (double)width_pixels * 0.5;
         double base_center_y = (double)data_height_pixels * 0.5;
 
-        // Estimate pixels-per-module from square page guess.
+        // Estimate pixels-per-module. Prefer the caller's logical size hint; fall back to
+        // the square-page heuristic when unavailable.
         double pitch_guess = 1.0;
-        u64 logical_guess = estimate_square_page_from_image(width_pixels, height_pixels);
-        if (logical_guess > 0u) {
-            double sx = (double)width_pixels / (double)logical_guess;
-            double sy = (double)height_pixels / (double)logical_guess;
+        if (expected_logical_width > 0u && expected_logical_height > 0u) {
+            double sx = (double)width_pixels / (double)expected_logical_width;
+            double sy = (double)data_height_pixels / (double)expected_logical_height;
             pitch_guess = 0.5 * (sx + sy);
+        } else {
+            u64 logical_guess = estimate_square_page_from_image(width_pixels, height_pixels);
+            if (logical_guess > 0u) {
+                double sx = (double)width_pixels / (double)logical_guess;
+                double sy = (double)height_pixels / (double)logical_guess;
+                pitch_guess = 0.5 * (sx + sy);
+            }
         }
         if (!(pitch_guess > 0.0)) pitch_guess = 1.0;
 
@@ -13220,10 +13229,22 @@ namespace MetadataTile {
         // NOTE: `estimate_square_page_from_image()` is tuned for general pages and is not a reliable
         // predictor of metadata-tile pixels-per-module (e.g. it may prefer ~2x over ~3x).
         // Use a broader pitch search window here.
+        // Keep the search broad enough for the distorted cases in the suite,
+        // but avoid the explosive Cartesian grid from the original values
+        // (96px span, 0.1deg angle, 0.1px pitch) which can take minutes.
+        // Heuristics:
+        //   - center search span scales with the guessed pitch but is capped;
+        //   - slightly coarser center/angle/pitch steps.
         double pitch_min = 0.90;
         double pitch_max = 4.20;
-        const int kCenterSpan = 96;
-        const int kCenterStepCoarse = 4;
+        if (pitch_guess > 0.0) {
+            double lower = pitch_guess * 0.60;
+            double upper = pitch_guess * 2.10;
+            pitch_min = clamp_double(lower, 0.90, 4.20);
+            pitch_max = clamp_double(upper, pitch_min + 0.20, 4.20);
+        }
+        const int kCenterSpan = (int)clamp_double(pitch_guess * 16.0, 32.0, 64.0);
+        const int kCenterStepCoarse = 6;
 
         if (debug_logging_enabled()) {
             char buf[64];
@@ -13254,7 +13275,7 @@ namespace MetadataTile {
                 double cy = base_center_y + (double)dy;
                 for (double angle = -max_abs_angle_degrees; angle <= max_abs_angle_degrees + 1e-9; angle += 0.1) {
                     double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                    for (double pitch = pitch_min; pitch <= pitch_max + 1e-9; pitch += 0.1) {
+                    for (double pitch = pitch_min; pitch <= pitch_max + 1e-9; pitch += 0.10) {
                         AffineParams affine;
                         affine.center_x = cx;
                         affine.center_y = cy;
@@ -17814,6 +17835,12 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         if (debug_logging_enabled()) {
             console_line(2, "debug metadata tile: starting affine search");
         }
+        u32 tile_width_hint = (state.has_page_width_pixels && state.page_width_pixels_value <= 0xFFFFFFFFull)
+                                  ? (u32)state.page_width_pixels_value
+                                  : 0u;
+        u32 tile_height_hint = (state.has_page_height_pixels && state.page_height_pixels_value <= 0xFFFFFFFFull)
+                                   ? (u32)state.page_height_pixels_value
+                                   : 0u;
         MetadataTile::AffineParams found_affine = {};
         MetadataTile::AffineParams* found_ptr = debug_logging_enabled() ? &found_affine : (MetadataTile::AffineParams*)0;
         if (MetadataTile::search_decode_tile_affine(pixel_data,
@@ -17821,6 +17848,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                     (u32)height,
                                                     data_height_hint,
                                                     5.0,
+                                                    tile_width_hint,
+                                                    tile_height_hint,
                                                     tile_values,
                                                     tile_palette_text,
                                                     found_ptr)) {
@@ -18572,7 +18601,8 @@ struct RotationEstimateCandidate {
             double rel = diff / worst;
             // Instead of discarding high anisotropy (common with rotated crops),
             // clamp both axes to the mean scale.
-            if (rel > 0.03) {
+            // Allow substantial anisotropy; only clamp if extremely skewed.
+            if (rel > 0.25) {
                 double mean = (sx + sy) * 0.5;
                 candidate.width  = (u64)((double)expected_width_px  * mean + 0.5);
                 candidate.height = (u64)((double)expected_height_px * mean + 0.5);
@@ -18581,32 +18611,44 @@ struct RotationEstimateCandidate {
                 if (debug_logging_enabled()) {
                     char rel_buf[32];
                     char mean_buf[32];
+                    char sx_buf[32];
+                    char sy_buf[32];
                     format_fixed_3(rel * 100.0, rel_buf, sizeof(rel_buf));
                     format_fixed_3(mean, mean_buf, sizeof(mean_buf));
+                    format_fixed_3(sx, sx_buf, sizeof(sx_buf));
+                    format_fixed_3(sy, sy_buf, sizeof(sy_buf));
                     console_write(2, "debug rotation: anisotropy ");
                     console_write(2, rel_buf);
                     console_write(2, "%; clamped scale=");
-                    console_line(2, mean_buf);
+                    console_write(2, mean_buf);
+                    console_write(2, " (sx=");
+                    console_write(2, sx_buf);
+                    console_write(2, " sy=");
+                    console_write(2, sy_buf);
+                    console_line(2, ")");
                 }
             }
         }
-        // Snap to nearest integer magnification when close (all magnifications, not just ~1x).
-        const double integer_snap_tolerance = 0.08; // reused tolerances elsewhere
+        // Snap to nearest integer magnification only for near-1x pages; avoid snapping large scales
+        // (e.g., 3.05x) down to integers, which misaligns heavily rotated/scaled crops.
         double scale_avg = ((double)candidate.width / (double)expected_width_px +
                             (double)candidate.height / (double)expected_height_px) * 0.5;
-        double rounded = floor(scale_avg + 0.5);
-        if (rounded >= 1.0 && fabs(scale_avg - rounded) < integer_snap_tolerance) {
-            candidate.width  = (u64)(rounded * (double)expected_width_px  + 0.5);
-            candidate.height = (u64)(rounded * (double)expected_height_px + 0.5);
-            if (debug_logging_enabled()) {
-                char scale_buf[32];
-                char round_buf[32];
-                format_fixed_3(scale_avg, scale_buf, sizeof(scale_buf));
-                format_fixed_3(rounded, round_buf, sizeof(round_buf));
-                console_write(2, "debug rotation: snapped scale ");
-                console_write(2, scale_buf);
-                console_write(2, " -> ");
-                console_line(2, round_buf);
+        if (scale_avg <= 1.5) {
+            const double integer_snap_tolerance = 0.03; // reused tolerances elsewhere
+            double rounded = floor(scale_avg + 0.5);
+            if (rounded >= 1.0 && fabs(scale_avg - rounded) < integer_snap_tolerance) {
+                candidate.width  = (u64)(rounded * (double)expected_width_px  + 0.5);
+                candidate.height = (u64)(rounded * (double)expected_height_px + 0.5);
+                if (debug_logging_enabled()) {
+                    char scale_buf[32];
+                    char round_buf[32];
+                    format_fixed_3(scale_avg, scale_buf, sizeof(scale_buf));
+                    format_fixed_3(rounded, round_buf, sizeof(round_buf));
+                    console_write(2, "debug rotation: snapped scale ");
+                    console_write(2, scale_buf);
+                    console_write(2, " -> ");
+                    console_line(2, round_buf);
+                }
             }
         }
     };
@@ -18829,7 +18871,7 @@ struct RotationEstimateCandidate {
                         scale_int = 1u;
                     }
                     double scale_diff = fabs(scale_avg - (double)scale_int);
-                    if (scale_diff < 0.12) {
+                    if (fabs(rotation_degrees_est) < 0.05 && scale_diff < 0.12) {
                         rotation_width_est = expected_width * scale_int;
                         rotation_height_est = expected_height * scale_int;
                         rotation_margin_est = compute_rotation_margin_from_geometry((unsigned)rotation_width_est,
@@ -18843,6 +18885,26 @@ struct RotationEstimateCandidate {
                     }
                 }
                 if (rotation_success) {
+                    if (expected_width && expected_height && expected_width == expected_height) {
+                        u64 max_dim = (rotation_width_est > rotation_height_est) ? rotation_width_est : rotation_height_est;
+                        u64 min_dim = (rotation_width_est < rotation_height_est) ? rotation_width_est : rotation_height_est;
+                        if (max_dim > 0u && min_dim * 10u < max_dim * 9u) {
+                            rotation_width_est = max_dim;
+                            rotation_height_est = max_dim;
+                        }
+                    }
+                    if (debug_logging_enabled()) {
+                        char ang_buf[32], w_buf[32], h_buf[32];
+                        format_fixed_3(rotation_degrees_est, ang_buf, sizeof(ang_buf));
+                        u64_to_ascii(rotation_width_est, w_buf, sizeof(w_buf));
+                        u64_to_ascii(rotation_height_est, h_buf, sizeof(h_buf));
+                        console_write(2, "debug fiducial-rotation raw angle_deg=");
+                        console_write(2, ang_buf);
+                        console_write(2, " width=");
+                        console_write(2, w_buf);
+                        console_write(2, " height=");
+                        console_line(2, h_buf);
+                    }
                     // Estimate vertical skew (shift in Y across X) from fiducials
                     if (expected_width > 1u && fiducial_columns >= 2u) {
                         double angle_rad = rotation_degrees_est * (3.14159265358979323846 / 180.0);
@@ -19015,7 +19077,9 @@ struct RotationEstimateCandidate {
         console_write(2, rot_h_buf);
         console_line(2, "");
     }
-    if (state.has_tile_pitch && state.tile_pitch_value > 0.0 && expected_width > 0u && expected_height > 0u) {
+    if (!fiducial_rotation_detected &&
+        state.has_tile_pitch && state.tile_pitch_value > 0.0 &&
+        expected_width > 0u && expected_height > 0u) {
         double fx = state.tile_pitch_value;
         double fy = state.tile_pitch_value;
         double rx = floor(fx + 0.5);
