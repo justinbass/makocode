@@ -19041,6 +19041,34 @@ struct RotationEstimateCandidate {
             }
         }
     }
+    // Snap near-integral small angles to reduce run-to-run drift in marginal rotation estimates.
+    if (has_rotation) {
+        double angle_now = state.rotation_degrees_value;
+        const double snap_step = 0.5; // half-degree snapping
+        double snapped = floor(angle_now / snap_step + 0.5) * snap_step;
+        if (fabs(angle_now - snapped) < 0.12) {
+            double forced_margin = compute_rotation_margin_from_geometry(rotation_width ? rotation_width : (unsigned)width,
+                                                                         rotation_height ? rotation_height : (unsigned)height,
+                                                                         snapped,
+                                                                         (unsigned)width,
+                                                                         (unsigned)height);
+            state.has_rotation_degrees = true;
+            state.rotation_degrees_value = snapped;
+            state.has_rotation_margin = true;
+            state.rotation_margin_value = (forced_margin > 0.0) ? forced_margin : 0.0;
+            refresh_rotation_state();
+            if (debug_logging_enabled()) {
+                char before_buf[32];
+                char after_buf[32];
+                format_fixed_3(angle_now, before_buf, sizeof(before_buf));
+                format_fixed_3(snapped, after_buf, sizeof(after_buf));
+                console_write(2, "debug rotation: snapped angle ");
+                console_write(2, before_buf);
+                console_write(2, " -> ");
+                console_line(2, after_buf);
+            }
+        }
+    }
     if (has_rotation &&
         fabs(state.rotation_degrees_value) < 0.2 &&
         state.has_skew_y_pixels &&
