@@ -341,9 +341,9 @@ run_roundtrip_case "gray_skew_xy_reverse_seeded" "Grayscale horizontal and verti
     --size 65536 --ecc 0.25 --width 900 --height 900 \
     --scale 3.0 --skew-x -5 --skew-y 5 --transform-seed 7331
 
-#run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotation combined with horizontal and vertical skew" \
-#    --size 65536 --ecc 0.25 --width 900 --height 900 \
-#    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
+run_roundtrip_case "gray_rotate_skew_seeded" "Grayscale rotation combined with horizontal and vertical skew" \
+    --size 65536 --ecc 0.25 --width 900 --height 900 \
+    --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
 
 run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
     --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password

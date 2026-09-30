@@ -16464,11 +16464,13 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                                                 u64 image_width,
                                                 u64 image_height,
                                                 const PpmParserState& state,
+                                                bool refine_affine_fit,
                                                 double& out_degrees,
                                                 u64& out_rotation_width,
                                                 u64& out_rotation_height,
                                                 double& out_margin,
-                                                AffineTransform* out_affine) {
+                                                AffineTransform* out_affine,
+                                                bool* out_affine_valid) {
     if (!centers_x || !centers_y || !fiducial_columns || !fiducial_rows ||
         !expected_width || !expected_height || !image_width || !image_height) {
         return false;
@@ -16480,6 +16482,9 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     }
     if (out_affine) {
         *out_affine = AffineTransform();
+    }
+    if (out_affine_valid) {
+        *out_affine_valid = false;
     }
 
     double* row_bias_y = (double*)malloc((usize)fiducial_rows * sizeof(double));
@@ -17049,15 +17054,38 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         return true;
     };
 
+    bool affine_fit_valid = false;
     if (out_affine) {
+        // The fiducial markers sit inside the page margin; they do not occupy
+        // the first and last logical pixel. Fit their observed centers against
+        // the same margin-aware positions used when the grid is drawn.
+        double marker_half_span = (state.has_fiducial_size && state.fiducial_size_value > 0u)
+                                      ? ((double)state.fiducial_size_value - 1.0) * 0.5
+                                      : 0.0;
+        double marker_min_x = (fiducial_margin < (double)expected_width) ? fiducial_margin : 0.0;
+        double marker_max_x = (double)expected_width - 1.0 - fiducial_margin;
+        double marker_min_y = (fiducial_margin < (double)expected_height) ? fiducial_margin : 0.0;
+        double marker_max_y = (double)expected_height - 1.0 - fiducial_margin;
+        if (marker_max_x < marker_min_x) marker_max_x = marker_min_x;
+        if (marker_max_y < marker_min_y) marker_max_y = marker_min_y;
+        auto rendered_marker_center = [&](double center) -> double {
+            double start = (double)(int)(center - marker_half_span);
+            return start + marker_half_span;
+        };
         double Sxx = 0.0, Syy = 0.0, Sxy = 0.0;
         double Sx = 0.0, Sy = 0.0;
         double SX = 0.0, SY = 0.0;
         double SxX = 0.0, SyX = 0.0, SxY = 0.0, SyY = 0.0;
         for (u32 row = 0u; row < fiducial_rows; ++row) {
-            double logical_y = logical_row_value(row);
+            double t_y = (fiducial_rows <= 1u) ? 0.5 : ((double)row / (double)(fiducial_rows - 1u));
+            double logical_y = refine_affine_fit
+                                   ? rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y)
+                                   : logical_row_value(row);
             for (u32 col = 0u; col < fiducial_columns; ++col) {
-                double logical_x = logical_column_value(col);
+                double t_x = (fiducial_columns <= 1u) ? 0.5 : ((double)col / (double)(fiducial_columns - 1u));
+                double logical_x = refine_affine_fit
+                                       ? rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x)
+                                       : logical_column_value(col);
                 usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
                 double px = centers_x[idx];
                 double py = centers_y[idx];
@@ -17086,12 +17114,101 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         bool ok_x = solve_linear3(M, bx, a00, a01, tx);
         bool ok_y = solve_linear3(M, by, a10, a11, ty);
         if (ok_x && ok_y) {
-            out_affine->a00 = a00;
-            out_affine->a01 = a01;
-            out_affine->a10 = a10;
-            out_affine->a11 = a11;
-            out_affine->tx = tx;
-            out_affine->ty = ty;
+            u64 robust_inlier_count = (u64)point_count;
+            for (u32 fit_round = 0u; refine_affine_fit && fit_round < 3u; ++fit_round) {
+                double Rxx = 0.0, Ryy = 0.0, Rxy = 0.0;
+                double Rx = 0.0, Ry = 0.0, RX = 0.0, RY = 0.0;
+                double RxX = 0.0, RyX = 0.0, RxY = 0.0, RyY = 0.0;
+                robust_inlier_count = 0u;
+                for (u32 row = 0u; row < fiducial_rows; ++row) {
+                    double t_y = (fiducial_rows <= 1u) ? 0.5 : ((double)row / (double)(fiducial_rows - 1u));
+                    double logical_y = refine_affine_fit
+                                           ? rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y)
+                                           : logical_row_value(row);
+                    for (u32 col = 0u; col < fiducial_columns; ++col) {
+                        double t_x = (fiducial_columns <= 1u) ? 0.5 : ((double)col / (double)(fiducial_columns - 1u));
+                        double logical_x = refine_affine_fit
+                                               ? rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x)
+                                               : logical_column_value(col);
+                        usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
+                        double residual_x = centers_x[idx] - (a00 * logical_x + a01 * logical_y + tx);
+                        double residual_y = centers_y[idx] - (a10 * logical_x + a11 * logical_y + ty);
+                        if (residual_x * residual_x + residual_y * residual_y > 6.25) {
+                            continue;
+                        }
+                        Rxx += logical_x * logical_x;
+                        Ryy += logical_y * logical_y;
+                        Rxy += logical_x * logical_y;
+                        Rx += logical_x;
+                        Ry += logical_y;
+                        RX += centers_x[idx];
+                        RY += centers_y[idx];
+                        RxX += logical_x * centers_x[idx];
+                        RyX += logical_y * centers_x[idx];
+                        RxY += logical_x * centers_y[idx];
+                        RyY += logical_y * centers_y[idx];
+                        ++robust_inlier_count;
+                    }
+                }
+                if (robust_inlier_count < 12u) {
+                    break;
+                }
+                double robust_M[3][3] = {
+                    {Rxx, Rxy, Rx},
+                    {Rxy, Ryy, Ry},
+                    {Rx, Ry, (double)robust_inlier_count},
+                };
+                double robust_bx[3] = {RxX, RyX, RX};
+                double robust_by[3] = {RxY, RyY, RY};
+                double next_a00, next_a01, next_tx, next_a10, next_a11, next_ty;
+                if (!solve_linear3(robust_M, robust_bx, next_a00, next_a01, next_tx) ||
+                    !solve_linear3(robust_M, robust_by, next_a10, next_a11, next_ty)) {
+                    break;
+                }
+                a00 = next_a00;
+                a01 = next_a01;
+                tx = next_tx;
+                a10 = next_a10;
+                a11 = next_a11;
+                ty = next_ty;
+            }
+            u64 min_affine_inliers = refine_affine_fit ? point_count / 2u : point_count;
+            if (refine_affine_fit && min_affine_inliers < 12u) {
+                min_affine_inliers = (point_count < 12u) ? point_count : 12u;
+            }
+            if (robust_inlier_count >= min_affine_inliers) {
+                out_affine->a00 = a00;
+                out_affine->a01 = a01;
+                out_affine->a10 = a10;
+                out_affine->a11 = a11;
+                out_affine->tx = tx;
+                out_affine->ty = ty;
+                affine_fit_valid = true;
+            }
+        }
+    }
+
+    if (refine_affine_fit && affine_fit_valid && out_affine &&
+        (fabs(out_affine->a00 + out_affine->a11) > 1e-9 ||
+                       fabs(out_affine->a10 - out_affine->a01) > 1e-9)) {
+        // The polar rotation of the complete grid transform remains meaningful
+        // when horizontal and vertical shears partially cancel each other.
+        double affine_rotation_degrees = makocode::image::normalize_angle(
+            atan2(out_affine->a10 - out_affine->a01,
+                  out_affine->a00 + out_affine->a11) * (180.0 / 3.14159265358979323846));
+        double affine_rotation_delta = fabs(makocode::image::normalize_angle(
+            affine_rotation_degrees - rotation_degrees));
+        if (affine_rotation_delta < 10.0) {
+            rotation_radians = affine_rotation_degrees * (3.14159265358979323846 / 180.0);
+            rotation_degrees = affine_rotation_degrees;
+            rotation_margin = compute_rotation_margin_from_geometry((unsigned)rotation_width,
+                                                                    (unsigned)rotation_height,
+                                                                    rotation_degrees,
+                                                                    (unsigned)image_width,
+                                                                    (unsigned)image_height);
+            if (rotation_margin < 0.0) {
+                rotation_margin = 0.0;
+            }
         }
     }
 
@@ -17100,6 +17217,9 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     out_rotation_width = rotation_width;
     out_rotation_height = rotation_height;
     out_margin = rotation_margin;
+    if (out_affine_valid) {
+        *out_affine_valid = affine_fit_valid;
+    }
     return true;
 }
 
@@ -17114,7 +17234,8 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                                     u64 expected_height,
                                     bool refine_marker_centers,
                                     double*& centers_x_out,
-                                    double*& centers_y_out) {
+                                    double*& centers_y_out,
+                                    const MetadataTile::AffineParams* affine_hint = 0) {
     if (!pixel_data || !width || !height || !fiducial_columns || !fiducial_rows) {
         return false;
     }
@@ -17150,6 +17271,35 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     }
     double fiducial_size_pixels = (fiducial_size_value > 0.0) ? fiducial_size_value : 1.0;
     fiducial_size_pixels *= scale_est;
+    double marker_half_span = (fiducial_size_value > 0.0) ? ((fiducial_size_value - 1.0) * 0.5) : 0.0;
+    MetadataTile::Placement logical_tile = {};
+    bool use_affine_hint = affine_hint && affine_hint->pitch_pixels > 0.0 &&
+                           expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull;
+    if (use_affine_hint) {
+        logical_tile = MetadataTile::compute_tile_placement((u32)expected_width, (u32)expected_height);
+        use_affine_hint = logical_tile.valid;
+    }
+    double logical_tile_center_x = use_affine_hint
+                                       ? ((double)logical_tile.x0 + ((double)MetadataTile::TILE_SIDE - 1.0) * 0.5)
+                                       : 0.0;
+    double logical_tile_center_y = use_affine_hint
+                                       ? ((double)logical_tile.y0 + ((double)MetadataTile::TILE_SIDE - 1.0) * 0.5)
+                                       : 0.0;
+    double affine_cos = use_affine_hint ? cos(affine_hint->angle_rad) : 1.0;
+    double affine_sin = use_affine_hint ? sin(affine_hint->angle_rad) : 0.0;
+    double affine_hint_pitch = use_affine_hint ? affine_hint->pitch_pixels : 0.0;
+    if (use_affine_hint && expected_width > 0u && expected_height > 0u) {
+        double cos_angle = fabs(affine_cos);
+        double sin_angle = fabs(affine_sin);
+        double projected_width = (double)expected_width * cos_angle + (double)expected_height * sin_angle;
+        double projected_height = (double)expected_width * sin_angle + (double)expected_height * cos_angle;
+        double pitch_x = (projected_width > 0.0) ? ((double)width / projected_width) : 0.0;
+        double pitch_y = (projected_height > 0.0) ? ((double)height / projected_height) : 0.0;
+        if (pitch_x > 0.0 && pitch_y > 0.0 &&
+            fabs(pitch_x - pitch_y) / ((pitch_x + pitch_y) * 0.5) < 0.08) {
+            affine_hint_pitch = (pitch_x + pitch_y) * 0.5;
+        }
+    }
     // Keep the fiducial search radius tight so nearby dark structures (e.g., metadata tile)
     // do not bias the fiducial center estimate.
     double search_radius_d = fiducial_size_pixels * 1.5 + 4.0 * scale_est;
@@ -17241,6 +17391,18 @@ static bool sample_fiducial_centers(const u8* pixel_data,
         for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
             double t_col = (fiducial_columns == 1u) ? 0.5 : ((double)col_index / (double)(fiducial_columns - 1u));
             double approx_x = min_x + (max_x - min_x) * t_col;
+            if (use_affine_hint) {
+                double logical_center_x = (fiducial_margin + ((double)expected_width - 1.0 - 2.0 * fiducial_margin) * t_col);
+                logical_center_x = (double)(int)(logical_center_x - marker_half_span) + marker_half_span;
+                double logical_center_y = (fiducial_margin + ((double)expected_height - 1.0 - 2.0 * fiducial_margin) * t_row);
+                logical_center_y = (double)(int)(logical_center_y - marker_half_span) + marker_half_span;
+                double logical_dx = logical_center_x - logical_tile_center_x;
+                double logical_dy = logical_center_y - logical_tile_center_y;
+                approx_x = affine_hint->center_x + affine_hint_pitch *
+                                                      (logical_dx * affine_cos - logical_dy * affine_sin);
+                approx_y = affine_hint->center_y + affine_hint_pitch *
+                                                      (logical_dx * affine_sin + logical_dy * affine_cos);
+            }
             double center_x = approx_x;
             double center_y = approx_y;
             double bright_w = 0.0;
@@ -17846,6 +18008,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         footer_rows_hint = 0u;
     }
     u32 data_height_hint = (footer_rows_hint > 0u && footer_rows_hint < (u32)height) ? ((u32)height - footer_rows_hint) : (u32)height;
+    MetadataTile::AffineParams tile_affine_hint = {};
+    bool tile_affine_hint_available = false;
     if (!(disable_tile_env && disable_tile_env[0]) && width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
         // Try a few plausible data heights in case the footer height (text-only) was mis-estimated.
         const u32 fallback_offsets[] = {0u, 8u, 16u, 24u, 32u};
@@ -17904,9 +18068,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    ? (u32)state.page_height_pixels_value
                                    : 0u;
         MetadataTile::AffineParams found_affine = {};
-        MetadataTile::AffineParams* found_ptr = debug_logging_enabled()
-                                                    ? &found_affine
-                                                    : (MetadataTile::AffineParams*)0;
         if (MetadataTile::search_decode_tile_affine(pixel_data,
                                                     (u32)width,
                                                     (u32)height,
@@ -17916,14 +18077,12 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                     tile_height_hint,
                                                     tile_values,
                                                     tile_palette_text,
-                                                    found_ptr)) {
+                                                    &found_affine)) {
             if (metadata_tile_plausible(tile_values, (u32)width, (u32)height)) {
                 tile_available = true;
                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
-                if (found_ptr) {
-                    state.has_tile_pitch = true;
-                    state.tile_pitch_value = found_affine.pitch_pixels;
-                }
+                tile_affine_hint = found_affine;
+                tile_affine_hint_available = true;
             }
         } else if (debug_logging_enabled()) {
             console_line(2, "debug metadata tile: affine search failed");
@@ -18863,6 +19022,23 @@ struct RotationEstimateCandidate {
             }
         }
     }
+    bool tile_affine_hint_trusted = false;
+    if (tile_affine_hint_available && (auto_candidate.valid || gradient_candidate.valid)) {
+        double tile_angle_degrees = tile_affine_hint.angle_rad * (180.0 / 3.14159265358979323846);
+        double independent_angle_error = 180.0;
+        if (auto_candidate.valid) {
+            independent_angle_error = fabs(makocode::image::normalize_angle(
+                tile_angle_degrees - auto_candidate.angle_deg));
+        }
+        if (gradient_candidate.valid) {
+            double gradient_angle_error = fabs(makocode::image::normalize_angle(
+                tile_angle_degrees - gradient_candidate.angle_deg));
+            if (gradient_angle_error < independent_angle_error) {
+                independent_angle_error = gradient_angle_error;
+            }
+        }
+        tile_affine_hint_trusted = independent_angle_error < 0.5;
+    }
     if (width_known && height_known &&
         state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_size &&
         state.fiducial_columns_value >= 1u && state.fiducial_rows_value >= 1u) {
@@ -18891,7 +19067,7 @@ struct RotationEstimateCandidate {
             }
             bool marker_rotation_hint = (auto_candidate.valid && fabs(auto_candidate.angle_deg) < 5.0) ||
                                         (gradient_candidate.valid && fabs(gradient_candidate.angle_deg) < 5.0);
-            bool refine_marker_centers = !marker_rotation_hint;
+            bool refine_marker_centers = !marker_rotation_hint || tile_affine_hint_trusted;
             if (sample_fiducial_centers(pixel_data,
                                         width,
                                         sample_height,
@@ -18903,12 +19079,14 @@ struct RotationEstimateCandidate {
                                         expected_height_eff,
                                         refine_marker_centers,
                                         centers_x,
-                                        centers_y)) {
+                                        centers_y,
+                                        tile_affine_hint_trusted ? &tile_affine_hint : (const MetadataTile::AffineParams*)0)) {
                 double rotation_degrees_est = 0.0;
                 u64 rotation_width_est = 0u;
                 u64 rotation_height_est = 0u;
                 double rotation_margin_est = 0.0;
                 AffineTransform fiducial_affine;
+                bool fiducial_affine_valid = false;
                 bool rotation_success = auto_detect_rotation_from_fiducials(centers_x,
                                                                             centers_y,
                                                                             fiducial_columns,
@@ -18919,11 +19097,14 @@ struct RotationEstimateCandidate {
                                                                             width,
                                                                             sample_height,
                                                                             state,
+                                                                            tile_affine_hint_trusted,
                                                                             rotation_degrees_est,
                                                                             rotation_width_est,
                                                                             rotation_height_est,
                                                                             rotation_margin_est,
-                                                                            &fiducial_affine);
+                                                                            &fiducial_affine,
+                                                                            &fiducial_affine_valid);
+                bool affine_rotation_validated = false;
                 if (rotation_success) {
                     bool scale_plausible = true;
                     if (expected_width && rotation_width_est < (u64)(expected_width * 0.9)) {
@@ -18934,6 +19115,39 @@ struct RotationEstimateCandidate {
                     }
                     if (!scale_plausible) {
                         rotation_success = false;
+                    }
+                }
+                if (rotation_success) {
+                    double independent_angle_error = 180.0;
+                    const RotationEstimateCandidate* independent_candidate = 0;
+                    if (auto_candidate.valid) {
+                        independent_angle_error = fabs(makocode::image::normalize_angle(
+                            rotation_degrees_est - auto_candidate.angle_deg));
+                        independent_candidate = &auto_candidate;
+                    }
+                    if (gradient_candidate.valid) {
+                        double gradient_angle_error = fabs(makocode::image::normalize_angle(
+                            rotation_degrees_est - gradient_candidate.angle_deg));
+                        if (gradient_angle_error < independent_angle_error) {
+                            independent_angle_error = gradient_angle_error;
+                            independent_candidate = &gradient_candidate;
+                        }
+                    }
+                    affine_rotation_validated = independent_angle_error < 0.25;
+                    if (!affine_rotation_validated && independent_candidate &&
+                        independent_angle_error < 10.0) {
+                        // A bad fiducial affine fit can skew its polar angle. Keep
+                        // the independently measured angle and use the markers for scale.
+                        rotation_degrees_est = independent_candidate->angle_deg;
+                        rotation_margin_est = compute_rotation_margin_from_geometry(
+                            (unsigned)rotation_width_est,
+                            (unsigned)rotation_height_est,
+                            rotation_degrees_est,
+                            (unsigned)width,
+                            (unsigned)sample_height);
+                        if (rotation_margin_est < 0.0) {
+                            rotation_margin_est = 0.0;
+                        }
                     }
                 }
                 if (rotation_success && expected_width && expected_height) {
@@ -18979,10 +19193,13 @@ struct RotationEstimateCandidate {
                         console_write(2, " height=");
                         console_line(2, h_buf);
                     }
-                    // Estimate vertical skew (shift in Y across X) from fiducials
                     bool rotation_consensus =
-                        (auto_candidate.valid && fabs(auto_candidate.angle_deg - rotation_degrees_est) < 2.0) ||
-                        (gradient_candidate.valid && fabs(gradient_candidate.angle_deg - rotation_degrees_est) < 2.0);
+                        (auto_candidate.valid && fabs(makocode::image::normalize_angle(
+                            auto_candidate.angle_deg - rotation_degrees_est)) < 2.0) ||
+                        (gradient_candidate.valid && fabs(makocode::image::normalize_angle(
+                            gradient_candidate.angle_deg - rotation_degrees_est)) < 2.0);
+                    // Estimate vertical skew only when the independent rotation
+                    // detectors do not already agree with the fiducial fit.
                     if (!rotation_consensus && expected_width > 1u && fiducial_columns >= 2u) {
                         double angle_rad = rotation_degrees_est * (3.14159265358979323846 / 180.0);
                         double cos_r = cos(-angle_rad);
@@ -19035,7 +19252,22 @@ struct RotationEstimateCandidate {
                             }
                         }
                     }
-                    bool use_affine = state.has_skew_y_pixels && fabs(state.skew_y_pixels_value) >= 0.3;
+                    double tile_angle_degrees = tile_affine_hint_trusted
+                                                    ? tile_affine_hint.angle_rad *
+                                                          (180.0 / 3.14159265358979323846)
+                                                    : 0.0;
+                    bool trusted_tile_affine = tile_affine_hint_trusted &&
+                                               fabs(tile_angle_degrees) >= 0.5 &&
+                                               affine_rotation_validated;
+                    bool legacy_skew_affine = state.has_skew_y_pixels &&
+                                              fabs(state.skew_y_pixels_value) >= 0.3 &&
+                                              fabs(rotation_degrees_est) < 0.2;
+                    bool use_affine = fiducial_affine_valid &&
+                                      (trusted_tile_affine || legacy_skew_affine);
+                    if (use_affine && trusted_tile_affine) {
+                        fiducial_affine.tx -= 0.5 * (fiducial_affine.a00 + fiducial_affine.a01);
+                        fiducial_affine.ty -= 0.5 * (fiducial_affine.a10 + fiducial_affine.a11);
+                    }
                     assign_rotation_candidate(fiducial_candidate,
                                               rotation_degrees_est,
                                               rotation_width_est,
@@ -19960,6 +20192,7 @@ struct RotationEstimateCandidate {
                                 u64 rotation_height_est = 0u;
                                 double rotation_margin_est = 0.0;
                                 AffineTransform fiducial_affine;
+                                bool fiducial_affine_valid = false;
                                 bool rotation_success = auto_detect_rotation_from_fiducials(fiducial_storage.centers_x,
                                                                                            fiducial_storage.centers_y,
                                                                                            fiducial_columns,
@@ -19967,17 +20200,21 @@ struct RotationEstimateCandidate {
                                                                                             expected_width,
                                                                                             expected_height,
                                                                                             margin_pixels,
-                                                                                            width,
-                                                                                            height,
+                                                                                           width,
+                                                                                           height,
                                                                                            state,
+                                                                                           false,
                                                                                            rotation_degrees_est,
                                                                                            rotation_width_est,
-                                                                                           rotation_height_est,
+                                                                                            rotation_height_est,
                                                                                             rotation_margin_est,
-                                                                                            &fiducial_affine);
+                                                                                            &fiducial_affine,
+                                                                                            &fiducial_affine_valid);
                                 if (rotation_success) {
                                     RotationEstimateCandidate candidate;
-                                    bool use_affine = state.has_skew_y_pixels && fabs(state.skew_y_pixels_value) >= 0.3;
+                                    bool use_affine = fiducial_affine_valid &&
+                                                      state.has_skew_y_pixels &&
+                                                      fabs(state.skew_y_pixels_value) >= 0.3;
                                     assign_rotation_candidate(candidate,
                                                               rotation_degrees_est,
                                                               rotation_width_est,
@@ -20498,8 +20735,8 @@ struct RotationEstimateCandidate {
             }
 
             if (state.has_affine_transform) {
-                double lx = ((double)logical_col + 0.5);
-                double ly = ((double)logical_row + 0.5);
+                double lx = (double)logical_col + 0.5;
+                double ly = (double)logical_row + 0.5;
                 double sample_x = state.affine_transform.a00 * lx +
                                   state.affine_transform.a01 * ly +
                                   state.affine_transform.tx + warp_dx;
@@ -21505,62 +21742,8 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_footer_stripe = true;
         dest.footer_stripe_values = src.footer_stripe_values;
     }
-    if (src.has_skew_src_width) {
-        if (dest.has_skew_src_width && dest.skew_src_width_value != src.skew_src_width_value) {
-            return false;
-        }
-        dest.has_skew_src_width = true;
-        dest.skew_src_width_value = src.skew_src_width_value;
-    }
-    if (src.has_skew_src_height) {
-        if (dest.has_skew_src_height && dest.skew_src_height_value != src.skew_src_height_value) {
-            return false;
-        }
-        dest.has_skew_src_height = true;
-        dest.skew_src_height_value = src.skew_src_height_value;
-    }
-    if (src.has_skew_margin_x) {
-        if (dest.has_skew_margin_x && dest.skew_margin_x_value != src.skew_margin_x_value) {
-            return false;
-        }
-        dest.has_skew_margin_x = true;
-        dest.skew_margin_x_value = src.skew_margin_x_value;
-    }
-    if (src.has_skew_x_pixels) {
-        if (dest.has_skew_x_pixels && dest.skew_x_pixels_value != src.skew_x_pixels_value) {
-            return false;
-        }
-        dest.has_skew_x_pixels = true;
-        dest.skew_x_pixels_value = src.skew_x_pixels_value;
-    }
-    if (src.has_skew_y_pixels) {
-        if (!dest.has_skew_y_pixels) {
-            dest.has_skew_y_pixels = true;
-            dest.skew_y_pixels_value = src.skew_y_pixels_value;
-        }
-    }
-    if (src.has_skew_bottom_x) {
-        if (dest.has_skew_bottom_x && dest.skew_bottom_x_value != src.skew_bottom_x_value) {
-            return false;
-        }
-        dest.has_skew_bottom_x = true;
-        dest.skew_bottom_x_value = src.skew_bottom_x_value;
-    }
-    if (src.has_affine_transform) {
-        if (dest.has_affine_transform) {
-            bool mismatch = dest.affine_transform.a00 != src.affine_transform.a00 ||
-                            dest.affine_transform.a01 != src.affine_transform.a01 ||
-                            dest.affine_transform.a10 != src.affine_transform.a10 ||
-                            dest.affine_transform.a11 != src.affine_transform.a11 ||
-                            dest.affine_transform.tx != src.affine_transform.tx ||
-                            dest.affine_transform.ty != src.affine_transform.ty;
-            if (mismatch) {
-                return false;
-            }
-        }
-        dest.has_affine_transform = true;
-        dest.affine_transform = src.affine_transform;
-    }
+    // Spatial transforms are applied while extracting each page's frame bits.
+    // Keep them page-local; separately scanned pages can have different geometry.
     return true;
 }
 
