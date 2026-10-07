@@ -351,17 +351,17 @@ run_roundtrip_case "password_ecc" "Password-protected payload with ECC" \
 run_roundtrip_case "ecc_multi_page_massive" "262 KiB ECC multi-page stress" \
     --size 262144 --ecc 0.25 --width 520 --height 520 --multi-page
 
-#run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale and rotation distortions" \
-#    --size 24576 --ecc 0.5 --width 620 --height 620 --multi-page \
-#    --scale 1.05 --rotate 1 --transform-seed 7331
+run_roundtrip_case "multi_page_distorted" "Multi-page payload with scale and rotation distortions" \
+    --size 32768 --ecc 0.5 --width 620 --height 620 --multi-page \
+    --scale 1.05 --rotate 1 --transform-seed 7331
 
 run_roundtrip_case "palette_base5_custom" "Custom palette/base-5 mode" \
     --size 16384 --ecc 0.25 --width 640 --height 640 \
     --palette "White Cyan Magenta Yellow Black"
 
-#run_roundtrip_case "border_dirt_dense" "Dense border-noise stress with deterministic seed" \
-#    --size 32768 --ecc 0.25 --width 640 --height 640 \
-#    --border-thickness 12 --border-density 0.15 --transform-seed 8675309
+run_roundtrip_case "border_dirt_dense" "Dense border-noise stress with deterministic seed" \
+    --size 32768 --ecc 0.25 --width 640 --height 640 \
+    --border-thickness 12 --border-density 0.15 --transform-seed 8675309
 
 run_cli_case "cli_output_dir" "CLI respects explicit output directory"
 

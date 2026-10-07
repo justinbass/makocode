@@ -43,7 +43,7 @@ Layout:
   --palette "..."       Custom palette passed to encode/decode.
   --title TEXT          Footer title (forwarded to encode).
   --font-size PX        Footer font size.
-  --multi-page          Treat output as a multi-page decode (all PPMs in order).
+  --multi-page          Require multiple encoded pages and decode all PPMs in order.
   --encode-opt OPT      Extra flag forwarded verbatim to `makocode encode` (repeatable).
   --decode-opt OPT      Extra flag forwarded verbatim to `makocode decode` (repeatable).
 
@@ -346,6 +346,11 @@ if [[ ${#ppm_paths[@]} -eq 0 ]]; then
 fi
 IFS=$'\n' ppm_paths=($(printf '%s\n' "${ppm_paths[@]}" | LC_ALL=C sort))
 unset IFS
+
+if [[ $multi_page -eq 1 && ${#ppm_paths[@]} -lt 2 ]]; then
+    echo "run_roundtrip: --multi-page requested but encode produced only ${#ppm_paths[@]} PPM page(s)" >&2
+    exit 1
+fi
 
 baseline_targets=()
 if [[ ${#ppm_paths[@]} -eq 1 ]]; then
