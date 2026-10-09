@@ -1,5 +1,4 @@
 Features
-- Fix all tests
 - FooterStripe still present?
 - Footer title and metadata just on first page - or middle page?
 - Test: Page height or width too small for title or metadata, fails to encode
