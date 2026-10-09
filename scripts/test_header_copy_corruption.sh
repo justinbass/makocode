@@ -3,7 +3,9 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
+. "$script_dir/lib/test_seed.sh"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
+ppm_transform_bin="$repo_root/scripts/ppm_transform"
 
 usage() {
     cat <<'USAGE'
@@ -37,9 +39,17 @@ if [[ -z $label ]]; then
     echo "test_header_copy_corruption: --label requires a value" >&2
     exit 1
 fi
+mako_test_seed_init "$repo_root"
+payload_seed=$(mako_test_case_seed "payload/$label")
+MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
+export MAKOCODE_TEST_SEED
 
 if [[ ! -x $makocode_bin ]]; then
     echo "test_header_copy_corruption: makocode binary not found at $makocode_bin" >&2
+    exit 1
+fi
+if [[ ! -x $ppm_transform_bin ]]; then
+    echo "test_header_copy_corruption: ppm_transform helper not found at $ppm_transform_bin" >&2
     exit 1
 fi
 
@@ -52,7 +62,7 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir"
 rm -f "$payload_final" "$encoded_ppm"
 
-head -c 4096 /dev/urandom > "$payload_final"
+"$ppm_transform_bin" bytes --output "$payload_final" --size 4096 --seed "$payload_seed"
 cp "$payload_final" "$work_dir/random.bin"
 
 encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--output-dir=$work_dir")

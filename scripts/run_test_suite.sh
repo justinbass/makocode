@@ -4,6 +4,8 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
+. "$script_dir/lib/test_seed.sh"
+mako_test_seed_init "$repo_root"
 suite_bin="$repo_root/scripts/run_roundtrip.sh"
 cli_test="$repo_root/scripts/test_cli_output_dir.sh"
 decode_test="$repo_root/scripts/test_decode_failures.sh"

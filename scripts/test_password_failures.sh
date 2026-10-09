@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/test_seed.sh"
 
 usage() {
     cat <<'USAGE'
@@ -73,11 +74,21 @@ run_expect_failure() {
 }
 
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
+mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
+ppm_transform_bin="$repo_root/scripts/ppm_transform"
 if [[ ! -x $makocode_bin ]]; then
     echo "test_password_failures: makocode binary not found at $makocode_bin" >&2
     exit 1
 fi
+if [[ ! -x $ppm_transform_bin ]]; then
+    echo "test_password_failures: ppm_transform helper not found at $ppm_transform_bin" >&2
+    exit 1
+fi
+
+payload_seed=$(mako_test_case_seed "payload/$label")
+MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
+export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test"
 work_dir="$test_dir/${label}_password_work"
@@ -103,7 +114,7 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir"
 rm -f "$payload" "$ppm_target"
 
-head -c 32768 /dev/urandom > "$payload"
+"$ppm_transform_bin" bytes --output "$payload" --size 32768 --seed "$payload_seed"
 password="suite-password"
 
 encode_cmd=(

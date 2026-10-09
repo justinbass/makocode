@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
+. "$script_dir/lib/test_seed.sh"
 makocode_bin="$repo_root/makocode"
 ppm_transform_bin="$repo_root/scripts/ppm_transform"
 
@@ -20,6 +21,11 @@ if [[ -z "$label" ]]; then
     echo "test_overlay_e2e: label may not be empty" >&2
     exit 1
 fi
+
+mako_test_seed_init "$repo_root"
+payload_seed=$(mako_test_case_seed "payload/$label")
+MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
+export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test"
 work_dir="$test_dir/${label}_overlay_work"
@@ -53,7 +59,7 @@ rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir"
 rm -f "$payload_path" "$encoded_path" "$overlay_path" "$merged_path" "$decoded_path"
 
-head -c 32768 /dev/urandom > "$payload_path"
+"$ppm_transform_bin" bytes --output "$payload_path" --size 32768 --seed "$payload_seed"
 cp "$payload_path" "$payload_work"
 
 encode_cmd=(

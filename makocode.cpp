@@ -6768,6 +6768,24 @@ static void crypto_random_bytes(u8* dest, usize count) {
     static bool seeded = false;
     if (!seeded) {
         u64 seed = (u64)time((long*)0);
+        const char* test_seed_text = getenv("MAKOCODE_TEST_SEED");
+        if (test_seed_text && *test_seed_text) {
+            u64 parsed_seed = 0u;
+            bool valid_seed = true;
+            for (const char* cursor = test_seed_text; *cursor; ++cursor) {
+                if (*cursor < '0' || *cursor > '9') {
+                    valid_seed = false;
+                    break;
+                }
+                u64 digit = (u64)(*cursor - '0');
+                if (parsed_seed > (U64_MAX_VALUE - digit) / 10u) {
+                    valid_seed = false;
+                    break;
+                }
+                parsed_seed = parsed_seed * 10u + digit;
+            }
+            if (valid_seed) seed = parsed_seed;
+        }
         if (!seed) {
             seed = 0x726f6c6c6572756cull;
         }

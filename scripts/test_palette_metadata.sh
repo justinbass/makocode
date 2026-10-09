@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/test_seed.sh"
 
 usage() {
     cat <<'USAGE'
@@ -71,11 +72,21 @@ print_labelled() {
 }
 
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
+mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
+ppm_transform_bin="$repo_root/scripts/ppm_transform"
 if [[ ! -x $makocode_bin ]]; then
     echo "test_palette_metadata: makocode binary not found at $makocode_bin" >&2
     exit 1
 fi
+if [[ ! -x $ppm_transform_bin ]]; then
+    echo "test_palette_metadata: ppm_transform helper not found at $ppm_transform_bin" >&2
+    exit 1
+fi
+
+payload_seed=$(mako_test_case_seed "payload/$label/$mode")
+MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label/$mode")
+export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test"
 work_dir="$test_dir/${label}_palette_work"
@@ -103,7 +114,7 @@ rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir"
 rm -f "$payload" "$ppm_target" "$decoded_target"
 
-head -c 16384 /dev/urandom > "$payload"
+"$ppm_transform_bin" bytes --output "$payload" --size 16384 --seed "$payload_seed"
 cp "$payload" "$payload_work"
 palette="White Cyan Magenta Yellow"
 

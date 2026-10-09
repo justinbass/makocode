@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/test_seed.sh"
 
 format_command() {
     local formatted="" quoted=""
@@ -265,6 +266,10 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test"
+mako_test_seed_init "$repo_root"
+payload_seed=$(mako_test_case_seed "payload/$label")
+MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
+export MAKOCODE_TEST_SEED
 mkdir -p "$test_dir"
 work_dir="$test_dir/${label}_work"
 payload_final="$test_dir/${label}_random_payload.bin"
@@ -309,7 +314,7 @@ if [[ -n $payload_literal ]]; then
     fi
     printf '%s' "$payload_literal" > "$payload_final"
 else
-    head -c "$size" /dev/urandom > "$payload_final"
+    "$repo_root/scripts/ppm_transform" bytes --output "$payload_final" --size "$size" --seed "$payload_seed"
 fi
 cp "$payload_final" "$payload_work"
 

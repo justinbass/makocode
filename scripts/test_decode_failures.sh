@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/test_seed.sh"
 
 usage() {
     cat <<'USAGE'
@@ -92,6 +93,7 @@ run_expect_failure() {
 }
 
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
+mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
     echo "test_decode_failures: makocode binary not found at $makocode_bin" >&2
@@ -104,6 +106,8 @@ if [[ ! -x $ppm_transform_bin ]]; then
 fi
 
 test_dir="$repo_root/test"
+MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label/$case_name")
+export MAKOCODE_TEST_SEED
 mkdir -p "$test_dir"
 wrong_depth="$test_dir/${label}_wrong_depth.ppm"
 invalid_magic="$test_dir/${label}_invalid_magic.ppm"
@@ -176,7 +180,9 @@ run_case_random_noise() {
 # 4) Footer stripe present, but data region destroyed with noise.
 run_case_footer_data_destroyed() {
     mkdir -p "$work_dir"
-    head -c 64 /dev/urandom > "$payload_path"
+    local payload_seed
+    payload_seed=$(mako_test_case_seed "payload/$label/footer_data_destroyed")
+    "$ppm_transform_bin" bytes --output "$payload_path" --size 64 --seed "$payload_seed"
     print_makocode_cmd "encode-footer-only" \
         "$makocode_bin" encode \
         "--input=payload.bin" \
@@ -218,7 +224,9 @@ run_case_footer_data_destroyed() {
 
 run_case_footer_valid_data_too_corrupt() {
     mkdir -p "$work_dir"
-    head -c 32768 /dev/urandom > "$payload_path"
+    local payload_seed
+    payload_seed=$(mako_test_case_seed "payload/$label/footer_valid_data_too_corrupt")
+    "$ppm_transform_bin" bytes --output "$payload_path" --size 32768 --seed "$payload_seed"
     print_makocode_cmd "encode-ecc-overwhelmed" \
         "$makocode_bin" encode \
         "--input=payload.bin" \

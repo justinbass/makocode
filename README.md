@@ -30,6 +30,17 @@ Pass `--debug` (e.g., `./makocode --debug encode ...`) if you need the verbose d
 Artifacts for debugging are written to `test/` using the labels defined in each
 script (e.g., `3001_random_payload*`, `2005_payload_gray_100k_*`).
 
+Each `make test` run prints its master seed and writes it to `test/test_seed.txt`.
+Repeat a randomized run with the same seed using:
+
+```
+MAKO_TEST_SEED=$(cat test/test_seed.txt) make test
+```
+
+You can also choose a seed explicitly, for example `MAKO_TEST_SEED=12345 make test`.
+Random payload seeds are derived from the master seed and test label, so each case
+gets a stable payload when replayed.
+
 ### Coverage
 
 To run the same end-to-end suite with GCC/gcov instrumentation and produce an

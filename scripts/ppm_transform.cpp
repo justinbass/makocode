@@ -781,6 +781,7 @@ static void usage() {
             "  ppm_transform overlay-mask --output OUT --circle-color \"R G B\" --background-color \"R G B\" [--width W] [--height H]\n"
             "  ppm_transform copy-footer-rows --encoded IN --merged INOUT\n"
             "  ppm_transform overlay-check --base IN --merged IN [--skip-grayscale 0|1]\n"
+            "  ppm_transform bytes --output OUT --size N --seed N\n"
             "  ppm_transform bytes-len TEXT\n");
 }
 
@@ -1341,6 +1342,42 @@ int main(int argc, char** argv) {
     }
     if (strcmp(cmd, "bytes-len") == 0) {
         cmd_bytes_len(argc, argv);
+        return 0;
+    }
+    if (strcmp(cmd, "bytes") == 0) {
+        const char* output = nullptr;
+        int byte_count = -1;
+        int seed = -1;
+        for (int i = 2; i < argc; i++) {
+            const char* arg = argv[i];
+            auto require_value = [&](const char* flag) -> const char* {
+                if (i + 1 >= argc) die2("ppm_transform: missing value for ", flag);
+                return argv[++i];
+            };
+            if (strcmp(arg, "--output") == 0) output = require_value("--output");
+            else if (strcmp(arg, "--size") == 0) byte_count = parse_i32(require_value("--size"), "size");
+            else if (strcmp(arg, "--seed") == 0) seed = parse_i32(require_value("--seed"), "seed");
+            else die2("ppm_transform: unknown flag ", arg);
+        }
+        if (!output || byte_count < 0 || seed < 0) {
+            die("ppm_transform: bytes requires --output, non-negative --size, and non-negative --seed");
+        }
+        uint32_t rng = (uint32_t)seed ^ 0xC0FFEEu;
+        if (rng == 0u) rng = 0xA341316Cu;
+        FILE* file = fopen(output, "wb");
+        if (!file) die2("ppm_transform: unable to open ", output);
+        unsigned char buffer[4096];
+        int remaining = byte_count;
+        while (remaining > 0) {
+            size_t count = remaining < (int)sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
+            for (size_t i = 0; i < count; i++) buffer[i] = (unsigned char)rand_u8(&rng);
+            if (fwrite(buffer, 1, count, file) != count) {
+                fclose(file);
+                die2("ppm_transform: unable to write ", output);
+            }
+            remaining -= (int)count;
+        }
+        if (fclose(file) != 0) die2("ppm_transform: unable to close ", output);
         return 0;
     }
     if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 || strcmp(cmd, "help") == 0) {
