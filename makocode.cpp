@@ -21528,7 +21528,8 @@ struct RotationEstimateCandidate {
         console_line(2, fiducial_displacement_active ? "yes" : "no");
     }
     bool prefer_nearest_sampling = false;
-    if (use_fiducial_subgrid && metadata_columns_overridden && metadata_rows_overridden) {
+    if (use_fiducial_subgrid && scale_x > 1.0 && scale_y > 1.0 &&
+        fabs(scale_x - scale_y) <= 0.02 * ((scale_x + scale_y) * 0.5)) {
         prefer_nearest_sampling = true;
     }
 
@@ -21557,7 +21558,7 @@ struct RotationEstimateCandidate {
                                      : (const u8*)0;
     usize reservation_size = reservation_mask ? fiducial_mask.size : 0u;
 
-    if (!state.has_affine_transform && tile_affine_hint_available && tile_affine_hint_trusted &&
+    if (tile_affine_hint_available && tile_affine_hint_trusted &&
         state.has_rotation_degrees && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
         state.has_page_width_pixels && state.has_page_height_pixels &&
         logical_width > 1u && logical_height > 1u && data_height > 1u &&
@@ -21575,6 +21576,69 @@ struct RotationEstimateCandidate {
                                     fabs((double)scaled_height * s) + 0.5);
         u64 predicted_height = (u64)(fabs((double)scaled_width * s) +
                                      fabs((double)scaled_height * c) + 0.5);
+        if (predicted_width != width || predicted_height != height) {
+            bool found_dimension_scale = false;
+            double best_scale_distance = 1.0e30;
+            double dimension_scale = scale;
+            u64 dimension_scaled_width = scaled_width;
+            u64 dimension_scaled_height = scaled_height;
+            u64 dimension_predicted_width = predicted_width;
+            u64 dimension_predicted_height = predicted_height;
+            u64 width_search_start = (scaled_width > 8u) ? scaled_width - 8u : 1u;
+            u64 height_search_start = (scaled_height > 8u) ? scaled_height - 8u : 1u;
+            for (u64 candidate_width = width_search_start;
+                 candidate_width <= scaled_width + 8u;
+                 ++candidate_width) {
+                double width_scale_min = ((double)candidate_width - 0.5) / (double)logical_width;
+                double width_scale_max = ((double)candidate_width + 0.5) / (double)logical_width;
+                for (u64 candidate_height = height_search_start;
+                     candidate_height <= scaled_height + 8u;
+                     ++candidate_height) {
+                    double height_scale_min = ((double)candidate_height - 0.5) / (double)logical_height;
+                    double height_scale_max = ((double)candidate_height + 0.5) / (double)logical_height;
+                    double common_scale_min = (width_scale_min > height_scale_min)
+                                                  ? width_scale_min
+                                                  : height_scale_min;
+                    double common_scale_max = (width_scale_max < height_scale_max)
+                                                  ? width_scale_max
+                                                  : height_scale_max;
+                    if (common_scale_min > common_scale_max) {
+                        continue;
+                    }
+                    u64 candidate_predicted_width =
+                        (u64)(fabs((double)candidate_width * c) +
+                              fabs((double)candidate_height * s) + 0.5);
+                    u64 candidate_predicted_height =
+                        (u64)(fabs((double)candidate_width * s) +
+                              fabs((double)candidate_height * c) + 0.5);
+                    if (candidate_predicted_width != width ||
+                        candidate_predicted_height != height) {
+                        continue;
+                    }
+                    double candidate_scale = scale;
+                    if (candidate_scale < common_scale_min || candidate_scale > common_scale_max) {
+                        candidate_scale = (common_scale_min + common_scale_max) * 0.5;
+                    }
+                    double scale_distance = fabs(candidate_scale - scale);
+                    if (!found_dimension_scale || scale_distance < best_scale_distance) {
+                        found_dimension_scale = true;
+                        best_scale_distance = scale_distance;
+                        dimension_scale = candidate_scale;
+                        dimension_scaled_width = candidate_width;
+                        dimension_scaled_height = candidate_height;
+                        dimension_predicted_width = candidate_predicted_width;
+                        dimension_predicted_height = candidate_predicted_height;
+                    }
+                }
+            }
+            if (found_dimension_scale) {
+                scale = dimension_scale;
+                scaled_width = dimension_scaled_width;
+                scaled_height = dimension_scaled_height;
+                predicted_width = dimension_predicted_width;
+                predicted_height = dimension_predicted_height;
+            }
+        }
         if (scaled_width > 0u && scaled_height > 0u &&
             predicted_width == width && predicted_height == height) {
             double input_center_x = ((double)scaled_width - 1.0) * 0.5;
@@ -21611,6 +21675,7 @@ struct RotationEstimateCandidate {
                                                 (state.affine_transform.a10 +
                                                  state.affine_transform.a11) * 0.5;
                     state.has_affine_transform = true;
+                    fiducial_displacement_active = false;
                     if (debug_logging_enabled()) {
                         char transform_buffer[128];
                         snprintf(transform_buffer,
@@ -21625,550 +21690,248 @@ struct RotationEstimateCandidate {
         }
     }
 
-    // A scale/rotation transform resamples the original pixels twice. Sampling the
-    // transformed raster once more blurs one-bit pages, so refine the page affine
-    // from payload contrast and invert those two interpolation stages when the
-    // page geometry matches a centered scale-then-rotate transform.
     makocode::ByteBuffer affine_reconstructed_pixels;
     if (!use_custom_palette && color_mode == 1u && samples_per_pixel == 1u &&
         state.has_affine_transform && state.has_ecc_flag && state.ecc_flag_value &&
         !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
         state.has_ecc_block_data && state.has_ecc_parity && state.has_ecc_block_count &&
         state.has_ecc_original_bytes && logical_width > 1u && logical_height > 1u &&
-        logical_width <= 0xFFFFFFFFull && logical_height <= 0xFFFFFFFFull &&
-        width > logical_width && height > logical_height) {
-        const u8* affine_input_data = affine_source_pixels.data
-                                          ? affine_source_pixels.data
-                                          : pixel_data;
+        width > logical_width && height > logical_height && affine_source_pixels.data) {
         double a00 = state.affine_transform.a00;
         double a01 = state.affine_transform.a01;
         double a10 = state.affine_transform.a10;
         double a11 = state.affine_transform.a11;
-        double scale_x = sqrt(a00 * a00 + a10 * a10);
-        double scale_y = sqrt(a01 * a01 + a11 * a11);
-        double scale = (scale_x + scale_y) * 0.5;
-        double angle = atan2(a10, a00) * (180.0 / 3.14159265358979323846);
-        if (scale > 1.005 && scale <= 1.25 &&
-            fabs(scale_x - scale_y) / scale < 0.005 && fabs(angle) < 10.0) {
-            const u32 affine_sample_capacity = 65536u;
-            u32* sample_columns = (u32*)malloc((usize)affine_sample_capacity * sizeof(u32));
-            u32* sample_rows = (u32*)malloc((usize)affine_sample_capacity * sizeof(u32));
-            u32 sample_count = 0u;
-            makocode::Pcg64Generator sample_rng;
-            sample_rng.seed(0x91E10DA5ull);
-            u64 sample_population = logical_width * data_height;
-            if (sample_columns && sample_rows) {
-                for (u64 attempt = 0u;
-                     attempt < sample_population * 4u && sample_count < affine_sample_capacity;
-                     ++attempt) {
-                    u64 sample_index = sample_rng.next() % sample_population;
-                    u32 sample_col = (u32)(sample_index % logical_width);
-                    u32 sample_row = (u32)(sample_index / logical_width);
-                    if (sample_col < 4u || sample_row < 4u ||
-                        sample_col + 4u >= logical_width || sample_row + 4u >= data_height) {
-                        continue;
-                    }
-                    usize mask_index = (usize)sample_row * (usize)logical_width + (usize)sample_col;
-                    if (reservation_mask && mask_index < reservation_size && reservation_mask[mask_index]) {
-                        continue;
-                    }
-                    sample_columns[sample_count] = sample_col;
-                    sample_rows[sample_count] = sample_row;
-                    ++sample_count;
-                }
-            }
-            auto centered_transform_offset = [&](double candidate_scale,
-                                                 double candidate_angle,
-                                                 double& offset_x,
-                                                 double& offset_y) -> bool {
-                double angle_rad = candidate_angle * (3.14159265358979323846 / 180.0);
-                double c = cos(angle_rad);
-                double s = sin(angle_rad);
-                u64 scaled_width = (u64)((double)logical_width * candidate_scale + 0.5);
-                u64 scaled_height = (u64)((double)logical_height * candidate_scale + 0.5);
-                if (scaled_width == 0u || scaled_height == 0u ||
-                    scaled_width > 0xFFFFFFFFull || scaled_height > 0xFFFFFFFFull) {
-                    return false;
-                }
-                u64 predicted_width = (u64)(fabs((double)scaled_width * c) +
-                                             fabs((double)scaled_height * s) + 0.5);
-                u64 predicted_height = (u64)(fabs((double)scaled_width * s) +
-                                              fabs((double)scaled_height * c) + 0.5);
-                if (predicted_width != width || predicted_height != height) {
-                    return false;
-                }
-                double input_center_x = ((double)scaled_width - 1.0) * 0.5;
-                double input_center_y = ((double)scaled_height - 1.0) * 0.5;
-                double output_center_x = ((double)width - 1.0) * 0.5;
-                double output_center_y = ((double)height - 1.0) * 0.5;
-                double scale_offset = (candidate_scale - 1.0) * 0.5;
-                offset_x = output_center_x + c * (scale_offset - input_center_x) -
-                           s * (scale_offset - input_center_y);
-                offset_y = output_center_y + s * (scale_offset - input_center_x) +
-                           c * (scale_offset - input_center_y);
-                return true;
-            };
-            double offset_x = 0.0;
-            double offset_y = 0.0;
-            bool geometry_matches = centered_transform_offset(scale, angle, offset_x, offset_y);
-            double current_offset_x = state.affine_transform.tx + (a00 + a01) * 0.5;
-            double current_offset_y = state.affine_transform.ty + (a10 + a11) * 0.5;
-            double delta_x = current_offset_x - offset_x;
-            double delta_y = current_offset_y - offset_y;
-            if (geometry_matches && fabs(delta_x) <= 1.0 && fabs(delta_y) <= 1.0 &&
-                sample_columns && sample_rows && sample_count >= 512u) {
-                auto affine_contrast_score = [&](double candidate_scale,
-                                                 double candidate_angle,
-                                                 double candidate_delta_x,
-                                                 double candidate_delta_y) -> double {
-                    double base_x = 0.0;
-                    double base_y = 0.0;
-                    if (!centered_transform_offset(candidate_scale,
-                                                   candidate_angle,
-                                                   base_x,
-                                                   base_y)) {
-                        return -1.0;
-                    }
-                    double angle_rad = candidate_angle * (3.14159265358979323846 / 180.0);
-                    double c = cos(angle_rad);
-                    double s = sin(angle_rad);
-                    double score = 0.0;
-                    for (u32 sample_index = 0u; sample_index < sample_count; ++sample_index) {
-                        double logical_x = (double)sample_columns[sample_index];
-                        double logical_y = (double)sample_rows[sample_index];
-                        double sample_x = candidate_scale * c * logical_x -
-                                          candidate_scale * s * logical_y +
-                                          base_x + candidate_delta_x;
-                        double sample_y = candidate_scale * s * logical_x +
-                                          candidate_scale * c * logical_y +
-                                          base_y + candidate_delta_y;
-                        double luma = MetadataTile::sample_luminance_bilinear(affine_input_data,
-                                                                               (u32)width,
-                                                                               (u32)height,
-                                                                               sample_x,
-                                                                               sample_y);
-                        score += fabs(luma - 127.5);
-                    }
-                    return score / (double)sample_count;
-                };
-                double affine_initial_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                if (affine_initial_score < 80.0 && tile_affine_hint_available) {
-                    double best_scale = scale;
-                    double best_angle = angle;
-                    double best_score = affine_contrast_score(scale, angle, 0.0, 0.0);
-                    // Fiducial noise can shift a low-scale estimate across a raster-size rounding boundary.
-                    // Search near the tile's pitch so the contrast fit does not settle on another valid size.
-                    double coarse_scale_center = tile_affine_hint.pitch_pixels;
-                    for (int angle_step = -10; angle_step <= 10; ++angle_step) {
-                        double candidate_angle = angle + (double)angle_step * 0.05;
-                        for (int scale_step = -10; scale_step <= 10; ++scale_step) {
-                            double candidate_scale = coarse_scale_center + (double)scale_step * 0.0005;
-                            double candidate_offset_x = 0.0;
-                            double candidate_offset_y = 0.0;
-                            if (!centered_transform_offset(candidate_scale,
-                                                           candidate_angle,
-                                                           candidate_offset_x,
-                                                           candidate_offset_y)) {
-                                continue;
-                            }
-                            double candidate_score = affine_contrast_score(candidate_scale,
-                                                                           candidate_angle,
-                                                                           0.0,
-                                                                           0.0);
-                            if (candidate_score > best_score) {
-                                best_score = candidate_score;
-                                best_scale = candidate_scale;
-                                best_angle = candidate_angle;
-                            }
+        double affine_scale_x = sqrt(a00 * a00 + a10 * a10);
+        double affine_scale_y = sqrt(a01 * a01 + a11 * a11);
+        double affine_scale = (affine_scale_x + affine_scale_y) * 0.5;
+        double affine_angle = atan2(a10, a00);
+        if (affine_scale > 1.005 && affine_scale <= 1.25 &&
+            fabs(affine_scale_x - affine_scale_y) / affine_scale < 0.005 &&
+            fabs(affine_angle) < (10.0 * 3.14159265358979323846 / 180.0) &&
+            logical_width <= 0xFFFFFFFFull && logical_height <= 0xFFFFFFFFull &&
+            width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
+            u64 scaled_width = (u64)((double)logical_width * affine_scale + 0.5);
+            u64 scaled_height = (u64)((double)logical_height * affine_scale + 0.5);
+            double cosine = cos(affine_angle);
+            double sine = sin(affine_angle);
+            u64 predicted_width = (u64)(fabs((double)scaled_width * cosine) +
+                                        fabs((double)scaled_height * sine) + 0.5);
+            u64 predicted_height = (u64)(fabs((double)scaled_width * sine) +
+                                         fabs((double)scaled_height * cosine) + 0.5);
+            double input_center_x = ((double)scaled_width - 1.0) * 0.5;
+            double input_center_y = ((double)scaled_height - 1.0) * 0.5;
+            double output_center_x = ((double)width - 1.0) * 0.5;
+            double output_center_y = ((double)height - 1.0) * 0.5;
+            double scale_offset = (affine_scale - 1.0) * 0.5;
+            double expected_offset_x = output_center_x +
+                                       cosine * (scale_offset - input_center_x) -
+                                       sine * (scale_offset - input_center_y);
+            double expected_offset_y = output_center_y +
+                                       sine * (scale_offset - input_center_x) +
+                                       cosine * (scale_offset - input_center_y);
+            double affine_offset_x = state.affine_transform.tx + (a00 + a01) * 0.5;
+            double affine_offset_y = state.affine_transform.ty + (a10 + a11) * 0.5;
+            if (scaled_width > 0u && scaled_height > 0u &&
+                predicted_width == width && predicted_height == height &&
+                fabs(affine_offset_x - expected_offset_x) <= 0.75 &&
+                fabs(affine_offset_y - expected_offset_y) <= 0.75) {
+                usize source_count = (usize)logical_width * (usize)logical_height;
+                usize scaled_count = (usize)scaled_width * (usize)scaled_height;
+                usize output_count = (usize)width * (usize)height;
+                if (scaled_width <= 0xFFFFFFFFull && scaled_height <= 0xFFFFFFFFull &&
+                    source_count <= 2097152u &&
+                    source_count <= USIZE_MAX_VALUE / sizeof(double) &&
+                    scaled_count <= USIZE_MAX_VALUE / sizeof(double) &&
+                    output_count <= USIZE_MAX_VALUE / sizeof(double) &&
+                    source_count <= USIZE_MAX_VALUE / 3u) {
+                    double* affine_source = (double*)malloc(source_count * sizeof(double));
+                    double* affine_scaled = (double*)malloc(scaled_count * sizeof(double));
+                    double* affine_scaled_gradient = (double*)malloc(scaled_count * sizeof(double));
+                    double* affine_observed = (double*)malloc(output_count * sizeof(double));
+                    double* affine_projected = (double*)malloc(output_count * sizeof(double));
+                    double* affine_rhs = (double*)malloc(source_count * sizeof(double));
+                    double* affine_residual = (double*)malloc(source_count * sizeof(double));
+                    double* affine_direction = (double*)malloc(source_count * sizeof(double));
+                    double* affine_normal_direction = (double*)malloc(source_count * sizeof(double));
+                    bool affine_buffers_ready = affine_source && affine_scaled &&
+                                                affine_scaled_gradient && affine_observed &&
+                                                affine_projected && affine_rhs && affine_residual &&
+                                                affine_direction && affine_normal_direction;
+                    if (affine_buffers_ready) {
+                        const u8* affine_input = affine_source_pixels.data;
+                        for (usize i = 0u; i < output_count; ++i) {
+                            usize pixel = i * 3u;
+                            double luma = 0.2126 * (double)affine_input[pixel] +
+                                          0.7152 * (double)affine_input[pixel + 1u] +
+                                          0.0722 * (double)affine_input[pixel + 2u];
+                            affine_observed[i] = 255.0 - luma;
                         }
-                    }
-                    if (best_score > affine_initial_score) {
-                        scale = best_scale;
-                        angle = best_angle;
-                        delta_x = 0.0;
-                        delta_y = 0.0;
-                    }
-                }
-                for (u32 pass = 0u; pass < 2u; ++pass) {
-                    double best_value = scale;
-                    double best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = scale + (double)step * 0.0002;
-                        double candidate_score = affine_contrast_score(candidate,
-                                                                       angle,
-                                                                       delta_x,
-                                                                       delta_y);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    scale = best_value;
-                    best_value = angle;
-                    best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = angle + (double)step * 0.02;
-                        double candidate_score = affine_contrast_score(scale,
-                                                                       candidate,
-                                                                       delta_x,
-                                                                       delta_y);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    angle = best_value;
-                    best_value = delta_x;
-                    best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = delta_x + (double)step * 0.05;
-                        double candidate_score = affine_contrast_score(scale,
-                                                                       angle,
-                                                                       candidate,
-                                                                       delta_y);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    delta_x = best_value;
-                    best_value = delta_y;
-                    best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = delta_y + (double)step * 0.05;
-                        double candidate_score = affine_contrast_score(scale,
-                                                                       angle,
-                                                                       delta_x,
-                                                                       candidate);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    delta_y = best_value;
-                }
-                for (u32 pass = 0u; pass < 2u; ++pass) {
-                    double best_value = scale;
-                    double best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = scale + (double)step * 0.00002;
-                        double candidate_score = affine_contrast_score(candidate,
-                                                                       angle,
-                                                                       delta_x,
-                                                                       delta_y);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    scale = best_value;
-                    best_value = angle;
-                    best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = angle + (double)step * 0.001;
-                        double candidate_score = affine_contrast_score(scale,
-                                                                       candidate,
-                                                                       delta_x,
-                                                                       delta_y);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    angle = best_value;
-                    best_value = delta_x;
-                    best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = delta_x + (double)step * 0.005;
-                        double candidate_score = affine_contrast_score(scale,
-                                                                       angle,
-                                                                       candidate,
-                                                                       delta_y);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    delta_x = best_value;
-                    best_value = delta_y;
-                    best_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    for (int step = -10; step <= 10; ++step) {
-                        double candidate = delta_y + (double)step * 0.005;
-                        double candidate_score = affine_contrast_score(scale,
-                                                                       angle,
-                                                                       delta_x,
-                                                                       candidate);
-                        if (candidate_score > best_score) {
-                            best_score = candidate_score;
-                            best_value = candidate;
-                        }
-                    }
-                    delta_y = best_value;
-                }
-                if (debug_logging_enabled()) {
-                    char fit_score_buffer[160];
-                    double affine_refined_score = affine_contrast_score(scale, angle, delta_x, delta_y);
-                    snprintf(fit_score_buffer,
-                             sizeof(fit_score_buffer),
-                             "debug affine raster fit: samples=%u score=%.6f->%.6f",
-                             sample_count,
-                             affine_initial_score,
-                             affine_refined_score);
-                    console_line(2, fit_score_buffer);
-                }
-                double refined_offset_x = 0.0;
-                double refined_offset_y = 0.0;
-                if (centered_transform_offset(scale,
-                                              angle,
-                                              refined_offset_x,
-                                              refined_offset_y)) {
-                    double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                    double c = cos(angle_rad);
-                    double s = sin(angle_rad);
-                    state.affine_transform.a00 = scale * c;
-                    state.affine_transform.a01 = -scale * s;
-                    state.affine_transform.a10 = scale * s;
-                    state.affine_transform.a11 = scale * c;
-                    state.affine_transform.tx = refined_offset_x + delta_x -
-                                                (state.affine_transform.a00 +
-                                                 state.affine_transform.a01) * 0.5;
-                    state.affine_transform.ty = refined_offset_y + delta_y -
-                                                (state.affine_transform.a10 +
-                                                 state.affine_transform.a11) * 0.5;
-                }
-
-                struct BilinearResampleMap {
-                    u32 index[4];
-                    float weight[4];
-                };
-                double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                double c = cos(angle_rad);
-                double s = sin(angle_rad);
-                u64 scaled_width = (u64)((double)logical_width * scale + 0.5);
-                u64 scaled_height = (u64)((double)logical_height * scale + 0.5);
-                u64 source_count = logical_width * logical_height;
-                u64 intermediate_count = scaled_width * scaled_height;
-                u64 output_count = width * height;
-                bool counts_valid = scaled_width > 0u && scaled_height > 0u &&
-                                    source_count <= 0xFFFFFFFFull &&
-                                    intermediate_count <= 0xFFFFFFFFull &&
-                                    output_count <= 0xFFFFFFFFull &&
-                                    source_count <= (u64)USIZE_MAX_VALUE / 3u &&
-                                    intermediate_count <= (u64)USIZE_MAX_VALUE / sizeof(BilinearResampleMap) &&
-                                    output_count <= (u64)USIZE_MAX_VALUE / sizeof(BilinearResampleMap);
-                if (counts_valid && affine_reconstructed_pixels.ensure((usize)source_count * 3u)) {
-                    BilinearResampleMap* scale_map = (BilinearResampleMap*)malloc(
-                        (usize)intermediate_count * sizeof(BilinearResampleMap));
-                    BilinearResampleMap* rotation_map = (BilinearResampleMap*)malloc(
-                        (usize)output_count * sizeof(BilinearResampleMap));
-                    usize scratch_capacity = (usize)(source_count + intermediate_count + output_count);
-                    bool scratch_valid = scratch_capacity <= (usize)USIZE_MAX_VALUE / sizeof(double);
-                    double* solution = scratch_valid ? (double*)malloc((usize)source_count * sizeof(double)) : 0;
-                    double* residual = scratch_valid ? (double*)malloc((usize)output_count * sizeof(double)) : 0;
-                    double* gradient = scratch_valid ? (double*)malloc((usize)source_count * sizeof(double)) : 0;
-                    double* direction = scratch_valid ? (double*)malloc((usize)source_count * sizeof(double)) : 0;
-                    double* projected = scratch_valid ? (double*)malloc((usize)output_count * sizeof(double)) : 0;
-                    double* intermediate = scratch_valid ? (double*)malloc((usize)intermediate_count * sizeof(double)) : 0;
-                    bool reconstruction_ready = scale_map && rotation_map && solution && residual &&
-                                                gradient && direction && projected && intermediate;
-                    if (reconstruction_ready) {
-                        auto set_resample_map = [&](BilinearResampleMap& map,
-                                                    double sample_x,
-                                                    double sample_y,
-                                                    u32 sample_width,
-                                                    u32 sample_height) {
-                            if (sample_x < 0.0) sample_x = 0.0;
-                            if (sample_y < 0.0) sample_y = 0.0;
-                            double max_x = (sample_width > 0u) ? (double)(sample_width - 1u) : 0.0;
-                            double max_y = (sample_height > 0u) ? (double)(sample_height - 1u) : 0.0;
-                            if (sample_x > max_x) sample_x = max_x;
-                            if (sample_y > max_y) sample_y = max_y;
-                            u32 x0 = (u32)floor(sample_x);
-                            u32 y0 = (u32)floor(sample_y);
-                            u32 x1 = (x0 + 1u < sample_width) ? (x0 + 1u) : x0;
-                            u32 y1 = (y0 + 1u < sample_height) ? (y0 + 1u) : y0;
-                            double fx = sample_x - (double)x0;
-                            double fy = sample_y - (double)y0;
-                            map.index[0] = y0 * sample_width + x0;
-                            map.index[1] = y0 * sample_width + x1;
-                            map.index[2] = y1 * sample_width + x0;
-                            map.index[3] = y1 * sample_width + x1;
-                            map.weight[0] = (float)((1.0 - fx) * (1.0 - fy));
-                            map.weight[1] = (float)(fx * (1.0 - fy));
-                            map.weight[2] = (float)((1.0 - fx) * fy);
-                            map.weight[3] = (float)(fx * fy);
-                        };
-                        for (u64 row = 0u; row < scaled_height; ++row) {
-                            for (u64 col = 0u; col < scaled_width; ++col) {
-                                double source_x = ((double)col + 0.5) / scale - 0.5;
-                                double source_y = ((double)row + 0.5) / scale - 0.5;
-                                BilinearResampleMap& map = scale_map[(usize)row * (usize)scaled_width + (usize)col];
-                                set_resample_map(map,
-                                                 source_x,
-                                                 source_y,
-                                                 (u32)logical_width,
-                                                 (u32)logical_height);
-                            }
-                        }
-                        double input_center_x = ((double)scaled_width - 1.0) * 0.5;
-                        double input_center_y = ((double)scaled_height - 1.0) * 0.5;
-                        double output_center_x = ((double)width - 1.0) * 0.5 + delta_x;
-                        double output_center_y = ((double)height - 1.0) * 0.5 + delta_y;
-                        for (u64 row = 0u; row < height; ++row) {
-                            for (u64 col = 0u; col < width; ++col) {
-                                BilinearResampleMap& map = rotation_map[(usize)row * (usize)width + (usize)col];
-                                for (u32 tap = 0u; tap < 4u; ++tap) {
-                                    map.index[tap] = 0u;
-                                    map.weight[tap] = 0.0f;
+                        auto affine_apply_forward = [&](const double* source,
+                                                        double* scaled,
+                                                        double* output) {
+                            for (u64 row = 0u; row < scaled_height; ++row) {
+                                double source_y = ((double)row + 0.5) / affine_scale - 0.5;
+                                if (source_y < 0.0) source_y = 0.0;
+                                double max_source_y = (double)(logical_height - 1u);
+                                if (source_y > max_source_y) source_y = max_source_y;
+                                u64 y0 = (u64)floor(source_y);
+                                u64 y1 = (y0 + 1u < logical_height) ? y0 + 1u : y0;
+                                double fy = source_y - (double)y0;
+                                for (u64 col = 0u; col < scaled_width; ++col) {
+                                    double source_x = ((double)col + 0.5) / affine_scale - 0.5;
+                                    if (source_x < 0.0) source_x = 0.0;
+                                    double max_source_x = (double)(logical_width - 1u);
+                                    if (source_x > max_source_x) source_x = max_source_x;
+                                    u64 x0 = (u64)floor(source_x);
+                                    u64 x1 = (x0 + 1u < logical_width) ? x0 + 1u : x0;
+                                    double fx = source_x - (double)x0;
+                                    double top = source[(usize)y0 * (usize)logical_width + (usize)x0] * (1.0 - fx) +
+                                                 source[(usize)y0 * (usize)logical_width + (usize)x1] * fx;
+                                    double bottom = source[(usize)y1 * (usize)logical_width + (usize)x0] * (1.0 - fx) +
+                                                    source[(usize)y1 * (usize)logical_width + (usize)x1] * fx;
+                                    scaled[(usize)row * (usize)scaled_width + (usize)col] =
+                                        top * (1.0 - fy) + bottom * fy;
                                 }
-                                double dx = (double)col - output_center_x;
-                                double dy = (double)row - output_center_y;
-                                double source_x = c * dx + s * dy + input_center_x;
-                                double source_y = -s * dx + c * dy + input_center_y;
-                                if (source_x < 0.0 || source_x > (double)(scaled_width - 1u) ||
-                                    source_y < 0.0 || source_y > (double)(scaled_height - 1u)) {
-                                    continue;
+                            }
+                            for (u64 row = 0u; row < height; ++row) {
+                                double ry = (double)row - output_center_y;
+                                for (u64 col = 0u; col < width; ++col) {
+                                    double rx = (double)col - output_center_x;
+                                    double source_x = cosine * rx + sine * ry + input_center_x;
+                                    double source_y = -sine * rx + cosine * ry + input_center_y;
+                                    usize output_index = (usize)row * (usize)width + (usize)col;
+                                    if (source_x < 0.0 || source_x > (double)(scaled_width - 1u) ||
+                                        source_y < 0.0 || source_y > (double)(scaled_height - 1u)) {
+                                        output[output_index] = 0.0;
+                                        continue;
+                                    }
+                                    u64 x0 = (u64)floor(source_x);
+                                    u64 y0 = (u64)floor(source_y);
+                                    u64 x1 = (x0 + 1u < scaled_width) ? x0 + 1u : x0;
+                                    u64 y1 = (y0 + 1u < scaled_height) ? y0 + 1u : y0;
+                                    double fx = source_x - (double)x0;
+                                    double fy = source_y - (double)y0;
+                                    double top = scaled[(usize)y0 * (usize)scaled_width + (usize)x0] * (1.0 - fx) +
+                                                 scaled[(usize)y0 * (usize)scaled_width + (usize)x1] * fx;
+                                    double bottom = scaled[(usize)y1 * (usize)scaled_width + (usize)x0] * (1.0 - fx) +
+                                                    scaled[(usize)y1 * (usize)scaled_width + (usize)x1] * fx;
+                                    output[output_index] = top * (1.0 - fy) + bottom * fy;
                                 }
-                                set_resample_map(map,
-                                                 source_x,
-                                                 source_y,
-                                                 (u32)scaled_width,
-                                                 (u32)scaled_height);
                             }
+                        };
+                        auto affine_apply_adjoint = [&](const double* output,
+                                                        double* scaled_gradient,
+                                                        double* source_gradient) {
+                            memset(scaled_gradient, 0, scaled_count * sizeof(double));
+                            memset(source_gradient, 0, source_count * sizeof(double));
+                            for (u64 row = 0u; row < height; ++row) {
+                                double ry = (double)row - output_center_y;
+                                for (u64 col = 0u; col < width; ++col) {
+                                    double rx = (double)col - output_center_x;
+                                    double source_x = cosine * rx + sine * ry + input_center_x;
+                                    double source_y = -sine * rx + cosine * ry + input_center_y;
+                                    if (source_x < 0.0 || source_x > (double)(scaled_width - 1u) ||
+                                        source_y < 0.0 || source_y > (double)(scaled_height - 1u)) {
+                                        continue;
+                                    }
+                                    u64 x0 = (u64)floor(source_x);
+                                    u64 y0 = (u64)floor(source_y);
+                                    u64 x1 = (x0 + 1u < scaled_width) ? x0 + 1u : x0;
+                                    u64 y1 = (y0 + 1u < scaled_height) ? y0 + 1u : y0;
+                                    double fx = source_x - (double)x0;
+                                    double fy = source_y - (double)y0;
+                                    double value = output[(usize)row * (usize)width + (usize)col];
+                                    scaled_gradient[(usize)y0 * (usize)scaled_width + (usize)x0] += value * (1.0 - fx) * (1.0 - fy);
+                                    scaled_gradient[(usize)y0 * (usize)scaled_width + (usize)x1] += value * fx * (1.0 - fy);
+                                    scaled_gradient[(usize)y1 * (usize)scaled_width + (usize)x0] += value * (1.0 - fx) * fy;
+                                    scaled_gradient[(usize)y1 * (usize)scaled_width + (usize)x1] += value * fx * fy;
+                                }
+                            }
+                            for (u64 row = 0u; row < scaled_height; ++row) {
+                                double source_y = ((double)row + 0.5) / affine_scale - 0.5;
+                                if (source_y < 0.0) source_y = 0.0;
+                                double max_source_y = (double)(logical_height - 1u);
+                                if (source_y > max_source_y) source_y = max_source_y;
+                                u64 y0 = (u64)floor(source_y);
+                                u64 y1 = (y0 + 1u < logical_height) ? y0 + 1u : y0;
+                                double fy = source_y - (double)y0;
+                                for (u64 col = 0u; col < scaled_width; ++col) {
+                                    double source_x = ((double)col + 0.5) / affine_scale - 0.5;
+                                    if (source_x < 0.0) source_x = 0.0;
+                                    double max_source_x = (double)(logical_width - 1u);
+                                    if (source_x > max_source_x) source_x = max_source_x;
+                                    u64 x0 = (u64)floor(source_x);
+                                    u64 x1 = (x0 + 1u < logical_width) ? x0 + 1u : x0;
+                                    double fx = source_x - (double)x0;
+                                    double value = scaled_gradient[(usize)row * (usize)scaled_width + (usize)col];
+                                    source_gradient[(usize)y0 * (usize)logical_width + (usize)x0] += value * (1.0 - fx) * (1.0 - fy);
+                                    source_gradient[(usize)y0 * (usize)logical_width + (usize)x1] += value * fx * (1.0 - fy);
+                                    source_gradient[(usize)y1 * (usize)logical_width + (usize)x0] += value * (1.0 - fx) * fy;
+                                    source_gradient[(usize)y1 * (usize)logical_width + (usize)x1] += value * fx * fy;
+                                }
+                            }
+                        };
+                        affine_apply_adjoint(affine_observed, affine_scaled_gradient, affine_rhs);
+                        for (usize i = 0u; i < source_count; ++i) {
+                            affine_source[i] = 0.0;
+                            affine_residual[i] = affine_rhs[i];
+                            affine_direction[i] = affine_residual[i];
                         }
-                        auto apply_forward = [&](const double* source, double* output) {
-                            for (u64 i = 0u; i < intermediate_count; ++i) {
-                                const BilinearResampleMap& map = scale_map[(usize)i];
-                                intermediate[(usize)i] = source[map.index[0]] * map.weight[0] +
-                                                         source[map.index[1]] * map.weight[1] +
-                                                         source[map.index[2]] * map.weight[2] +
-                                                         source[map.index[3]] * map.weight[3];
+                        double residual_norm = 0.0;
+                        for (usize i = 0u; i < source_count; ++i) {
+                            residual_norm += affine_residual[i] * affine_residual[i];
+                        }
+                        for (u32 iteration = 0u; iteration < 24u && residual_norm > 1.0e-12; ++iteration) {
+                            affine_apply_forward(affine_direction, affine_scaled, affine_projected);
+                            affine_apply_adjoint(affine_projected, affine_scaled_gradient, affine_normal_direction);
+                            double denominator = 0.0;
+                            for (usize i = 0u; i < source_count; ++i) {
+                                denominator += affine_direction[i] * affine_normal_direction[i];
                             }
-                            for (u64 i = 0u; i < output_count; ++i) {
-                                const BilinearResampleMap& map = rotation_map[(usize)i];
-                                output[(usize)i] = intermediate[map.index[0]] * map.weight[0] +
-                                                   intermediate[map.index[1]] * map.weight[1] +
-                                                   intermediate[map.index[2]] * map.weight[2] +
-                                                   intermediate[map.index[3]] * map.weight[3];
-                            }
-                        };
-                        auto apply_adjoint = [&](const double* output, double* source) {
-                            for (u64 i = 0u; i < intermediate_count; ++i) {
-                                intermediate[(usize)i] = 0.0;
-                            }
-                            for (u64 i = 0u; i < output_count; ++i) {
-                                const BilinearResampleMap& map = rotation_map[(usize)i];
-                                double value = output[(usize)i];
-                                intermediate[map.index[0]] += value * map.weight[0];
-                                intermediate[map.index[1]] += value * map.weight[1];
-                                intermediate[map.index[2]] += value * map.weight[2];
-                                intermediate[map.index[3]] += value * map.weight[3];
-                            }
-                            for (u64 i = 0u; i < source_count; ++i) {
-                                source[(usize)i] = 0.0;
-                            }
-                            for (u64 i = 0u; i < intermediate_count; ++i) {
-                                const BilinearResampleMap& map = scale_map[(usize)i];
-                                double value = intermediate[(usize)i];
-                                source[map.index[0]] += value * map.weight[0];
-                                source[map.index[1]] += value * map.weight[1];
-                                source[map.index[2]] += value * map.weight[2];
-                                source[map.index[3]] += value * map.weight[3];
-                            }
-                        };
-                        for (u32 channel = 0u; channel < 3u; ++channel) {
-                            for (u64 i = 0u; i < source_count; ++i) {
-                                solution[(usize)i] = 0.0;
-                            }
-                            for (u64 i = 0u; i < output_count; ++i) {
-                                usize pixel_index = (usize)i * 3u + (usize)channel;
-                                residual[(usize)i] = (double)affine_input_data[pixel_index] - 255.0;
-                            }
-                            apply_adjoint(residual, gradient);
-                            for (u64 i = 0u; i < source_count; ++i) {
-                                direction[(usize)i] = gradient[(usize)i];
-                            }
-                            double gradient_norm_sq = 0.0;
-                            for (u64 i = 0u; i < source_count; ++i) {
-                                gradient_norm_sq += gradient[(usize)i] * gradient[(usize)i];
-                            }
-                            double initial_gradient_norm = sqrt(gradient_norm_sq);
-                            if (initial_gradient_norm <= 1e-9) {
-                                reconstruction_ready = false;
+                            if (denominator <= 1.0e-12) {
                                 break;
                             }
-                            for (u32 iteration = 0u; iteration < 30u; ++iteration) {
-                                apply_forward(direction, projected);
-                                double projected_norm_sq = 0.0;
-                                for (u64 i = 0u; i < output_count; ++i) {
-                                    projected_norm_sq += projected[(usize)i] * projected[(usize)i];
-                                }
-                                if (projected_norm_sq <= 1e-30) {
-                                    reconstruction_ready = false;
-                                    break;
-                                }
-                                double alpha = gradient_norm_sq / projected_norm_sq;
-                                for (u64 i = 0u; i < source_count; ++i) {
-                                    solution[(usize)i] += alpha * direction[(usize)i];
-                                }
-                                for (u64 i = 0u; i < output_count; ++i) {
-                                    residual[(usize)i] -= alpha * projected[(usize)i];
-                                }
-                                apply_adjoint(residual, gradient);
-                                double next_gradient_norm_sq = 0.0;
-                                for (u64 i = 0u; i < source_count; ++i) {
-                                    next_gradient_norm_sq += gradient[(usize)i] * gradient[(usize)i];
-                                }
-                                if (next_gradient_norm_sq <= gradient_norm_sq * 1e-12) {
-                                    gradient_norm_sq = next_gradient_norm_sq;
-                                    break;
-                                }
-                                double beta = next_gradient_norm_sq / gradient_norm_sq;
-                                for (u64 i = 0u; i < source_count; ++i) {
-                                    direction[(usize)i] = gradient[(usize)i] + beta * direction[(usize)i];
-                                }
-                                gradient_norm_sq = next_gradient_norm_sq;
+                            double step = residual_norm / denominator;
+                            for (usize i = 0u; i < source_count; ++i) {
+                                affine_source[i] += step * affine_direction[i];
+                                affine_residual[i] -= step * affine_normal_direction[i];
                             }
-                            if (!reconstruction_ready) {
+                            double next_norm = 0.0;
+                            for (usize i = 0u; i < source_count; ++i) {
+                                next_norm += affine_residual[i] * affine_residual[i];
+                            }
+                            if (next_norm <= 1.0e-12) {
+                                residual_norm = next_norm;
                                 break;
                             }
-                            for (u64 i = 0u; i < source_count; ++i) {
-                                double value = 255.0 + solution[(usize)i];
-                                if (value < 0.0) value = 0.0;
-                                if (value > 255.0) value = 255.0;
-                                u8 quantized = (u8)(value + 0.5);
-                                affine_reconstructed_pixels.data[(usize)i * 3u + (usize)channel] = quantized;
+                            double direction_scale = next_norm / residual_norm;
+                            for (usize i = 0u; i < source_count; ++i) {
+                                affine_direction[i] = affine_residual[i] + direction_scale * affine_direction[i];
                             }
+                            residual_norm = next_norm;
                         }
-                        if (reconstruction_ready) {
-                            affine_reconstructed_pixels.size = (usize)source_count * 3u;
-                            if (debug_logging_enabled()) {
-                                char transform_buffer[192];
-                                snprintf(transform_buffer,
-                                         sizeof(transform_buffer),
-                                         "debug affine raster: inverse resampling scale=%.9f angle_deg=%.9f offset=%.9f,%.9f",
-                                         scale,
-                                         angle,
-                                         delta_x,
-                                         delta_y);
-                                console_line(2, transform_buffer);
+                        usize reconstructed_size = source_count * 3u;
+                        if (affine_reconstructed_pixels.ensure(reconstructed_size)) {
+                            for (usize i = 0u; i < source_count; ++i) {
+                                u8 value = affine_source[i] > 127.5 ? 0u : 255u;
+                                affine_reconstructed_pixels.data[i * 3u + 0u] = value;
+                                affine_reconstructed_pixels.data[i * 3u + 1u] = value;
+                                affine_reconstructed_pixels.data[i * 3u + 2u] = value;
                             }
-                        } else {
-                            affine_reconstructed_pixels.release();
+                            affine_reconstructed_pixels.size = reconstructed_size;
                         }
                     }
-                    if (scale_map) free(scale_map);
-                    if (rotation_map) free(rotation_map);
-                    if (solution) free(solution);
-                    if (residual) free(residual);
-                    if (gradient) free(gradient);
-                    if (direction) free(direction);
-                    if (projected) free(projected);
-                    if (intermediate) free(intermediate);
+                    free(affine_source);
+                    free(affine_scaled);
+                    free(affine_scaled_gradient);
+                    free(affine_observed);
+                    free(affine_projected);
+                    free(affine_rhs);
+                    free(affine_residual);
+                    free(affine_direction);
+                    free(affine_normal_direction);
                 }
             }
-            if (sample_columns) free(sample_columns);
-            if (sample_rows) free(sample_rows);
         }
     }
 
@@ -22375,11 +22138,14 @@ struct RotationEstimateCandidate {
                 usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
                 usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;
                 usize idx11 = ((usize)y1 * (usize)width + (usize)x1) * 3u;
+                const u8* affine_pixels = affine_source_pixels.data
+                                              ? affine_source_pixels.data
+                                              : pixel_data;
                 for (u32 channel = 0u; channel < 3u; ++channel) {
-                    double v00 = (double)pixel_data[idx00 + channel];
-                    double v10 = (double)pixel_data[idx10 + channel];
-                    double v01 = (double)pixel_data[idx01 + channel];
-                    double v11 = (double)pixel_data[idx11 + channel];
+                    double v00 = (double)affine_pixels[idx00 + channel];
+                    double v10 = (double)affine_pixels[idx10 + channel];
+                    double v01 = (double)affine_pixels[idx01 + channel];
+                    double v11 = (double)affine_pixels[idx11 + channel];
                     double top = v00 + (v10 - v00) * fx;
                     double bottom = v01 + (v11 - v01) * fx;
                     double value = top + (bottom - top) * fy;

@@ -30,4 +30,4 @@ Finalize
 - Much better documentation, or a spec
 - 100% branch coverage, test parameterization of each combination of options
 - Reorganize tests logically from simple to complex, and document each one in full.
-- Suggestions and specs for archival file formats (Text: txt, images: PPM, Video: YUV4MPEG2). C++/GCC specs?
+- Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs?
