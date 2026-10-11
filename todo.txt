@@ -19,6 +19,7 @@ Features
  - What if white/black or light/dark are inverted for the metadata?
 
 Finalize
+- Remove dead/debugging code.
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
 - Increase all distortions until decoding breaks, make improvements
 - Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.

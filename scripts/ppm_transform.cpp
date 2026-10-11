@@ -256,32 +256,6 @@ static void write_ppm_p3_ascii(const char* path,
     fclose(f);
 }
 
-[[maybe_unused]] static StrVec strip_geometry_comments(const StrVec* comments) {
-    static const char* prefixes[] = {
-        "# skew_src_width",
-        "# skew_src_height",
-        "# skew_margin_x",
-        "# skew_x_pixels",
-        "# skew_bottom_x",
-    };
-    StrVec out;
-    if (!comments) return out;
-    for (size_t i = 0; i < comments->size; i++) {
-        const char* line = comments->data[i];
-        const char* s = line;
-        while (*s == ' ' || *s == '\t') s++;
-        int drop = 0;
-        for (size_t p = 0; p < sizeof(prefixes) / sizeof(prefixes[0]); p++) {
-            if (starts_with(s, prefixes[p])) {
-                drop = 1;
-                break;
-            }
-        }
-        if (!drop) strvec_push(&out, line);
-    }
-    return out;
-}
-
 static void bilinear_sample(const int* pixels, int width, int height, double fx, double fy, int out_rgb[3]) {
     if (fx < 0.0) fx = 0.0;
     if (fy < 0.0) fy = 0.0;
@@ -968,9 +942,8 @@ static void cmd_overlay_mask(int argc, char** argv) {
     if (!parse_rgb_triplet(circle_color_text, circle_color)) die("ppm_transform: overlay-mask invalid --circle-color");
     if (!parse_rgb_triplet(background_color_text, bg_color)) die("ppm_transform: overlay-mask invalid --background-color");
 
-    // Intentionally do not emit any PPM header comment lines. Metadata must be
-    // carried in pixels (e.g., footer stripe) rather than file headers, since
-    // print/scan workflows discard container headers entirely.
+    // Intentionally do not emit PPM header comments. Print/scan workflows can
+    // discard container headers, so metadata must be carried in image pixels.
     StrVec comments;
 
     // Optional per-segment circle palette via env var.

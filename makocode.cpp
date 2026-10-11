@@ -537,10 +537,6 @@ static bool utc_timestamp_string(char* buffer, usize capacity) {
     return true;
 }
 
-// Footer stripes were removed from the format; keep a single switch to hard-disable
-// any legacy probing while the code remains compiled for now.
-static constexpr bool kFooterStripeEnabled = false;
-
 namespace makocode {
 
 namespace image {
@@ -9707,11 +9703,6 @@ struct PageFooterConfig {
     bool has_filename;
     bool display_page_info;
     bool display_filename;
-    // Optional stripe sizing hints (used by variable-length footer stripes).
-    u32 stripe_rows_hint;          // 0 means use default
-    u32 stripe_module_count_hint;  // 0 means use default
-    u32 stripe_module_pitch_hint;  // 0 means use default
-
     PageFooterConfig()
         : title_text(0),
           title_length(0u),
@@ -9722,10 +9713,7 @@ struct PageFooterConfig {
           has_title(false),
           has_filename(false),
           display_page_info(true),
-          display_filename(true),
-          stripe_rows_hint(0u),
-          stripe_module_count_hint(0u),
-          stripe_module_pitch_hint(0u) {}
+          display_filename(true) {}
 };
 
 struct FiducialGridDefaults {
@@ -9761,16 +9749,6 @@ struct FooterLayout {
     u32 text_top_row;
     u32 text_left_column;
     u32 text_pixel_width;
-    u32 stripe_module_pitch;
-    u32 stripe_rows;
-    u32 stripe_gap_pixels;
-    u32 stripe_height_pixels;
-    u32 stripe_top_row;
-    u32 stripe_module_count;
-    u32 stripe_data_bits;
-    u32 stripe_pixel_width;
-    u32 stripe_quiet_modules;
-    u32 stripe_sentinel_modules;
 
     FooterLayout()
         : has_text(false),
@@ -9782,17 +9760,7 @@ struct FooterLayout {
           data_height_pixels(0u),
           text_top_row(0u),
           text_left_column(0u),
-          text_pixel_width(0u),
-          stripe_module_pitch(0u),
-          stripe_rows(0u),
-          stripe_gap_pixels(0u),
-          stripe_height_pixels(0u),
-          stripe_top_row(0u),
-          stripe_module_count(0u),
-          stripe_data_bits(0u),
-          stripe_pixel_width(0u),
-          stripe_quiet_modules(0u),
-          stripe_sentinel_modules(0u) {}
+          text_pixel_width(0u) {}
 };
 
 struct AffineTransform {
@@ -9803,2398 +9771,11 @@ struct AffineTransform {
         : a00(1.0), a01(0.0), a10(0.0), a11(1.0), tx(0.0), ty(0.0) {}
 };
 
-namespace FooterStripe {
-    using namespace makocode;
-    struct StripeSpec {
-        u32 module_pitch;
-        u32 rows;
-        u32 quiet_modules;
-        u32 barker_modules;
-        u32 timing_modules;
-        u32 parity_symbols;
-        u32 metadata_bytes;
-        u32 palette_bytes;
-        u8  schema_version;
-    };
-
-    static const StripeSpec SPEC_V2 = {
-        2u,   // module_pitch
-        33u,  // rows
-        2u,   // quiet_modules
-        11u,  // barker_modules
-        6u,   // timing_modules
-        15u,  // parity_symbols (RS(255,240) corrects up to 7 symbol errors)
-        240u, // metadata_bytes (includes CRC byte)
-        219u, // palette_bytes written into metadata
-        2u    // schema version
-    };
-
-    static const StripeSpec SPEC_V1 = {
-        2u,  // module_pitch
-        4u,  // rows
-        2u,  // quiet_modules
-        11u, // barker_modules
-        6u,  // timing_modules
-        8u,  // parity_symbols
-        20u, // metadata_bytes (includes CRC byte)
-        0u,  // palette bytes not present
-        1u   // schema version
-    };
-
-    // Variable-length footer stripe (schema V3)
-    static const u32 V3_SCHEMA_VERSION = 3u;
-    static const u32 V3_MODULE_PITCH = 2u;
-    static const u32 V3_QUIET_MODULES = 2u;
-    static const u32 V3_BARKER_MODULES = 11u;
-    static const u32 V3_TIMING_MODULES = 6u;
-    static const u32 V3_GUARD_MODULES = V3_BARKER_MODULES + V3_TIMING_MODULES; // 17 per side
-    static const u32 V3_MODULE_COUNT = 100u;                                    // same visual width as V2
-    static const u32 V3_DATA_MODULES = V3_MODULE_COUNT - (V3_QUIET_MODULES * 2u) - (V3_GUARD_MODULES * 2u); // 62 data bits per row
-    static const u32 V3_HEADER_BYTES = 10u;                                     // 80-bit layout header (74 bits rounded to bytes)
-    static const u32 V3_MIN_PARITY_BYTES = 8u;
-    static const u32 V3_MAX_PARITY_BYTES = 32u;
-    static const u32 V3_MAX_ROWS = 63u;                                         // keeps height <=126px at 2px pitch
-
-    static const u32 MAX_STRIPE_ROWS = V3_MAX_ROWS;
-    static const u32 MAX_STRIPE_PALETTE_BYTES = 512u;
-    static const u32 MAX_STRIPE_MODULES = 128u;
-
-    // Forward declarations for sampling helpers.
-    static bool capture_module_row(const StripeSpec& spec,
-                                   const u8* pixels,
-                                   u32 width,
-                                   u32 height,
-                                   u32 stripe_top,
-                                   u32 start_column,
-                                   u32 row_index,
-                                   u8* row_storage);
-    struct V3Params {
-        u32 rows;
-        u32 parity_bytes;
-        u32 metadata_bytes; // header + payload + crc
-        u32 payload_bytes;
-        u32 total_bytes;   // metadata + parity
-    };
-
-    static u32 footer_v3_payload_bytes(u32 palette_length, bool has_palette) {
-        // Payload fields only (page/ecc/palette data). Header size is fixed separately.
-        // Fields: page_bits(24) + page_count(20) + page_index(20) + footer_rows(8) +
-        //         ecc_flag(1) + ecc_block_data(10) + ecc_parity(10) +
-        //         ecc_block_count(20) + ecc_original_bytes(28) +
-        //         page_width_px(16) + page_height_px(16) +
-        //         fiducial_marker_size_px(8) +
-        //         palette bytes (optional, length * 8)
-        const u32 fixed_payload_bits = 24u + 20u + 20u + 8u + 1u + 10u + 10u + 20u + 28u + 16u + 16u + 8u; // 181 bits
-        u64 bits = (u64)fixed_payload_bits;
-        if (has_palette) {
-            bits += (u64)palette_length * 8ull;
-        }
-        return (u32)((bits + 7u) >> 3u);
-    }
-
-    // Compute V3 sizing based on payload length in bytes. Width is fixed; height varies by rows.
-    [[maybe_unused]] static bool compute_v3_parameters(u32 payload_bytes, V3Params& out) {
-        out = {};
-        const u32 header_bytes = V3_HEADER_BYTES; // fixed 10-byte layout header
-        const u32 crc_bytes = 1u;                 // CRC over header+payload
-        u32 metadata_bytes = header_bytes + payload_bytes + crc_bytes;
-        // Choose parity ≈10% of metadata within bounds.
-        u32 parity_bytes = (metadata_bytes + 9u) / 10u;
-        if (parity_bytes < V3_MIN_PARITY_BYTES) parity_bytes = V3_MIN_PARITY_BYTES;
-        if (parity_bytes > V3_MAX_PARITY_BYTES) parity_bytes = V3_MAX_PARITY_BYTES;
-        u32 total_bytes = metadata_bytes + parity_bytes;
-        if (total_bytes > RS_POLY_CAPACITY) {
-            return false;
-        }
-        const u32 bits_per_row = 62u; // fixed data modules per row for V3
-        u32 total_bits = total_bytes * 8u;
-        u32 rows = (total_bits + bits_per_row - 1u) / bits_per_row;
-        if (rows == 0u) rows = 1u;
-        if (rows > V3_MAX_ROWS) {
-            return false;
-        }
-        out.rows = rows;
-        out.parity_bytes = parity_bytes;
-        out.metadata_bytes = metadata_bytes;
-        out.payload_bytes = payload_bytes;
-        out.total_bytes = total_bytes;
-        return true;
-    }
-
-    static u32 guard_modules(const StripeSpec& spec) {
-        return spec.barker_modules + spec.timing_modules;
-    }
-
-    static u32 data_bits(const StripeSpec& spec) {
-        return (spec.metadata_bytes + spec.parity_symbols) * 8u;
-    }
-
-    static u32 max_row_data_bits(const StripeSpec& spec) {
-        u32 bits = data_bits(spec);
-        return (bits + spec.rows - 1u) / spec.rows;
-    }
-
-    static u32 module_count(const StripeSpec& spec) {
-        return spec.quiet_modules * 2u + guard_modules(spec) * 2u + max_row_data_bits(spec);
-    }
-
-    static u32 pixel_width(const StripeSpec& spec) {
-        return module_count(spec) * spec.module_pitch;
-    }
-
-    static u32 stripe_height(const StripeSpec& spec) {
-        return spec.rows * spec.module_pitch;
-    }
-
-    static const u8 Barker11[11u] = {1u,1u,1u,0u,0u,1u,1u,0u,1u,0u,1u};
-    static const u8 TimingPattern[6u] = {1u,0u,1u,0u,1u,0u};
-
-    struct Values {
-        u64 page_bits;
-        u64 page_count;
-        u64 page_index;
-        u32 page_width_pixels;
-        u32 page_height_pixels;
-	        u64 footer_rows;
-	        u32 fiducial_marker_size_pixels;
-	        bool ecc_enabled;
-        u16 ecc_block_data;
-        u16 ecc_parity;
-        u64 ecc_block_count;
-        u64 ecc_original_bytes;
-        bool has_palette;
-        u8  palette_base;
-        u16 palette_length;
-        u8  palette_bytes[MAX_STRIPE_PALETTE_BYTES];
-        // V3 dynamic layout fields
-        u32 v3_rows;
-        u32 v3_modules_per_row;
-        u32 v3_module_pitch;
-        u32 v3_parity_bytes;
-        u32 v3_metadata_bytes;
-        u32 v3_payload_bytes;
-    };
-
-    struct Pattern {
-        ByteBuffer rows[MAX_STRIPE_ROWS];
-    };
-
-    static u32 row_data_bits(const StripeSpec& spec, u32 row_index) {
-        if (row_index >= spec.rows) {
-            return 0u;
-        }
-        u32 base = data_bits(spec) / spec.rows;
-        u32 remainder = data_bits(spec) % spec.rows;
-        return base + ((row_index < remainder) ? 1u : 0u);
-    }
-
-    static u8 compute_crc8(const u8* data, usize length) {
-        u8 crc = 0u;
-        for (usize i = 0u; i < length; ++i) {
-            crc ^= data[i];
-            for (u32 bit = 0u; bit < 8u; ++bit) {
-                if (crc & 0x80u) {
-                    crc = (u8)((crc << 1u) ^ 0x07u);
-                } else {
-                    crc <<= 1u;
-                }
-            }
-        }
-        return crc;
-    }
-
-    static void log_metadata_limit(const char* label, u64 value) {
-        if (!debug_logging_enabled()) {
-            return;
-        }
-        char buffer[32];
-        u64_to_ascii(value, buffer, sizeof(buffer));
-        console_write(2, "debug footer stripe metadata limit ");
-        console_write(2, label);
-        console_write(2, "=");
-        console_line(2, buffer);
-    }
-
-    static bool encode_metadata_v3(const Values& values, const V3Params& v3, ByteBuffer& output) {
-        output.release();
-        BitWriter writer;
-        // Layout header (10 bytes):
-        // schema_version(4) | row_count(6) | modules_per_row(7) | module_pitch(8)
-        // parity_bytes(8) | payload_bytes(16) | flags(8) | palette_base(5) | palette_length(12)
-        u32 schema = V3_SCHEMA_VERSION & 0x0Fu;
-        u32 modules_per_row = V3_MODULE_COUNT;
-        u32 module_pitch = V3_MODULE_PITCH;
-        u32 flags = 0u;
-        if (values.has_palette && values.palette_length > 0u) {
-            flags |= 1u; // palette_present
-        }
-        if (!writer.write_bits((u64)schema, 4u)) return false;
-        if (!writer.write_bits((u64)v3.rows, 6u)) return false;
-        if (!writer.write_bits((u64)modules_per_row, 7u)) return false;
-        if (!writer.write_bits((u64)module_pitch, 8u)) return false;
-        if (!writer.write_bits((u64)v3.parity_bytes, 8u)) return false;
-        if (!writer.write_bits((u64)v3.payload_bytes, 16u)) return false;
-        if (!writer.write_bits((u64)flags, 8u)) return false;
-        u32 palette_base = (u32)values.palette_base;
-        u32 palette_length = (u32)values.palette_length;
-        if (palette_length > 0u && palette_length > MAX_STRIPE_PALETTE_BYTES) {
-            return false;
-        }
-        if (!writer.write_bits((u64)palette_base, 5u)) return false;
-        if (!writer.write_bits((u64)palette_length, 12u)) return false;
-        if (!writer.align_to_byte()) return false;
-        if (writer.byte_size() != V3_HEADER_BYTES) {
-            // Keep header length in sync with sizing math.
-            return false;
-        }
-
-        // Payload: existing metadata fields.
-        auto write_limited = [&](u64 value, u32 bits, const char* label) -> bool {
-            u64 limit = (bits >= 64u) ? ~0ull : ((1ull << bits) - 1ull);
-            if (value > limit) {
-                log_metadata_limit(label, value);
-                return false;
-            }
-            return writer.write_bits(value, bits);
-        };
-        if (!write_limited(values.page_bits, 24u, "page_bits")) return false;
-        if (!write_limited(values.page_count, 20u, "page_count")) return false;
-        if (!write_limited(values.page_index, 20u, "page_index")) return false;
-        if (!write_limited(values.footer_rows, 8u, "footer_rows")) return false;
-        if (!writer.write_bits(values.ecc_enabled ? 1ull : 0ull, 1u)) return false;
-        if (!write_limited(values.ecc_block_data, 10u, "ecc_block_data")) return false;
-        if (!write_limited(values.ecc_parity, 10u, "ecc_parity")) return false;
-        if (!write_limited(values.ecc_block_count, 20u, "ecc_block_count")) return false;
-        if (!write_limited(values.ecc_original_bytes, 28u, "ecc_original_bytes")) return false;
-        if (!write_limited(values.page_width_pixels, 16u, "page_width_px")) return false;
-        if (!write_limited(values.page_height_pixels, 16u, "page_height_px")) return false;
-        if (!write_limited(values.fiducial_marker_size_pixels, 8u, "fiducial_marker_size_px")) return false;
-        // Palette bytes inline
-        if (values.has_palette && values.palette_length > 0u) {
-            for (u32 i = 0u; i < values.palette_length; ++i) {
-                if (!writer.write_bits((u64)values.palette_bytes[i], 8u)) return false;
-            }
-        }
-        if (!writer.align_to_byte()) return false;
-
-        // CRC over header+payload bytes.
-        ByteBuffer header_copy;
-        usize header_bytes = writer.byte_size();
-        if (header_bytes == 0u) return false;
-        if (!header_copy.ensure(header_bytes)) return false;
-        for (usize i = 0u; i < header_bytes; ++i) {
-            const u8* writer_data = writer.data();
-            header_copy.data[i] = writer_data ? writer_data[i] : 0u;
-        }
-        header_copy.size = header_bytes;
-        u8 crc = compute_crc8(header_copy.data, header_copy.size);
-        if (!writer.write_bits(crc, 8u)) return false;
-        if (!writer.align_to_byte()) return false;
-
-        // Output metadata buffer (header+payload+crc)
-        usize total_bytes = writer.byte_size();
-        if (!output.ensure(total_bytes)) return false;
-        output.size = total_bytes;
-        const u8* final_data = writer.data();
-        for (usize i = 0u; i < total_bytes; ++i) {
-            output.data[i] = final_data ? final_data[i] : 0u;
-        }
-        return true;
-    }
-
-    static bool encode_metadata(const StripeSpec& spec, const Values& values, ByteBuffer& output) {
-        output.release();
-        if (values.page_bits >= (1ull << 24u)) {
-            log_metadata_limit("page_bits", values.page_bits);
-            return false;
-        }
-        if (values.page_count >= (1ull << 20u)) {
-            log_metadata_limit("page_count", values.page_count);
-            return false;
-        }
-        if (values.page_index >= (1ull << 20u)) {
-            log_metadata_limit("page_index", values.page_index);
-            return false;
-        }
-        if (values.footer_rows >= (1ull << 8u)) {
-            log_metadata_limit("footer_rows", values.footer_rows);
-            return false;
-        }
-        if (values.ecc_block_data >= (1u << 10u)) {
-            log_metadata_limit("ecc_block_data", values.ecc_block_data);
-            return false;
-        }
-        if (values.ecc_parity >= (1u << 10u)) {
-            log_metadata_limit("ecc_parity", values.ecc_parity);
-            return false;
-        }
-        if (values.ecc_block_count >= (1ull << 20u)) {
-            log_metadata_limit("ecc_block_count", values.ecc_block_count);
-            return false;
-        }
-        if (values.ecc_original_bytes >= (1ull << 28u)) {
-            log_metadata_limit("ecc_original_bytes", values.ecc_original_bytes);
-            return false;
-        }
-        if (values.has_palette && spec.palette_bytes == 0u) {
-            return false;
-        }
-        if (values.has_palette && values.palette_length > spec.palette_bytes) {
-            log_metadata_limit("palette_length", values.palette_length);
-            return false;
-        }
-        BitWriter writer;
-        if (!writer.write_bits((u64)spec.schema_version, 4u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.page_bits, 24u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.page_count, 20u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.page_index, 20u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.footer_rows, 8u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.ecc_enabled ? 1ull : 0ull, 1u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.ecc_block_data, 10u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.ecc_parity, 10u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.ecc_block_count, 20u)) {
-            return false;
-        }
-        if (!writer.write_bits(values.ecc_original_bytes, 28u)) {
-            return false;
-        }
-        if (spec.palette_bytes) {
-            u64 palette_flag = values.has_palette ? 1ull : 0ull;
-            if (!writer.write_bits(palette_flag, 1u)) {
-                return false;
-            }
-            if (!writer.write_bits((u64)values.palette_base, 5u)) {
-                return false;
-            }
-            if (!writer.write_bits((u64)values.palette_length, 8u)) {
-                return false;
-            }
-            for (u32 i = 0u; i < spec.palette_bytes; ++i) {
-                u8 byte_value = (i < values.palette_length) ? values.palette_bytes[i] : 0u;
-                if (!writer.write_bits((u64)byte_value, 8u)) {
-                    return false;
-                }
-            }
-            u32 header_bits_target = (spec.metadata_bytes > 0u) ? ((spec.metadata_bytes - 1u) * 8u) : 0u;
-            if (writer.bit_size() < header_bits_target) {
-                u32 pad_bits = header_bits_target - writer.bit_size();
-                if (!writer.write_bits(0u, pad_bits)) {
-                    return false;
-                }
-            }
-        }
-        if (!writer.align_to_byte()) {
-            return false;
-        }
-        ByteBuffer header_copy;
-        usize header_bytes = writer.byte_size();
-        if (header_bytes == 0u) {
-            return false;
-        }
-        if (!header_copy.ensure(header_bytes)) {
-            return false;
-        }
-        for (usize i = 0u; i < header_bytes; ++i) {
-            const u8* writer_data = writer.data();
-            header_copy.data[i] = writer_data ? writer_data[i] : 0u;
-        }
-        header_copy.size = header_bytes;
-        u8 crc = compute_crc8(header_copy.data, header_copy.size);
-        if (!writer.write_bits(crc, 8u)) {
-            return false;
-        }
-        if (!writer.align_to_byte()) {
-            return false;
-        }
-        usize total_bytes = writer.byte_size();
-        if (!output.ensure(total_bytes)) {
-            return false;
-        }
-        output.size = total_bytes;
-        const u8* final_data = writer.data();
-        for (usize i = 0u; i < total_bytes; ++i) {
-            output.data[i] = final_data ? final_data[i] : 0u;
-        }
-        return true;
-    }
-
-    [[maybe_unused]] static bool build_pattern(const StripeSpec& spec, const Values& values, Pattern& pattern) {
-        ByteBuffer metadata;
-        if (!encode_metadata(spec, values, metadata)) {
-            if (debug_logging_enabled()) {
-                console_line(2, "debug footer stripe encode_metadata failed");
-            }
-            return false;
-        }
-        if (metadata.size != spec.metadata_bytes) {
-            if (debug_logging_enabled()) {
-                char num_buf[32];
-                u64_to_ascii((u64)metadata.size, num_buf, sizeof(num_buf));
-                console_write(2, "debug footer stripe metadata size=");
-                console_line(2, num_buf);
-            }
-            return false;
-        }
-        ByteBuffer codeword;
-        if (!codeword.ensure(metadata.size + spec.parity_symbols)) {
-            return false;
-        }
-        codeword.size = metadata.size + spec.parity_symbols;
-        for (usize i = 0u; i < metadata.size; ++i) {
-            codeword.data[i] = metadata.data[i];
-        }
-        u8 generator[RS_POLY_CAPACITY];
-        u16 generator_size = 0u;
-        if (!rs_build_generator((u16)spec.parity_symbols, generator, generator_size)) {
-            return false;
-        }
-        u8 parity[RS_POLY_CAPACITY];
-        rs_compute_parity(generator,
-                          (u16)spec.parity_symbols,
-                          metadata.data,
-                          (u16)metadata.size,
-                          parity);
-        for (u32 i = 0u; i < spec.parity_symbols; ++i) {
-            codeword.data[metadata.size + i] = parity[i];
-        }
-        ByteBuffer bit_sequence;
-        usize total_bits = codeword.size * 8u;
-        if (!bit_sequence.ensure(total_bits)) {
-            return false;
-        }
-        bit_sequence.size = 0u;
-        for (usize byte_index = 0u; byte_index < codeword.size; ++byte_index) {
-            u8 byte = codeword.data[byte_index];
-            for (u32 bit = 0u; bit < 8u; ++bit) {
-                bit_sequence.data[bit_sequence.size++] = (u8)((byte >> bit) & 1u);
-            }
-        }
-        if ((usize)data_bits(spec) != bit_sequence.size) {
-            return false;
-        }
-        usize bit_cursor = 0u;
-        for (u32 row = 0u; row < spec.rows; ++row) {
-            ByteBuffer& row_buffer = pattern.rows[row];
-            if (!row_buffer.ensure(module_count(spec))) {
-                return false;
-            }
-            row_buffer.size = module_count(spec);
-            u32 module_index = 0u;
-            // Quiet zone
-            for (u32 i = 0u; i < spec.quiet_modules; ++i) {
-                row_buffer.data[module_index++] = 0u;
-            }
-            // Left guard: Barker-11 then timing 1010..
-            for (u32 i = 0u; i < spec.barker_modules; ++i) {
-                row_buffer.data[module_index++] = Barker11[i];
-            }
-            for (u32 i = 0u; i < spec.timing_modules; ++i) {
-                row_buffer.data[module_index++] = TimingPattern[i];
-            }
-            // Data payload bits
-            u32 bits_in_row = row_data_bits(spec, row);
-            u32 max_bits_row = max_row_data_bits(spec);
-            for (u32 i = 0u; i < max_bits_row; ++i) {
-                u8 module_bit = 0u;
-                if (i < bits_in_row) {
-                    if (bit_cursor >= bit_sequence.size) {
-                        return false;
-                    }
-                    module_bit = bit_sequence.data[bit_cursor++];
-                }
-                row_buffer.data[module_index++] = module_bit;
-            }
-            // Right guard: timing then Barker-11
-            for (u32 i = 0u; i < spec.timing_modules; ++i) {
-                row_buffer.data[module_index++] = TimingPattern[i];
-            }
-            for (u32 i = 0u; i < spec.barker_modules; ++i) {
-                row_buffer.data[module_index++] = Barker11[i];
-            }
-            // Trailing quiet zone
-            for (u32 i = 0u; i < spec.quiet_modules; ++i) {
-                row_buffer.data[module_index++] = 0u;
-            }
-            if (module_index != module_count(spec)) {
-                return false;
-            }
-        }
-        if (bit_cursor != bit_sequence.size) {
-            return false;
-        }
-        return true;
-    }
-
-    [[maybe_unused]] static bool build_pattern_v3(const V3Params& v3, const Values& values, Pattern& pattern) {
-        ByteBuffer metadata;
-        if (!encode_metadata_v3(values, v3, metadata)) {
-            if (debug_logging_enabled()) {
-                console_line(2, "debug footer stripe encode_metadata_v3 failed");
-            }
-            return false;
-        }
-        if (metadata.size != v3.metadata_bytes) {
-            return false;
-        }
-        ByteBuffer codeword;
-        if (!codeword.ensure(v3.total_bytes)) {
-            return false;
-        }
-        codeword.size = v3.total_bytes;
-        // metadata bytes then parity
-        for (usize i = 0u; i < metadata.size; ++i) {
-            codeword.data[i] = metadata.data[i];
-        }
-        u8 generator[RS_POLY_CAPACITY];
-        u16 generator_size = 0u;
-        if (!rs_build_generator((u16)v3.parity_bytes, generator, generator_size)) {
-            return false;
-        }
-        u8 parity[RS_POLY_CAPACITY];
-        rs_compute_parity(generator,
-                          (u16)v3.parity_bytes,
-                          metadata.data,
-                          (u16)metadata.size,
-                          parity);
-        for (u32 i = 0u; i < v3.parity_bytes; ++i) {
-            codeword.data[metadata.size + i] = parity[i];
-        }
-        usize total_bits = (usize)v3.total_bytes * 8u;
-        ByteBuffer bit_sequence;
-        if (!bit_sequence.ensure(total_bits)) {
-            return false;
-        }
-        bit_sequence.size = 0u;
-        for (usize byte_index = 0u; byte_index < codeword.size; ++byte_index) {
-            u8 byte = codeword.data[byte_index];
-            for (u32 bit = 0u; bit < 8u; ++bit) {
-                bit_sequence.data[bit_sequence.size++] = (u8)((byte >> bit) & 1u);
-            }
-        }
-        usize bit_cursor = 0u;
-        u32 bits_per_row_base = (u32)(total_bits / v3.rows);
-        u32 bits_remainder = (u32)(total_bits % v3.rows);
-        for (u32 row = 0u; row < v3.rows; ++row) {
-            ByteBuffer& row_buffer = pattern.rows[row];
-            if (!row_buffer.ensure(V3_MODULE_COUNT)) {
-                return false;
-            }
-            row_buffer.size = V3_MODULE_COUNT;
-            u32 module_index = 0u;
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                row_buffer.data[module_index++] = 0u;
-            }
-            for (u32 i = 0u; i < V3_BARKER_MODULES; ++i) {
-                row_buffer.data[module_index++] = Barker11[i];
-            }
-            for (u32 i = 0u; i < V3_TIMING_MODULES; ++i) {
-                row_buffer.data[module_index++] = TimingPattern[i];
-            }
-            u32 bits_in_row = bits_per_row_base + ((row < bits_remainder) ? 1u : 0u);
-            for (u32 i = 0u; i < V3_DATA_MODULES; ++i) {
-                u8 module_bit = 0u;
-                if (i < bits_in_row) {
-                    if (bit_cursor < bit_sequence.size) {
-                        module_bit = bit_sequence.data[bit_cursor++];
-                    }
-                }
-                row_buffer.data[module_index++] = module_bit;
-            }
-            for (u32 i = 0u; i < V3_TIMING_MODULES; ++i) {
-                row_buffer.data[module_index++] = TimingPattern[i];
-            }
-            for (u32 i = 0u; i < V3_BARKER_MODULES; ++i) {
-                row_buffer.data[module_index++] = Barker11[i];
-            }
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                row_buffer.data[module_index++] = 0u;
-            }
-            if (module_index != V3_MODULE_COUNT) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    static bool decode_from_bits(const StripeSpec& spec, const ByteBuffer& module_bits, Values& values) {
-        u32 modules_per_row = module_count(spec);
-        u32 expected_size = modules_per_row * spec.rows;
-        if (module_bits.size < expected_size) {
-            if (debug_logging_enabled()) {
-                console_line(2, "debug stripe: insufficient module bits");
-            }
-            return false;
-        }
-        u32 data_start = spec.quiet_modules + guard_modules(spec);
-        u32 max_data = max_row_data_bits(spec);
-        u32 trailing_start = data_start + max_data;
-        u32 guard_errors = 0u;
-        for (u32 row = 0u; row < spec.rows; ++row) {
-            u32 row_offset = row * modules_per_row;
-            // Validate Barker + timing on both sides for framing and pitch sanity.
-            for (u32 i = 0u; i < spec.barker_modules; ++i) {
-                if (module_bits.data[row_offset + spec.quiet_modules + i] != Barker11[i]) {
-                    ++guard_errors;
-                }
-            }
-            for (u32 i = 0u; i < spec.timing_modules; ++i) {
-                if (module_bits.data[row_offset + spec.quiet_modules + spec.barker_modules + i] != TimingPattern[i]) {
-                    ++guard_errors;
-                }
-            }
-            for (u32 i = 0u; i < spec.timing_modules; ++i) {
-                if (module_bits.data[row_offset + trailing_start + i] != TimingPattern[i]) {
-                    ++guard_errors;
-                }
-            }
-            for (u32 i = 0u; i < spec.barker_modules; ++i) {
-                if (module_bits.data[row_offset + trailing_start + spec.timing_modules + i] != Barker11[i]) {
-                    ++guard_errors;
-                }
-            }
-        }
-        if (guard_errors > spec.rows * 2u) {
-            if (debug_logging_enabled()) {
-                console_line(2, "debug stripe: guard mismatch budget exceeded");
-            }
-            return false;
-        }
-        u8 codeword[255u];
-        usize codeword_limit = (usize)spec.metadata_bytes + (usize)spec.parity_symbols;
-        if (codeword_limit > sizeof(codeword)) {
-            return false;
-        }
-        memset(codeword, 0, sizeof(codeword));
-        u32 bit_cursor = 0u;
-        for (u32 row = 0u; row < spec.rows; ++row) {
-            u32 row_bits = row_data_bits(spec, row);
-            u32 row_offset = row * modules_per_row;
-            for (u32 bit_index = 0u; bit_index < row_bits; ++bit_index) {
-                if (module_bits.data[row_offset + data_start + bit_index]) {
-                    u32 byte_index = bit_cursor >> 3u;
-                    u32 bit_offset = bit_cursor & 7u;
-                    codeword[byte_index] = (u8)(codeword[byte_index] | (1u << bit_offset));
-                }
-                ++bit_cursor;
-            }
-        }
-        if (bit_cursor != data_bits(spec)) {
-            if (debug_logging_enabled()) {
-                console_line(2, "debug stripe: unexpected bit cursor");
-            }
-            return false;
-        }
-        u8 pre_crc = compute_crc8(codeword, spec.metadata_bytes - 1u);
-        u8 stored_crc = codeword[spec.metadata_bytes - 1u];
-        u16 corrections = 0u;
-        if (!rs_decode_block(codeword, (u16)spec.metadata_bytes, (u16)spec.parity_symbols, &corrections)) {
-            if (debug_logging_enabled()) {
-                console_write(2, "debug stripe: RS decode failed corrections=");
-                char corr_buf[32];
-                u64_to_ascii((u64)corrections, corr_buf, sizeof(corr_buf));
-                console_write(2, corr_buf);
-                console_write(2, " crc_before=");
-                char crc_buf[4];
-                u64_to_ascii((u64)pre_crc, crc_buf, sizeof(crc_buf));
-                console_write(2, crc_buf);
-                console_write(2, " stored_crc=");
-                char stored_buf[4];
-                u64_to_ascii((u64)stored_crc, stored_buf, sizeof(stored_buf));
-                console_line(2, stored_buf);
-            }
-            return false;
-        }
-        u8 computed_crc = compute_crc8(codeword, spec.metadata_bytes - 1u);
-        if (computed_crc != stored_crc) {
-            if (debug_logging_enabled()) {
-                console_line(2, "debug stripe: CRC mismatch");
-            }
-            return false;
-        }
-        BitReader reader;
-        reader.reset(codeword, (spec.metadata_bytes - 1u) * 8u);
-        u64 schema = reader.read_bits(4u);
-        if (reader.failed || (schema != 1ull && schema != (u64)SPEC_V2.schema_version)) {
-            return false;
-        }
-        u64 page_bits = reader.read_bits(24u);
-        u64 page_count = reader.read_bits(20u);
-        u64 page_index = reader.read_bits(20u);
-        u64 footer_rows = reader.read_bits(8u);
-        u64 ecc_flag = reader.read_bits(1u);
-        u64 ecc_block_data = reader.read_bits(10u);
-        u64 ecc_parity = reader.read_bits(10u);
-        u64 ecc_block_count = reader.read_bits(20u);
-        u64 ecc_original_bytes = reader.read_bits(28u);
-        u16 palette_length = 0u;
-        u8 palette_base = 0u;
-        bool palette_flag = false;
-        if (!reader.failed && schema == SPEC_V2.schema_version && spec.palette_bytes) {
-            palette_flag = reader.read_bits(1u) != 0u;
-            palette_base = (u8)reader.read_bits(5u);
-            palette_length = (u16)reader.read_bits(8u);
-            if (palette_length > spec.palette_bytes) {
-                return false;
-            }
-            for (u32 i = 0u; i < spec.palette_bytes; ++i) {
-                u64 byte_val = reader.read_bits(8u);
-                if (reader.failed) {
-                    return false;
-                }
-                if (i < (u32)sizeof(values.palette_bytes)) {
-                    values.palette_bytes[i] = (u8)byte_val;
-                }
-            }
-            u64 consumed_bits = (u64)reader.cursor;
-            u64 target_bits = ((u64)spec.metadata_bytes - 1ull) * 8ull;
-            if (consumed_bits > target_bits) {
-                return false;
-            }
-            if (target_bits > consumed_bits) {
-                reader.read_bits((u32)(target_bits - consumed_bits));
-            }
-        }
-        if (reader.failed) {
-            return false;
-        }
-        values.page_bits = page_bits;
-        values.page_count = page_count;
-        values.page_index = page_index;
-        values.footer_rows = footer_rows;
-        values.ecc_enabled = (ecc_flag != 0ull);
-        values.ecc_block_data = (u16)ecc_block_data;
-        values.ecc_parity = (u16)ecc_parity;
-        values.ecc_block_count = ecc_block_count;
-        values.ecc_original_bytes = ecc_original_bytes;
-        values.has_palette = palette_flag && spec.palette_bytes && (palette_length > 0u);
-        values.palette_base = palette_base;
-        values.palette_length = palette_length;
-        return true;
-    }
-
-    static bool decode_from_bits_v3(const ByteBuffer& module_bits,
-                                    u32 rows,
-                                    Values& values) {
-        if (rows == 0u || rows > V3_MAX_ROWS) {
-            return false;
-        }
-        const u32 modules_per_row = V3_MODULE_COUNT;
-        const u32 expected_size = modules_per_row * rows;
-        if (module_bits.size < expected_size) {
-            return false;
-        }
-
-        const u32 data_start = V3_QUIET_MODULES + V3_GUARD_MODULES;
-        const u32 trailing_start = data_start + V3_DATA_MODULES;
-        u32 guard_errors = 0u;
-        for (u32 row = 0u; row < rows; ++row) {
-            u32 row_offset = row * modules_per_row;
-            for (u32 i = 0u; i < V3_BARKER_MODULES; ++i) {
-                if (module_bits.data[row_offset + V3_QUIET_MODULES + i] != Barker11[i]) {
-                    ++guard_errors;
-                }
-            }
-            for (u32 i = 0u; i < V3_TIMING_MODULES; ++i) {
-                if (module_bits.data[row_offset + V3_QUIET_MODULES + V3_BARKER_MODULES + i] != TimingPattern[i]) {
-                    ++guard_errors;
-                }
-            }
-            for (u32 i = 0u; i < V3_TIMING_MODULES; ++i) {
-                if (module_bits.data[row_offset + trailing_start + i] != TimingPattern[i]) {
-                    ++guard_errors;
-                }
-            }
-            for (u32 i = 0u; i < V3_BARKER_MODULES; ++i) {
-                if (module_bits.data[row_offset + trailing_start + V3_TIMING_MODULES + i] != Barker11[i]) {
-                    ++guard_errors;
-                }
-            }
-        }
-        const bool guard_strong = (guard_errors <= rows * 2u);
-        // Guard has 34 checks per row (11+6 left, 6+11 right). If we can't match at least
-        // ~5/6 of these, we are almost certainly not aligned to the stripe, and brute-forcing
-        // layouts below becomes prohibitively expensive.
-        if (guard_errors > rows * 6u) {
-            if (debug_logging_enabled()) {
-                static u32 guard_error_log_budget = 0u;
-                if (guard_error_log_budget < 64u) {
-                    ++guard_error_log_budget;
-                    console_write(2, "debug v3 stripe: guard errors rows=");
-                    char row_buf[8];
-                    u64_to_ascii(rows, row_buf, sizeof(row_buf));
-                    console_write(2, row_buf);
-                    console_write(2, " errors=");
-                    char buf[16];
-                    u64_to_ascii(guard_errors, buf, sizeof(buf));
-                    console_line(2, buf);
-                }
-            }
-            return false;
-        }
-
-        const u32 available_bits = rows * V3_DATA_MODULES;
-        ByteBuffer data_bits;
-        if (!data_bits.ensure(available_bits)) {
-            return false;
-        }
-        data_bits.size = available_bits;
-        usize bit_cursor = 0u;
-        for (u32 row = 0u; row < rows; ++row) {
-            u32 row_offset = row * modules_per_row + data_start;
-            for (u32 i = 0u; i < V3_DATA_MODULES; ++i) {
-                data_bits.data[bit_cursor++] = module_bits.data[row_offset + i];
-            }
-        }
-        if (bit_cursor != available_bits) {
-            return false;
-        }
-        if (available_bits < V3_HEADER_BYTES * 8u) {
-            return false;
-        }
-
-        const u32 max_bits_supported = (u32)RS_POLY_CAPACITY * 8u;
-        u32 preview_bits = (available_bits < max_bits_supported) ? available_bits : max_bits_supported;
-        u8 preview_bytes[RS_POLY_CAPACITY];
-        memset(preview_bytes, 0, sizeof(preview_bytes));
-        for (u32 i = 0u; i < preview_bits; ++i) {
-            if (data_bits.data[i]) {
-                preview_bytes[i >> 3u] = (u8)(preview_bytes[i >> 3u] | (1u << (i & 7u)));
-            }
-        }
-
-        makocode::BitReader header_reader;
-        header_reader.reset(preview_bytes, preview_bits);
-        u64 schema = header_reader.read_bits(4u);
-        u64 row_count = header_reader.read_bits(6u);
-        u64 modules_per_row_hdr = header_reader.read_bits(7u);
-        u64 module_pitch = header_reader.read_bits(8u);
-        u64 parity_bytes = header_reader.read_bits(8u);
-        u64 payload_bytes = header_reader.read_bits(16u);
-        u64 flags = header_reader.read_bits(8u);
-        u64 palette_base = header_reader.read_bits(5u);
-        u64 palette_length = header_reader.read_bits(12u);
-        if (!header_reader.align_to_byte() || header_reader.failed) {
-            return false;
-        }
-        // Use preview purely as a hint; allow RS to correct small header corruption.
-        if (schema != (u64)V3_SCHEMA_VERSION && debug_logging_enabled()) {
-            console_write(2, "debug v3 stripe: schema preview mismatch rows=");
-            char buf[8];
-            u64_to_ascii(rows, buf, sizeof(buf));
-            console_line(2, buf);
-        }
-        if (row_count != rows && debug_logging_enabled()) {
-            console_write(2, "debug v3 stripe: row_count preview mismatch rows=");
-            char buf[8];
-            u64_to_ascii(rows, buf, sizeof(buf));
-            console_line(2, buf);
-        }
-        if (modules_per_row_hdr != V3_MODULE_COUNT && debug_logging_enabled()) {
-            console_line(2, "debug v3 stripe: module_count preview mismatch");
-        }
-	        if (module_pitch != V3_MODULE_PITCH && debug_logging_enabled()) {
-	            console_line(2, "debug v3 stripe: module_pitch preview mismatch");
-	        }
-	        (void)flags; // preview-only
-	        (void)palette_base; // preview-only
-	        (void)palette_length; // preview-only (validated after RS decode)
-	        const u32 header_bytes = V3_HEADER_BYTES;
-	        const u32 crc_bytes = 1u;
-	        auto decode_corrected_codeword = [&](u8* codeword_buf,
-	                                            u32 metadata_bytes_local,
-	                                            u32 parity_bytes_local,
-	                                            u32 payload_bytes_local) -> bool {
-	            if (!codeword_buf || metadata_bytes_local == 0u || parity_bytes_local == 0u) {
-	                return false;
-	            }
-	            BitReader reader;
-	            reader.reset(codeword_buf, (metadata_bytes_local - 1u) * 8u);
-	            u64 schema_fixed = reader.read_bits(4u);
-	            u64 row_count_fixed = reader.read_bits(6u);
-	            u64 modules_fixed = reader.read_bits(7u);
-	            u64 pitch_fixed = reader.read_bits(8u);
-	            u64 parity_fixed = reader.read_bits(8u);
-	            u64 payload_fixed = reader.read_bits(16u);
-	            u64 corrected_flags = reader.read_bits(8u);
-	            u64 pal_base = reader.read_bits(5u);
-	            u64 pal_length = reader.read_bits(12u);
-	            if (!reader.align_to_byte()) {
-	                return false;
-	            }
-	            if (schema_fixed != (u64)V3_SCHEMA_VERSION) {
-	                return false;
-	            }
-	            if (row_count_fixed != (u64)rows) {
-	                return false;
-	            }
-	            if (modules_fixed != (u64)V3_MODULE_COUNT) {
-	                return false;
-	            }
-	            if (pitch_fixed != (u64)V3_MODULE_PITCH) {
-	                return false;
-	            }
-	            if (parity_fixed != (u64)parity_bytes_local) {
-	                return false;
-	            }
-	            if (payload_fixed != (u64)payload_bytes_local) {
-	                return false;
-	            }
-	            u64 page_bits = reader.read_bits(24u);
-	            u64 page_count = reader.read_bits(20u);
-	            u64 page_index = reader.read_bits(20u);
-	            u64 footer_rows = reader.read_bits(8u);
-	            u64 ecc_flag = reader.read_bits(1u);
-	            u64 ecc_block_data = reader.read_bits(10u);
-	            u64 ecc_parity = reader.read_bits(10u);
-	            u64 ecc_block_count = reader.read_bits(20u);
-	            u64 ecc_original_bytes = reader.read_bits(28u);
-	            u64 page_width_px = reader.read_bits(16u);
-	            u64 page_height_px = reader.read_bits(16u);
-	            u64 fiducial_marker_size_px = reader.read_bits(8u);
-	            if (reader.failed) {
-	                return false;
-	            }
-	            bool has_palette = ((corrected_flags & 1u) != 0u) && pal_length > 0u;
-	            if (has_palette) {
-	                if (pal_length > MAX_STRIPE_PALETTE_BYTES) {
-	                    return false;
-	                }
-	                u32 pal_len_u32 = (u32)pal_length;
-	                for (u32 i = 0u; i < pal_len_u32; ++i) {
-	                    u64 byte_val = reader.read_bits(8u);
-	                    if (reader.failed) {
-	                        return false;
-	                    }
-	                    values.palette_bytes[i] = (u8)byte_val;
-	                }
-	            }
-	            values.page_bits = page_bits;
-	            values.page_count = page_count;
-	            values.page_index = page_index;
-	            values.footer_rows = footer_rows;
-	            values.fiducial_marker_size_pixels = (u32)fiducial_marker_size_px;
-	            values.ecc_enabled = (ecc_flag != 0u);
-	            values.ecc_block_data = (u16)ecc_block_data;
-	            values.ecc_parity = (u16)ecc_parity;
-	            values.ecc_block_count = ecc_block_count;
-	            values.ecc_original_bytes = ecc_original_bytes;
-	            values.page_width_pixels = (u32)page_width_px;
-	            values.page_height_pixels = (u32)page_height_px;
-	            values.has_palette = has_palette;
-	            values.palette_base = (u8)pal_base;
-	            values.palette_length = (u16)pal_length;
-	            values.v3_rows = rows;
-	            values.v3_modules_per_row = V3_MODULE_COUNT;
-	            values.v3_module_pitch = V3_MODULE_PITCH;
-	            values.v3_parity_bytes = parity_bytes_local;
-	            values.v3_metadata_bytes = metadata_bytes_local;
-	            values.v3_payload_bytes = payload_bytes_local;
-	            return true;
-	        };
-	        auto try_decode_with_layout = [&](u32 payload_bytes_local, u32 parity_bytes_local) -> bool {
-	            if (parity_bytes_local < V3_MIN_PARITY_BYTES || parity_bytes_local > V3_MAX_PARITY_BYTES) {
-	                return false;
-	            }
-	            u32 metadata_bytes_local = header_bytes + payload_bytes_local + crc_bytes;
-	            u32 codeword_bytes_local = metadata_bytes_local + parity_bytes_local;
-	            if (codeword_bytes_local == 0u || codeword_bytes_local > RS_POLY_CAPACITY) {
-	                return false;
-	            }
-	            u32 required_bits_local = codeword_bytes_local * 8u;
-	            if (required_bits_local > available_bits) {
-	                return false;
-	            }
-	            u8 codeword_buf[RS_POLY_CAPACITY];
-	            memset(codeword_buf, 0, sizeof(codeword_buf));
-	            u32 bits_per_row_base_local = required_bits_local / rows;
-	            u32 bits_remainder_local = required_bits_local % rows;
-	            u32 codeword_cursor_local = 0u;
-	            for (u32 row = 0u; row < rows; ++row) {
-	                u32 bits_in_row = bits_per_row_base_local + ((row < bits_remainder_local) ? 1u : 0u);
-	                if (bits_in_row > V3_DATA_MODULES) {
-	                    return false;
-	                }
-	                u32 row_offset = row * V3_DATA_MODULES;
-	                for (u32 i = 0u; i < bits_in_row; ++i) {
-	                    if (data_bits.data[row_offset + i]) {
-	                        codeword_buf[codeword_cursor_local >> 3u] =
-	                            (u8)(codeword_buf[codeword_cursor_local >> 3u] | (1u << (codeword_cursor_local & 7u)));
-	                    }
-	                    ++codeword_cursor_local;
-	                }
-	            }
-	            if (codeword_cursor_local != required_bits_local) {
-	                return false;
-	            }
-	            u16 corrections = 0u;
-	            if (!rs_decode_block(codeword_buf, (u16)metadata_bytes_local, (u16)parity_bytes_local, &corrections)) {
-	                return false;
-	            }
-	            u8 stored_crc = codeword_buf[metadata_bytes_local - 1u];
-	            u8 computed_crc = compute_crc8(codeword_buf, metadata_bytes_local - 1u);
-	            if (computed_crc != stored_crc) {
-	                return false;
-	            }
-	            return decode_corrected_codeword(codeword_buf, metadata_bytes_local, parity_bytes_local, payload_bytes_local);
-	        };
-	        auto fast_fallback_decode = [&]() -> bool {
-	            // This path is hit very frequently during stripe search. Keep it tight:
-	            // try only the most likely layouts first (fixed payload, small neighborhood).
-	            const u32 parity = V3_MIN_PARITY_BYTES;
-	            u32 max_payload = RS_POLY_CAPACITY - header_bytes - crc_bytes - parity;
-	            if (max_payload > 128u) {
-	                max_payload = 128u;
-	            }
-	            const u32 likely_payload = footer_v3_payload_bytes(0u, false);
-	            const u32 candidates[] = {
-	                likely_payload,
-	                likely_payload + 1u,
-	                (likely_payload > 0u) ? (likely_payload - 1u) : 0u,
-	                likely_payload + 2u,
-	                likely_payload + 4u,
-	                likely_payload + 8u,
-	                likely_payload + 16u,
-	            };
-	            for (u32 i = 0u; i < (u32)(sizeof(candidates) / sizeof(candidates[0])); ++i) {
-	                u32 payload = candidates[i];
-	                if (payload <= max_payload && try_decode_with_layout(payload, parity)) {
-	                    return true;
-	                }
-	            }
-	            return false;
-	        };
-
-	        auto brute_force_decode_full = [&]() -> bool {
-	            // Full search: only use when we're reasonably sure we're aligned and just
-	            // need to recover header/payload sizing via RS+CRC.
-	            const u32 parity = V3_MIN_PARITY_BYTES;
-	            u32 max_payload = RS_POLY_CAPACITY - header_bytes - crc_bytes - parity;
-	            if (max_payload > 128u) {
-	                max_payload = 128u;
-	            }
-	            for (u32 payload = 0u; payload <= max_payload; ++payload) {
-	                if (try_decode_with_layout(payload, parity)) {
-	                    return true;
-	                }
-	            }
-	            return false;
-	        };
-
-	        bool preview_parity_ok = (parity_bytes >= V3_MIN_PARITY_BYTES && parity_bytes <= V3_MAX_PARITY_BYTES);
-	        u32 metadata_bytes = header_bytes + (u32)payload_bytes + crc_bytes;
-	        u32 codeword_bytes = metadata_bytes + (u32)parity_bytes;
-	        bool preview_layout_ok = preview_parity_ok && (codeword_bytes > 0u && codeword_bytes <= RS_POLY_CAPACITY);
-	        u32 required_bits = preview_layout_ok ? (codeword_bytes * 8u) : 0u;
-	        bool preview_header_plausible =
-	            (schema == (u64)V3_SCHEMA_VERSION) &&
-	            (row_count == (u64)rows) &&
-	            (modules_per_row_hdr == (u64)V3_MODULE_COUNT) &&
-	            (module_pitch == (u64)V3_MODULE_PITCH);
-	        if (!preview_layout_ok || required_bits > available_bits) {
-	            if (guard_strong) {
-	                if (preview_header_plausible) {
-	                    if (brute_force_decode_full()) {
-	                        return true;
-	                    }
-	                } else {
-	                    if (fast_fallback_decode()) {
-	                        return true;
-	                    }
-	                }
-	            }
-	            if (debug_logging_enabled()) {
-	                static u32 brute_force_log_budget = 0u;
-	                if (brute_force_log_budget < 64u) {
-	                    ++brute_force_log_budget;
-	                    console_write(2, "debug v3 stripe: brute force decode failed rows=");
-	                    char buf[8];
-	                    u64_to_ascii(rows, buf, sizeof(buf));
-	                    console_line(2, buf);
-	                }
-	            }
-	            return false;
-	        }
-
-        u8 codeword[RS_POLY_CAPACITY];
-        memset(codeword, 0, sizeof(codeword));
-        u32 bits_per_row_base = required_bits / rows;
-        u32 bits_remainder = required_bits % rows;
-        u32 codeword_cursor = 0u;
-        for (u32 row = 0u; row < rows; ++row) {
-            u32 bits_in_row = bits_per_row_base + ((row < bits_remainder) ? 1u : 0u);
-            if (bits_in_row > V3_DATA_MODULES) {
-                return false;
-            }
-            u32 row_offset = row * V3_DATA_MODULES;
-            for (u32 i = 0u; i < bits_in_row; ++i) {
-                if (data_bits.data[row_offset + i]) {
-                    codeword[codeword_cursor >> 3u] = (u8)(codeword[codeword_cursor >> 3u] | (1u << (codeword_cursor & 7u)));
-                }
-                ++codeword_cursor;
-            }
-        }
-        if (codeword_cursor != required_bits) {
-            return false;
-        }
-
-        u16 corrections = 0u;
-        if (!rs_decode_block(codeword, (u16)metadata_bytes, (u16)parity_bytes, &corrections)) {
-            if (guard_strong) {
-                if (preview_header_plausible) {
-                    if (brute_force_decode_full()) {
-                        return true;
-                    }
-                } else if (fast_fallback_decode()) {
-                    return true;
-                }
-            }
-            if (debug_logging_enabled()) {
-                console_write(2, "debug v3 stripe: RS decode failed rows=");
-                char buf[8];
-                u64_to_ascii(rows, buf, sizeof(buf));
-                console_line(2, buf);
-            }
-            return false;
-        }
-        u8 stored_crc = codeword[metadata_bytes - 1u];
-        u8 computed_crc = compute_crc8(codeword, metadata_bytes - 1u);
-        if (computed_crc != stored_crc) {
-            if (guard_strong) {
-                if (preview_header_plausible) {
-                    if (brute_force_decode_full()) {
-                        return true;
-                    }
-                } else if (fast_fallback_decode()) {
-                    return true;
-                }
-            }
-            if (debug_logging_enabled()) {
-                console_write(2, "debug v3 stripe: CRC mismatch rows=");
-                char buf[8];
-                u64_to_ascii(rows, buf, sizeof(buf));
-                console_line(2, buf);
-            }
-            return false;
-        }
-
-        BitReader reader;
-        reader.reset(codeword, (metadata_bytes - 1u) * 8u);
-        reader.read_bits(4u);  // schema
-        reader.read_bits(6u);  // rows
-        reader.read_bits(7u);  // modules
-        reader.read_bits(8u);  // pitch
-        reader.read_bits(8u);  // parity
-        reader.read_bits(16u); // payload
-        u64 corrected_flags = reader.read_bits(8u);
-        u64 pal_base = reader.read_bits(5u);
-        u64 pal_length = reader.read_bits(12u);
-        if (!reader.align_to_byte()) {
-            return false;
-        }
-        u64 page_bits = reader.read_bits(24u);
-        u64 page_count = reader.read_bits(20u);
-        u64 page_index = reader.read_bits(20u);
-        u64 footer_rows = reader.read_bits(8u);
-        u64 ecc_flag = reader.read_bits(1u);
-        u64 ecc_block_data = reader.read_bits(10u);
-        u64 ecc_parity = reader.read_bits(10u);
-        u64 ecc_block_count = reader.read_bits(20u);
-	        u64 ecc_original_bytes = reader.read_bits(28u);
-	        u64 page_width_px = reader.read_bits(16u);
-	        u64 page_height_px = reader.read_bits(16u);
-	        u64 fiducial_marker_size_px = reader.read_bits(8u);
-	        if (reader.failed) {
-	            if (guard_strong) {
-	                if (preview_header_plausible) {
-	                    if (brute_force_decode_full()) {
-	                        return true;
-	                    }
-	                } else if (fast_fallback_decode()) {
-	                    return true;
-	                }
-	            }
-	            return false;
-	        }
-
-        bool has_palette = ((corrected_flags & 1u) != 0u) && pal_length > 0u;
-        if (has_palette) {
-            if (pal_length > MAX_STRIPE_PALETTE_BYTES) {
-                return false;
-            }
-            u32 pal_len_u32 = (u32)pal_length;
-            for (u32 i = 0u; i < pal_len_u32; ++i) {
-                u64 byte_val = reader.read_bits(8u);
-                if (reader.failed) {
-                    return false;
-                }
-                values.palette_bytes[i] = (u8)byte_val;
-            }
-        }
-
-	        values.page_bits = page_bits;
-	        values.page_count = page_count;
-	        values.page_index = page_index;
-	        values.footer_rows = footer_rows;
-	        values.fiducial_marker_size_pixels = (u32)fiducial_marker_size_px;
-	        values.ecc_enabled = (ecc_flag != 0u);
-        values.ecc_block_data = (u16)ecc_block_data;
-        values.ecc_parity = (u16)ecc_parity;
-        values.ecc_block_count = ecc_block_count;
-        values.ecc_original_bytes = ecc_original_bytes;
-        values.page_width_pixels = (u32)page_width_px;
-        values.page_height_pixels = (u32)page_height_px;
-        values.has_palette = has_palette;
-        values.palette_base = (u8)pal_base;
-        values.palette_length = (u16)pal_length;
-        values.v3_rows = rows;
-        values.v3_modules_per_row = V3_MODULE_COUNT;
-        values.v3_module_pitch = V3_MODULE_PITCH;
-        values.v3_parity_bytes = (u32)parity_bytes;
-        values.v3_metadata_bytes = metadata_bytes;
-        values.v3_payload_bytes = (u32)payload_bytes;
-        return true;
-    }
-
-    static bool capture_module_row(const StripeSpec& spec,
-                                   const u8* pixels,
-                                   u32 width,
-                                   u32 height,
-                                   u32 stripe_top,
-                                   u32 start_column,
-                                   u32 row_index,
-                                   u8* row_storage) {
-        u32 module_pitch = spec.module_pitch;
-        if (module_count(spec) > MAX_STRIPE_MODULES) {
-            return false;
-        }
-        u32 sample_row = stripe_top + row_index * module_pitch + (module_pitch / 2u);
-        if (sample_row >= height) {
-            return false;
-        }
-        if (!row_storage) {
-            return false;
-        }
-        u16 brightness[MAX_STRIPE_MODULES];
-        for (u32 index = 0u; index < module_count(spec); ++index) {
-            u32 sample_column = start_column + index * module_pitch + (module_pitch / 2u);
-            if (sample_column >= width) {
-                return false;
-            }
-            usize pixel_index = ((usize)sample_row * (usize)width + (usize)sample_column) * 3u;
-            u32 value = (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
-            brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
-        }
-        u32 background_sum = 0u;
-        u32 background_count = 0u;
-        auto add_background = [&](u32 module_idx) {
-            if (module_idx < module_count(spec)) {
-                background_sum += brightness[module_idx];
-                ++background_count;
-            }
-        };
-        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
-            add_background(i);
-        }
-        u32 trailing_start = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec) + guard_modules(spec);
-        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
-            add_background(trailing_start + i);
-        }
-        auto guard_bit = [&](u32 idx) -> u8 {
-            if (idx < spec.barker_modules) return Barker11[idx];
-            idx -= spec.barker_modules;
-            if (idx < spec.timing_modules) return TimingPattern[idx];
-            return 0u;
-        };
-        u32 guard_sum = 0u;
-        u32 guard_count = 0u;
-        u32 guard_start_left = spec.quiet_modules;
-        u32 guard_start_right = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec);
-        for (u32 i = 0u; i < guard_modules(spec); ++i) {
-            if (guard_bit(i)) {
-                u32 pos_left = guard_start_left + i;
-                u32 pos_right = guard_start_right + i;
-                if (pos_left < module_count(spec)) {
-                    guard_sum += brightness[pos_left];
-                    ++guard_count;
-                }
-                if (pos_right < module_count(spec)) {
-                    guard_sum += brightness[pos_right];
-                    ++guard_count;
-                }
-            }
-        }
-        u32 threshold = 384u;
-        if (background_count > 0u && guard_count > 0u) {
-            u32 background_avg = background_sum / background_count;
-            u32 guard_avg = guard_sum / guard_count;
-            if (guard_avg < background_avg) {
-                threshold = (background_avg + guard_avg) / 2u;
-            } else if (background_avg > 0u) {
-                threshold = background_avg / 2u;
-            }
-        }
-        for (u32 index = 0u; index < module_count(spec); ++index) {
-            row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
-        }
-        return true;
-    }
-
-    static bool capture_module_row_affine(const StripeSpec& spec,
-                                          const u8* pixels,
-                                          u32 width,
-                                          u32 height,
-                                          const AffineTransform& affine,
-                                          double skew_y_pixels,
-                                          double skew_span,
-                                          double stripe_top_logical,
-                                          u32 start_column,
-                                          u32 row_index,
-                                          u8* row_storage) {
-        u32 module_pitch = spec.module_pitch;
-        if (module_count(spec) > MAX_STRIPE_MODULES) {
-            return false;
-        }
-        double logical_y = stripe_top_logical + (double)row_index * (double)module_pitch + ((double)module_pitch * 0.5);
-        if (!row_storage) {
-            return false;
-        }
-        u16 brightness[MAX_STRIPE_MODULES];
-        for (u32 index = 0u; index < module_count(spec); ++index) {
-            double logical_x = (double)start_column + (double)index * (double)module_pitch + ((double)module_pitch * 0.5);
-            double sample_x = affine.a00 * logical_x + affine.a01 * logical_y + affine.tx;
-            double sample_y = affine.a10 * logical_x + affine.a11 * logical_y + affine.ty;
-            if (skew_span > 0.0 && skew_y_pixels != 0.0) {
-                double norm_col = sample_x / skew_span;
-                if (norm_col < 0.0) norm_col = 0.0;
-                if (norm_col > 1.0) norm_col = 1.0;
-                sample_y += skew_y_pixels * norm_col;
-            }
-            if (sample_x < 0.0) sample_x = 0.0;
-            if (sample_y < 0.0) sample_y = 0.0;
-            double max_x = (width > 0u) ? (double)(width - 1u) : 0.0;
-            double max_y = (height > 0u) ? (double)(height - 1u) : 0.0;
-            if (sample_x > max_x) sample_x = max_x;
-            if (sample_y > max_y) sample_y = max_y;
-            unsigned x0 = (unsigned)floor(sample_x);
-            unsigned y0 = (unsigned)floor(sample_y);
-            unsigned x1 = (x0 + 1u < width) ? (x0 + 1u) : x0;
-            unsigned y1 = (y0 + 1u < height) ? (y0 + 1u) : y0;
-            double fx = sample_x - (double)x0;
-            double fy = sample_y - (double)y0;
-            usize idx00 = ((usize)y0 * (usize)width + (usize)x0) * 3u;
-            usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
-            usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;
-            usize idx11 = ((usize)y1 * (usize)width + (usize)x1) * 3u;
-            double rgb00 = (double)pixels[idx00] + (double)pixels[idx00 + 1u] + (double)pixels[idx00 + 2u];
-            double rgb10 = (double)pixels[idx10] + (double)pixels[idx10 + 1u] + (double)pixels[idx10 + 2u];
-            double rgb01 = (double)pixels[idx01] + (double)pixels[idx01 + 1u] + (double)pixels[idx01 + 2u];
-            double rgb11 = (double)pixels[idx11] + (double)pixels[idx11 + 1u] + (double)pixels[idx11 + 2u];
-            double top = rgb00 + (rgb10 - rgb00) * fx;
-            double bottom = rgb01 + (rgb11 - rgb01) * fx;
-            double value = top + (bottom - top) * fy;
-            if (value < 0.0) value = 0.0;
-            if (value > 765.0) value = 765.0;
-            brightness[index] = (u16)(value + 0.5);
-        }
-        u32 background_sum = 0u;
-        u32 background_count = 0u;
-        auto add_background = [&](u32 module_idx) {
-            if (module_idx < module_count(spec)) {
-                background_sum += brightness[module_idx];
-                ++background_count;
-            }
-        };
-        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
-            add_background(i);
-        }
-        u32 trailing_start = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec) + guard_modules(spec);
-        for (u32 i = 0u; i < spec.quiet_modules; ++i) {
-            add_background(trailing_start + i);
-        }
-        auto guard_bit = [&](u32 idx) -> u8 {
-            if (idx < spec.barker_modules) return Barker11[idx];
-            idx -= spec.barker_modules;
-            if (idx < spec.timing_modules) return TimingPattern[idx];
-            return 0u;
-        };
-        u32 guard_sum = 0u;
-        u32 guard_count = 0u;
-        u32 guard_start_left = spec.quiet_modules;
-        u32 guard_start_right = spec.quiet_modules + guard_modules(spec) + max_row_data_bits(spec);
-        for (u32 i = 0u; i < guard_modules(spec); ++i) {
-            if (guard_bit(i)) {
-                u32 pos_left = guard_start_left + i;
-                u32 pos_right = guard_start_right + i;
-                if (pos_left < module_count(spec)) {
-                    guard_sum += brightness[pos_left];
-                    ++guard_count;
-                }
-                if (pos_right < module_count(spec)) {
-                    guard_sum += brightness[pos_right];
-                    ++guard_count;
-                }
-            }
-        }
-        u32 threshold = 384u;
-        if (background_count > 0u && guard_count > 0u) {
-            u32 background_avg = background_sum / background_count;
-            u32 guard_avg = guard_sum / guard_count;
-            if (guard_avg < background_avg) {
-                threshold = (background_avg + guard_avg) / 2u;
-            } else if (background_avg > 0u) {
-                threshold = background_avg / 2u;
-            }
-        }
-        for (u32 index = 0u; index < module_count(spec); ++index) {
-            row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
-        }
-        return true;
-    }
-
-    static bool capture_stripe(const StripeSpec& spec,
-                               const u8* pixels,
-                               u32 width,
-                               u32 height,
-                               u32 stripe_top,
-                               u32 start_column,
-                               ByteBuffer& module_bits) {
-        usize total = (usize)module_count(spec) * (usize)spec.rows;
-        if (!module_bits.ensure(total)) {
-            return false;
-        }
-        module_bits.size = total;
-        for (u32 row = 0u; row < spec.rows; ++row) {
-            if (!capture_module_row(spec, pixels, width, height, stripe_top, start_column, row, module_bits.data + (usize)row * module_count(spec))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    static bool decode_at(const StripeSpec& spec,
-                          const u8* pixels,
-                          u32 width,
-                          u32 height,
-                          u32 start_column,
-                          u32 stripe_top,
-                          Values& values) {
-        if (width < pixel_width(spec)) {
-            return false;
-        }
-        if (height < spec.module_pitch + spec.rows * spec.module_pitch) {
-            return false;
-        }
-        if (stripe_top + spec.rows * spec.module_pitch > height) {
-            return false;
-        }
-        ByteBuffer module_bits;
-        if (!capture_stripe(spec, pixels, width, height, stripe_top, start_column, module_bits)) {
-            return false;
-        }
-        if (debug_logging_enabled()) {
-            console_write(2, "debug stripe capture prefix=");
-            char prefix[64];
-            u32 prefix_len = 0u;
-            u32 limit = module_count(spec);
-            if (limit > 32u) {
-                limit = 32u;
-            }
-            for (u32 i = 0u; i < limit && prefix_len < (u32)(sizeof(prefix) - 1u); ++i) {
-                u8 bit = module_bits.data[i];
-                prefix[prefix_len++] = bit ? '1' : '0';
-            }
-            prefix[prefix_len] = '\0';
-            console_write(2, prefix);
-            console_line(2, "");
-        }
-        if (!decode_from_bits(spec, module_bits, values)) {
-            return false;
-        }
-        return true;
-    }
-
-    static bool decode(const StripeSpec& spec, const u8* pixels, u32 width, u32 height, Values& values) {
-        u32 left_start = 0u;
-        u32 right_start = (width >= pixel_width(spec)) ? (width - pixel_width(spec)) : 0u;
-        u32 stripe_height_px = stripe_height(spec);
-        u32 base_top = (height > stripe_height_px) ? (height - stripe_height_px) : 0u;
-        u32 max_offset = base_top;
-        if (max_offset > 256u) {
-            max_offset = 256u;
-        }
-        for (u32 offset = 0u; offset <= max_offset; offset += spec.module_pitch) {
-            if (base_top < offset) {
-                break;
-            }
-            u32 stripe_top = base_top - offset;
-            ByteBuffer left_bits;
-            if (decode_at(spec, pixels, width, height, left_start, stripe_top, values)) {
-                return true;
-            }
-            bool left_ok = capture_stripe(spec, pixels, width, height, stripe_top, left_start, left_bits);
-            ByteBuffer right_bits;
-            bool right_ok = false;
-            if (right_start != left_start) {
-                if (decode_at(spec, pixels, width, height, right_start, stripe_top, values)) {
-                    return true;
-                }
-                right_ok = capture_stripe(spec, pixels, width, height, stripe_top, right_start, right_bits);
-            }
-            if (left_ok && right_ok && left_bits.size == right_bits.size && left_bits.size > 0u) {
-                ByteBuffer combined;
-                if (!combined.ensure(left_bits.size)) {
-                    return false;
-                }
-                combined.size = left_bits.size;
-                for (usize i = 0u; i < left_bits.size; ++i) {
-                    u8 l = left_bits.data[i];
-                    u8 r = right_bits.data[i];
-                    combined.data[i] = (u8)((l | r) ? 1u : 0u);
-                }
-                if (decode_from_bits(spec, combined, values)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-	    static bool capture_stripe_v3(const u8* pixels,
-	                                  u32 width,
-	                                  u32 height,
-	                                  u32 row_count,
-	                                  u32 stripe_top,
-	                                  u32 start_column,
-	                                  u32 module_pitch_x,
-	                                  u32 module_pitch_y,
-	                                  ByteBuffer& module_bits) {
-        usize total = (usize)V3_MODULE_COUNT * (usize)row_count;
-        if (row_count == 0u || row_count > V3_MAX_ROWS) {
-            return false;
-        }
-        if (!module_bits.ensure(total)) {
-            return false;
-        }
-        module_bits.size = total;
-        for (u32 row = 0u; row < row_count; ++row) {
-            u32 sample_row = stripe_top + row * module_pitch_y + (module_pitch_y / 2u);
-            if (sample_row >= height) {
-                return false;
-            }
-            u16 brightness[MAX_STRIPE_MODULES];
-            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-                u32 sample_column = start_column + index * module_pitch_x + (module_pitch_x / 2u);
-                if (sample_column >= width) {
-                    return false;
-                }
-                usize pixel_index = ((usize)sample_row * (usize)width + (usize)sample_column) * 3u;
-                u32 value = (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
-                brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
-            }
-            auto guard_bit = [&](u32 idx) -> u8 {
-                if (idx < V3_BARKER_MODULES) return Barker11[idx];
-                idx -= V3_BARKER_MODULES;
-                if (idx < V3_TIMING_MODULES) return TimingPattern[idx];
-                return 0u;
-            };
-            u32 background_sum = 0u;
-            u32 background_count = 0u;
-            auto add_background = [&](u32 module_idx) {
-                if (module_idx < V3_MODULE_COUNT) {
-                    background_sum += brightness[module_idx];
-                    ++background_count;
-                }
-            };
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                add_background(i);
-            }
-            u32 trailing_start = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES + V3_GUARD_MODULES;
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                add_background(trailing_start + i);
-            }
-            u32 guard_start_left = V3_QUIET_MODULES;
-            u32 guard_start_right = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES;
-            u32 guard_sum = 0u;
-            u32 guard_count = 0u;
-            for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
-                if (guard_bit(i)) {
-                    u32 pos_left = guard_start_left + i;
-                    u32 pos_right = guard_start_right + i;
-                    if (pos_left < V3_MODULE_COUNT) {
-                        guard_sum += brightness[pos_left];
-                        ++guard_count;
-                    }
-                    if (pos_right < V3_MODULE_COUNT) {
-                        guard_sum += brightness[pos_right];
-                        ++guard_count;
-                    }
-                }
-            }
-            u32 threshold = 384u;
-            if (background_count > 0u && guard_count > 0u) {
-                u32 background_avg = background_sum / background_count;
-                u32 guard_avg = guard_sum / guard_count;
-                if (guard_avg < background_avg) {
-                    threshold = (background_avg + guard_avg) / 2u;
-                } else if (background_avg > 0u) {
-                    threshold = background_avg / 2u;
-                }
-            }
-            u8* row_storage = module_bits.data + (usize)row * V3_MODULE_COUNT;
-            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-                row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
-            }
-        }
-	        return true;
-	    }
-
-	    static bool capture_stripe_v3_float(const u8* pixels,
-	                                        u32 width,
-	                                        u32 height,
-	                                        u32 row_count,
-	                                        double stripe_top,
-	                                        double start_column,
-	                                        double module_pitch_x,
-	                                        double module_pitch_y,
-	                                        ByteBuffer& module_bits) {
-	        if (!pixels || width == 0u || height == 0u) {
-	            return false;
-	        }
-	        if (row_count == 0u || row_count > V3_MAX_ROWS) {
-	            return false;
-	        }
-	        if (!(module_pitch_x > 0.0) || !(module_pitch_y > 0.0)) {
-	            return false;
-	        }
-	        usize total = (usize)V3_MODULE_COUNT * (usize)row_count;
-	        if (!module_bits.ensure(total)) {
-	            return false;
-	        }
-	        module_bits.size = total;
-	        double max_x = (width > 0u) ? (double)(width - 1u) : 0.0;
-	        double max_y = (height > 0u) ? (double)(height - 1u) : 0.0;
-	        // Avoid sampling near module edges: nearest-neighbor resampling at non-integer
-	        // scale factors (e.g. 2.6x) causes uneven module widths, and edge taps can
-	        // spill into adjacent modules.
-	        const double taps[] = {0.40, 0.50, 0.60};
-	        for (u32 row = 0u; row < row_count; ++row) {
-	            u16 brightness[MAX_STRIPE_MODULES];
-	            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-	                double y0 = stripe_top + (double)row * module_pitch_y;
-	                double x0 = start_column + (double)index * module_pitch_x;
-	                u32 value_sum = 0u;
-	                u32 sample_count = 0u;
-	                for (u32 ty = 0u; ty < 3u; ++ty) {
-	                    double sample_row = y0 + module_pitch_y * taps[ty];
-	                    if (sample_row < 0.0) sample_row = 0.0;
-	                    if (sample_row > max_y) sample_row = max_y;
-	                    u32 sample_row_i = (u32)(sample_row + 0.5);
-	                    if (sample_row_i >= height) {
-	                        continue;
-	                    }
-	                    for (u32 tx = 0u; tx < 3u; ++tx) {
-	                        double sample_col = x0 + module_pitch_x * taps[tx];
-	                        if (sample_col < 0.0) sample_col = 0.0;
-	                        if (sample_col > max_x) sample_col = max_x;
-	                        u32 sample_col_i = (u32)(sample_col + 0.5);
-	                        if (sample_col_i >= width) {
-	                            continue;
-	                        }
-	                        usize pixel_index = ((usize)sample_row_i * (usize)width + (usize)sample_col_i) * 3u;
-	                        value_sum += (u32)pixels[pixel_index] + (u32)pixels[pixel_index + 1u] + (u32)pixels[pixel_index + 2u];
-	                        ++sample_count;
-	                    }
-	                }
-	                if (sample_count == 0u) {
-	                    return false;
-	                }
-	                u32 value = value_sum / sample_count;
-	                brightness[index] = (u16)((value > 0xFFFFu) ? 0xFFFFu : value);
-	            }
-	            auto guard_bit = [&](u32 idx) -> u8 {
-	                if (idx < V3_BARKER_MODULES) return Barker11[idx];
-	                idx -= V3_BARKER_MODULES;
-	                if (idx < V3_TIMING_MODULES) return TimingPattern[idx];
-	                return 0u;
-	            };
-	            u32 background_sum = 0u;
-	            u32 background_count = 0u;
-	            auto add_background = [&](u32 module_idx) {
-	                if (module_idx < V3_MODULE_COUNT) {
-	                    background_sum += brightness[module_idx];
-	                    ++background_count;
-	                }
-	            };
-	            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-	                add_background(i);
-	            }
-	            u32 trailing_start = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES + V3_GUARD_MODULES;
-	            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-	                add_background(trailing_start + i);
-	            }
-	            u32 guard_start_left = V3_QUIET_MODULES;
-	            u32 guard_start_right = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES;
-	            u32 guard_sum = 0u;
-	            u32 guard_count = 0u;
-	            for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
-	                if (guard_bit(i)) {
-	                    u32 pos_left = guard_start_left + i;
-	                    u32 pos_right = guard_start_right + i;
-	                    if (pos_left < V3_MODULE_COUNT) {
-	                        guard_sum += brightness[pos_left];
-	                        ++guard_count;
-	                    }
-	                    if (pos_right < V3_MODULE_COUNT) {
-	                        guard_sum += brightness[pos_right];
-	                        ++guard_count;
-	                    }
-	                }
-	            }
-	            u32 threshold = 384u;
-	            if (background_count > 0u && guard_count > 0u) {
-	                u32 background_avg = background_sum / background_count;
-	                u32 guard_avg = guard_sum / guard_count;
-	                if (guard_avg < background_avg) {
-	                    threshold = (background_avg + guard_avg) / 2u;
-	                } else if (background_avg > 0u) {
-	                    threshold = background_avg / 2u;
-	                }
-	            }
-	            u8* row_storage = module_bits.data + (usize)row * V3_MODULE_COUNT;
-	            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-	                row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
-	            }
-	        }
-	        return true;
-	    }
-
-	    static bool capture_stripe_v3_affine(const u8* pixels,
-	                                         u32 width,
-	                                         u32 height,
-	                                         u32 row_count,
-	                                         const AffineTransform& affine,
-                                         double skew_y_pixels,
-                                         double skew_span,
-                                         double stripe_top_logical,
-                                         u32 start_column,
-                                         ByteBuffer& module_bits) {
-        usize total = (usize)V3_MODULE_COUNT * (usize)row_count;
-        if (row_count == 0u || row_count > V3_MAX_ROWS) {
-            return false;
-        }
-        if (!module_bits.ensure(total)) {
-            return false;
-        }
-        module_bits.size = total;
-        for (u32 row = 0u; row < row_count; ++row) {
-            double logical_y = stripe_top_logical + (double)row * (double)V3_MODULE_PITCH + ((double)V3_MODULE_PITCH * 0.5);
-            u16 brightness[MAX_STRIPE_MODULES];
-            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-                double logical_x = (double)start_column + (double)index * (double)V3_MODULE_PITCH + ((double)V3_MODULE_PITCH * 0.5);
-                double sample_x = affine.a00 * logical_x + affine.a01 * logical_y + affine.tx;
-                double sample_y = affine.a10 * logical_x + affine.a11 * logical_y + affine.ty;
-                if (skew_span > 0.0 && skew_y_pixels != 0.0) {
-                    double norm_col = sample_x / skew_span;
-                    if (norm_col < 0.0) norm_col = 0.0;
-                    if (norm_col > 1.0) norm_col = 1.0;
-                    sample_y += skew_y_pixels * norm_col;
-                }
-                if (sample_x < 0.0) sample_x = 0.0;
-                if (sample_y < 0.0) sample_y = 0.0;
-                double max_x = (width > 0u) ? (double)(width - 1u) : 0.0;
-                double max_y = (height > 0u) ? (double)(height - 1u) : 0.0;
-                if (sample_x > max_x) sample_x = max_x;
-                if (sample_y > max_y) sample_y = max_y;
-                unsigned x0 = (unsigned)floor(sample_x);
-                unsigned y0 = (unsigned)floor(sample_y);
-                unsigned x1 = (x0 + 1u < width) ? (x0 + 1u) : x0;
-                unsigned y1 = (y0 + 1u < height) ? (y0 + 1u) : y0;
-                double fx = sample_x - (double)x0;
-                double fy = sample_y - (double)y0;
-                usize idx00 = ((usize)y0 * (usize)width + (usize)x0) * 3u;
-                usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
-                usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;
-                usize idx11 = ((usize)y1 * (usize)width + (usize)x1) * 3u;
-                double rgb00 = (double)pixels[idx00] + (double)pixels[idx00 + 1u] + (double)pixels[idx00 + 2u];
-                double rgb10 = (double)pixels[idx10] + (double)pixels[idx10 + 1u] + (double)pixels[idx10 + 2u];
-                double rgb01 = (double)pixels[idx01] + (double)pixels[idx01 + 1u] + (double)pixels[idx01 + 2u];
-                double rgb11 = (double)pixels[idx11] + (double)pixels[idx11 + 1u] + (double)pixels[idx11 + 2u];
-                double top = rgb00 + (rgb10 - rgb00) * fx;
-                double bottom = rgb01 + (rgb11 - rgb01) * fx;
-                double value = top + (bottom - top) * fy;
-                if (value < 0.0) value = 0.0;
-                if (value > 765.0) value = 765.0;
-                brightness[index] = (u16)(value + 0.5);
-            }
-            u32 background_sum = 0u;
-            u32 background_count = 0u;
-            auto add_background = [&](u32 module_idx) {
-                if (module_idx < V3_MODULE_COUNT) {
-                    background_sum += brightness[module_idx];
-                    ++background_count;
-                }
-            };
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                add_background(i);
-            }
-            u32 trailing_start = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES + V3_GUARD_MODULES;
-            for (u32 i = 0u; i < V3_QUIET_MODULES; ++i) {
-                add_background(trailing_start + i);
-            }
-            auto guard_bit = [&](u32 idx) -> u8 {
-                if (idx < V3_BARKER_MODULES) return Barker11[idx];
-                idx -= V3_BARKER_MODULES;
-                if (idx < V3_TIMING_MODULES) return TimingPattern[idx];
-                return 0u;
-            };
-            u32 guard_sum = 0u;
-            u32 guard_count = 0u;
-            u32 guard_start_left = V3_QUIET_MODULES;
-            u32 guard_start_right = V3_QUIET_MODULES + V3_GUARD_MODULES + V3_DATA_MODULES;
-            for (u32 i = 0u; i < V3_GUARD_MODULES; ++i) {
-                if (guard_bit(i)) {
-                    u32 pos_left = guard_start_left + i;
-                    u32 pos_right = guard_start_right + i;
-                    if (pos_left < V3_MODULE_COUNT) {
-                        guard_sum += brightness[pos_left];
-                        ++guard_count;
-                    }
-                    if (pos_right < V3_MODULE_COUNT) {
-                        guard_sum += brightness[pos_right];
-                        ++guard_count;
-                    }
-                }
-            }
-            u32 threshold = 384u;
-            if (background_count > 0u && guard_count > 0u) {
-                u32 background_avg = background_sum / background_count;
-                u32 guard_avg = guard_sum / guard_count;
-                if (guard_avg < background_avg) {
-                    threshold = (background_avg + guard_avg) / 2u;
-                } else if (background_avg > 0u) {
-                    threshold = background_avg / 2u;
-                }
-            }
-            u8* row_storage = module_bits.data + (usize)row * V3_MODULE_COUNT;
-            for (u32 index = 0u; index < V3_MODULE_COUNT; ++index) {
-                row_storage[index] = (brightness[index] < threshold) ? 1u : 0u;
-            }
-        }
-        return true;
-    }
-
-    static bool decode_v3(const u8* pixels, u32 width, u32 height, Values& values) {
-        if (!pixels || width == 0u || height == 0u) {
-            return false;
-        }
-
-        // Heuristic fast path for non-integer rescaling:
-        // Try to detect the stripe bounds at the bottom edge (near left/right) and derive
-        // pitch from the observed stripe width/height. This avoids the very large search
-        // space of the generic float-pitch loop.
-        auto try_decode_from_bottom_probe = [&](bool probe_right) -> bool {
-            const bool dbg = debug_logging_enabled();
-            static u32 probe_log_budget = 0u;
-            const u32 probe_span = 512u;
-            const u32 probe_width = (width < probe_span) ? width : probe_span;
-            const u32 probe_x0 = probe_right ? ((width > probe_width) ? (width - probe_width) : 0u) : 0u;
-            const u32 probe_x1 = probe_x0 + probe_width;
-
-            auto pixel_sum = [&](u32 x, u32 y) -> u32 {
-                usize idx = ((usize)y * (usize)width + (usize)x) * 3u;
-                return (u32)pixels[idx] + (u32)pixels[idx + 1u] + (u32)pixels[idx + 2u];
-            };
-
-            auto row_has_ink = [&](u32 y) -> bool {
-                // Count "ink" pixels in the probe window for this row.
-                u32 ink = 0u;
-                for (u32 x = probe_x0; x < probe_x1; ++x) {
-                    if (pixel_sum(x, y) < 740u) {
-                        ++ink;
-                    }
-                }
-                // Require a small but non-trivial amount of ink to avoid confusing all-white
-                // footer padding with a stripe.
-                return ink > (probe_width / 64u);
-            };
-
-            // Find bottom-most contiguous band with ink.
-            u32 y = height;
-            while (y > 0u && !row_has_ink(y - 1u)) {
-                --y;
-            }
-            if (y == 0u) {
-                if (dbg && probe_log_budget < 8u) {
-                    ++probe_log_budget;
-                    console_line(2, "debug v3 stripe probe: no ink at bottom");
-                }
-                return false;
-            }
-            u32 stripe_bottom = y - 1u;
-            while (y > 0u && row_has_ink(y - 1u)) {
-                --y;
-            }
-            u32 stripe_top = y;
-            u32 stripe_height_px = stripe_bottom - stripe_top + 1u;
-            if (stripe_height_px < 4u || stripe_height_px > 1024u) {
-                if (dbg && probe_log_budget < 8u) {
-                    ++probe_log_budget;
-                    console_line(2, "debug v3 stripe probe: stripe height out of range");
-                }
-                return false;
-            }
-
-            // Estimate stripe width by finding a long, near-all-white gap.
-            u32 y_mid = stripe_top + stripe_height_px / 2u;
-            const u32 gap_len = 64u;
-            auto col_has_ink = [&](u32 x) -> bool {
-                // Sample multiple taps across the stripe height so we don't accidentally
-                // land on an all-white scanline for a long run of modules.
-                (void)y_mid;
-                const u32 taps = 9u;
-                for (u32 t = 0u; t < taps; ++t) {
-                    u32 yy = stripe_top + (u32)(((u64)(stripe_height_px - 1u) * (u64)(t + 1u)) / (u64)(taps + 1u));
-                    if (yy >= height) {
-                        continue;
-                    }
-                    if (pixel_sum(x, yy) < 740u) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-            u32 stripe_width_px = 0u;
-            if (!probe_right) {
-                for (u32 x = 0u; x + gap_len < width; ++x) {
-                    bool gap = true;
-                    for (u32 k = 0u; k < gap_len; ++k) {
-                        if (col_has_ink(x + k)) {
-                            gap = false;
-                            break;
-                        }
-                    }
-                    if (gap) {
-                        stripe_width_px = x;
-                        break;
-                    }
-                }
-            } else {
-                for (u32 x = width; x > gap_len; --x) {
-                    bool gap = true;
-                    for (u32 k = 0u; k < gap_len; ++k) {
-                        u32 xx = (x - 1u) - k;
-                        if (col_has_ink(xx)) {
-                            gap = false;
-                            break;
-                        }
-                    }
-                    if (gap) {
-                        stripe_width_px = width - x;
-                        break;
-                    }
-                }
-            }
-            if (stripe_width_px < 32u || stripe_width_px > width) {
-                if (dbg && probe_log_budget < 8u) {
-                    ++probe_log_budget;
-                    console_line(2, "debug v3 stripe probe: stripe width not found");
-                }
-                return false;
-            }
-
-            // The V3 stripe ends with a 2-module quiet zone of all-white pixels. Our "gap"
-            // detector tends to fire at the beginning of that quiet zone. Compensate by
-            // adding ~2 modules worth of pixels using a quick self-consistent estimate.
-            {
-                double pitch_guess = (double)stripe_width_px / (double)V3_MODULE_COUNT;
-                u32 quiet_px = (u32)(pitch_guess * (double)V3_QUIET_MODULES + 0.5);
-                if (quiet_px > 0u && stripe_width_px + quiet_px <= width) {
-                    stripe_width_px += quiet_px;
-                }
-            }
-
-            double pitch_x = (double)stripe_width_px / (double)V3_MODULE_COUNT;
-            if (!(pitch_x > 0.9) || pitch_x > 64.0) {
-                if (dbg && probe_log_budget < 8u) {
-                    ++probe_log_budget;
-                    console_line(2, "debug v3 stripe probe: pitch_x out of range");
-                }
-                return false;
-            }
-            double start_base = probe_right ? ((double)width - (double)stripe_width_px) : 0.0;
-            double stripe_top_f = (double)stripe_top;
-            if (dbg && probe_log_budget < 8u) {
-                ++probe_log_budget;
-                console_write(2, "debug v3 stripe probe: side=");
-                console_write(2, probe_right ? "right" : "left");
-                console_write(2, " top=");
-                char buf[32];
-                u64_to_ascii((u64)stripe_top, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " height=");
-                u64_to_ascii((u64)stripe_height_px, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " width=");
-                u64_to_ascii((u64)stripe_width_px, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " pitch_x_milli=");
-                u64 pitch_x_milli = (u64)(pitch_x * 1000.0 + 0.5);
-                u64_to_ascii(pitch_x_milli, buf, sizeof(buf));
-                console_line(2, buf);
-            }
-
-            const double start_shifts[] = {0.0, 0.25, 0.5, 0.75};
-            const double top_shifts[] = {0.0, -0.25, 0.25, -0.5, 0.5};
-            for (u32 rows = 1u; rows <= 24u; ++rows) {
-                double pitch_y = (double)stripe_height_px / (double)rows;
-                if (!(pitch_y > 0.9) || pitch_y > 64.0) {
-                    continue;
-                }
-                ByteBuffer module_bits;
-                for (u32 ts = 0u; ts < (u32)(sizeof(top_shifts) / sizeof(top_shifts[0])); ++ts) {
-                    double top_try = stripe_top_f + top_shifts[ts] * pitch_y;
-                    if (top_try < 0.0) {
-                        continue;
-                    }
-                    for (u32 sh = 0u; sh < (u32)(sizeof(start_shifts) / sizeof(start_shifts[0])); ++sh) {
-                        double start_try = start_base + start_shifts[sh] * pitch_x;
-                        if (start_try < 0.0) {
-                            continue;
-                        }
-                        double pixel_width_f = pitch_x * (double)V3_MODULE_COUNT;
-                        if (start_try + pixel_width_f > (double)width + 0.5) {
-                            continue;
-                        }
-                        if (capture_stripe_v3_float(pixels, width, height, rows, top_try, start_try, pitch_x, pitch_y, module_bits) &&
-                            decode_from_bits_v3(module_bits, rows, values)) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        };
-
-        auto try_decode_at_pitch = [&](u32 module_pitch_x,
-                                       u32 module_pitch_y,
-                                       u32 max_offset,
-                                       u32 offset_step,
-                                       u32 max_starts,
-                                       const u32* start_candidates) -> bool {
-            if (module_pitch_x == 0u || module_pitch_y == 0u) {
-                return false;
-            }
-            if (offset_step == 0u) {
-                offset_step = 1u;
-            }
-            u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
-            if (pixel_width == 0u || pixel_width > width) {
-                return false;
-            }
-            ByteBuffer module_bits;
-            for (u32 rows = 1u; rows <= V3_MAX_ROWS; ++rows) {
-                u32 stripe_height_px = rows * module_pitch_y;
-                if (stripe_height_px == 0u || stripe_height_px > height) {
-                    continue;
-                }
-                u32 base_top = (height > stripe_height_px) ? (height - stripe_height_px) : 0u;
-                for (u32 offset = 0u; offset <= max_offset; offset += offset_step) {
-                    if (base_top < offset) {
-                        break;
-                    }
-                    u32 stripe_top = base_top - offset;
-                    for (u32 i = 0u; i < max_starts; ++i) {
-                        u32 start = start_candidates[i];
-                        if (start + pixel_width > width) {
-                            continue;
-                        }
-                        if (capture_stripe_v3(pixels, width, height, rows, stripe_top, start, module_pitch_x, module_pitch_y, module_bits) &&
-                            decode_from_bits_v3(module_bits, rows, values)) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        };
-
-        // Fast path: assume unscaled V3 pitch and common left/center/right alignment.
-        {
-            const u32 module_pitch_x = V3_MODULE_PITCH;
-            const u32 module_pitch_y = V3_MODULE_PITCH;
-            const u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
-            if (pixel_width > 0u && pixel_width <= width) {
-                u32 starts[3];
-                starts[0] = 0u;
-                starts[1] = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
-                starts[2] = (width >= pixel_width) ? (width - pixel_width) : 0u;
-                u32 max_offset = height;
-                if (max_offset > 512u) max_offset = 512u;
-                if (try_decode_at_pitch(module_pitch_x, module_pitch_y, max_offset, V3_MODULE_PITCH, 3u, starts)) {
-                    return true;
-                }
-            }
-        }
-
-        // Heuristic: try decoding at the bottom-left/bottom-right based on observed stripe bounds.
-        // This is especially important for nearest-neighbor scaled images with non-integer factors.
-        if (try_decode_from_bottom_probe(false)) {
-            return true;
-        }
-        if (try_decode_from_bottom_probe(true)) {
-            return true;
-        }
-
-        // Slow path (budgeted): try a small set of integer pitch candidates with a small alignment neighborhood.
-        // This is intentionally conservative to avoid pathological runtimes on images where the stripe is absent
-        // or badly distorted. More robust recovery is expected to occur later via affine-based decoding.
-        const u32 pitch_candidates[] = {3u, 4u, 5u, 6u, 8u, 10u, 12u};
-        u32 max_offset = height;
-        if (max_offset > 512u) max_offset = 512u;
-        if (max_offset > 128u) max_offset = 128u;
-
-	        for (u32 py_i = 0u; py_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++py_i) {
-	            u32 module_pitch_y = pitch_candidates[py_i];
-	            for (u32 px_i = 0u; px_i < (u32)(sizeof(pitch_candidates) / sizeof(pitch_candidates[0])); ++px_i) {
-	                u32 module_pitch_x = pitch_candidates[px_i];
-                u32 pixel_width = V3_MODULE_COUNT * module_pitch_x;
-                if (pixel_width == 0u || pixel_width > width) {
-                    continue;
-                }
-                u32 center_start = (width > pixel_width) ? (u32)((width - pixel_width) / 2u) : 0u;
-                u32 right_start = (width >= pixel_width) ? (width - pixel_width) : 0u;
-                u32 starts[9];
-                u32 start_count = 0u;
-                auto add_start = [&](u32 start) {
-                    for (u32 i = 0u; i < start_count; ++i) {
-                        if (starts[i] == start) return;
-                    }
-                    if (start_count < (u32)(sizeof(starts) / sizeof(starts[0]))) {
-                        starts[start_count++] = start;
-                    }
-                };
-                add_start(0u);
-                add_start(center_start);
-                add_start(right_start);
-                add_start((center_start > module_pitch_x) ? (center_start - module_pitch_x) : 0u);
-                add_start(center_start + module_pitch_x);
-                add_start((center_start > 2u * module_pitch_x) ? (center_start - 2u * module_pitch_x) : 0u);
-                add_start(center_start + 2u * module_pitch_x);
-
-                u32 offset_step = (module_pitch_y > 1u) ? (module_pitch_y / 2u) : 1u;
-                if (try_decode_at_pitch(module_pitch_x, module_pitch_y, max_offset, offset_step, start_count, starts)) {
-                    return true;
-                }
-	            }
-	        }
-
-		        // Float pitch path (budgeted): supports non-integer rescaling (e.g. 2.6x/2.4x).
-		        // Keep this *very* conservative: the generic float search can easily become
-		        // pathological on large images.
-		        {
-		            const double aspect = (width > 0u) ? ((double)height / (double)width) : 1.0;
-		            const u32 rows_limit = 16u;
-		            u32 max_offset_f = height;
-		            if (max_offset_f > 256u) max_offset_f = 256u;
-		            const u32 offset_step = 8u;
-		            const double base_pitches[] = {2.0, 3.0, 4.0, 5.0, 6.0, 7.0};
-		            const double deltas[] = {0.0};
-		            const double y_ratios[] = {0.90, 1.00, 1.10};
-		            const double start_shifts[] = {0.0, 0.5};
-		            for (u32 b = 0u; b < (u32)(sizeof(base_pitches) / sizeof(base_pitches[0])); ++b) {
-		                for (u32 d = 0u; d < (u32)(sizeof(deltas) / sizeof(deltas[0])); ++d) {
-		                    double pitch_x = base_pitches[b] + deltas[d];
-	                    if (!(pitch_x > 0.9)) {
-	                        continue;
-	                    }
-	                    double pixel_width_f = pitch_x * (double)V3_MODULE_COUNT;
-	                    if (!(pixel_width_f > 0.0) || pixel_width_f > (double)width) {
-	                        continue;
-	                    }
-	                    double starts[3];
-	                    starts[0] = 0.0;
-	                    starts[1] = ((double)width > pixel_width_f) ? (((double)width - pixel_width_f) * 0.5) : 0.0;
-	                    starts[2] = ((double)width >= pixel_width_f) ? ((double)width - pixel_width_f) : 0.0;
-	                    for (u32 yr = 0u; yr < (u32)(sizeof(y_ratios) / sizeof(y_ratios[0])); ++yr) {
-	                        double pitch_y = pitch_x * aspect * y_ratios[yr];
-	                        if (!(pitch_y > 0.9)) {
-	                            continue;
-	                        }
-	                        for (u32 rows = 1u; rows <= rows_limit; ++rows) {
-	                            double stripe_height_f = (double)rows * pitch_y;
-	                            if (!(stripe_height_f > 0.0) || stripe_height_f > (double)height) {
-	                                continue;
-	                            }
-	                            double base_top_f = ((double)height > stripe_height_f) ? ((double)height - stripe_height_f) : 0.0;
-	                            for (u32 offset = 0u; offset <= max_offset_f; offset += offset_step) {
-	                                double stripe_top_f = base_top_f - (double)offset;
-	                                if (stripe_top_f < 0.0) {
-	                                    break;
-	                                }
-	                                for (u32 si = 0u; si < 3u; ++si) {
-	                                    for (u32 sh = 0u; sh < (u32)(sizeof(start_shifts) / sizeof(start_shifts[0])); ++sh) {
-	                                        double start_f = starts[si] + start_shifts[sh] * pitch_x;
-	                                        if (start_f < 0.0) {
-	                                            continue;
-	                                        }
-	                                        if (start_f + pixel_width_f > (double)width + 0.5) {
-	                                            continue;
-	                                        }
-	                                        ByteBuffer module_bits;
-	                                        if (capture_stripe_v3_float(pixels, width, height, rows, stripe_top_f, start_f, pitch_x, pitch_y, module_bits) &&
-	                                            decode_from_bits_v3(module_bits, rows, values)) {
-	                                            return true;
-	                                        }
-	                                    }
-	                                }
-	                            }
-	                        }
-	                    }
-	                }
-	            }
-	        }
-
-	        return false;
-	    }
-
-    static bool decode_v3_affine(const u8* pixels,
-                                 u32 width,
-                                 u32 height,
-                                 const AffineTransform& affine,
-                                 double skew_y_pixels,
-                                 double skew_span,
-                                 u32 logical_width,
-                                 u32 logical_height,
-                                 u32 footer_rows,
-                                 Values& values) {
-        if (!pixels || width == 0u || height == 0u || logical_width == 0u || logical_height == 0u) {
-            return false;
-        }
-        u32 pixel_width = V3_MODULE_COUNT * V3_MODULE_PITCH;
-        u32 left_start = 0u;
-        u32 right_start = (logical_width >= pixel_width) ? (logical_width - pixel_width) : 0u;
-        u32 center_start = (logical_width > pixel_width) ? (u32)((logical_width - pixel_width) / 2u) : 0u;
-        u32 rows_limit = V3_MAX_ROWS;
-        u32 hint_rows = (footer_rows > 0u) ? (footer_rows / V3_MODULE_PITCH) : 0u;
-        if (hint_rows > 0u && hint_rows < rows_limit) {
-            rows_limit = hint_rows;
-        }
-        u32 max_offset = (logical_height > 512u) ? 512u : logical_height;
-        for (u32 rows = 1u; rows <= rows_limit; ++rows) {
-            u32 stripe_height_px = rows * V3_MODULE_PITCH;
-            if (stripe_height_px == 0u || stripe_height_px > logical_height) {
-                continue;
-            }
-            u32 stripe_top_logical = (logical_height > stripe_height_px) ? (logical_height - stripe_height_px) : 0u;
-            if (footer_rows > stripe_height_px && footer_rows < logical_height) {
-                stripe_top_logical = logical_height - footer_rows;
-            }
-            for (u32 offset = 0u; offset <= max_offset; offset += V3_MODULE_PITCH) {
-                if (stripe_top_logical < offset) {
-                    break;
-                }
-                double stripe_top = (double)stripe_top_logical - (double)offset;
-                ByteBuffer module_bits;
-                if (capture_stripe_v3_affine(pixels, width, height, rows, affine, skew_y_pixels, skew_span, stripe_top, left_start, module_bits)) {
-                    if (decode_from_bits_v3(module_bits, rows, values)) {
-                        return true;
-                    }
-                }
-                if (right_start != left_start &&
-                    capture_stripe_v3_affine(pixels, width, height, rows, affine, skew_y_pixels, skew_span, stripe_top, right_start, module_bits) &&
-                    decode_from_bits_v3(module_bits, rows, values)) {
-                    return true;
-                }
-                if (center_start != left_start && center_start != right_start &&
-                    capture_stripe_v3_affine(pixels, width, height, rows, affine, skew_y_pixels, skew_span, stripe_top, center_start, module_bits) &&
-                    decode_from_bits_v3(module_bits, rows, values)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    static bool decode_affine(const StripeSpec& spec,
-                              const u8* pixels,
-                              u32 width,
-                              u32 height,
-                              const AffineTransform& affine,
-                              double skew_y_pixels,
-                              double skew_span,
-                              u32 logical_width,
-                              u32 logical_height,
-                              u32 footer_rows,
-                              Values& values) {
-        if (!pixels || width == 0u || height == 0u || logical_width == 0u || logical_height == 0u) {
-            return false;
-        }
-        u32 stripe_height_px = stripe_height(spec);
-        u32 stripe_top_logical = (logical_height > stripe_height_px) ? (logical_height - stripe_height_px) : 0u;
-        if (footer_rows > stripe_height_px && footer_rows < logical_height) {
-            stripe_top_logical = logical_height - footer_rows;
-        }
-        u32 left_start = 0u;
-        u32 right_start = (logical_width >= pixel_width(spec)) ? (logical_width - pixel_width(spec)) : 0u;
-        auto decode_at_affine = [&](u32 start_column) -> bool {
-            ByteBuffer module_bits;
-            usize total = (usize)module_count(spec) * (usize)spec.rows;
-            if (!module_bits.ensure(total)) {
-                return false;
-            }
-            module_bits.size = total;
-            for (u32 row = 0u; row < spec.rows; ++row) {
-                if (!capture_module_row_affine(spec,
-                                               pixels,
-                                               width,
-                                               height,
-                                               affine,
-                                               skew_y_pixels,
-                                               skew_span,
-                                               (double)stripe_top_logical,
-                                               start_column,
-                                               row,
-                                               module_bits.data + (usize)row * module_count(spec))) {
-                    return false;
-                }
-            }
-            return decode_from_bits(spec, module_bits, values);
-        };
-        if (decode_at_affine(left_start)) {
-            return true;
-        }
-        if (right_start != left_start) {
-            if (decode_at_affine(right_start)) {
-                return true;
-            }
-        }
-        return false;
-    }
-}
-
 namespace MetadataTile {
     using namespace makocode;
 
     static const u32 TILE_SIDE = 48u;
     static const u32 TILE_BORDER = 1u;
-    [[maybe_unused]] static const u32 TILE_INNER_SIDE = TILE_SIDE - TILE_BORDER * 2u;
     static const u32 TILE_HEADER_BITS = 32u;
     static const u32 TILE_HEADER_REPETITIONS_V1 = 5u;
     static const u32 TILE_HEADER_REPETITIONS = 5u;
@@ -12443,7 +10024,7 @@ namespace MetadataTile {
     }
 
     static u8 compute_crc8(const u8* data, usize length) {
-        // Same CRC-8 polynomial as FooterStripe uses (0x07).
+        // CRC-8 polynomial 0x07.
         u8 crc = 0u;
         for (usize i = 0u; i < length; ++i) {
             crc ^= data[i];
@@ -12638,129 +10219,6 @@ namespace MetadataTile {
         placement.x0 = (u32)x0;
         placement.y0 = (u32)y0;
         return placement;
-    }
-
-    [[maybe_unused]] static void mark_tile_mask(const Placement& placement,
-                                                u32 width_pixels,
-                                                u32 data_height_pixels,
-                                                u8* mask_data) {
-        if (!placement.valid || !mask_data) return;
-        if (placement.x0 + TILE_SIDE > width_pixels) return;
-        if (placement.y0 + TILE_SIDE > data_height_pixels) return;
-        for (u32 dy = 0u; dy < TILE_SIDE; ++dy) {
-            u32 y = placement.y0 + dy;
-            for (u32 dx = 0u; dx < TILE_SIDE; ++dx) {
-                u32 x = placement.x0 + dx;
-                usize idx = (usize)y * (usize)width_pixels + (usize)x;
-                mask_data[idx] = 1u;
-            }
-        }
-    }
-
-    [[maybe_unused]] static bool render_tile(const Values& values,
-                                             const Placement& placement,
-                                             u32 width_pixels,
-                                             u32 height_pixels,
-                                             u32 data_height_pixels,
-                                             u8* pixel_data_rgb,
-                                             const PaletteColor& light,
-                                             const PaletteColor& dark) {
-        if (!placement.valid) return false;
-        if (!pixel_data_rgb) return false;
-        if (placement.x0 + TILE_SIDE > width_pixels) return false;
-        if (placement.y0 + TILE_SIDE > data_height_pixels) return false;
-        // Build metadata bytes then RS codeword.
-        ByteBuffer metadata;
-        if (!encode_metadata_bytes(values, metadata)) return false;
-        ByteBuffer codeword;
-        u32 parity_bytes = tile_rs_parity_bytes(TILE_SCHEMA_VERSION, values.palette_count);
-        u32 payload_repetitions = tile_payload_bit_repetitions(TILE_SCHEMA_VERSION, values.palette_count);
-        if (!rs_encode_with_parity(metadata, parity_bytes, codeword)) return false;
-        if (metadata.size > 255u) return false;
-
-        // Build 32-bit header: magic16 | schema4 | meta_len8 | palette_count4
-        u32 meta_len = (u32)metadata.size;
-        if (meta_len > 255u) return false;
-        u32 header = 0u;
-        header |= (u32)0x4D4Du << 16; // 'M''K' as 16-bit marker
-        header |= (TILE_SCHEMA_VERSION & 0x0Fu) << 12;
-        header |= (meta_len & 0xFFu) << 4;
-        header |= (values.palette_count & 0x0Fu);
-
-        auto set_module = [&](u32 x, u32 y, u8 bit) {
-            if (x >= width_pixels || y >= height_pixels) return;
-            usize idx = ((usize)y * (usize)width_pixels + (usize)x) * 3u;
-            const PaletteColor& c = bit ? dark : light;
-            pixel_data_rgb[idx + 0u] = c.r;
-            pixel_data_rgb[idx + 1u] = c.g;
-            pixel_data_rgb[idx + 2u] = c.b;
-        };
-
-        // Outer border: alternating pattern for sanity.
-        for (u32 y = 0u; y < TILE_SIDE; ++y) {
-            for (u32 x = 0u; x < TILE_SIDE; ++x) {
-                bool border = (x < TILE_BORDER) || (y < TILE_BORDER) ||
-                              (x >= TILE_SIDE - TILE_BORDER) || (y >= TILE_SIDE - TILE_BORDER);
-                if (border) {
-                    u8 bit = (u8)(((x + y) & 1u) ? 1u : 0u);
-                    set_module(placement.x0 + x, placement.y0 + y, bit);
-                } else {
-                    // Initialize inner area to light.
-                    set_module(placement.x0 + x, placement.y0 + y, 0u);
-                }
-            }
-        }
-
-        // Compute inner hole bounds (centered in tile).
-        u32 hole_x0 = (TILE_SIDE - TILE_HOLE_SIDE) / 2u;
-        u32 hole_y0 = (TILE_SIDE - TILE_HOLE_SIDE) / 2u;
-        u32 hole_x1 = hole_x0 + TILE_HOLE_SIDE;
-        u32 hole_y1 = hole_y0 + TILE_HOLE_SIDE;
-
-        // Header: repeat across first TILE_HEADER_REPETITIONS inner rows.
-        for (u32 rep = 0u; rep < TILE_HEADER_REPETITIONS; ++rep) {
-            u32 inner_y = TILE_BORDER + rep;
-            if (inner_y >= TILE_SIDE - TILE_BORDER) break;
-            for (u32 bit = 0u; bit < TILE_HEADER_BITS; ++bit) {
-                u32 inner_x = TILE_BORDER + bit;
-                if (inner_x >= TILE_SIDE - TILE_BORDER) break;
-                u8 value_bit = (u8)((header >> bit) & 1u);
-                set_module(placement.x0 + inner_x, placement.y0 + inner_y, value_bit);
-            }
-        }
-
-        // Payload bits: fill remaining inner modules (skipping header rows and hole).
-        usize total_bits = codeword.size * 8u;
-        usize total_module_bits = total_bits * payload_repetitions;
-        usize module_cursor = 0u;
-        for (u32 inner_y = TILE_BORDER; inner_y < TILE_SIDE - TILE_BORDER; ++inner_y) {
-            // skip header rows
-            if (inner_y < TILE_BORDER + TILE_HEADER_REPETITIONS) {
-                continue;
-            }
-            for (u32 inner_x = TILE_BORDER; inner_x < TILE_SIDE - TILE_BORDER; ++inner_x) {
-                // Skip hole region.
-                if (inner_x >= hole_x0 && inner_x < hole_x1 && inner_y >= hole_y0 && inner_y < hole_y1) {
-                    continue;
-                }
-                if (module_cursor >= total_module_bits) {
-                    break;
-                }
-                usize bit_cursor = module_cursor / payload_repetitions;
-                usize byte_index = bit_cursor / 8u;
-                u32 bit_index = (u32)(bit_cursor % 8u);
-                u8 byte = codeword.data[byte_index];
-                u8 bit = (u8)((byte >> bit_index) & 1u);
-                set_module(placement.x0 + inner_x, placement.y0 + inner_y, bit);
-                ++module_cursor;
-            }
-            if (module_cursor >= total_module_bits) break;
-        }
-        // Require full fit.
-        if (module_cursor != total_module_bits) {
-            return false;
-        }
-        return true;
     }
 
     static bool build_tile_bits(const Values& values,
@@ -14508,17 +11966,6 @@ static bool compute_footer_layout(u32 page_width_pixels,
     } else {
         layout.has_text = false;
     }
-    // Footer barcode has been removed; disable all stripe fields.
-    layout.stripe_module_pitch = 0u;
-    layout.stripe_rows = 0u;
-    layout.stripe_gap_pixels = 0u;
-    layout.stripe_height_pixels = 0u;
-    layout.stripe_data_bits = 0u;
-    layout.stripe_quiet_modules = 0u;
-    layout.stripe_sentinel_modules = 0u;
-    layout.stripe_module_count = 0u;
-    layout.stripe_pixel_width = 0u;
-
     u64 footer_height = 0u;
     if (has_text) {
         footer_height = text_height_pixels;
@@ -14531,7 +11978,6 @@ static bool compute_footer_layout(u32 page_width_pixels,
     if (layout.data_height_pixels == 0u) {
         return false;
     }
-    layout.stripe_top_row = layout.data_height_pixels;
     if (layout.has_text) {
         layout.text_top_row = layout.data_height_pixels;
         if ((u64)layout.text_top_row + (u64)layout.glyph_height_pixels > page_height_pixels) {
@@ -15596,8 +13042,6 @@ struct PpmParserState {
     u64 page_bits_value;
     bool has_footer_rows;
     u64 footer_rows_value;
-    bool has_footer_stripe;
-    FooterStripe::Values footer_stripe_values;
     bool has_rotation_degrees;
     double rotation_degrees_value;
     bool has_rotation_width;
@@ -15673,8 +13117,6 @@ struct PpmParserState {
           page_bits_value(0u),
           has_footer_rows(false),
           footer_rows_value(0u),
-          has_footer_stripe(false),
-          footer_stripe_values(),
           has_rotation_degrees(false),
           rotation_degrees_value(0.0),
           has_rotation_width(false),
@@ -15722,8 +13164,34 @@ struct PpmParserState {
 static bool ppm_append_extended_metadata(const PpmParserState& state,
                                          makocode::ByteBuffer& output);
 
-static void apply_footer_stripe_metadata(PpmParserState& state,
-                                         const FooterStripe::Values& values);
+static void metadata_log_mismatch(const char* label,
+                                 u64 header_value,
+                                 u64 tile_value) {
+    if (!debug_logging_enabled()) {
+        return;
+    }
+    char header_buffer[32];
+    char tile_buffer[32];
+    u64_to_ascii(header_value, header_buffer, sizeof(header_buffer));
+    u64_to_ascii(tile_value, tile_buffer, sizeof(tile_buffer));
+    console_write(2, "debug metadata mismatch ");
+    console_write(2, label);
+    console_write(2, ": header=");
+    console_write(2, header_buffer);
+    console_write(2, " tile=");
+    console_line(2, tile_buffer);
+}
+
+static void update_metadata_field(const char* label,
+                                  bool& flag,
+                                  u64& target,
+                                  u64 value) {
+    if (flag && target != value) {
+        metadata_log_mismatch(label, target, value);
+    }
+    flag = true;
+    target = value;
+}
 
 static void apply_metadata_tile_metadata(PpmParserState& state,
                                          const MetadataTile::Values& values,
@@ -18793,45 +16261,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
 
-    FooterStripe::Values stripe_values = {};
-    bool stripe_available = false;
-    if (kFooterStripeEnabled && width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
-        if (!tile_available) {
-            stripe_available = FooterStripe::decode_v3(pixel_data, (u32)width, (u32)height, stripe_values);
-            if (!stripe_available) {
-                stripe_available = FooterStripe::decode(FooterStripe::SPEC_V2, pixel_data, (u32)width, (u32)height, stripe_values);
-            }
-            if (!stripe_available) {
-                stripe_available = FooterStripe::decode(FooterStripe::SPEC_V1, pixel_data, (u32)width, (u32)height, stripe_values);
-            }
-            if (!stripe_available) {
-                u64 logical_guess = estimate_square_page_from_image(width, height);
-                if (logical_guess && logical_guess <= 0xFFFFFFFFull) {
-                    AffineTransform scale_affine = {};
-                    scale_affine.a00 = (double)width / (double)logical_guess;
-                    scale_affine.a11 = (double)height / (double)logical_guess;
-                    scale_affine.a01 = 0.0;
-                    scale_affine.a10 = 0.0;
-                    scale_affine.tx = 0.0;
-                    scale_affine.ty = 0.0;
-                    u32 footer_hint = state.has_footer_rows ? (u32)state.footer_rows_value : 0u;
-                    stripe_available = FooterStripe::decode_v3_affine(pixel_data,
-                                                                      (u32)width,
-                                                                      (u32)height,
-                                                                      scale_affine,
-                                                                      0.0,
-                                                                      (double)logical_guess,
-                                                                      (u32)logical_guess,
-                                                                      (u32)logical_guess,
-                                                                      footer_hint,
-                                                                      stripe_values);
-                }
-            }
-        }
-    }
-    // If both metadata tile and footer stripe are missing, try a simple nearest-neighbor
-    // downsample to an estimated logical square page size, then retry metadata tile decode.
-        if (!tile_available && !stripe_available) {
+    // If the metadata tile is missing, try a simple nearest-neighbor downsample
+    // to an estimated logical square page size, then retry the tile decode.
+    if (!tile_available) {
         bool downsample_buffer_ready = false;
         u32 downsample_buffer_w = 0u;
         u32 downsample_buffer_h = 0u;
@@ -19089,43 +16521,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                          : base_height);
         }
     }
-    if (stripe_available) {
-        bool sane = (stripe_values.page_bits > 0u) &&
-                    (stripe_values.footer_rows > 0u) &&
-                    (stripe_values.page_index > 0u) &&
-                    (stripe_values.page_count > 0u) &&
-                    (stripe_values.page_width_pixels > 0u) &&
-                    (stripe_values.page_height_pixels > 0u);
-        if (!sane) {
-            stripe_available = false;
-        }
-    }
-    if (stripe_available) {
-        state.has_footer_stripe = true;
-        state.footer_stripe_values = stripe_values;
-        apply_footer_stripe_metadata(state, stripe_values);
-        if (debug_logging_enabled()) {
-            console_write(2, "debug footer stripe: ecc=");
-            console_write(2, stripe_values.ecc_enabled ? "1" : "0");
-            console_write(2, " block_data=");
-            char buf_block[32];
-            char buf_parity[32];
-            char buf_blocks[32];
-            char buf_orig[32];
-            u64_to_ascii((u64)stripe_values.ecc_block_data, buf_block, sizeof(buf_block));
-            u64_to_ascii((u64)stripe_values.ecc_parity, buf_parity, sizeof(buf_parity));
-            u64_to_ascii(stripe_values.ecc_block_count, buf_blocks, sizeof(buf_blocks));
-            u64_to_ascii(stripe_values.ecc_original_bytes, buf_orig, sizeof(buf_orig));
-            console_write(2, buf_block);
-            console_write(2, " parity=");
-            console_write(2, buf_parity);
-            console_write(2, " blocks=");
-            console_write(2, buf_blocks);
-            console_write(2, " orig=");
-            console_line(2, buf_orig);
-        }
-    } else if (!tile_available) {
-        // No metadata tile (and footer stripes are disabled): cannot recover layout.
+    if (!tile_available) {
+        // Without a metadata tile, the page layout cannot be recovered.
         if (debug_logging_enabled() && pixel_buffer.data && base_width <= 0xFFFFFFFFull && base_height <= 0xFFFFFFFFull) {
             u32 base_data_height = (u32)((state.has_footer_rows && state.footer_rows_value < base_height)
                                              ? (base_height - state.footer_rows_value)
@@ -19135,7 +16532,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         console_line(1, "decode: metadata tile missing; aborting (no metadata available)");
         return 1;
     }
-    if (!state.has_footer_rows && !tile_available && !stripe_available) {
+    if (!state.has_footer_rows && !tile_available) {
         auto row_black_count = [&](u64 row_index) -> u64 {
             if (!pixel_data || row_index >= height || width == 0u) return 0u;
             u64 count = 0u;
@@ -19232,7 +16629,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     bool force_monochrome = false;
     if (tile_available && tile_values.palette_count <= 2u) {
         force_monochrome = true;
-    } else if (!tile_available && !stripe_available && !has_custom_palette_text) {
+    } else if (!tile_available && !has_custom_palette_text) {
         // Default palette is White/Black when no metadata or stripe is present.
         force_monochrome = true;
     }
@@ -20639,107 +18036,11 @@ struct RotationEstimateCandidate {
         console_write(2, " footer_rows=");
         console_line(2, foot_buf);
     }
-    if (kFooterStripeEnabled && !state.has_footer_stripe && state.has_affine_transform) {
-        double skew_span = state.has_skew_src_width ? (double)state.skew_src_width_value : (double)width;
-        if (skew_span <= 0.0) {
-            skew_span = (double)width;
-        }
-        double skew_pixels = state.has_skew_y_pixels ? state.skew_y_pixels_value : 0.0;
-        FooterStripe::Values affine_stripe = {};
-        bool affine_ok = FooterStripe::decode_v3_affine(pixel_data,
-                                                        (u32)width,
-                                                        (u32)height,
-                                                        state.affine_transform,
-                                                        skew_pixels,
-                                                        skew_span,
-                                                        (u32)logical_width,
-                                                        (u32)logical_height,
-                                                        (u32)footer_rows,
-                                                        affine_stripe);
-        if (!affine_ok) {
-            affine_ok = FooterStripe::decode_affine(FooterStripe::SPEC_V2,
-                                                    pixel_data,
-                                                    (u32)width,
-                                                    (u32)height,
-                                                    state.affine_transform,
-                                                    skew_pixels,
-                                                    skew_span,
-                                                    (u32)logical_width,
-                                                    (u32)logical_height,
-                                                    (u32)footer_rows,
-                                                    affine_stripe);
-        }
-        if (!affine_ok) {
-            affine_ok = FooterStripe::decode_affine(FooterStripe::SPEC_V1,
-                                                    pixel_data,
-                                                    (u32)width,
-                                                    (u32)height,
-                                                    state.affine_transform,
-                                                    skew_pixels,
-                                                    skew_span,
-                                                    (u32)logical_width,
-                                                    (u32)logical_height,
-                                                    (u32)footer_rows,
-                                                    affine_stripe);
-        }
-        if (affine_ok) {
-            state.has_footer_stripe = true;
-            state.footer_stripe_values = affine_stripe;
-            apply_footer_stripe_metadata(state, affine_stripe);
-            if (debug_logging_enabled()) {
-                char buf[64];
-                console_write(2, "debug affine-matrix: a00=");
-                format_fixed_3(state.affine_transform.a00, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " a01=");
-                format_fixed_3(state.affine_transform.a01, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " a10=");
-                format_fixed_3(state.affine_transform.a10, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " a11=");
-                format_fixed_3(state.affine_transform.a11, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " tx=");
-                format_fixed_3(state.affine_transform.tx, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " ty=");
-                format_fixed_3(state.affine_transform.ty, buf, sizeof(buf));
-                console_line(2, buf);
-                console_write(2, "debug affine-skew: y_pixels=");
-                format_fixed_3(skew_pixels, buf, sizeof(buf));
-                console_write(2, buf);
-                console_write(2, " span=");
-                format_fixed_3(skew_span, buf, sizeof(buf));
-                console_line(2, buf);
-            }
-            if (debug_logging_enabled()) {
-                console_write(2, "debug footer stripe (affine): ecc=");
-                console_write(2, affine_stripe.ecc_enabled ? "1" : "0");
-                console_write(2, " block_data=");
-                char buf_block[32];
-                char buf_parity[32];
-                char buf_blocks[32];
-                char buf_orig[32];
-                u64_to_ascii((u64)affine_stripe.ecc_block_data, buf_block, sizeof(buf_block));
-                u64_to_ascii((u64)affine_stripe.ecc_parity, buf_parity, sizeof(buf_parity));
-                u64_to_ascii(affine_stripe.ecc_block_count, buf_blocks, sizeof(buf_blocks));
-                u64_to_ascii(affine_stripe.ecc_original_bytes, buf_orig, sizeof(buf_orig));
-                console_write(2, buf_block);
-                console_write(2, " parity=");
-                console_write(2, buf_parity);
-                console_write(2, " blocks=");
-                console_write(2, buf_blocks);
-                console_write(2, " orig=");
-                console_line(2, buf_orig);
-            }
-        }
-    }
     makocode::ByteBuffer fiducial_mask;
     u64 reserved_data_pixels = 0u;
-    // If the footer stripe is absent (new layout), keep reserving the metadata tile region
-    // even when the tile decode failed so the payload bitstream stays aligned with the encoder.
-    bool reserve_metadata_tile = tile_available || !stripe_available;
+    // Reserve the metadata tile region even when decoding it failed, so payload
+    // extraction stays aligned with the encoder.
+    bool reserve_metadata_tile = true;
     if (!compute_fiducial_reservation((u32)logical_width,
                                       (u32)logical_height,
                                       (u32)data_height,
@@ -22495,342 +19796,45 @@ static bool append_bits_from_buffer(makocode::BitWriter& writer,
     return true;
 }
 
-static void log_footer_stripe_mismatch(const char* label,
-                                       u64 first_value,
-                                       u64 second_value) {
-    if (!debug_logging_enabled()) {
-        return;
-    }
-    char first_buffer[32];
-    char second_buffer[32];
-    u64_to_ascii(first_value, first_buffer, sizeof(first_buffer));
-    u64_to_ascii(second_value, second_buffer, sizeof(second_buffer));
-    console_write(2, "debug footer stripe mismatch ");
-    console_write(2, label);
-    console_write(2, ": first=");
-    console_write(2, first_buffer);
-    console_write(2, " second=");
-    console_line(2, second_buffer);
-}
-
-static bool footer_stripe_values_equal(const FooterStripe::Values& a,
-                                       const FooterStripe::Values& b) {
-    if (a.page_bits != b.page_bits) {
-        log_footer_stripe_mismatch("page_bits", a.page_bits, b.page_bits);
-        return false;
-    }
-    if (a.page_count != b.page_count) {
-        log_footer_stripe_mismatch("page_count", a.page_count, b.page_count);
-        return false;
-    }
-    if (a.page_width_pixels != b.page_width_pixels) {
-        log_footer_stripe_mismatch("page_width_px", a.page_width_pixels, b.page_width_pixels);
-        return false;
-    }
-    if (a.page_height_pixels != b.page_height_pixels) {
-        log_footer_stripe_mismatch("page_height_px", a.page_height_pixels, b.page_height_pixels);
-        return false;
-    }
-	if (a.footer_rows != b.footer_rows) {
-	    log_footer_stripe_mismatch("footer_rows", a.footer_rows, b.footer_rows);
-	    return false;
-	}
-	if (a.fiducial_marker_size_pixels != b.fiducial_marker_size_pixels) {
-	    log_footer_stripe_mismatch("fiducial_marker_size_px", a.fiducial_marker_size_pixels, b.fiducial_marker_size_pixels);
-	    return false;
-	}
-		if (a.ecc_enabled != b.ecc_enabled) {
-		    log_footer_stripe_mismatch("ecc", a.ecc_enabled ? 1ull : 0ull, b.ecc_enabled ? 1ull : 0ull);
-		    return false;
-		}
-    if (a.ecc_block_data != b.ecc_block_data) {
-        log_footer_stripe_mismatch("ecc_block_data", a.ecc_block_data, b.ecc_block_data);
-        return false;
-    }
-    if (a.ecc_parity != b.ecc_parity) {
-        log_footer_stripe_mismatch("ecc_parity", a.ecc_parity, b.ecc_parity);
-        return false;
-    }
-    if (a.ecc_block_count != b.ecc_block_count) {
-        log_footer_stripe_mismatch("ecc_block_count", a.ecc_block_count, b.ecc_block_count);
-        return false;
-    }
-    if (a.ecc_original_bytes != b.ecc_original_bytes) {
-        log_footer_stripe_mismatch("ecc_original_bytes", a.ecc_original_bytes, b.ecc_original_bytes);
-        return false;
-    }
-    if (a.has_palette != b.has_palette) {
-        log_footer_stripe_mismatch("palette_flag", a.has_palette ? 1ull : 0ull, b.has_palette ? 1ull : 0ull);
-        return false;
-    }
-    if (a.has_palette) {
-        if (a.palette_base != b.palette_base) {
-            log_footer_stripe_mismatch("palette_base", a.palette_base, b.palette_base);
-            return false;
-        }
-        if (a.palette_length != b.palette_length) {
-            log_footer_stripe_mismatch("palette_length", a.palette_length, b.palette_length);
-            return false;
-        }
-        for (u16 i = 0u; i < a.palette_length && i < b.palette_length; ++i) {
-            if (a.palette_bytes[i] != b.palette_bytes[i]) {
-                log_footer_stripe_mismatch("palette_bytes", a.palette_bytes[i], b.palette_bytes[i]);
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-static void stripe_metadata_log_mismatch(const char* label,
-                                         u64 header_value,
-                                         u64 stripe_value) {
-    if (!debug_logging_enabled()) {
-        return;
-    }
-    char header_buffer[32];
-    char stripe_buffer[32];
-    u64_to_ascii(header_value, header_buffer, sizeof(header_buffer));
-    u64_to_ascii(stripe_value, stripe_buffer, sizeof(stripe_buffer));
-    console_write(2, "debug footer stripe mismatch ");
-    console_write(2, label);
-    console_write(2, ": header=");
-    console_write(2, header_buffer);
-    console_write(2, " stripe=");
-    console_line(2, stripe_buffer);
-}
-
-static void update_stripe_metadata_field(const char* label,
-                                         bool& flag,
-                                         u64& target,
-                                         u64 value) {
-    if (flag && target != value) {
-        stripe_metadata_log_mismatch(label, target, value);
-    }
-    flag = true;
-    target = value;
-}
-
-static void apply_footer_stripe_metadata(PpmParserState& state,
-                                         const FooterStripe::Values& values) {
-    // The footer stripe stores the payload bit-count that appears in the 64-bit frame
-    // header. This lets us recover payload length without relying on PPM comments, and
-    // still derive the total frame bit-count (payload + 64 header bits) for page
-    // extraction heuristics.
-    const u64 payload_bits = values.page_bits;
-    const u64 frame_bits = payload_bits + 64u;
-    update_stripe_metadata_field("MAKOCODE_BITS", state.has_bits, state.bits_value, payload_bits);
-    update_stripe_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, frame_bits);
-    update_stripe_metadata_field("page_count", state.has_page_count, state.page_count_value, values.page_count);
-    update_stripe_metadata_field("page_index", state.has_page_index, state.page_index_value, values.page_index);
-	    update_stripe_metadata_field("page_width_px", state.has_page_width_pixels, state.page_width_pixels_value, values.page_width_pixels);
-	    update_stripe_metadata_field("page_height_px", state.has_page_height_pixels, state.page_height_pixels_value, values.page_height_pixels);
-	    update_stripe_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, values.footer_rows);
-	    if (values.fiducial_marker_size_pixels > 0u) {
-	        update_stripe_metadata_field("MAKOCODE_FIDUCIAL_SIZE",
-	                                     state.has_fiducial_size,
-	                                     state.fiducial_size_value,
-	                                     (u64)values.fiducial_marker_size_pixels);
-	        // Derive the remaining fiducial grid metadata deterministically from the
-	        // page geometry and compiled defaults. This keeps the footer stripe small
-	        // (more decodable after scaling) while staying print/scan safe.
-	        u32 marker_size = values.fiducial_marker_size_pixels;
-	        if (marker_size == 0u) {
-	            marker_size = 1u;
-	        }
-	        u32 spacing = g_fiducial_defaults.spacing_pixels;
-	        if (spacing == 0u) {
-	            spacing = marker_size;
-	        }
-	        u32 margin = g_fiducial_defaults.margin_pixels;
-	        u32 expected_width = values.page_width_pixels;
-	        u32 expected_height = values.page_height_pixels;
-	        if (expected_width > 0u && expected_height > 0u) {
-	            u32 footer_rows = (values.footer_rows <= 0xFFFFFFFFull) ? (u32)values.footer_rows : 0u;
-	            u32 data_height = (expected_height > footer_rows) ? (expected_height - footer_rows) : expected_height;
-	            double min_x = (margin < expected_width) ? (double)margin : 0.0;
-	            double max_x = (expected_width > margin)
-	                               ? (double)(expected_width - 1u - margin)
-	                               : (expected_width ? (double)(expected_width - 1u) : 0.0);
-	            if (max_x < min_x) max_x = min_x;
-	            double min_y = (margin < data_height) ? (double)margin : 0.0;
-	            double max_y = (data_height > margin)
-	                               ? (double)(data_height - 1u - margin)
-	                               : (data_height ? (double)(data_height - 1u) : 0.0);
-	            if (max_y < min_y) max_y = min_y;
-	            double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
-	            double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
-	            u32 columns = 1u;
-	            if (spacing > 0u && available_width > 0.0) {
-	                double span = available_width / (double)spacing;
-	                if (span < 0.0) span = 0.0;
-	                u64 additional = (u64)span;
-	                if (additional > 0xFFFFFFFFull - 1ull) additional = 0xFFFFFFFFull - 1ull;
-	                columns = (u32)(additional + 1ull);
-	            }
-	            if (columns == 0u) columns = 1u;
-	            u32 rows = 1u;
-	            if (spacing > 0u && available_height > 0.0) {
-	                double span = available_height / (double)spacing;
-	                if (span < 0.0) span = 0.0;
-	                u64 additional = (u64)span;
-	                if (additional > 0xFFFFFFFFull - 1ull) additional = 0xFFFFFFFFull - 1ull;
-	                rows = (u32)(additional + 1ull);
-	            }
-	            if (rows == 0u) rows = 1u;
-	            if (columns > 1u) {
-	                double span = (double)spacing * (double)(columns - 1u);
-	                while (columns > 1u && span > available_width + 1e-6) {
-	                    --columns;
-	                    span = (double)spacing * (double)(columns - 1u);
-	                }
-	            }
-	            if (rows > 1u) {
-	                double span = (double)spacing * (double)(rows - 1u);
-	                while (rows > 1u && span > available_height + 1e-6) {
-	                    --rows;
-	                    span = (double)spacing * (double)(rows - 1u);
-	                }
-	            }
-	            update_stripe_metadata_field("MAKOCODE_FIDUCIAL_MARGIN",
-	                                         state.has_fiducial_margin,
-	                                         state.fiducial_margin_value,
-	                                         (u64)margin);
-	            update_stripe_metadata_field("MAKOCODE_FIDUCIAL_COLUMNS",
-	                                         state.has_fiducial_columns,
-	                                         state.fiducial_columns_value,
-	                                         (u64)columns);
-		            update_stripe_metadata_field("MAKOCODE_FIDUCIAL_ROWS",
-		                                         state.has_fiducial_rows,
-		                                         state.fiducial_rows_value,
-		                                         (u64)rows);
-
-                    // Reconstruct the subgrid offsets deterministically. These were previously
-                    // communicated via PPM comment headers, but print/scan will not preserve
-                    // them. Without offsets the fiducial subgrid transform assumes control
-                    // points span the full image, which can distort pristine images.
-                    u32 sub_cols = (columns > 0u) ? (columns - 1u) : 0u;
-                    if (sub_cols > 0u && (sub_cols + 1u) <= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
-                        double total_phys_width = available_width;
-                        if (total_phys_width <= 0.0) {
-                            total_phys_width = (double)sub_cols;
-                        }
-                        double width_scale = (double)expected_width / total_phys_width;
-                        double physical_span = (sub_cols > 0u) ? (available_width / (double)sub_cols) : 0.0;
-                        if (physical_span <= 0.0) {
-                            physical_span = 1.0;
-                        }
-                        u64 assigned = 0u;
-                        state.has_fiducial_col_offsets = true;
-                        state.fiducial_col_offset_count = sub_cols + 1u;
-                        state.fiducial_col_offsets[0u] = 0u;
-                        for (u32 i = 0u; i < sub_cols; ++i) {
-                            double scaled = physical_span * width_scale;
-                            double accum = (double)assigned + scaled;
-                            u64 target = (u64)(accum + 0.5);
-                            if (target <= assigned) {
-                                target = assigned + 1u;
-                            }
-                            if ((i + 1u) == sub_cols || target > (u64)expected_width) {
-                                target = (u64)expected_width;
-                            }
-                            state.fiducial_col_offsets[i + 1u] = target;
-                            assigned = target;
-                        }
-                    }
-
-                    u32 sub_rows = (rows > 0u) ? (rows - 1u) : 0u;
-                    if (sub_rows > 0u && (sub_rows + 1u) <= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
-                        double total_phys_height = available_height;
-                        if (total_phys_height <= 0.0) {
-                            total_phys_height = (double)sub_rows;
-                        }
-                        double height_scale = (double)data_height / total_phys_height;
-                        double physical_span = (sub_rows > 0u) ? (available_height / (double)sub_rows) : 0.0;
-                        if (physical_span <= 0.0) {
-                            physical_span = 1.0;
-                        }
-                        u64 assigned = 0u;
-                        state.has_fiducial_row_offsets = true;
-                        state.fiducial_row_offset_count = sub_rows + 1u;
-                        state.fiducial_row_offsets[0u] = 0u;
-                        for (u32 i = 0u; i < sub_rows; ++i) {
-                            double scaled = physical_span * height_scale;
-                            double accum = (double)assigned + scaled;
-                            u64 target = (u64)(accum + 0.5);
-                            if (target <= assigned) {
-                                target = assigned + 1u;
-                            }
-                            if ((i + 1u) == sub_rows || target > (u64)data_height) {
-                                target = (u64)data_height;
-                            }
-                            state.fiducial_row_offsets[i + 1u] = target;
-                            assigned = target;
-                        }
-                    }
-		        }
-		    }
-		    update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
-		    if (values.ecc_enabled) {
-	        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_DATA", state.has_ecc_block_data, state.ecc_block_data_value, (u64)values.ecc_block_data);
-	        update_stripe_metadata_field("MAKOCODE_ECC_PARITY", state.has_ecc_parity, state.ecc_parity_value, (u64)values.ecc_parity);
-        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_COUNT", state.has_ecc_block_count, state.ecc_block_count_value, values.ecc_block_count);
-        update_stripe_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES", state.has_ecc_original_bytes, state.ecc_original_bytes_value, values.ecc_original_bytes);
-    }
-    if (values.has_palette) {
-        update_stripe_metadata_field("MAKOCODE_PALETTE_BASE", state.has_palette_base, state.palette_base_value, (u64)values.palette_base);
-        usize copy_length = values.palette_length;
-        if (copy_length >= MAX_CUSTOM_PALETTE_TEXT) {
-            copy_length = MAX_CUSTOM_PALETTE_TEXT - 1u;
-        }
-        for (usize i = 0u; i < copy_length; ++i) {
-            state.palette_text[i] = (char)values.palette_bytes[i];
-        }
-        state.palette_text[copy_length] = '\0';
-        state.palette_text_length = copy_length;
-        state.has_palette_text = (copy_length > 0u);
-    }
-}
-
 static void apply_metadata_tile_metadata(PpmParserState& state,
                                          const MetadataTile::Values& values,
                                          const makocode::ByteBuffer& palette_text) {
     const u64 payload_bits = values.page_bits;
     const u64 frame_bits = payload_bits + 64u;
-    update_stripe_metadata_field("MAKOCODE_BITS", state.has_bits, state.bits_value, payload_bits);
-    update_stripe_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, frame_bits);
-    update_stripe_metadata_field("page_count", state.has_page_count, state.page_count_value, values.page_count);
-    update_stripe_metadata_field("page_index", state.has_page_index, state.page_index_value, values.page_index);
-    update_stripe_metadata_field("page_width_px", state.has_page_width_pixels, state.page_width_pixels_value, values.page_width_pixels);
-    update_stripe_metadata_field("page_height_px", state.has_page_height_pixels, state.page_height_pixels_value, values.page_height_pixels);
-    update_stripe_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, (u64)values.footer_rows);
-    update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
+    update_metadata_field("MAKOCODE_BITS", state.has_bits, state.bits_value, payload_bits);
+    update_metadata_field("MAKOCODE_PAGE_BITS", state.has_page_bits, state.page_bits_value, frame_bits);
+    update_metadata_field("page_count", state.has_page_count, state.page_count_value, values.page_count);
+    update_metadata_field("page_index", state.has_page_index, state.page_index_value, values.page_index);
+    update_metadata_field("page_width_px", state.has_page_width_pixels, state.page_width_pixels_value, values.page_width_pixels);
+    update_metadata_field("page_height_px", state.has_page_height_pixels, state.page_height_pixels_value, values.page_height_pixels);
+    update_metadata_field("MAKOCODE_FOOTER_ROWS", state.has_footer_rows, state.footer_rows_value, (u64)values.footer_rows);
+    update_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
     if (values.ecc_enabled) {
-        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_DATA",
+        update_metadata_field("MAKOCODE_ECC_BLOCK_DATA",
                                      state.has_ecc_block_data,
                                      state.ecc_block_data_value,
                                      (u64)values.ecc_block_data);
-        update_stripe_metadata_field("MAKOCODE_ECC_PARITY",
+        update_metadata_field("MAKOCODE_ECC_PARITY",
                                      state.has_ecc_parity,
                                      state.ecc_parity_value,
                                      (u64)values.ecc_parity);
-        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_COUNT",
+        update_metadata_field("MAKOCODE_ECC_BLOCK_COUNT",
                                      state.has_ecc_block_count,
                                      state.ecc_block_count_value,
                                      values.ecc_block_count);
-        update_stripe_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES",
+        update_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES",
                                      state.has_ecc_original_bytes,
                                      state.ecc_original_bytes_value,
                                      values.ecc_original_bytes);
     }
 
     if (values.fiducial_marker_size_pixels > 0u) {
-        update_stripe_metadata_field("MAKOCODE_FIDUCIAL_SIZE",
+        update_metadata_field("MAKOCODE_FIDUCIAL_SIZE",
                                      state.has_fiducial_size,
                                      state.fiducial_size_value,
                                      (u64)values.fiducial_marker_size_pixels);
-        // Mirror the footer-stripe behavior: deterministically derive the rest of the fiducial metadata
-        // from page geometry + compiled defaults so it survives print/scan (no comment reliance).
+        // Derive the remaining fiducial metadata from page geometry and compiled
+        // defaults so it survives print/scan without relying on comments.
         u32 marker_size = values.fiducial_marker_size_pixels;
         if (marker_size == 0u) marker_size = 1u;
         u32 spacing = g_fiducial_defaults.spacing_pixels;
@@ -22881,27 +19885,27 @@ static void apply_metadata_tile_metadata(PpmParserState& state,
                     span = (double)spacing * (double)(rows - 1u);
                 }
             }
-            update_stripe_metadata_field("MAKOCODE_FIDUCIAL_COLUMNS",
+            update_metadata_field("MAKOCODE_FIDUCIAL_COLUMNS",
                                          state.has_fiducial_columns,
                                          state.fiducial_columns_value,
                                          (u64)columns);
-            update_stripe_metadata_field("MAKOCODE_FIDUCIAL_ROWS",
+            update_metadata_field("MAKOCODE_FIDUCIAL_ROWS",
                                          state.has_fiducial_rows,
                                          state.fiducial_rows_value,
                                          (u64)rows);
-            update_stripe_metadata_field("MAKOCODE_FIDUCIAL_MARGIN",
+            update_metadata_field("MAKOCODE_FIDUCIAL_MARGIN",
                                          state.has_fiducial_margin,
                                          state.fiducial_margin_value,
                                          (u64)margin);
         }
     }
 
-    update_stripe_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
+    update_metadata_field("MAKOCODE_ECC", state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
     if (values.ecc_enabled) {
-        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_DATA", state.has_ecc_block_data, state.ecc_block_data_value, (u64)values.ecc_block_data);
-        update_stripe_metadata_field("MAKOCODE_ECC_PARITY", state.has_ecc_parity, state.ecc_parity_value, (u64)values.ecc_parity);
-        update_stripe_metadata_field("MAKOCODE_ECC_BLOCK_COUNT", state.has_ecc_block_count, state.ecc_block_count_value, values.ecc_block_count);
-        update_stripe_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES", state.has_ecc_original_bytes, state.ecc_original_bytes_value, values.ecc_original_bytes);
+        update_metadata_field("MAKOCODE_ECC_BLOCK_DATA", state.has_ecc_block_data, state.ecc_block_data_value, (u64)values.ecc_block_data);
+        update_metadata_field("MAKOCODE_ECC_PARITY", state.has_ecc_parity, state.ecc_parity_value, (u64)values.ecc_parity);
+        update_metadata_field("MAKOCODE_ECC_BLOCK_COUNT", state.has_ecc_block_count, state.ecc_block_count_value, values.ecc_block_count);
+        update_metadata_field("MAKOCODE_ECC_ORIGINAL_BYTES", state.has_ecc_original_bytes, state.ecc_original_bytes_value, values.ecc_original_bytes);
     }
 
     // Provide palette text for existing decode path (hex tokens).
@@ -23109,13 +20113,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_footer_rows = true;
         dest.footer_rows_value = src.footer_rows_value;
     }
-    if (src.has_footer_stripe) {
-        if (dest.has_footer_stripe && !footer_stripe_values_equal(dest.footer_stripe_values, src.footer_stripe_values)) {
-            return false;
-        }
-        dest.has_footer_stripe = true;
-        dest.footer_stripe_values = src.footer_stripe_values;
-    }
     // Spatial transforms are applied while extracting each page's frame bits.
     // Keep them page-local; separately scanned pages can have different geometry.
     return true;
@@ -23234,53 +20231,6 @@ static bool buffer_append_number(makocode::ByteBuffer& buffer, u64 value) {
     char digits[32];
    u64_to_ascii(value, digits, sizeof(digits));
     return buffer.append_ascii(digits);
-}
-
-[[maybe_unused]] static bool append_comment_number(makocode::ByteBuffer& buffer,
-                                                   const char* tag,
-                                                   u64 value) {
-    if (!tag) {
-        return false;
-    }
-    if (!buffer.append_char('#')) {
-        return false;
-    }
-    if (!buffer.append_char(' ')) {
-        return false;
-    }
-    if (!buffer.append_ascii(tag)) {
-        return false;
-    }
-    if (!buffer.append_char(' ')) {
-        return false;
-    }
-    if (!buffer_append_number(buffer, value)) {
-        return false;
-    }
-    return buffer.append_char('\n');
-}
-
-[[maybe_unused]] static bool append_comment_list(makocode::ByteBuffer& buffer,
-                                                 const char* tag,
-                                                 const u64* values,
-                                                 u32 count) {
-    if (!tag || !values || count == 0u) {
-        return false;
-    }
-    if (!buffer.append_char('#') ||
-        !buffer.append_char(' ') ||
-        !buffer.append_ascii(tag)) {
-        return false;
-    }
-    for (u32 i = 0u; i < count; ++i) {
-        if (!buffer.append_char(' ')) {
-            return false;
-        }
-        if (!buffer_append_number(buffer, values[i])) {
-            return false;
-        }
-    }
-    return buffer.append_char('\n');
 }
 
 static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
@@ -23407,21 +20357,6 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         return false;
     }
     u32 draw_height = (grid_height_limit > 0u && grid_height_limit < height_px) ? grid_height_limit : height_px;
-    // Footer stripes are disabled; rely on metadata tile or defaults for footer sizing.
-    if (kFooterStripeEnabled && !state.has_footer_rows) {
-        FooterStripe::Values stripe_values = {};
-        bool stripe_ok = FooterStripe::decode_v3(pixel_data, width_px, height_px, stripe_values);
-        if (!stripe_ok) {
-            stripe_ok = FooterStripe::decode(FooterStripe::SPEC_V2, pixel_data, width_px, height_px, stripe_values);
-        }
-        if (!stripe_ok) {
-            stripe_ok = FooterStripe::decode(FooterStripe::SPEC_V1, pixel_data, width_px, height_px, stripe_values);
-        }
-        if (stripe_ok && stripe_values.footer_rows > 0u && stripe_values.footer_rows <= (u64)height_px) {
-            state.has_footer_rows = true;
-            state.footer_rows_value = stripe_values.footer_rows;
-        }
-    }
     state.has_fiducial_size = true;
     state.fiducial_size_value = marker_size;
     state.has_fiducial_columns = true;
@@ -23686,7 +20621,7 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
 }
 
 // Place the default fiducial grid. Optional data_height_pixels clips the grid
-// so markers stay above the footer stripe.
+// so markers stay within the data area.
 static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                         makocode::ByteBuffer& output,
                                         u32 data_height_pixels = 0u) {
@@ -23787,53 +20722,7 @@ static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::B
     if (!ppm_measure_dimensions(buffer, width_pixels, height_pixels)) {
         return false;
     }
-    // Footer stripes are disabled; rely on metadata tile or defaults.
-    u32 data_height_pixels = 0u;
-    if (kFooterStripeEnabled && buffer.data && buffer.size > 0u && width_pixels > 0u && height_pixels > 0u) {
-        PpmParserState state;
-        state.data = buffer.data;
-        state.size = buffer.size;
-        const char* token = 0;
-        usize token_length = 0u;
-        if (ppm_next_token(state, &token, &token_length) &&
-            ascii_equals_token(token, token_length, "P3") &&
-            ppm_next_token(state, &token, &token_length) &&
-            ppm_next_token(state, &token, &token_length) &&
-            ppm_next_token(state, &token, &token_length)) {
-            // The first three tokens after P3 are width/height/max_value; width/height are already known.
-            u64 max_value = 0u;
-            if (ascii_to_u64(token, token_length, &max_value) && max_value == 255u) {
-                u64 pixel_count = (u64)width_pixels * (u64)height_pixels;
-                makocode::ByteBuffer pixels;
-                if (ppm_read_rgb_pixels(state, pixel_count, pixels) && pixels.data) {
-                    FooterStripe::Values stripe_values = {};
-                    bool stripe_ok = FooterStripe::decode_v3(pixels.data, width_pixels, height_pixels, stripe_values);
-                    if (!stripe_ok) {
-                        stripe_ok = FooterStripe::decode(FooterStripe::SPEC_V2, pixels.data, width_pixels, height_pixels, stripe_values);
-                    }
-                    if (!stripe_ok) {
-                        stripe_ok = FooterStripe::decode(FooterStripe::SPEC_V1, pixels.data, width_pixels, height_pixels, stripe_values);
-                    }
-                    if (stripe_ok && stripe_values.footer_rows > 0u && stripe_values.footer_rows < (u64)height_pixels) {
-                        data_height_pixels = height_pixels - (u32)stripe_values.footer_rows;
-                        if (debug_logging_enabled()) {
-                            char footer_buf[32];
-                            char data_buf[32];
-                            u64_to_ascii(stripe_values.footer_rows, footer_buf, sizeof(footer_buf));
-                            u64_to_ascii((u64)data_height_pixels, data_buf, sizeof(data_buf));
-                            console_write(2, "debug fiducial embed: footer_rows=");
-                            console_write(2, footer_buf);
-                            console_write(2, " data_height=");
-                            console_line(2, data_buf);
-                        }
-                    } else if (debug_logging_enabled()) {
-                        console_line(2, "debug fiducial embed: footer stripe not available");
-                    }
-                }
-            }
-        }
-    }
-    if (!apply_default_fiducial_grid(buffer, fiducial_buffer, data_height_pixels)) {
+    if (!apply_default_fiducial_grid(buffer, fiducial_buffer)) {
         return false;
     }
     return write_bytes_to_file(path, fiducial_buffer.data, fiducial_buffer.size);
@@ -24359,7 +21248,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         console_write(2, " usable_pixels=");
         console_line(2, capacity_buf);
     }
-    // Footer barcode removed; keep layout variables zeroed.
+    // Select colors for the footer text and background.
     u8 footer_text_rgb[3] = {0u, 0u, 0u};
     u8 footer_background_rgb[3] = {255u, 255u, 255u};
     footer_select_colors(mapping, footer_text_rgb, footer_background_rgb);
@@ -26045,20 +22934,12 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
     const u32 MAX_FOOTER_LAYOUT_PASSES = 16u;
     bool layout_converged = false;
     for (u32 pass = 0u; pass < MAX_FOOTER_LAYOUT_PASSES; ++pass) {
-        // Footer barcode removed: disable stripe sizing hints.
-        footer_config.stripe_rows_hint = 0u;
-        footer_config.stripe_module_count_hint = 0u;
-        footer_config.stripe_module_pitch_hint = 0u;
         u64 text_page_count = footer_config.display_page_info ? page_count : 1u;
         footer_config.max_text_length = footer_compute_max_text_length(footer_config, text_page_count);
         if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
             return false;
         }
         data_height_pixels = footer_layout.data_height_pixels;
-        if (footer_layout.stripe_height_pixels > 0u && data_height_pixels >= height_pixels) {
-            console_line(2, "encode: footer layout would drop the barcode footer");
-            return false;
-        }
         if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
             return false;
         }
@@ -26929,17 +23810,12 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
 
-        // For single-page outputs with no footer text, allow the footer band to
-        // collapse to the minimum height needed for payload data.
+        // For single-page outputs with no footer text, shrink to the minimum
+        // height needed for payload data.
         if (compact_page && !footer_layout.has_text && layout_data_height > 0u) {
             double bits_per_pixel = mapping_bits_per_data_pixel(mapping);
             if (bits_per_pixel > 0.0) {
                 u32 max_data_height = layout_data_height;
-                u32 stripe_height = footer_layout.stripe_height_pixels;
-                u32 stripe_limited = (height_pixels > stripe_height) ? (height_pixels - stripe_height) : 0u;
-                if (stripe_limited > 0u && stripe_limited < max_data_height) {
-                    max_data_height = stripe_limited;
-                }
                 if (max_data_height > 0u) {
                     u32 low = 1u;
                     u32 high = max_data_height;
@@ -26967,13 +23843,8 @@ static int command_encode(int arg_count, char** args) {
                     }
                     // Only apply if it meaningfully reduces the unused band.
                     if (best_bits > 0u && best + 4u < layout_data_height) {
-                        u32 minimal_height = best + stripe_height;
-                        if (minimal_height >= best && minimal_height <= height_pixels) {
-                            output_height_pixels = minimal_height;
-                        }
+                        output_height_pixels = best;
                         output_footer_layout.data_height_pixels = best;
-                        output_footer_layout.stripe_top_row = best;
-                        output_footer_layout.footer_height_pixels = stripe_height;
                         output_data_height_pixels = best;
                         // Bits-per-page depends on data_height; keep it consistent with
                         // the chosen data height even when we shrink the output image.
@@ -27008,7 +23879,7 @@ static int command_encode(int arg_count, char** args) {
            return 1;
        }
         makocode::ByteBuffer fiducial_page;
-        // Clip fiducials to the data area so they don't land on the footer stripe.
+        // Clip fiducials to the data area so they don't overlap footer text.
         if (!apply_default_fiducial_grid(page_output, fiducial_page, output_data_height_pixels)) {
             console_line(2, "encode: failed to embed fiducial grid");
             return 1;
@@ -27066,7 +23937,7 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             makocode::ByteBuffer fiducial_page;
-            // Clip fiducials to the data area so they don't land on the footer stripe.
+            // Clip fiducials to the data area so they don't overlap footer text.
             if (!apply_default_fiducial_grid(page_output, fiducial_page, footer_layout.data_height_pixels)) {
                 console_line(2, "encode: failed to embed fiducial grid");
                 return 1;
@@ -27347,7 +24218,7 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
     page.metadata.size = 0u;
     page.metadata.cursor = 0u;
 
-    // Prefer metadata tile (v3) for layout/ecc details now that footer stripes may be absent.
+    // Read layout and ECC details from the metadata tile.
     MetadataTile::Values tile_values = {};
     makocode::ByteBuffer tile_palette_text;
     MetadataTile::Placement placement = MetadataTile::compute_tile_placement((u32)width_value, (u32)height_value);
@@ -27361,34 +24232,6 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
                                       tile_palette_text)) {
             apply_metadata_tile_metadata(page.metadata, tile_values, tile_palette_text);
         }
-    }
-
-    FooterStripe::Values stripe_values = {};
-    bool stripe_available = false;
-    if (kFooterStripeEnabled && width_value <= 0xFFFFFFFFull && height_value <= 0xFFFFFFFFull) {
-        stripe_available = FooterStripe::decode_v3(pixel_data.data,
-                                                   (u32)width_value,
-                                                   (u32)height_value,
-                                                   stripe_values);
-        if (!stripe_available) {
-            stripe_available = FooterStripe::decode(FooterStripe::SPEC_V2,
-                                                    pixel_data.data,
-                                                    (u32)width_value,
-                                                    (u32)height_value,
-                                                    stripe_values);
-        }
-        if (!stripe_available) {
-            stripe_available = FooterStripe::decode(FooterStripe::SPEC_V1,
-                                                    pixel_data.data,
-                                                    (u32)width_value,
-                                                    (u32)height_value,
-                                                    stripe_values);
-        }
-    }
-    if (stripe_available) {
-        page.metadata.has_footer_stripe = true;
-        page.metadata.footer_stripe_values = stripe_values;
-        apply_footer_stripe_metadata(page.metadata, stripe_values);
     }
 
     byte_buffer_move(page.pixels, pixel_data);
