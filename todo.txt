@@ -1,5 +1,4 @@
 Features
-- Remove --corrupt-header-copies
 - Test: Wavy distortion test. Note, center barcode would be distorted too.
 - Test: Scanning type distortion tests, anticipated.
 - Footer title and metadata just on first page - or middle page?

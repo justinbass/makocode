@@ -24765,9 +24765,8 @@ static int command_decode(int arg_count, char** args) {
     makocode::ByteBuffer output_dir_buffer;
     const char* output_dir = ".";
     bool have_output_dir = false;
-    u32 corrupt_header_copies = 0u;
-   for (int i = 0; i < arg_count; ++i) {
-       bool handled = false;
+    for (int i = 0; i < arg_count; ++i) {
+        bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "decode", &handled)) {
             return 1;
         }
@@ -24865,25 +24864,6 @@ static int command_decode(int arg_count, char** args) {
             }
             password_buffer.size = password_length;
             have_password = true;
-            continue;
-        }
-        const char corrupt_prefix[] = "--corrupt-header-copies=";
-        if (ascii_starts_with(arg, corrupt_prefix)) {
-            const char* value = arg + (sizeof(corrupt_prefix) - 1u);
-            usize value_length = ascii_length(value);
-            if (value_length == 0u) {
-                console_line(2, "decode: --corrupt-header-copies requires a value");
-                return 1;
-            }
-            u64 parsed = 0u;
-            if (!ascii_to_u64(value, value_length, &parsed)) {
-                console_line(2, "decode: invalid value for --corrupt-header-copies");
-                return 1;
-            }
-            if (parsed > (u64)makocode::ECC_HEADER_COPY_COUNT) {
-                parsed = (u64)makocode::ECC_HEADER_COPY_COUNT;
-            }
-            corrupt_header_copies = (u32)parsed;
             continue;
         }
         if (file_count >= MAX_INPUT_FILES) {
@@ -25146,31 +25126,6 @@ retry_decode:
     if (ecc_header_repaired) {
         console_line(2, "decode: repaired ECC header from metadata");
     }
-    if (corrupt_header_copies > 0u &&
-        bitstream.data &&
-        bitstream.size >= ((usize)makocode::ECC_HEADER_COPY_TOTAL_BYTES)) {
-        u32 count = corrupt_header_copies;
-        if (count > (u32)makocode::ECC_HEADER_COPY_COUNT) {
-            count = (u32)makocode::ECC_HEADER_COPY_COUNT;
-        }
-        for (u32 copy_index = 0u; copy_index < count; ++copy_index) {
-            usize base = (usize)copy_index * makocode::ECC_HEADER_COPY_TOTAL_BYTES + makocode::ECC_HEADER_COPY_DATA_BYTES;
-            usize limit = base + ((usize)makocode::ECC_HEADER_COPY_PARITY_SYMBOLS + 1u);
-            usize copy_end = ((usize)copy_index + 1u) * makocode::ECC_HEADER_COPY_TOTAL_BYTES;
-            if (limit > copy_end) {
-                limit = copy_end;
-            }
-            if (limit > bitstream.size) {
-                limit = bitstream.size;
-            }
-            for (usize i = base; i < limit; ++i) {
-                bitstream.data[i] ^= 0xFFu;
-            }
-        }
-        
-    }
-    
-
     makocode::DecoderContext decoder;
     const char* password_ptr = have_password ? (const char*)password_buffer.data : (const char*)0;
     usize password_length = have_password ? password_buffer.size : 0u;

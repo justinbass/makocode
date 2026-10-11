@@ -748,6 +748,7 @@ static void usage() {
             "                       [--seed N] [--ink-blot-radius PX] [--ink-blot-color C]\n"
             "                       [--paper-color C] [--paper-alpha A] [--paper-splotch-alpha A]\n"
             "                       [--paper-splotch-shade A] [--paper-splotch-px PX]\n"
+            "                       [--corrupt-header-copies N]\n"
             "  ppm_transform solid --output OUT --width W --height H --r R --g G --b B\n"
             "  ppm_transform noise --output OUT --width W --height H --seed N\n"
             "  ppm_transform corrupt-footer-data-destroyed --input IN --output OUT [--seed N] [--footer-height-px N]\n"
@@ -1151,6 +1152,7 @@ static void cmd_transform(int argc, char** argv) {
     double paper_splotch_alpha = 0.0;
     double paper_splotch_shade = 0.0;
     int paper_splotch_px = 0;
+    int corrupt_header_copies = 0;
 
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
@@ -1175,10 +1177,14 @@ static void cmd_transform(int argc, char** argv) {
         else if (strcmp(arg, "--paper-splotch-alpha") == 0) paper_splotch_alpha = parse_f64(require_value("--paper-splotch-alpha"), "paper-splotch-alpha");
         else if (strcmp(arg, "--paper-splotch-shade") == 0) paper_splotch_shade = parse_f64(require_value("--paper-splotch-shade"), "paper-splotch-shade");
         else if (strcmp(arg, "--paper-splotch-px") == 0) paper_splotch_px = parse_i32(require_value("--paper-splotch-px"), "paper-splotch-px");
+        else if (strcmp(arg, "--corrupt-header-copies") == 0) corrupt_header_copies = parse_i32(require_value("--corrupt-header-copies"), "corrupt-header-copies");
         else die2("ppm_transform: unknown flag ", arg);
     }
 
     if (!input || !output) die("ppm_transform: --input and --output are required");
+    if (corrupt_header_copies < 0 || corrupt_header_copies > 3) {
+        die("ppm_transform: --corrupt-header-copies must be between 0 and 3");
+    }
 
     Ppm ppm = read_ppm_p3_ascii(input);
     // Never emit PPM comment header lines in outputs (they will be lost in print/scan workflows).
@@ -1264,6 +1270,116 @@ static void cmd_transform(int argc, char** argv) {
                               paper_splotch_shade,
                               paper_splotch_px,
                               seed);
+
+    if (corrupt_header_copies > 0) {
+        if (w != ppm.width || h != ppm.height ||
+            !nearly_equal(scale_x, 1.0) || !nearly_equal(scale_y, 1.0) ||
+            !nearly_equal(rotate_deg, 0.0) || !nearly_equal(skew_x, 0.0) ||
+            !nearly_equal(skew_y, 0.0) || border_thickness != 0 ||
+            ink_blot_radius != 0 || paper_alpha > 0.0 ||
+            paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0) {
+            die("ppm_transform: header corruption requires an otherwise unmodified page");
+        }
+        if (w < 1 || h < 1 || (size_t)w > ((size_t)-1) / (size_t)h) {
+            die("ppm_transform: invalid dimensions for header corruption");
+        }
+        size_t total_pixels = (size_t)w * (size_t)h;
+        unsigned char* reserved = (unsigned char*)calloc(total_pixels, 1u);
+        if (!reserved) die("ppm_transform: OOM");
+
+        // Match makocode's default 4 px markers on a 24 px grid with a 12 px margin.
+        const unsigned int marker_size = 4u;
+        const unsigned int spacing = 24u;
+        const unsigned int margin = 12u;
+        double min_x = (margin < (unsigned int)w) ? (double)margin : 0.0;
+        double max_x = (w > (int)margin) ? (double)(w - 1 - (int)margin) : (double)(w - 1);
+        if (max_x < min_x) max_x = min_x;
+        double min_y = (margin < (unsigned int)h) ? (double)margin : 0.0;
+        double max_y = (h > (int)margin) ? (double)(h - 1 - (int)margin) : (double)(h - 1);
+        if (max_y < min_y) max_y = min_y;
+        double available_width = max_x - min_x;
+        double available_height = max_y - min_y;
+        unsigned int columns = (unsigned int)(available_width / (double)spacing) + 1u;
+        unsigned int rows = (unsigned int)(available_height / (double)spacing) + 1u;
+        for (unsigned int grid_row = 0u; grid_row < rows; ++grid_row) {
+            double t_y = (rows == 1u) ? 0.5 : (double)grid_row / (double)(rows - 1u);
+            double center_y = min_y + (max_y - min_y) * t_y;
+            int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+            for (unsigned int grid_col = 0u; grid_col < columns; ++grid_col) {
+                double t_x = (columns == 1u) ? 0.5 : (double)grid_col / (double)(columns - 1u);
+                double center_x = min_x + (max_x - min_x) * t_x;
+                int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
+                for (unsigned int dy = 0u; dy < marker_size; ++dy) {
+                    int pixel_y = start_y + (int)dy;
+                    if (pixel_y < 0 || pixel_y >= h) continue;
+                    for (unsigned int dx = 0u; dx < marker_size; ++dx) {
+                        int pixel_x = start_x + (int)dx;
+                        if (pixel_x < 0 || pixel_x >= w) continue;
+                        reserved[(size_t)pixel_y * (size_t)w + (size_t)pixel_x] = 1u;
+                    }
+                }
+            }
+        }
+
+        if (w >= 48 && h >= 48) {
+            unsigned int mid_col = columns / 2u;
+            unsigned int mid_row = rows / 2u;
+            double t_x = (columns == 1u) ? 0.5 : (double)mid_col / (double)(columns - 1u);
+            double t_y = (rows == 1u) ? 0.5 : (double)mid_row / (double)(rows - 1u);
+            double center_x = min_x + (max_x - min_x) * t_x;
+            double center_y = min_y + (max_y - min_y) * t_y;
+            int tile_x0 = (int)(center_x - 23.5);
+            int tile_y0 = (int)(center_y - 23.5);
+            if (tile_x0 < 0) tile_x0 = 0;
+            if (tile_y0 < 0) tile_y0 = 0;
+            if (tile_x0 + 48 > w) tile_x0 = w - 48;
+            if (tile_y0 + 48 > h) tile_y0 = h - 48;
+            for (int tile_y = tile_y0; tile_y < tile_y0 + 48; ++tile_y) {
+                for (int tile_x = tile_x0; tile_x < tile_x0 + 48; ++tile_x) {
+                    reserved[(size_t)tile_y * (size_t)w + (size_t)tile_x] = 1u;
+                }
+            }
+        }
+
+        size_t target_bits[3u * 6u * 8u];
+        size_t target_count = 0u;
+        for (int copy = 0; copy < corrupt_header_copies; ++copy) {
+            for (size_t parity_byte = 0u; parity_byte < 6u; ++parity_byte) {
+                size_t byte_index = (size_t)copy * 32u + 26u + parity_byte;
+                for (size_t bit = 0u; bit < 8u; ++bit) {
+                    target_bits[target_count++] = 64u + byte_index * 8u + bit;
+                }
+            }
+        }
+
+        size_t carrier_bit = 0u;
+        size_t target_index = 0u;
+        size_t modified_pixels = 0u;
+        for (size_t pixel = 0u; pixel < total_pixels && target_index < target_count; ++pixel) {
+            if (reserved[pixel]) continue;
+            if (carrier_bit == target_bits[target_index]) {
+                size_t rgb = pixel * 3u;
+                int value = current.data[rgb];
+                if (current.data[rgb + 1u] != value || current.data[rgb + 2u] != value ||
+                    (value != 0 && value != 255)) {
+                    free(reserved);
+                    die("ppm_transform: header corruption expects a black/white encoded page");
+                }
+                int flipped = value ? 0 : 255;
+                current.data[rgb] = flipped;
+                current.data[rgb + 1u] = flipped;
+                current.data[rgb + 2u] = flipped;
+                ++modified_pixels;
+                ++target_index;
+            }
+            ++carrier_bit;
+        }
+        free(reserved);
+        if (target_index != target_count) {
+            die("ppm_transform: page does not contain all header parity carriers");
+        }
+        fprintf(stdout, "header parity carrier pixels modified: %zu\n", modified_pixels);
+    }
 
     write_ppm_p3_ascii(output, &comments, w, h, &current, 0);
 

@@ -65,7 +65,7 @@ rm -f "$payload_final" "$encoded_ppm"
 "$ppm_transform_bin" bytes --output "$payload_final" --size 4096 --seed "$payload_seed"
 cp "$payload_final" "$work_dir/random.bin"
 
-encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--output-dir=$work_dir")
+encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--no-filename" "--no-page-count" "--output-dir=$work_dir")
 (cd "$work_dir" && "${encode_cmd[@]}") >/dev/null
 
 shopt -s nullglob
@@ -87,17 +87,23 @@ run_decode_expect() {
     local expect_success=$2
     local corrupt_count=$3
     local output_dir="$test_dir/${label}_${scenario}_decoded"
+    local damaged_ppm="$test_dir/${label}_${scenario}_corrupted.ppm"
+    local decode_log="$test_dir/${label}_${scenario}_decode.log"
     rm -rf "$output_dir"
     mkdir -p "$output_dir"
+    rm -f "$damaged_ppm"
+    rm -f "$decode_log"
+
+    "$ppm_transform_bin" transform \
+        --input "$encoded_ppm" \
+        --output "$damaged_ppm" \
+        --corrupt-header-copies "$corrupt_count" >/dev/null
 
     local decode_cmd=("$makocode_bin" decode "--output-dir=$output_dir")
-    if [[ $corrupt_count -gt 0 ]]; then
-        decode_cmd+=("--corrupt-header-copies=$corrupt_count")
-    fi
-    decode_cmd+=("$encoded_ppm")
+    decode_cmd+=("$damaged_ppm")
 
     set +e
-    "${decode_cmd[@]}" >/dev/null 2>&1
+    "${decode_cmd[@]}" >/dev/null 2>"$decode_log"
     local status=$?
     set -e
     if [[ $expect_success -eq 1 && $status -ne 0 ]]; then
@@ -106,6 +112,14 @@ run_decode_expect() {
     fi
     if [[ $expect_success -eq 0 && $status -eq 0 ]]; then
         echo "test_header_copy_corruption: decode ${scenario} unexpectedly succeeded" >&2
+        exit 1
+    fi
+    if [[ $corrupt_count -eq 3 ]] && ! grep -q 'decode: repaired ECC header from metadata' "$decode_log"; then
+        echo "test_header_copy_corruption: decode ${scenario} did not recover from metadata" >&2
+        exit 1
+    fi
+    if [[ $corrupt_count -lt 3 ]] && grep -q 'decode: repaired ECC header from metadata' "$decode_log"; then
+        echo "test_header_copy_corruption: decode ${scenario} bypassed surviving header copies" >&2
         exit 1
     fi
     if [[ $expect_success -eq 1 ]]; then
@@ -119,7 +133,8 @@ run_decode_expect() {
 
 run_decode_expect "one_copy" 1 1
 run_decode_expect "two_copies" 1 2
-run_decode_expect "all_copies" 0 3
+# The metadata tile reconstructs the ECC header after all three protected copies are damaged.
+run_decode_expect "all_copies" 1 3
 
 label_fmt="$label"
 printf '%s SUCCESS header copy corruption expectations met\n' "$label_fmt"
