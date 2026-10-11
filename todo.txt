@@ -1,22 +1,34 @@
+Cleanup
+- 100% line coverage
+  - PPM comment-metadata fallback roundtrip, including malformed tags (makocode.cpp:12634-13605).
+  - Nested/empty-directory archive encode/decode roundtrip (makocode.cpp:20908-21309,21496-21595).
+  - Minify test: preserve literals/directives and compile output (makocode.cpp:25257-25496).
+  - Pipe a single PPM into decode; verify extracted payload (makocode.cpp:20731,24890-24960).
+  - Smoke-test usage and each command's --help (makocode.cpp:21597-21708).
+  - Test --prefix ending _encoded; verify fiducial embedding/roundtrip (makocode.cpp:12433-12458,19753-19763).
+  - Audit uncalled CLI code: grayscale loader, border cleanup, LZMA decoder (makocode.cpp:621,3683,6467).
+- License text / notices, as per GNU recommendation
+
 Features
-- Test: Wavy distortion test. Note, center barcode would be distorted too.
-- Test: Scanning type distortion tests, anticipated.
 - Footer title and metadata just on first page - or middle page?
-- Test: Page height or width too small for title or metadata, fails to encode
 - Compress metadata (confirm it saves space worth the risk of corruption)
 - Footer text scaling glyphs? Could use an internal vector image. May not look good in practice.
 - Footer title wrap, confirm page-height/width applies as a hard limit
-- Test: All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
-- Test: Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
-- Test: Remove entire page test, with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
 - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
-- Test: ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
 - Overlay improvements
  - Use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions).
  - Improve overlay up to 50% ECC for each, including ignore - or 100% if possible.
 - Metadata recovery mode to brute force guess it if missing, exponentially difficult
  - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
  - What if white/black or light/dark are inverted for the metadata?
+
+Tests
+- Wavy distortion test
+- Page height or width too small for title or metadata, fails to encode
+- All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
+- Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
+- Remove entire page test, with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+- ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
 
 Finalize
 - Remove dead/debugging code.
@@ -26,7 +38,7 @@ Finalize
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
 - Determine proper defaults
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
-- Remove all external dependencies (shell: head -c ... /dev/urandom, sort).
+- Abstract all external dependencies (shell: head -c ... /dev/urandom, sort) into an OS-relevant C++ module.
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Much better documentation, or a spec
 - 100% branch coverage, test parameterization of each combination of options
