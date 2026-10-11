@@ -1,0 +1,38 @@
+Goal: Test real-world print-and-scan reliability.
+
+1. Resolution, sampling, and moiré
+- Model physical page size, printer DPI, scanner DPI, and pixels per barcode module.
+- Sweep downsampling, upsampling, subpixel alignment, and scan angles.
+- Include periodic printer halftone patterns at different frequencies and angles.
+
+2. Print growth, loss, and blur
+- Test ink or toner spreading into neighboring cells, shrinking or dropout of marks, optical blur, and low-pass filtering.
+- Sweep from mild edge changes to merged cells or lost gaps.
+
+3. Color and channel errors
+- For every supported palette, test global color cast or white-balance shifts, per-channel gain and gamma, clipping, reduced saturation, and color quantization.
+- Separately offset RGB channels to create colored edge fringes (color-plane misregistration / chromatic aberration).
+
+4. Local geometric warping
+- Add sinusoidal waviness across rows and columns, page curl, perspective skew, and local stretch or compression.
+- Sweep distortion size and wavelength relative to fiducial spacing.
+
+5. Cropping and edge loss
+- Cut into each page edge by increasing amounts, including damage to fiducials, metadata, quiet margins, or footer content.
+- Test scanner auto-crop that leaves a narrow, uneven border.
+
+6. Uneven lighting and scanner artifacts
+- Add smooth brightness gradients, local shadows, sensor noise, banding, and scan-line streaks.
+- Test contrast loss and highlights or shadows clipped to black or white.
+
+7. Realistic surface damage
+- Test thin scratches, folds, smears, isolated dirt, long streaks, edge tears, and holes at varied positions.
+- Vary damage size and color across binary and multicolor palettes.
+
+8. Severity curves and combined effects
+- Increase damage in steps and record the point where exact payload recovery stops.
+- Combine difficult cases, such as low resolution, blur, color shift, and waviness, at different ECC settings.
+
+9. Page-to-page variation and scan conversion
+- For multipage sets, vary skew, crop, color response, and resolution per page; test missing or reordered pages.
+- Exercise the documented scanner-image-to-P3-PPM conversion path with representative scan exports.
