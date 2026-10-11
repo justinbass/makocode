@@ -53,6 +53,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 
 #ifndef SIZE_MAX
 #define SIZE_MAX ((size_t)~(size_t)0)
@@ -433,6 +434,43 @@ static bool consume_debug_flag(const char* arg) {
 
 static bool debug_logging_enabled() {
     return g_debug_enabled;
+}
+
+static bool profile_logging_enabled() {
+    const char* value = getenv("MAKOCODE_PROFILE");
+    return value && value[0] == '1' && value[1] == '\0';
+}
+
+static u64 monotonic_time_ns() {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0u;
+    }
+    return (u64)now.tv_sec * 1000000000ull + (u64)now.tv_nsec;
+}
+
+static u64 profile_time_ns() {
+    return profile_logging_enabled() ? monotonic_time_ns() : 0u;
+}
+
+static u64 profile_phase_start(const char* phase) {
+    u64 started_ns = profile_time_ns();
+    if (started_ns != 0u) {
+        console_write(2, "profile: ");
+        console_write(2, phase);
+        console_line(2, " start");
+    }
+    return started_ns;
+}
+
+static void profile_log_duration(const char* stage, u64 started_ns, u64 finished_ns) {
+    if (!profile_logging_enabled() || started_ns == 0u || finished_ns < started_ns) {
+        return;
+    }
+    char message[192];
+    double elapsed_ms = (double)(finished_ns - started_ns) / 1000000.0;
+    snprintf(message, sizeof(message), "profile: %s %.3f ms", stage, elapsed_ms);
+    console_line(2, message);
 }
 
 static double clamp_double(double value, double lo, double hi) {
@@ -10515,7 +10553,8 @@ namespace MetadataTile {
                                          u32& header_out,
                                          bool& inverted_out,
                                          double& confidence_out,
-                                         bool allow_incomplete_palette = false) {
+                                         bool allow_incomplete_palette = false,
+                                         bool header_only = false) {
         header_out = 0u;
         inverted_out = false;
         confidence_out = 0.0;
@@ -10651,6 +10690,12 @@ namespace MetadataTile {
                 return false;
             }
             inverted = true;
+        }
+        if (header_only) {
+            header_out = header;
+            inverted_out = inverted;
+            confidence_out = conf_avg;
+            return true;
         }
 
         double known_dark_sum = 0.0;
@@ -11117,6 +11162,98 @@ namespace MetadataTile {
             return fabs(predicted_width - (double)width_pixels) <= width_tolerance &&
                    fabs(predicted_height - (double)height_pixels) <= height_tolerance;
         };
+        auto could_match_tile_magic = [&](const AffineParams& affine) -> bool {
+            double c = cos(affine.angle_rad);
+            double s = sin(affine.angle_rad);
+            double vx_x = affine.pitch_pixels * c;
+            double vx_y = affine.pitch_pixels * s;
+            double vy_x = -affine.pitch_pixels * s;
+            double vy_y = affine.pitch_pixels * c;
+            double half = ((double)TILE_SIDE - 1.0) * 0.5;
+            double corners_x[4] = {
+                affine.center_x - vx_x * half - vy_x * half,
+                affine.center_x + vx_x * half - vy_x * half,
+                affine.center_x - vx_x * half + vy_x * half,
+                affine.center_x + vx_x * half + vy_x * half
+            };
+            double corners_y[4] = {
+                affine.center_y - vx_y * half - vy_y * half,
+                affine.center_y + vx_y * half - vy_y * half,
+                affine.center_y - vx_y * half + vy_y * half,
+                affine.center_y + vx_y * half + vy_y * half
+            };
+            double min_x = corners_x[0], max_x = corners_x[0];
+            double min_y = corners_y[0], max_y = corners_y[0];
+            for (u32 corner = 1u; corner < 4u; ++corner) {
+                if (corners_x[corner] < min_x) min_x = corners_x[corner];
+                if (corners_x[corner] > max_x) max_x = corners_x[corner];
+                if (corners_y[corner] < min_y) min_y = corners_y[corner];
+                if (corners_y[corner] > max_y) max_y = corners_y[corner];
+            }
+            if (min_x < 0.0 || min_y < 0.0 ||
+                max_x > (double)(width_pixels - 1u) ||
+                max_y > (double)(data_height_pixels - 1u)) {
+                return false;
+            }
+
+            double cutoffs[16];
+            u32 cutoff_count = 0u;
+            for (u32 bit = 16u; bit < 32u; ++bit) {
+                double sample_luminances[TILE_HEADER_REPETITIONS];
+                double module_x = (double)bit - half + (double)TILE_BORDER;
+                for (u32 rep = 0u; rep < TILE_HEADER_REPETITIONS; ++rep) {
+                    double module_y = (double)rep - half + (double)TILE_BORDER;
+                    double x = affine.center_x + vx_x * module_x + vy_x * module_y;
+                    double y = affine.center_y + vx_y * module_x + vy_y * module_y;
+                    double luminance = sample_luminance_bilinear(pixel_data_rgb,
+                                                                 width_pixels,
+                                                                 height_pixels,
+                                                                 x,
+                                                                 y);
+                    u32 insert_index = rep;
+                    while (insert_index > 0u &&
+                           sample_luminances[insert_index - 1u] > luminance) {
+                        sample_luminances[insert_index] = sample_luminances[insert_index - 1u];
+                        --insert_index;
+                    }
+                    sample_luminances[insert_index] = luminance;
+                }
+                // For five repeated samples, the decoded bit changes only when the
+                // threshold crosses the middle (third) luminance sample.
+                cutoffs[cutoff_count] = sample_luminances[TILE_HEADER_REPETITIONS / 2u];
+                ++cutoff_count;
+
+                double lowest_cutoff = cutoffs[0];
+                for (u32 i = 1u; i < cutoff_count; ++i) {
+                    if (cutoffs[i] < lowest_cutoff) lowest_cutoff = cutoffs[i];
+                }
+                u32 minimum_normal_errors = cutoff_count + 1u;
+                u32 minimum_inverted_errors = cutoff_count + 1u;
+                for (u32 threshold_index = 0u; threshold_index <= cutoff_count; ++threshold_index) {
+                    double threshold = threshold_index == 0u
+                                           ? lowest_cutoff - 1.0
+                                           : cutoffs[threshold_index - 1u] + 0.000001;
+                    u32 normal_errors = 0u;
+                    u32 inverted_errors = 0u;
+                    for (u32 prior = 0u; prior < cutoff_count; ++prior) {
+                        u32 decoded_bit = threshold > cutoffs[prior] ? 1u : 0u;
+                        u32 expected_bit = (((u32)0x4D4Du >> prior) & 1u);
+                        if (decoded_bit != expected_bit) ++normal_errors;
+                        if ((decoded_bit ^ 1u) != expected_bit) ++inverted_errors;
+                    }
+                    if (normal_errors < minimum_normal_errors) {
+                        minimum_normal_errors = normal_errors;
+                    }
+                    if (inverted_errors < minimum_inverted_errors) {
+                        minimum_inverted_errors = inverted_errors;
+                    }
+                }
+                if (minimum_normal_errors > 2u && minimum_inverted_errors > 2u) {
+                    return false;
+                }
+            }
+            return true;
+        };
 
         // Stage 1: find a header match (cheap), then refine and fully decode.
         // NOTE: `estimate_square_page_from_image()` is tuned for general pages and is not a reliable
@@ -11161,6 +11298,7 @@ namespace MetadataTile {
         bool have_best = false;
         double best_score = 1e30;
         AffineParams best_affine = {};
+        u64 coarse_search_started_ns = profile_phase_start("metadata affine coarse search");
         for (int dy = -kCenterSpan; dy <= kCenterSpan; dy += kCenterStepCoarse) {
             for (int dx = -kCenterSpan; dx <= kCenterSpan; dx += kCenterStepCoarse) {
                 double cx = base_center_x + (double)dx;
@@ -11202,6 +11340,7 @@ namespace MetadataTile {
                 }
             }
         }
+        profile_log_duration("metadata affine coarse search", coarse_search_started_ns, profile_time_ns());
 
         if (!have_best) {
             // The broad search uses a 0.10-pixel pitch grid and a 6-pixel center grid.
@@ -11213,6 +11352,7 @@ namespace MetadataTile {
             if (debug_logging_enabled()) {
                 console_line(2, "debug metadata tile: starting near-native fine search");
             }
+            u64 near_native_search_started_ns = profile_phase_start("metadata affine near-native search");
             const int kFineCenterRadiusHalfPixels = 32; // 16 pixels, in half-pixel steps
             for (int ring = 0; ring <= kFineCenterRadiusHalfPixels; ++ring) {
                 for (int dy = -ring; dy <= ring; ++dy) {
@@ -11234,6 +11374,9 @@ namespace MetadataTile {
                                 affine.center_y = cy;
                                 affine.pitch_pixels = pitch;
                                 affine.angle_rad = angle_rad;
+                                if (!could_match_tile_magic(affine)) {
+                                    continue;
+                                }
                                 u32 header = 0u;
                                 bool inverted = false;
                                 double confidence = 0.0;
@@ -11267,6 +11410,9 @@ namespace MetadataTile {
                                     if (debug_logging_enabled()) {
                                         console_line(2, "debug metadata tile: decoded with near-native coarse alignment");
                                     }
+                                    profile_log_duration("metadata affine near-native search",
+                                                         near_native_search_started_ns,
+                                                         profile_time_ns());
                                     return true;
                                 }
                                 // Rank local header alignments first. Full payload decoding
@@ -11363,6 +11509,9 @@ namespace MetadataTile {
                                     if (debug_logging_enabled()) {
                                         console_line(2, "debug metadata tile: decoded with near-native fine search");
                                     }
+                                    profile_log_duration("metadata affine near-native search",
+                                                         near_native_search_started_ns,
+                                                         profile_time_ns());
                                     return true;
                                 }
                             }
@@ -11370,12 +11519,89 @@ namespace MetadataTile {
                     }
                 }
             }
+            profile_log_duration("metadata affine near-native search",
+                                 near_native_search_started_ns,
+                                 profile_time_ns());
         }
         if (!have_best) {
             return false;
         }
 
         // Stage 2: refine around the best header match and fully decode.
+        u64 refine_search_started_ns = profile_phase_start("metadata affine refine search");
+        u64 refine_candidate_count = 0u;
+        u64 refine_fast_reject_count = 0u;
+        u64 refine_header_match_count = 0u;
+        u64 refine_full_decode_count = 0u;
+        const u32 kRefinePayloadCandidateLimit = 8192u;
+        AffineParams refine_payload_candidates[kRefinePayloadCandidateLimit];
+        double refine_payload_candidate_scores[kRefinePayloadCandidateLimit] = {};
+        u32 refine_payload_candidate_count = 0u;
+        auto sift_refine_candidate_heap_down = [&](u32 root, u32 heap_count) {
+            for (;;) {
+                u32 child = root * 2u + 1u;
+                if (child >= heap_count) break;
+                u32 right_child = child + 1u;
+                if (right_child < heap_count &&
+                    refine_payload_candidate_scores[right_child] >
+                        refine_payload_candidate_scores[child]) {
+                    child = right_child;
+                }
+                if (refine_payload_candidate_scores[root] >=
+                    refine_payload_candidate_scores[child]) {
+                    break;
+                }
+                double score_tmp = refine_payload_candidate_scores[root];
+                refine_payload_candidate_scores[root] = refine_payload_candidate_scores[child];
+                refine_payload_candidate_scores[child] = score_tmp;
+                AffineParams affine_tmp = refine_payload_candidates[root];
+                refine_payload_candidates[root] = refine_payload_candidates[child];
+                refine_payload_candidates[child] = affine_tmp;
+                root = child;
+            }
+        };
+        auto try_refined_decode = [&](const AffineParams& candidate_affine) -> bool {
+            ++refine_full_decode_count;
+            Values values;
+            ByteBuffer pal_text;
+            if (!decode_tile_affine(pixel_data_rgb,
+                                    width_pixels,
+                                    height_pixels,
+                                    data_height_pixels,
+                                    candidate_affine,
+                                    values,
+                                    pal_text) ||
+                !affine_page_geometry_matches(values, candidate_affine)) {
+                return false;
+            }
+            out_values = values;
+            byte_buffer_move(out_palette_text, pal_text);
+            if (found_affine_out) {
+                *found_affine_out = candidate_affine;
+            }
+            if (debug_logging_enabled()) {
+                char buf_angle[64];
+                char buf_pitch[64];
+                char buf_cx[64];
+                char buf_cy[64];
+                format_fixed_3(candidate_affine.angle_rad *
+                                   (180.0 / 3.14159265358979323846),
+                               buf_angle,
+                               sizeof(buf_angle));
+                format_fixed_3(candidate_affine.pitch_pixels, buf_pitch, sizeof(buf_pitch));
+                format_fixed_3(candidate_affine.center_x, buf_cx, sizeof(buf_cx));
+                format_fixed_3(candidate_affine.center_y, buf_cy, sizeof(buf_cy));
+                console_write(2, "debug metadata tile: affine decoded angle_deg=");
+                console_write(2, buf_angle);
+                console_write(2, " pitch=");
+                console_write(2, buf_pitch);
+                console_write(2, " center=");
+                console_write(2, buf_cx);
+                console_write(2, ",");
+                console_line(2, buf_cy);
+            }
+            return true;
+        };
         const int kRefineSpan = 6;
         const double kRefineAngleSpan = 0.75;
         const double kRefinePitchSpan = 0.25;
@@ -11388,53 +11614,149 @@ namespace MetadataTile {
                     double angle_rad = angle * (3.14159265358979323846 / 180.0);
                     for (double pitch = best_affine.pitch_pixels - kRefinePitchSpan; pitch <= best_affine.pitch_pixels + kRefinePitchSpan + 1e-9; pitch += 0.01) {
                         if (!(pitch > 0.0)) continue;
+                        ++refine_candidate_count;
                         AffineParams affine;
                         affine.center_x = cx;
                         affine.center_y = cy;
                         affine.pitch_pixels = pitch;
                         affine.angle_rad = angle_rad;
-                        Values values;
-                        ByteBuffer pal_text;
-                        if (!decode_tile_affine(pixel_data_rgb,
-                                                width_pixels,
-                                                height_pixels,
-                                                data_height_pixels,
-                                                affine,
-                                                values,
-                                                pal_text)) {
+                        if (!could_match_tile_magic(affine)) {
+                            ++refine_fast_reject_count;
                             continue;
                         }
-                        if (!affine_page_geometry_matches(values, affine)) {
+                        u32 refined_header = 0u;
+                        bool refined_inverted = false;
+                        double refined_confidence = 0.0;
+                        if (!match_tile_header_affine(pixel_data_rgb,
+                                                      width_pixels,
+                                                      height_pixels,
+                                                      data_height_pixels,
+                                                      affine,
+                                                      refined_header,
+                                                      refined_inverted,
+                                                      refined_confidence,
+                                                      true,
+                                                      true)) {
                             continue;
                         }
-                        out_values = values;
-                        byte_buffer_move(out_palette_text, pal_text);
-                        if (found_affine_out) {
-                            *found_affine_out = affine;
+                        ++refine_header_match_count;
+                        double rank_score = -refined_confidence +
+                                            fabs(angle - base_angle_deg) * 0.01 +
+                                            fabs(pitch - best_affine.pitch_pixels) * 0.05 +
+                                            (fabs((double)dx) + fabs((double)dy)) * 0.0005;
+                        if (refine_payload_candidate_count < kRefinePayloadCandidateLimit) {
+                            u32 insert_index = refine_payload_candidate_count++;
+                            refine_payload_candidates[insert_index] = affine;
+                            refine_payload_candidate_scores[insert_index] = rank_score;
+                            while (insert_index > 0u) {
+                                u32 parent = (insert_index - 1u) / 2u;
+                                if (refine_payload_candidate_scores[parent] >= rank_score) break;
+                                refine_payload_candidate_scores[insert_index] =
+                                    refine_payload_candidate_scores[parent];
+                                refine_payload_candidates[insert_index] =
+                                    refine_payload_candidates[parent];
+                                refine_payload_candidate_scores[parent] = rank_score;
+                                refine_payload_candidates[parent] = affine;
+                                insert_index = parent;
+                            }
+                        } else if (rank_score < refine_payload_candidate_scores[0]) {
+                            refine_payload_candidate_scores[0] = rank_score;
+                            refine_payload_candidates[0] = affine;
+                            sift_refine_candidate_heap_down(0u, refine_payload_candidate_count);
                         }
-                        if (debug_logging_enabled()) {
-                            char buf_angle[64];
-                            char buf_pitch[64];
-                            char buf_cx[64];
-                            char buf_cy[64];
-                            format_fixed_3(angle, buf_angle, sizeof(buf_angle));
-                            format_fixed_3(pitch, buf_pitch, sizeof(buf_pitch));
-                            format_fixed_3(cx, buf_cx, sizeof(buf_cx));
-                            format_fixed_3(cy, buf_cy, sizeof(buf_cy));
-                            console_write(2, "debug metadata tile: affine decoded angle_deg=");
-                            console_write(2, buf_angle);
-                            console_write(2, " pitch=");
-                            console_write(2, buf_pitch);
-                            console_write(2, " center=");
-                            console_write(2, buf_cx);
-                            console_write(2, ",");
-                            console_line(2, buf_cy);
-                        }
-                        return true;
                     }
                 }
             }
         }
+        for (u32 heap_size = refine_payload_candidate_count; heap_size > 1u; --heap_size) {
+            u32 last = heap_size - 1u;
+            double score_tmp = refine_payload_candidate_scores[0];
+            refine_payload_candidate_scores[0] = refine_payload_candidate_scores[last];
+            refine_payload_candidate_scores[last] = score_tmp;
+            AffineParams affine_tmp = refine_payload_candidates[0];
+            refine_payload_candidates[0] = refine_payload_candidates[last];
+            refine_payload_candidates[last] = affine_tmp;
+            sift_refine_candidate_heap_down(0u, last);
+        }
+        for (u32 candidate_index = 0u;
+             candidate_index < refine_payload_candidate_count;
+             ++candidate_index) {
+            if (!try_refined_decode(refine_payload_candidates[candidate_index])) {
+                continue;
+            }
+            if (profile_logging_enabled()) {
+                char profile_counts[256];
+                snprintf(profile_counts,
+                         sizeof(profile_counts),
+                         "profile: metadata affine refine candidates=%llu fast_rejects=%llu header_matches=%llu ranked_candidates=%u full_decodes=%llu",
+                         (unsigned long long)refine_candidate_count,
+                         (unsigned long long)refine_fast_reject_count,
+                         (unsigned long long)refine_header_match_count,
+                         candidate_index + 1u,
+                         (unsigned long long)refine_full_decode_count);
+                console_line(2, profile_counts);
+            }
+            profile_log_duration("metadata affine refine search",
+                                 refine_search_started_ns,
+                                 profile_time_ns());
+            return true;
+        }
+        // Preserve the exhaustive legacy path if ranking does not find a valid tile.
+        // This keeps every previously searched alignment available as a fallback.
+        for (int dy = -kRefineSpan; dy <= kRefineSpan; ++dy) {
+            for (int dx = -kRefineSpan; dx <= kRefineSpan; ++dx) {
+                double cx = best_affine.center_x + (double)dx;
+                double cy = best_affine.center_y + (double)dy;
+                double base_angle_deg = best_affine.angle_rad *
+                                        (180.0 / 3.14159265358979323846);
+                for (double angle = base_angle_deg - kRefineAngleSpan;
+                     angle <= base_angle_deg + kRefineAngleSpan + 1e-9;
+                     angle += 0.05) {
+                    double angle_rad = angle * (3.14159265358979323846 / 180.0);
+                    for (double pitch = best_affine.pitch_pixels - kRefinePitchSpan;
+                         pitch <= best_affine.pitch_pixels + kRefinePitchSpan + 1e-9;
+                         pitch += 0.01) {
+                        if (!(pitch > 0.0)) continue;
+                        AffineParams affine;
+                        affine.center_x = cx;
+                        affine.center_y = cy;
+                        affine.pitch_pixels = pitch;
+                        affine.angle_rad = angle_rad;
+                        if (try_refined_decode(affine)) {
+                            if (profile_logging_enabled()) {
+                                char profile_counts[256];
+                                snprintf(profile_counts,
+                                         sizeof(profile_counts),
+                                         "profile: metadata affine refine candidates=%llu fast_rejects=%llu header_matches=%llu ranked_candidates=%u full_decodes=%llu (exhaustive fallback)",
+                                         (unsigned long long)refine_candidate_count,
+                                         (unsigned long long)refine_fast_reject_count,
+                                         (unsigned long long)refine_header_match_count,
+                                         refine_payload_candidate_count,
+                                         (unsigned long long)refine_full_decode_count);
+                                console_line(2, profile_counts);
+                            }
+                            profile_log_duration("metadata affine refine search",
+                                                 refine_search_started_ns,
+                                                 profile_time_ns());
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        if (profile_logging_enabled()) {
+            char profile_counts[256];
+            snprintf(profile_counts,
+                     sizeof(profile_counts),
+                     "profile: metadata affine refine candidates=%llu fast_rejects=%llu header_matches=%llu ranked_candidates=%u full_decodes=%llu (exhaustive fallback failed)",
+                     (unsigned long long)refine_candidate_count,
+                     (unsigned long long)refine_fast_reject_count,
+                     (unsigned long long)refine_header_match_count,
+                     refine_payload_candidate_count,
+                     (unsigned long long)refine_full_decode_count);
+            console_line(2, profile_counts);
+        }
+        profile_log_duration("metadata affine refine search", refine_search_started_ns, profile_time_ns());
 
         return false;
     }
@@ -15948,7 +16270,11 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    makocode::ByteBuffer& frame_bits,
                                    u64& frame_bit_count,
                                    PpmParserState& metadata_out,
-                                   bool force_disable_fiducial_subgrid = false) {
+                                   bool force_disable_fiducial_subgrid,
+                                   bool* retry_without_subgrid_out = 0) {
+    if (retry_without_subgrid_out) {
+        *retry_without_subgrid_out = false;
+    }
     if (!input.data || input.size == 0u) {
         return false;
     }
@@ -16046,12 +16372,47 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return false;
     }
     makocode::ByteBuffer pixel_buffer;
-    if (!ppm_read_rgb_pixels(state, raw_pixel_count, pixel_buffer)) {
+    u64 pixel_parse_started_ns = profile_time_ns();
+    bool pixels_read = ppm_read_rgb_pixels(state, raw_pixel_count, pixel_buffer);
+    profile_log_duration("P3 ASCII pixel token parse", pixel_parse_started_ns, profile_time_ns());
+    if (profile_logging_enabled()) {
+        char image_info[192];
+        snprintf(image_info,
+                 sizeof(image_info),
+                 "profile: P3 image width=%llu height=%llu pixels=%llu input_bytes=%lu",
+                 (unsigned long long)width,
+                 (unsigned long long)height,
+                 (unsigned long long)raw_pixel_count,
+                 (unsigned long)input.size);
+        console_line(2, image_info);
+    }
+    if (!pixels_read) {
         return false;
     }
     u8* pixel_data = pixel_buffer.data;
     if (!pixel_data) {
         return false;
+    }
+    if (raw_pixel_count <= 262144u) {
+        u8 first_r = pixel_data[0u];
+        u8 first_g = pixel_data[1u];
+        u8 first_b = pixel_data[2u];
+        bool uniform_image = true;
+        for (usize pixel = 1u; pixel < (usize)raw_pixel_count; ++pixel) {
+            usize idx = pixel * 3u;
+            if (pixel_data[idx + 0u] != first_r ||
+                pixel_data[idx + 1u] != first_g ||
+                pixel_data[idx + 2u] != first_b) {
+                uniform_image = false;
+                break;
+            }
+        }
+        if (uniform_image) {
+            if (profile_logging_enabled()) {
+                console_line(2, "profile: uniform image rejected before metadata search");
+            }
+            return false;
+        }
     }
     makocode::ByteBuffer affine_source_pixels;
     makocode::ByteBuffer downsampled_pixels;
@@ -16088,6 +16449,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     u32 data_height_hint = (footer_rows_hint > 0u && footer_rows_hint < (u32)height) ? ((u32)height - footer_rows_hint) : (u32)height;
     MetadataTile::AffineParams tile_affine_hint = {};
     bool tile_affine_hint_available = false;
+    u64 exact_tile_search_started_ns = profile_phase_start("metadata tile exact search");
     if (!(disable_tile_env && disable_tile_env[0]) && width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
         // Try a few plausible data heights in case the footer height (text-only) was mis-estimated.
         const u32 fallback_offsets[] = {0u, 8u, 16u, 24u, 32u};
@@ -16130,8 +16492,142 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             }
         }
     }
+    profile_log_duration("metadata tile exact search", exact_tile_search_started_ns, profile_time_ns());
+    // Before the broad affine search, try a couple of square logical-size estimates.
+    // This is especially useful when X and Y were stretched by different factors: a
+    // single-pitch affine model cannot fit that distortion, but downsampling can still
+    // restore the metadata tile cheaply.
+    u64 downsample_preflight_started_ns = profile_phase_start("metadata tile downsample preflight");
+    if (!tile_available && width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull &&
+        width > MetadataTile::TILE_SIDE && height > MetadataTile::TILE_SIDE) {
+        u64 logical_guess = estimate_square_page_from_image(base_width, base_height);
+        double geometric_mean = sqrt((double)base_width * (double)base_height);
+        u64 geometric_target = (u64)floor(geometric_mean / 2.5 + 0.5);
+        u64 sweep_target = logical_guess;
+        if (logical_guess > 0u) {
+            u64 sweep_min = (logical_guess * 60ull) / 100ull;
+            if (sweep_min < MetadataTile::TILE_SIDE) sweep_min = MetadataTile::TILE_SIDE;
+            if (geometric_target >= sweep_min) {
+                sweep_target = sweep_min + ((geometric_target - sweep_min) / 20ull) * 20ull;
+            }
+        }
+        u64 targets[3] = {geometric_target, sweep_target, logical_guess};
+        for (u32 target_index = 0u; target_index < 3u && !tile_available; ++target_index) {
+            u64 target = targets[target_index];
+            if (target < MetadataTile::TILE_SIDE || target >= base_width || target >= base_height) {
+                continue;
+            }
+            if ((target_index > 0u && target == targets[0]) ||
+                (target_index > 1u && target == targets[1])) {
+                continue;
+            }
+            u32 target_size = (u32)target;
+            makocode::ByteBuffer preflight_pixels;
+            if (!preflight_pixels.ensure((usize)target_size * (usize)target_size * 3u)) {
+                continue;
+            }
+            preflight_pixels.size = (usize)target_size * (usize)target_size * 3u;
+            for (u32 y = 0u; y < target_size; ++y) {
+                double y0 = ((double)y * (double)base_height) / (double)target_size;
+                double y1 = ((double)(y + 1u) * (double)base_height) / (double)target_size;
+                u32 iy0 = (u32)floor(y0);
+                u32 iy1 = (u32)ceil(y1);
+                if (iy1 > base_height) iy1 = (u32)base_height;
+                for (u32 x = 0u; x < target_size; ++x) {
+                    double x0 = ((double)x * (double)base_width) / (double)target_size;
+                    double x1 = ((double)(x + 1u) * (double)base_width) / (double)target_size;
+                    u32 ix0 = (u32)floor(x0);
+                    u32 ix1 = (u32)ceil(x1);
+                    if (ix1 > base_width) ix1 = (u32)base_width;
+                    u64 sums[3] = {};
+                    u64 count = 0u;
+                    for (u32 sy = iy0; sy < iy1; ++sy) {
+                        double cy = (double)sy + 0.5;
+                        if (cy < y0 || cy >= y1) continue;
+                        for (u32 sx = ix0; sx < ix1; ++sx) {
+                            double cx = (double)sx + 0.5;
+                            if (cx < x0 || cx >= x1) continue;
+                            usize src = ((usize)sy * (usize)base_width + (usize)sx) * 3u;
+                            sums[0] += pixel_buffer.data[src + 0u];
+                            sums[1] += pixel_buffer.data[src + 1u];
+                            sums[2] += pixel_buffer.data[src + 2u];
+                            ++count;
+                        }
+                    }
+                    if (count == 0u) count = 1u;
+                    usize dst = ((usize)y * (usize)target_size + (usize)x) * 3u;
+                    preflight_pixels.data[dst + 0u] = (u8)((sums[0] + count / 2u) / count);
+                    preflight_pixels.data[dst + 1u] = (u8)((sums[1] + count / 2u) / count);
+                    preflight_pixels.data[dst + 2u] = (u8)((sums[2] + count / 2u) / count);
+                }
+            }
+            double min_luminance = 255.0;
+            double max_luminance = 0.0;
+            usize downsample_pixels = (usize)target_size * (usize)target_size;
+            for (usize i = 0u; i < downsample_pixels; ++i) {
+                usize idx = i * 3u;
+                double luminance = 0.2126 * (double)preflight_pixels.data[idx + 0u] +
+                                   0.7152 * (double)preflight_pixels.data[idx + 1u] +
+                                   0.0722 * (double)preflight_pixels.data[idx + 2u];
+                if (luminance < min_luminance) min_luminance = luminance;
+                if (luminance > max_luminance) max_luminance = luminance;
+            }
+            if (!(max_luminance > min_luminance + 32.0)) {
+                continue;
+            }
+            double threshold = (min_luminance + max_luminance) * 0.5;
+            for (usize i = 0u; i < downsample_pixels; ++i) {
+                usize idx = i * 3u;
+                double luminance = 0.2126 * (double)preflight_pixels.data[idx + 0u] +
+                                   0.7152 * (double)preflight_pixels.data[idx + 1u] +
+                                   0.0722 * (double)preflight_pixels.data[idx + 2u];
+                u8 value = luminance < threshold ? 0u : 255u;
+                preflight_pixels.data[idx + 0u] = value;
+                preflight_pixels.data[idx + 1u] = value;
+                preflight_pixels.data[idx + 2u] = value;
+            }
+            MetadataTile::Placement placement = MetadataTile::compute_tile_placement(target_size,
+                                                                                       target_size);
+            if (!placement.valid) {
+                continue;
+            }
+            for (int dy = -12; dy <= 12 && !tile_available; ++dy) {
+                for (int dx = -12; dx <= 12 && !tile_available; ++dx) {
+                    int tile_x = (int)placement.x0 + dx;
+                    int tile_y = (int)placement.y0 + dy;
+                    if (tile_x < 0 || tile_y < 0 ||
+                        (u32)tile_x + MetadataTile::TILE_SIDE > target_size ||
+                        (u32)tile_y + MetadataTile::TILE_SIDE > target_size) {
+                        continue;
+                    }
+                    MetadataTile::Placement candidate = placement;
+                    candidate.x0 = (u32)tile_x;
+                    candidate.y0 = (u32)tile_y;
+                    if (!MetadataTile::decode_tile(preflight_pixels.data,
+                                                   target_size,
+                                                   target_size,
+                                                   target_size,
+                                                   candidate,
+                                                   tile_values,
+                                                   tile_palette_text) ||
+                        !metadata_tile_plausible(tile_values, target_size, target_size)) {
+                        continue;
+                    }
+                    tile_available = true;
+                    apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+                    if (debug_logging_enabled()) {
+                        console_line(2, "debug metadata tile: decoded by square downsample preflight");
+                    }
+                }
+            }
+        }
+    }
+    profile_log_duration("metadata tile downsample preflight",
+                         downsample_preflight_started_ns,
+                         profile_time_ns());
     // If the tile is present but the page was scaled/rotated, the axis-aligned 1px/module sampler
     // won't see it. Fall back to an affine tile decode centered near the expected location.
+    u64 affine_tile_search_started_ns = profile_phase_start("metadata tile affine search");
     if (!tile_available &&
         !(disable_tile_env && disable_tile_env[0]) &&
         width <= 0xFFFFFFFFull &&
@@ -16260,9 +16756,11 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             console_line(2, "debug metadata tile: affine search failed");
         }
     }
+    profile_log_duration("metadata tile affine search", affine_tile_search_started_ns, profile_time_ns());
 
     // If the metadata tile is missing, try a simple nearest-neighbor downsample
     // to an estimated logical square page size, then retry the tile decode.
+    u64 downsample_recovery_started_ns = profile_phase_start("metadata tile downsample recovery");
     if (!tile_available) {
         bool downsample_buffer_ready = false;
         u32 downsample_buffer_w = 0u;
@@ -16400,7 +16898,16 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             if (target_w < MetadataTile::TILE_SIDE || target_h < MetadataTile::TILE_SIDE) {
                 return false;
             }
+            char candidate_label[128];
+            snprintf(candidate_label,
+                     sizeof(candidate_label),
+                     "metadata downsample %s %ux%u",
+                     label,
+                     target_w,
+                     target_h);
+            u64 candidate_started_ns = profile_phase_start(candidate_label);
             if (!fill_downsample(target_w, target_h)) {
+                profile_log_duration(candidate_label, candidate_started_ns, profile_time_ns());
                 return false;
             }
             downsample_buffer_ready = true;
@@ -16432,8 +16939,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     console_write(2, "debug metadata tile: decoded after ");
                     console_line(2, label);
                 }
+                profile_log_duration(candidate_label, candidate_started_ns, profile_time_ns());
                 return true;
             }
+            profile_log_duration(candidate_label, candidate_started_ns, profile_time_ns());
             return false;
         };
         if (logical_guess > 0u && logical_guess < base_width && logical_guess < base_height) {
@@ -16521,6 +17030,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                          : base_height);
         }
     }
+    profile_log_duration("metadata tile downsample recovery", downsample_recovery_started_ns, profile_time_ns());
     if (!tile_available) {
         // Without a metadata tile, the page layout cannot be recovered.
         if (debug_logging_enabled() && pixel_buffer.data && base_width <= 0xFFFFFFFFull && base_height <= 0xFFFFFFFFull) {
@@ -16530,7 +17040,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             debug_probe_metadata_tile_affine(pixel_buffer.data, (u32)base_width, (u32)base_height, base_data_height);
         }
         console_line(1, "decode: metadata tile missing; aborting (no metadata available)");
-        return 1;
+        return false;
+    }
+    if (retry_without_subgrid_out) {
+        *retry_without_subgrid_out = true;
     }
     if (!state.has_footer_rows && !tile_available) {
         auto row_black_count = [&](u64 row_index) -> u64 {
@@ -16633,6 +17146,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         // Default palette is White/Black when no metadata or stripe is present.
         force_monochrome = true;
     }
+    u64 monochrome_normalization_started_ns = profile_phase_start("monochrome image normalization");
     if (force_monochrome && pixel_data && width > 0u && height > 0u) {
         bool retain_affine_source = tile_available &&
                                     tile_values.palette_count == 2u &&
@@ -16653,6 +17167,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         bool contains_interpolated_pixels = false;
         binarize_monochrome_image(pixel_data, width, height, contains_interpolated_pixels);
     }
+    profile_log_duration("monochrome image normalization",
+                         monochrome_normalization_started_ns,
+                         profile_time_ns());
+    u64 geometry_detection_started_ns = profile_phase_start("rotation and scale detection");
     bool has_rotation = false;
     unsigned rotated_width = (unsigned)width;
     unsigned rotated_height = (unsigned)height;
@@ -18021,6 +18539,7 @@ struct RotationEstimateCandidate {
     if (logical_width > 0xFFFFFFFFull || logical_height > 0xFFFFFFFFull || data_height > 0xFFFFFFFFull) {
         return false;
     }
+    profile_log_duration("rotation and scale detection", geometry_detection_started_ns, profile_time_ns());
     if (debug_logging_enabled()) {
         char lw_buf[32], lh_buf[32], dh_buf[32], foot_buf[32];
         u64_to_ascii(logical_width, lw_buf, sizeof(lw_buf));
@@ -18170,6 +18689,7 @@ struct RotationEstimateCandidate {
     u64 pixel_stride = raw_width;
     double scale_xd = scale_x;
     double scale_yd = scale_y;
+    u64 fiducial_subgrid_started_ns = profile_phase_start("fiducial subgrid fitting");
     struct FiducialSubgridCell {
         double tl_x;
         double tl_y;
@@ -18809,6 +19329,7 @@ struct RotationEstimateCandidate {
             }
         }
     }
+    profile_log_duration("fiducial subgrid fitting", fiducial_subgrid_started_ns, profile_time_ns());
 
     if (debug_logging_enabled()) {
         char column_buf[32];
@@ -18859,6 +19380,7 @@ struct RotationEstimateCandidate {
                                      : (const u8*)0;
     usize reservation_size = reservation_mask ? fiducial_mask.size : 0u;
 
+    u64 affine_pixel_reconstruction_started_ns = profile_phase_start("affine pixel reconstruction");
     if (tile_affine_hint_available && tile_affine_hint_trusted &&
         state.has_rotation_degrees && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
         state.has_page_width_pixels && state.has_page_height_pixels &&
@@ -19236,6 +19758,10 @@ struct RotationEstimateCandidate {
         }
     }
 
+    profile_log_duration("affine pixel reconstruction",
+                         affine_pixel_reconstruction_started_ns,
+                         profile_time_ns());
+    u64 payload_sampling_started_ns = profile_phase_start("payload pixel sampling");
     for (u64 logical_row = 0u; logical_row < data_height; ++logical_row) {
         if (use_fiducial_subgrid) {
             while (active_row_cell + 1u < fiducial_subgrid_rows && logical_row >= active_row_end) {
@@ -19630,6 +20156,7 @@ struct RotationEstimateCandidate {
             }
         }
     }
+    profile_log_duration("payload pixel sampling", payload_sampling_started_ns, profile_time_ns());
     if (use_custom_palette) {
         u64 digits_available = (u64)custom_digits.size;
         if (digits_target > 0u && digits_available == 0u) {
@@ -26027,23 +26554,49 @@ static int command_decode(int arg_count, char** args) {
     bool have_metadata = false;
     bool force_disable_subgrid = false;
     bool retried_subgrid = false;
+    u32 profile_attempt_count = 0u;
+    u64 profile_attempt_started_ns = 0u;
 
 retry_decode:
+    ++profile_attempt_count;
+    profile_attempt_started_ns = profile_time_ns();
+    if (profile_logging_enabled()) {
+        char attempt_info[128];
+        snprintf(attempt_info,
+                 sizeof(attempt_info),
+                 "profile: decode attempt=%u fiducial_subgrid=%s",
+                 profile_attempt_count,
+                 force_disable_subgrid ? "disabled" : "enabled");
+        console_line(2, attempt_info);
+    }
     bitstream.release();
     bit_count = 0u;
     aggregate_state = PpmParserState();
     have_metadata = false;
     if (file_count == 0u) {
         makocode::ByteBuffer ppm_stream;
+        u64 input_read_started_ns = profile_time_ns();
         if (!read_entire_stdin(ppm_stream)) {
             console_line(2, "decode: failed to read stdin");
             return 1;
         }
+        profile_log_duration("stdin read", input_read_started_ns, profile_time_ns());
         makocode::ByteBuffer frame_bits;
         u64 frame_bit_count = 0u;
         PpmParserState single_state;
-        if (!ppm_extract_frame_bits(ppm_stream, mapping, frame_bits, frame_bit_count, single_state, force_disable_subgrid)) {
-            if (!force_disable_subgrid && !retried_subgrid) {
+        bool retry_without_subgrid_allowed = false;
+        u64 extract_started_ns = profile_time_ns();
+        bool frame_extracted = ppm_extract_frame_bits(ppm_stream,
+                                                      mapping,
+                                                      frame_bits,
+                                                      frame_bit_count,
+                                                      single_state,
+                                                      force_disable_subgrid,
+                                                      &retry_without_subgrid_allowed);
+        profile_log_duration("PPM parse and frame extraction", extract_started_ns, profile_time_ns());
+        if (!frame_extracted) {
+            if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
+                profile_log_duration("decode attempt total", profile_attempt_started_ns, profile_time_ns());
                 console_line(2, "decode: retrying without fiducial subgrid (frame extraction failed)");
                 force_disable_subgrid = true;
                 retried_subgrid = true;
@@ -26052,8 +26605,16 @@ retry_decode:
             console_line(2, "decode: invalid ppm input");
             return 1;
         }
-        if (!frame_bits_to_payload(frame_bits.data, frame_bit_count, single_state, bitstream, bit_count)) {
+        u64 payload_header_started_ns = profile_time_ns();
+        bool payload_extracted = frame_bits_to_payload(frame_bits.data,
+                                                       frame_bit_count,
+                                                       single_state,
+                                                       bitstream,
+                                                       bit_count);
+        profile_log_duration("frame bits to payload header", payload_header_started_ns, profile_time_ns());
+        if (!payload_extracted) {
             if (!force_disable_subgrid && !retried_subgrid) {
+                profile_log_duration("decode attempt total", profile_attempt_started_ns, profile_time_ns());
                 console_line(2, "decode: retrying without fiducial subgrid (payload header unreadable)");
                 force_disable_subgrid = true;
                 retried_subgrid = true;
@@ -26064,6 +26625,7 @@ retry_decode:
         }
         aggregate_state = single_state;
         have_metadata = true;
+        profile_log_duration("decode attempt total", profile_attempt_started_ns, profile_time_ns());
     } else {
         makocode::BitWriter frame_aggregator;
         frame_aggregator.reset();
@@ -26076,10 +26638,20 @@ retry_decode:
                 console_write(2, "debug reading file: ");
                 console_line(2, input_files[file_index]);
             }
+            u64 input_read_started_ns = profile_time_ns();
             if (!read_entire_file(input_files[file_index], ppm_stream)) {
                 console_write(2, "decode: failed to read ");
                 console_line(2, input_files[file_index]);
                 return 1;
+            }
+            profile_log_duration("input file read", input_read_started_ns, profile_time_ns());
+            if (profile_logging_enabled()) {
+                char input_info[192];
+                snprintf(input_info,
+                         sizeof(input_info),
+                         "profile: input file bytes=%lu",
+                         (unsigned long)ppm_stream.size);
+                console_line(2, input_info);
             }
             if (debug_logging_enabled() && ppm_stream.size >= 8u && ppm_stream.data) {
                 console_write(2, "debug read bytes: ");
@@ -26096,8 +26668,19 @@ retry_decode:
             makocode::ByteBuffer page_bits;
             u64 page_bit_count = 0u;
             PpmParserState page_state;
-            if (!ppm_extract_frame_bits(ppm_stream, mapping, page_bits, page_bit_count, page_state, force_disable_subgrid)) {
-                if (!force_disable_subgrid && !retried_subgrid) {
+            bool retry_without_subgrid_allowed = false;
+            u64 extract_started_ns = profile_time_ns();
+            bool frame_extracted = ppm_extract_frame_bits(ppm_stream,
+                                                          mapping,
+                                                          page_bits,
+                                                          page_bit_count,
+                                                          page_state,
+                                                          force_disable_subgrid,
+                                                          &retry_without_subgrid_allowed);
+            profile_log_duration("PPM parse and frame extraction", extract_started_ns, profile_time_ns());
+            if (!frame_extracted) {
+                if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
+                    profile_log_duration("decode attempt total", profile_attempt_started_ns, profile_time_ns());
                     console_line(2, "decode: retrying without fiducial subgrid (frame extraction failed)");
                     force_disable_subgrid = true;
                     retried_subgrid = true;
@@ -26168,8 +26751,16 @@ retry_decode:
         }
         const u8* frame_data = frame_aggregator.data();
         u64 frame_bit_total = frame_aggregator.bit_size();
-        if (!frame_bits_to_payload(frame_data, frame_bit_total, aggregate_state, bitstream, bit_count)) {
+        u64 payload_header_started_ns = profile_time_ns();
+        bool payload_extracted = frame_bits_to_payload(frame_data,
+                                                       frame_bit_total,
+                                                       aggregate_state,
+                                                       bitstream,
+                                                       bit_count);
+        profile_log_duration("frame bits to payload header", payload_header_started_ns, profile_time_ns());
+        if (!payload_extracted) {
             if (!force_disable_subgrid && !retried_subgrid) {
+                profile_log_duration("decode attempt total", profile_attempt_started_ns, profile_time_ns());
                 console_line(2, "decode: retrying without fiducial subgrid (payload header unreadable)");
                 force_disable_subgrid = true;
                 retried_subgrid = true;
@@ -26179,6 +26770,7 @@ retry_decode:
             return 1;
         }
         have_metadata = true;
+        profile_log_duration("decode attempt total", profile_attempt_started_ns, profile_time_ns());
     }
     if (have_metadata &&
         aggregate_state.has_palette_text &&

@@ -26,6 +26,24 @@ print_makocode_cmd() {
     printf '%s makocode %s: %s\n' "$label_fmt" "$phase" "$(format_command "$@")"
 }
 
+run_profiled_step() {
+    local phase=$1
+    local original_timeformat=${TIMEFORMAT:-}
+    local status=0
+    shift
+    if [[ ${MAKOCODE_PROFILE:-0} == 1 ]]; then
+        TIMEFORMAT="profile: $phase real=%3R user=%3U sys=%3S"
+        if time "$@"; then
+            status=0
+        else
+            status=$?
+        fi
+        TIMEFORMAT=$original_timeformat
+        return "$status"
+    fi
+    "$@"
+}
+
 usage() {
     cat <<'USAGE'
 Usage: run_roundtrip.sh --label NAME --size BYTES --ecc VALUE --width PX --height PX [options]
@@ -339,7 +357,7 @@ fi
 print_makocode_cmd "encode" "${encode_cmd[@]}"
 (
     cd "$work_dir"
-    "${encode_cmd[@]}"
+    run_profiled_step "encode" "${encode_cmd[@]}"
 ) >/dev/null
 
 shopt -s nullglob
@@ -389,7 +407,7 @@ fi
 decode_cmd+=("--output-dir=$baseline_decode_dir")
 decode_cmd+=("${baseline_targets[@]}")
 print_makocode_cmd "decode" "${decode_cmd[@]}"
-"${decode_cmd[@]}" >/dev/null
+run_profiled_step "baseline decode" "${decode_cmd[@]}" >/dev/null
 
 baseline_decoded_payload="$baseline_decode_dir/random.bin"
 if [[ ! -f $baseline_decoded_payload ]]; then
@@ -423,7 +441,7 @@ if [[ $transform_needed -eq 1 ]]; then
     for ppm in "${ppm_targets[@]}"; do
         base_name=$(basename "$ppm")
         transformed_path="$work_dir/${base_name%.*}_transformed.ppm"
-        "$repo_root/scripts/ppm_transform" transform \
+        run_profiled_step "PPM transform" "$repo_root/scripts/ppm_transform" transform \
             --input "$ppm" \
             --output "$transformed_path" \
             --scale-x "$scale_x" \
@@ -479,7 +497,7 @@ if [[ $transform_needed -eq 1 ]]; then
         transform_decode_cmd+=("${transformed_targets[0]}")
     fi
     print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
-    "${transform_decode_cmd[@]}" >/dev/null
+    run_profiled_step "transformed decode" "${transform_decode_cmd[@]}" >/dev/null
     transformed_decoded_payload="$transformed_decode_dir/random.bin"
     if [[ ! -f $transformed_decoded_payload ]]; then
         echo "run_roundtrip: transformed decode missing random.bin" >&2
