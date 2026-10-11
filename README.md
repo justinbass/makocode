@@ -21,13 +21,11 @@ make test
 ./makocode decode scan.ppm
 ```
 
-Pass `--debug` (e.g., `./makocode --debug encode ...`) if you need the verbose diagnostic logs that were previously always emitted.
-
 ## Tests
 
 `make test` now drives the CLI end-to-end through the shell scripts in `scripts/`
 (round-trip, payload suite, overlay, CLI output-dir, and decode failure cases).
-Artifacts for debugging are written to `test/` using the labels defined in each
+Test artifacts are written to `test/` using the labels defined in each
 script (e.g., `3001_random_payload*`, `2005_payload_gray_100k_*`).
 
 Each `make test` run prints its master seed and writes it to `test/test_seed.txt`.

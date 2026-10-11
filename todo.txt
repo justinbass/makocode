@@ -1,8 +1,10 @@
 Features
+- Remove --corrupt-header-copies
+- Test: Wavy distortion test. Note, center barcode would be distorted too.
+- Test: Scanning type distortion tests, anticipated.
 - Footer title and metadata just on first page - or middle page?
 - Test: Page height or width too small for title or metadata, fails to encode
 - Compress metadata (confirm it saves space worth the risk of corruption)
-- Test: Wavy distortion test. Note, footer barcode would be distorted too. This will fail currently.
 - Footer text scaling glyphs? Could use an internal vector image. May not look good in practice.
 - Footer title wrap, confirm page-height/width applies as a hard limit
 - Test: All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color

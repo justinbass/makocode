@@ -39,7 +39,7 @@ coverage: clean
 clean:
 	@$(STATUS) --note clean "cleanup start"
 	@$(STATUS) clean "binary" rm -f makocode
-	@$(STATUS) clean "debug symbols" rm -rf makocode.dSYM
+	@$(STATUS) clean "symbol bundle" rm -rf makocode.dSYM
 	@$(STATUS) clean "ppm_transform helper" rm -f scripts/ppm_transform
 	@$(STATUS) clean "test artifacts" rm -rf test
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
