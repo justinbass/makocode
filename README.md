@@ -27,6 +27,8 @@ make test
 (round-trip, payload suite, overlay, CLI output-dir, and decode failure cases).
 Test artifacts are written to `test/` using the labels defined in each
 script (e.g., `3001_random_payload*`, `2005_payload_gray_100k_*`).
+After a passing run, final round-trip images (transformed where applicable) and
+the CLI output image are moved to `test/visual/`.
 
 Each `make test` run prints its master seed and writes it to `test/test_seed.txt`.
 Repeat a randomized run with the same seed using:

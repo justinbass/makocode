@@ -6,6 +6,8 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 mako_test_seed_init "$repo_root"
+visual_dir="$repo_root/test/visual"
+rm -rf "$visual_dir"
 suite_bin="$repo_root/scripts/run_roundtrip.sh"
 cli_test="$repo_root/scripts/test_cli_output_dir.sh"
 decode_test="$repo_root/scripts/test_decode_failures.sh"
@@ -480,3 +482,18 @@ run_roundtrip_case "paper_offwhite_cmykwrbg" "Slightly off-white, splotchy paper
 
 run_script_case "$repo_root/scripts/test_no_ppm_headers.sh" \
     "no_ppm_headers" "No PPM header comment lines remain"
+
+shopt -s nullglob
+visual_ppms=("$repo_root"/test/*_random_payload_transformed_encoded*.ppm)
+for ppm in "$repo_root"/test/*_random_payload_encoded*.ppm; do
+    transformed_ppm=${ppm/_random_payload_encoded/_random_payload_transformed_encoded}
+    if [[ ! -f $transformed_ppm ]]; then
+        visual_ppms+=("$ppm")
+    fi
+done
+visual_ppms+=("$repo_root"/test/*_cli_payload_encoded.ppm)
+shopt -u nullglob
+mkdir -p "$visual_dir"
+if ((${#visual_ppms[@]})); then
+    mv "${visual_ppms[@]}" "$visual_dir/"
+fi
