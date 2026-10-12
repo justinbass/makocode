@@ -1,11 +1,10 @@
 Cleanup
 - 100% line coverage
-  - PPM comment-metadata fallback roundtrip, including malformed tags (makocode.cpp:12634-13605).
-  - Nested/empty-directory archive encode/decode roundtrip (makocode.cpp:20908-21309,21496-21595).
-  - Minify test: preserve literals/directives and compile output (makocode.cpp:25257-25496).
-  - Pipe a single PPM into decode; verify extracted payload (makocode.cpp:20731,24890-24960).
-  - Smoke-test usage and each command's --help (makocode.cpp:21597-21708).
-  - Test --prefix ending _encoded; verify fiducial embedding/roundtrip (makocode.cpp:12433-12458,19753-19763).
+  - Nested/empty-directory archive encode/decode roundtrip (makocode.cpp:19874-20275,20462-20561).
+  - Minify test: preserve literals/directives and compile output (makocode.cpp:24211-24450).
+  - Pipe a single PPM into decode; verify extracted payload (makocode.cpp:19697,23844-23914).
+  - Smoke-test usage and each command's --help (makocode.cpp:20563-20674).
+  - Test --prefix ending _encoded; verify fiducial embedding/roundtrip (makocode.cpp:12409-12431,18719-18729).
   - Audit uncalled CLI code: grayscale loader, border cleanup, LZMA decoder (makocode.cpp:621,3683,6467).
 - License text / notices, as per GNU recommendation
 
