@@ -943,8 +943,6 @@ static void cmd_overlay_mask(int argc, char** argv) {
     if (!parse_rgb_triplet(circle_color_text, circle_color)) die("ppm_transform: overlay-mask invalid --circle-color");
     if (!parse_rgb_triplet(background_color_text, bg_color)) die("ppm_transform: overlay-mask invalid --background-color");
 
-    // Intentionally do not emit PPM header comments. Print/scan workflows can
-    // discard container headers, so metadata must be carried in image pixels.
     StrVec comments;
 
     // Optional per-segment circle palette via env var.
@@ -1187,7 +1185,6 @@ static void cmd_transform(int argc, char** argv) {
     }
 
     Ppm ppm = read_ppm_p3_ascii(input);
-    // Never emit PPM comment header lines in outputs (they will be lost in print/scan workflows).
     StrVec comments;
     StrVec metadata;
 

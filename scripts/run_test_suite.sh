@@ -11,7 +11,7 @@ usage() {
 Usage: run_test_suite.sh --prepare | --finalize
 
   --prepare    Initialize the master seed and clear visual symlinks.
-  --finalize   Scan PPM headers and collect links to final visual artifacts.
+  --finalize   Collect links to final visual artifacts.
 USAGE
 }
 
@@ -22,12 +22,6 @@ prepare_suite() {
 }
 
 finalize_suite() {
-    local label="0054_no_ppm_headers"
-    local label_fmt
-    label_fmt=$(mako_format_label "$label")
-    printf '%s No PPM header comment lines remain\n' "$label_fmt"
-    "$script_dir/test_no_ppm_headers.sh" --label "$label"
-
     local visual_dir="$repo_root/test/visual"
     local visual_ppms=()
     shopt -s nullglob

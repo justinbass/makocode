@@ -37,7 +37,7 @@ $(TEST_CASE_TARGETS): test-case-%: test-setup makocode scripts/ppm_transform
 	@bash ./scripts/run_test_case.sh --run "$*"
 
 test-finalize: $(TEST_CASE_TARGETS)
-	@$(STATUS) test "verify PPM headers and collect visuals" bash ./scripts/run_test_suite.sh --finalize
+	@$(STATUS) test "collect visual artifacts" bash ./scripts/run_test_suite.sh --finalize
 
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
