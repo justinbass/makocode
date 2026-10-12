@@ -1,11 +1,5 @@
 Cleanup
 - Fix 0026_multi_page_distorted failed with seed 1317923707
-- 100% line coverage
-  - Minify test: preserve literals/directives and compile output (makocode.cpp:24211-24450).
-  - Pipe a single PPM into decode; verify extracted payload (makocode.cpp:19697,23844-23914).
-  - Smoke-test usage and each command's --help (makocode.cpp:20563-20674).
-  - Test --prefix ending _encoded; verify fiducial embedding/roundtrip (makocode.cpp:12409-12431,18719-18729).
-  - Audit uncalled CLI code: grayscale loader, border cleanup, LZMA decoder (makocode.cpp:621,3683,6467).
 - License text / notices, as per GNU recommendation
 
 Features
@@ -40,6 +34,6 @@ Finalize
 - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort) into an OS-relevant C++ module.
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Much better documentation, or a spec
-- 100% branch coverage, test parameterization of each combination of options
+- 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code.
 - Reorganize tests logically from simple to complex, and document each one in full.
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs?

@@ -225,3 +225,18 @@ test_case 0052_paper_offwhite_cmykwrbg roundtrip "Slightly off-white, splotchy p
 
 test_case 0053_archive_tree_roundtrip script "Nested and empty archive directories round-trip" \
     test_archive_tree_roundtrip.sh
+
+test_case 0056_cli_help script "CLI usage and command help smoke test" \
+    test_cli_help.sh
+
+test_case 0054_minify_literals script "Minify preserves literals and directives and emits compilable C++" \
+    test_minify_literals.sh
+
+test_case 0055_decode_stdin script "Decoder reads one PPM page from stdin" \
+    test_decode_stdin.sh
+
+test_case 0058_cli_decoder_paths script "Grayscale loader, border cleanup, and LZMA decoder paths" \
+    test_cli_decoder_paths.sh
+
+test_case 0057_prefix_ends_encoded script "--prefix ending in _encoded keeps its filename and fiducials" \
+    test_prefix_ends_encoded.sh
