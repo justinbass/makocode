@@ -480,6 +480,9 @@ run_roundtrip_case "paper_offwhite_cmykwrbg" "Slightly off-white, splotchy paper
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
+run_script_case "$repo_root/scripts/test_archive_tree_roundtrip.sh" \
+    "archive_tree_roundtrip" "Nested and empty archive directories round-trip"
+
 run_script_case "$repo_root/scripts/test_no_ppm_headers.sh" \
     "no_ppm_headers" "No PPM header comment lines remain"
 
@@ -492,8 +495,12 @@ for ppm in "$repo_root"/test/*_random_payload_encoded*.ppm; do
     fi
 done
 visual_ppms+=("$repo_root"/test/*_cli_payload_encoded.ppm)
+visual_ppms+=("$repo_root"/test/*_archive_tree_encoded_*.ppm)
 shopt -u nullglob
 mkdir -p "$visual_dir"
 if ((${#visual_ppms[@]})); then
-    mv "${visual_ppms[@]}" "$visual_dir/"
+    for ppm in "${visual_ppms[@]}"; do
+        ppm_name=$(basename "$ppm")
+        ln -s "../$ppm_name" "$visual_dir/$ppm_name"
+    done
 fi

@@ -1,6 +1,5 @@
 Cleanup
 - 100% line coverage
-  - Nested/empty-directory archive encode/decode roundtrip (makocode.cpp:19874-20275,20462-20561).
   - Minify test: preserve literals/directives and compile output (makocode.cpp:24211-24450).
   - Pipe a single PPM into decode; verify extracted payload (makocode.cpp:19697,23844-23914).
   - Smoke-test usage and each command's --help (makocode.cpp:20563-20674).
