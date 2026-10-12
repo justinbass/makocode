@@ -1,4 +1,5 @@
 Cleanup
+- Fix 0026_multi_page_distorted failed with seed 1317923707
 - 100% line coverage
   - Minify test: preserve literals/directives and compile output (makocode.cpp:24211-24450).
   - Pipe a single PPM into decode; verify extracted payload (makocode.cpp:19697,23844-23914).

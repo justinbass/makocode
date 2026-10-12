@@ -10,7 +10,10 @@ GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,c
 
 STATUS ?= ./scripts/make_step.sh
 
-.PHONY: all clean test coverage
+TEST_CASES := $(shell bash ./scripts/run_test_case.sh --list)
+TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
+
+.PHONY: all clean test test-setup test-finalize coverage $(TEST_CASE_TARGETS)
 
 ifeq ($(COVERAGE),1)
 CXXFLAGS += --coverage -O0 -g
@@ -25,9 +28,16 @@ makocode: makocode.cpp
 scripts/ppm_transform: scripts/ppm_transform.cpp
 	@$(STATUS) build "compile ppm_transform" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test: makocode scripts/ppm_transform
-	@$(STATUS) test "ensure test dir" mkdir -p test
-	@$(STATUS) test "run test suite" ./scripts/run_test_suite.sh
+test: test-finalize
+
+test-setup:
+	@$(STATUS) test "prepare test suite" bash ./scripts/run_test_suite.sh --prepare
+
+$(TEST_CASE_TARGETS): test-case-%: test-setup makocode scripts/ppm_transform
+	@bash ./scripts/run_test_case.sh --run "$*"
+
+test-finalize: $(TEST_CASE_TARGETS)
+	@$(STATUS) test "verify PPM headers and collect visuals" bash ./scripts/run_test_suite.sh --finalize
 
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'

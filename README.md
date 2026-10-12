@@ -26,19 +26,24 @@ make test
 `make test` now drives the CLI end-to-end through the shell scripts in `scripts/`
 (round-trip, payload suite, overlay, CLI output-dir, and decode failure cases).
 Test artifacts are written to `test/` using the labels defined in each
-script (e.g., `3001_random_payload*`, `2005_payload_gray_100k_*`).
+case registration (e.g., `0002_baseline_8k_ecc_050_*`,
+`0015_gray_100k_single_*`).
 After a passing run, final round-trip images (transformed where applicable) and
 the CLI output image remain in `test/` and are linked from `test/visual/` with
 relative symlinks.
+
+Test cases are registered in `scripts/test_cases.sh`. Run independent cases in
+parallel with GNU Make, for example `make -j test` to allow up to four cases
+at once.
 
 Each `make test` run prints its master seed and writes it to `test/test_seed.txt`.
 Repeat a randomized run with the same seed using:
 
 ```
-MAKO_TEST_SEED=$(cat test/test_seed.txt) make test
+MAKO_TEST_SEED=$(cat test/test_seed.txt) make -j test
 ```
 
-You can also choose a seed explicitly, for example `MAKO_TEST_SEED=12345 make test`.
+You can also choose a seed explicitly, for example `MAKO_TEST_SEED=12345 make -j test`.
 Random payload seeds are derived from the master seed and test label, so each case
 gets a stable payload when replayed.
 
