@@ -15959,6 +15959,89 @@ struct RotationEstimateCandidate {
         }
     }
     recompute_skew_flags();
+    double independent_rotation = auto_candidate.valid ? auto_candidate.angle_deg
+                                  : (fiducial_candidate.valid ? fiducial_candidate.angle_deg : 0.0);
+    double tile_scale = tile_affine_hint.pitch_pixels;
+    if (tile_affine_hint_available && tile_affine_hint_trusted && has_rotation &&
+        !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        expected_width > 0u && expected_height > 0u &&
+        tile_scale > 1.005 && tile_scale <= 1.25 &&
+        fabs(independent_rotation) >= 0.25 && fabs(independent_rotation) < 5.0 &&
+        (width > expected_width || height > expected_height)) {
+        u64 scaled_width = (u64)((double)expected_width * tile_scale + 0.5);
+        u64 scaled_height = (u64)((double)expected_height * tile_scale + 0.5);
+        double best_angle = 0.0;
+        double best_error = 1.0e30;
+        double best_reference_gap = 1.0e30;
+        for (u32 angle_step = 0u; angle_step <= 5000u; ++angle_step) {
+            double angle = (double)angle_step * 0.001;
+            double radians = angle * (3.14159265358979323846 / 180.0);
+            double predicted_width = (double)scaled_width * fabs(cos(radians)) +
+                                     (double)scaled_height * fabs(sin(radians));
+            double predicted_height = (double)scaled_width * fabs(sin(radians)) +
+                                      (double)scaled_height * fabs(cos(radians));
+            double width_error = fabs(floor(predicted_width + 0.5) - (double)width);
+            double height_error = fabs(floor(predicted_height + 0.5) - (double)height);
+            double error = width_error + height_error;
+            double reference_gap = fabs(angle - fabs(independent_rotation));
+            if (error < best_error || (error == best_error && reference_gap < best_reference_gap)) {
+                best_angle = angle;
+                best_error = error;
+                best_reference_gap = reference_gap;
+            }
+        }
+        if (best_error == 0.0 && best_reference_gap <= 0.25) {
+            double half_degree = floor(best_angle * 2.0 + 0.5) * 0.5;
+            if (fabs(best_angle - half_degree) < 0.12) {
+                double snapped_radians = half_degree * (3.14159265358979323846 / 180.0);
+                double snapped_width = (double)scaled_width * fabs(cos(snapped_radians)) +
+                                       (double)scaled_height * fabs(sin(snapped_radians));
+                double snapped_height = (double)scaled_width * fabs(sin(snapped_radians)) +
+                                        (double)scaled_height * fabs(cos(snapped_radians));
+                if (floor(snapped_width + 0.5) == (double)width &&
+                    floor(snapped_height + 0.5) == (double)height) {
+                    best_angle = half_degree;
+                }
+            }
+            state.has_rotation_degrees = true;
+            state.rotation_degrees_value = (independent_rotation < 0.0) ? -best_angle : best_angle;
+            state.has_rotation_width = true;
+            state.rotation_width_value = scaled_width;
+            state.has_rotation_height = true;
+            state.rotation_height_value = scaled_height;
+            state.rotation_margin_value = compute_rotation_margin_from_geometry(
+                (unsigned)scaled_width,
+                (unsigned)scaled_height,
+                state.rotation_degrees_value,
+                (unsigned)width,
+                (unsigned)height);
+            state.has_rotation_margin = true;
+            refresh_rotation_state();
+
+            double angle_rad = state.rotation_degrees_value * (3.14159265358979323846 / 180.0);
+            double c = cos(angle_rad);
+            double s = sin(angle_rad);
+            double input_center_x = ((double)scaled_width - 1.0) * 0.5;
+            double input_center_y = ((double)scaled_height - 1.0) * 0.5;
+            double output_center_x = ((double)width - 1.0) * 0.5;
+            double output_center_y = ((double)height - 1.0) * 0.5;
+            double scale_offset = (tile_scale - 1.0) * 0.5;
+            double offset_x = output_center_x + c * (scale_offset - input_center_x) -
+                              s * (scale_offset - input_center_y);
+            double offset_y = output_center_y + s * (scale_offset - input_center_x) +
+                              c * (scale_offset - input_center_y);
+            state.affine_transform.a00 = tile_scale * c;
+            state.affine_transform.a01 = -tile_scale * s;
+            state.affine_transform.a10 = tile_scale * s;
+            state.affine_transform.a11 = tile_scale * c;
+            state.affine_transform.tx = offset_x -
+                                        (state.affine_transform.a00 + state.affine_transform.a01) * 0.5;
+            state.affine_transform.ty = offset_y -
+                                        (state.affine_transform.a10 + state.affine_transform.a11) * 0.5;
+            state.has_affine_transform = true;
+            recompute_skew_flags();
+        }
+    }
 
     u64 analysis_width = has_rotation ? (u64)rotation_width : width;
     u64 analysis_height = has_rotation ? (u64)rotation_height : height;
@@ -17832,7 +17915,7 @@ struct RotationEstimateCandidate {
         }
         frame_bits.size = simple_bytes;
     }
-    
+
     metadata_out = state;
     metadata_out.data = 0;
     metadata_out.size = 0u;

@@ -1,5 +1,4 @@
 Cleanup
-- Fix 0026_multi_page_distorted failed with seed 1317923707
 - License text / notices, as per GNU recommendation
 
 Features
