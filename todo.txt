@@ -1,6 +1,3 @@
-Cleanup
-- License text / notices, as per GNU recommendation
-
 Features
 - Footer title and metadata just on first page - or middle page?
 - Compress metadata (confirm it saves space worth the risk of corruption)

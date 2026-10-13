@@ -44,7 +44,13 @@
         * Data section tiles LZMA/ECC payload stripes with parity gutters and alignment rails.
         * Footer section repeats checksums, color bars, and page/total counters.
 
-    License: GNU AGPLv3 (intent inherited from the project notes).
+    Copyright (C) 2026 Justin Alan Bass.
+    This program is free software: you can redistribute it and/or modify it
+    under the terms of the GNU Affero General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or (at
+    your option) any later version. See LICENSE for the full license text.
+    This program is distributed without any warranty; without even the implied
+    warranty of merchantability or fitness for a particular purpose.
 */
 
 #include <dirent.h>

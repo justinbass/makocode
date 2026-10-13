@@ -6,6 +6,12 @@ Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu,
 
 Written entirely with codex-gpt-5.
 
+## License
+
+Copyright © 2026 Justin Alan Bass. MakoCode is licensed under the GNU Affero
+General Public License, version 3 or later. See [LICENSE](LICENSE) for the
+complete license text.
+
 ## Dependencies
 
 Totally standalone for future-proofing, c++ and g++ required for compiling. CLI tests require bash.

@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Copyright (C) 2026 Justin Alan Bass.
+# This file is part of MakoCode. MakoCode is free software: you can
+# redistribute it and/or modify it under the terms of the GNU Affero
+# General Public License as published by the Free Software Foundation,
+# either version 3 of the License, or (at your option) any later version.
+# MakoCode is distributed without any warranty; without even the implied
+# warranty of merchantability or fitness for a particular purpose. See
+# the LICENSE file for the full license text.
+#
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
