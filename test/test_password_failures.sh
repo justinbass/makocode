@@ -18,7 +18,7 @@ usage() {
     cat <<'USAGE'
 Usage: test_password_failures.sh [--label NAME]
 
-  --label NAME    Artifact prefix under test/ (default: password_failures).
+  --label NAME    Artifact prefix under test_output/ (default: password_failures).
   --help          Show this help message.
 USAGE
 }
@@ -85,7 +85,7 @@ run_expect_failure() {
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/scripts/ppm_transform"
+ppm_transform_bin="$repo_root/test/ppm_transform"
 if [[ ! -x $makocode_bin ]]; then
     echo "test_password_failures: makocode binary not found at $makocode_bin" >&2
     exit 1
@@ -99,7 +99,7 @@ payload_seed=$(mako_test_case_seed "payload/$label")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
 export MAKOCODE_TEST_SEED
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_password_work"
 payload="$test_dir/${label}_payload.bin"
 ppm_target="$test_dir/${label}_encoded.ppm"

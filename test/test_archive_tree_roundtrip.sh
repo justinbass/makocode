@@ -17,7 +17,7 @@ usage() {
     cat <<'USAGE'
 Usage: test_archive_tree_roundtrip.sh [--label NAME]
 
-  --label NAME    Prefix for artifacts under test/ (default: archive_tree_roundtrip).
+  --label NAME    Prefix for artifacts under test_output/ (default: archive_tree_roundtrip).
   --help          Show this message.
 USAGE
 }
@@ -53,7 +53,7 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_archive_work"
 source_dir="$work_dir/source"
 page_dir="$work_dir/pages"

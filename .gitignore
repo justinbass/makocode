@@ -2,10 +2,10 @@ makocode
 *.bin
 *.ppm
 .tmp/
-test/
+/test_output/
 makocode_minified.cpp
 *.gcda
 *.gcno
 *.dSYM/
 *__pycache__*
-scripts/ppm_transform
+test/ppm_transform

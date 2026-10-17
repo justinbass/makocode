@@ -154,7 +154,7 @@ test_case() {
 }
 
 if [[ $mode == "run" ]]; then
-    seed_file="$repo_root/test/test_seed.txt"
+    seed_file="$repo_root/test_output/test_seed.txt"
     if [[ ! -f $seed_file ]]; then
         echo "run_test_case: missing suite seed $seed_file; run through make test" >&2
         exit 2

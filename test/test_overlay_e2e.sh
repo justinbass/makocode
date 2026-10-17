@@ -14,7 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 makocode_bin="$repo_root/makocode"
-ppm_transform_bin="$repo_root/scripts/ppm_transform"
+ppm_transform_bin="$repo_root/test/ppm_transform"
 
 if [[ ! -x "$makocode_bin" ]]; then
     echo "test_overlay_e2e: makocode binary not found at $makocode_bin" >&2
@@ -36,7 +36,7 @@ payload_seed=$(mako_test_case_seed "payload/$label")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
 export MAKOCODE_TEST_SEED
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_overlay_work"
 payload_path="$test_dir/${label}_overlay_payload.bin"
 payload_work="$work_dir/payload.bin"

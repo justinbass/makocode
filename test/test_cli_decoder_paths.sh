@@ -18,7 +18,7 @@ usage() {
     cat <<'USAGE'
 Usage: test_cli_decoder_paths.sh [--label NAME]
 
-  --label NAME    Prefix for artifacts under test/ (default: cli_decoder_paths).
+  --label NAME    Prefix for artifacts under test_output/ (default: cli_decoder_paths).
   --help          Show this message.
 USAGE
 }
@@ -53,7 +53,7 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_decoder_work"
 harness_src="$script_dir/test_cli_decoder_paths_harness.cpp"
 if [[ ! -f $harness_src ]]; then

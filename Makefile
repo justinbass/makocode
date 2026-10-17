@@ -2,15 +2,15 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 LDFLAGS ?=
 
-LCOV_REPORT ?= test/makocode.info
-LCOV_HTML_DIR ?= test/coverage
+LCOV_REPORT ?= test_output/makocode.info
+LCOV_HTML_DIR ?= test_output/coverage
 LCOV_FLAGS ?= --ignore-errors inconsistent,unsupported,format
 LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
 GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category
 
-STATUS ?= ./scripts/make_step.sh
+STATUS ?= ./test/make_step.sh
 
-TEST_CASES := $(shell bash ./scripts/run_test_case.sh --list)
+TEST_CASES := $(shell bash ./test/run_test_case.sh --list)
 TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
 
 .PHONY: all clean test test-setup test-finalize coverage $(TEST_CASE_TARGETS)
@@ -25,19 +25,19 @@ all: makocode
 makocode: makocode.cpp
 	@$(STATUS) build "compile makocode" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-scripts/ppm_transform: scripts/ppm_transform.cpp
+test/ppm_transform: test/ppm_transform.cpp
 	@$(STATUS) build "compile ppm_transform" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 test: test-finalize
 
 test-setup:
-	@$(STATUS) test "prepare test suite" bash ./scripts/run_test_suite.sh --prepare
+	@$(STATUS) test "prepare test suite" bash ./test/run_test_suite.sh --prepare
 
-$(TEST_CASE_TARGETS): test-case-%: test-setup makocode scripts/ppm_transform
-	@bash ./scripts/run_test_case.sh --run "$*"
+$(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform
+	@bash ./test/run_test_case.sh --run "$*"
 
 test-finalize: $(TEST_CASE_TARGETS)
-	@$(STATUS) test "collect visual artifacts" bash ./scripts/run_test_suite.sh --finalize
+	@$(STATUS) test "collect visual artifacts" bash ./test/run_test_suite.sh --finalize
 
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
@@ -50,8 +50,8 @@ clean:
 	@$(STATUS) --note clean "cleanup start"
 	@$(STATUS) clean "binary" rm -f makocode
 	@$(STATUS) clean "symbol bundle" rm -rf makocode.dSYM
-	@$(STATUS) clean "ppm_transform helper" rm -f scripts/ppm_transform
-	@$(STATUS) clean "test artifacts" rm -rf test
+	@$(STATUS) clean "ppm_transform helper" rm -f test/ppm_transform
+	@$(STATUS) clean "test artifacts" rm -rf test_output
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
-	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno scripts/*.gcda scripts/*.gcno $(LCOV_REPORT)
+	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno test/*.gcda test/*.gcno $(LCOV_REPORT)
 	@$(STATUS) --note clean "cleanup complete"

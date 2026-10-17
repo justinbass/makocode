@@ -29,24 +29,24 @@ make test
 
 ## Tests
 
-`make test` now drives the CLI end-to-end through the shell scripts in `scripts/`
+`make test` now drives the CLI end-to-end through the shell scripts in `test/`
 (round-trip, payload suite, overlay, CLI output-dir, and decode failure cases).
-Test artifacts are written to `test/` using the labels defined in each
+Test artifacts are written to `test_output/` using the labels defined in each
 case registration (e.g., `0002_baseline_8k_ecc_050_*`,
 `0015_gray_100k_single_*`).
 After a passing run, final round-trip images (transformed where applicable) and
-the CLI output image remain in `test/` and are linked from `test/visual/` with
+the CLI output image remain in `test_output/` and are linked from `test_output/visual/` with
 relative symlinks.
 
-Test cases are registered in `scripts/test_cases.sh`. Run independent cases in
+Test cases are registered in `test/test_cases.sh`. Run independent cases in
 parallel with GNU Make, for example `make -j test` to allow up to four cases
 at once.
 
-Each `make test` run prints its master seed and writes it to `test/test_seed.txt`.
+Each `make test` run prints its master seed and writes it to `test_output/test_seed.txt`.
 Repeat a randomized run with the same seed using:
 
 ```
-MAKO_TEST_SEED=$(cat test/test_seed.txt) make -j test
+MAKO_TEST_SEED=$(cat test_output/test_seed.txt) make -j test
 ```
 
 You can also choose a seed explicitly, for example `MAKO_TEST_SEED=12345 make -j test`.
@@ -63,8 +63,8 @@ make coverage
 ```
 
 This rebuilds `makocode` with `--coverage -O0 -g`, executes every case in
-`scripts/run_test_suite.sh`, and writes `test/makocode.info` plus an HTML
-dashboard under `test/coverage/index.html`.
+`test/run_test_suite.sh`, and writes `test_output/makocode.info` plus an HTML
+dashboard under `test_output/coverage/index.html`.
 
 ### Converting Scans
 

@@ -40,7 +40,7 @@ usage() {
 Usage: run_roundtrip.sh --label NAME --size BYTES --ecc VALUE --width PX --height PX [options]
 
 Required:
-  --label NAME          Artifact prefix under test/ (e.g., 3001_demo).
+  --label NAME          Artifact prefix under test_output/ (e.g., 3001_demo).
   --size BYTES          Payload size fed to the encoder.
   --ecc VALUE           ECC redundancy ratio (floating point).
   --width PX            Page width in pixels.
@@ -274,7 +274,7 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 mako_test_seed_init "$repo_root"
 payload_seed=$(mako_test_case_seed "payload/$label")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
@@ -316,14 +316,14 @@ rm -f "${encoded_prefix}.ppm" ${encoded_prefix}_*.ppm 2>/dev/null || true
 rm -f "${transformed_prefix}.ppm" ${transformed_prefix}_*.ppm 2>/dev/null || true
 
 if [[ -n $payload_literal ]]; then
-    payload_len=$("$repo_root/scripts/ppm_transform" bytes-len "$payload_literal")
+    payload_len=$("$repo_root/test/ppm_transform" bytes-len "$payload_literal")
     if [[ $payload_len -ne $size ]]; then
         echo "run_roundtrip: --size ($size) must match --payload-literal byte length ($payload_len)" >&2
         exit 1
     fi
     printf '%s' "$payload_literal" > "$payload_final"
 else
-    "$repo_root/scripts/ppm_transform" bytes --output "$payload_final" --size "$size" --seed "$payload_seed"
+    "$repo_root/test/ppm_transform" bytes --output "$payload_final" --size "$size" --seed "$payload_seed"
 fi
 cp "$payload_final" "$payload_work"
 
@@ -432,7 +432,7 @@ if [[ $transform_needed -eq 1 ]]; then
     for ppm in "${ppm_targets[@]}"; do
         base_name=$(basename "$ppm")
         transformed_path="$work_dir/${base_name%.*}_transformed.ppm"
-        "$repo_root/scripts/ppm_transform" transform \
+        "$repo_root/test/ppm_transform" transform \
             --input "$ppm" \
             --output "$transformed_path" \
             --scale-x "$scale_x" \

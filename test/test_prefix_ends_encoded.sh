@@ -43,7 +43,7 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_prefix_work"
 pages_dir="$work_dir/pages"
 decoded_dir="$work_dir/decoded"

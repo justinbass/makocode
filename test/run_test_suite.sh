@@ -27,22 +27,22 @@ USAGE
 prepare_suite() {
     unset MAKO_TEST_SEED_REPORTED
     mako_test_seed_init "$repo_root"
-    rm -rf "$repo_root/test/visual"
+    rm -rf "$repo_root/test_output/visual"
 }
 
 finalize_suite() {
-    local visual_dir="$repo_root/test/visual"
+    local visual_dir="$repo_root/test_output/visual"
     local visual_ppms=()
     shopt -s nullglob
-    visual_ppms+=("$repo_root"/test/*_random_payload_transformed_encoded*.ppm)
-    for ppm in "$repo_root"/test/*_random_payload_encoded*.ppm; do
+    visual_ppms+=("$repo_root"/test_output/*_random_payload_transformed_encoded*.ppm)
+    for ppm in "$repo_root"/test_output/*_random_payload_encoded*.ppm; do
         transformed_ppm=${ppm/_random_payload_encoded/_random_payload_transformed_encoded}
         if [[ ! -f $transformed_ppm ]]; then
             visual_ppms+=("$ppm")
         fi
     done
-    visual_ppms+=("$repo_root"/test/*_cli_payload_encoded.ppm)
-    visual_ppms+=("$repo_root"/test/*_archive_tree_encoded_*.ppm)
+    visual_ppms+=("$repo_root"/test_output/*_cli_payload_encoded.ppm)
+    visual_ppms+=("$repo_root"/test_output/*_archive_tree_encoded_*.ppm)
     shopt -u nullglob
 
     mkdir -p "$visual_dir"

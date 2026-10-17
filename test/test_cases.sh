@@ -8,7 +8,7 @@
 # the LICENSE file for the full license text.
 #
 # Case registry consumed by run_test_case.sh. Keep case IDs unique: they also
-# namespace the artifacts written under test/.
+# namespace the artifacts written under test_output/.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' baseline" \
     --size 1 --ecc 0 --width 55 --height 55 \

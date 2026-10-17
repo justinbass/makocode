@@ -11,7 +11,7 @@
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname "$0")/.." && pwd -P)
-suite_bin="$repo_root/scripts/run_roundtrip.sh"
+suite_bin="$repo_root/test/run_roundtrip.sh"
 if [[ ! -x $suite_bin ]]; then
     echo "run_payload_suite: missing run_roundtrip.sh" >&2
     exit 1

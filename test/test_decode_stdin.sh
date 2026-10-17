@@ -18,7 +18,7 @@ usage() {
     cat <<'USAGE'
 Usage: test_decode_stdin.sh [--label NAME]
 
-  --label NAME    Artifact prefix under test/ (default: decode_stdin).
+  --label NAME    Artifact prefix under test_output/ (default: decode_stdin).
   --help          Show this help message.
 USAGE
 }
@@ -74,7 +74,7 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_stdin_work"
 payload="$work_dir/payload.bin"
 decoded_dir="$work_dir/decoded"

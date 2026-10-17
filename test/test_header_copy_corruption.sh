@@ -14,7 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/scripts/ppm_transform"
+ppm_transform_bin="$repo_root/test/ppm_transform"
 
 usage() {
     cat <<'USAGE'
@@ -62,7 +62,7 @@ if [[ ! -x $ppm_transform_bin ]]; then
     exit 1
 fi
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_work"
 payload_final="$test_dir/${label}_payload.bin"
 encoded_ppm="$test_dir/${label}_encoded.ppm"

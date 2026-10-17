@@ -18,7 +18,7 @@ usage() {
     cat <<'USAGE'
 Usage: test_palette_metadata.sh [--label NAME] [--mode MODE]
 
-  --label NAME    Artifact prefix under test/ (default: palette_metadata).
+  --label NAME    Artifact prefix under test_output/ (default: palette_metadata).
   --mode MODE     One of:
                     auto   (decode without supplying --palette, expect success)
                     wrong  (decode with an incorrect palette, expect failure)
@@ -83,7 +83,7 @@ print_labelled() {
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/scripts/ppm_transform"
+ppm_transform_bin="$repo_root/test/ppm_transform"
 if [[ ! -x $makocode_bin ]]; then
     echo "test_palette_metadata: makocode binary not found at $makocode_bin" >&2
     exit 1
@@ -97,7 +97,7 @@ payload_seed=$(mako_test_case_seed "payload/$label/$mode")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label/$mode")
 export MAKOCODE_TEST_SEED
 
-test_dir="$repo_root/test"
+test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_palette_work"
 payload="$test_dir/${label}_payload.bin"
 payload_work="$work_dir/payload.bin"
