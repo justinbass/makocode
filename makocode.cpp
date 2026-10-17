@@ -6037,6 +6037,7 @@ SRes LzmaEnc_CodeOneMemBlock(CLzmaEncHandle pp, Bool reInit,
   
   *unpackSize = (UInt32)(p->nowPos64 - nowPos64);
   *destLen -= outStream.rem;
+  p->rc.outStream = NULL;
   if (outStream.overflow)
     return SZ_ERROR_OUTPUT_EOF;
 
@@ -6617,25 +6618,27 @@ bool remove_border_dirt(image::ImageBuffer& image,
     return true;
 }
 
-static const unsigned __int128 PCG64_MULTIPLIER =
-    (((unsigned __int128)0x2360ED051FC65DA4ull) << 64u) | (unsigned __int128)0x4385DF649FCCF645ull;
-static const unsigned __int128 PCG64_INCREMENT =
-    (((unsigned __int128)0x5851F42D4C957F2Dull) << 64u) | (unsigned __int128)0x14057B7EF767814Full;
+__extension__ typedef unsigned __int128 u128;
+
+static const u128 PCG64_MULTIPLIER =
+    (((u128)0x2360ED051FC65DA4ull) << 64u) | (u128)0x4385DF649FCCF645ull;
+static const u128 PCG64_INCREMENT =
+    (((u128)0x5851F42D4C957F2Dull) << 64u) | (u128)0x14057B7EF767814Full;
 
 struct Pcg64Generator {
-    unsigned __int128 state;
+    u128 state;
 
     Pcg64Generator() : state(0u) {}
 
     void seed(u64 seed_value) {
         state = 0u;
         (void)next();
-        state += (unsigned __int128)seed_value;
+        state += (u128)seed_value;
         (void)next();
     }
 
     u64 next() {
-        unsigned __int128 oldstate = state;
+        u128 oldstate = state;
         state = oldstate * PCG64_MULTIPLIER + PCG64_INCREMENT;
         u64 xorshifted = (u64)(((oldstate >> 64u) ^ oldstate) >> 64u);
         u32 rot = (u32)(oldstate >> 122u);
@@ -7058,12 +7061,12 @@ struct Poly1305State {
 };
 
 static void poly1305_init_state(Poly1305State& state, const u8 key[32]) {
-    unsigned __int128 r = (unsigned __int128)read_le_u64(key) |
-                          ((unsigned __int128)read_le_u64(key + 8u) << 64u);
-    unsigned __int128 mask = (((unsigned __int128)0x0ffffffc0ffffffcull) << 64u) |
-                             (unsigned __int128)0x0ffffffc0fffffffull;
+    u128 r = (u128)read_le_u64(key) |
+             ((u128)read_le_u64(key + 8u) << 64u);
+    u128 mask = (((u128)0x0ffffffc0ffffffcull) << 64u) |
+                (u128)0x0ffffffc0fffffffull;
     r &= mask;
-    u64 r_low = (u64)(r & ((unsigned __int128)0xFFFFFFFFFFFFFFFFull));
+    u64 r_low = (u64)(r & ((u128)0xFFFFFFFFFFFFFFFFull));
     u64 r_high = (u64)(r >> 64u);
     state.r0 = r_low & 0x3ffffffu;
     state.r1 = ((r_low >> 26u) & 0x3ffffffu);
@@ -7086,31 +7089,31 @@ static void poly1305_process_block(Poly1305State& state, const u8 block[16], u64
     state.h3 += (t1 >> 14u) & 0x3ffffffu;
     state.h4 += ((t1 >> 40u) & 0x3ffffffu) + hibit;
 
-    unsigned __int128 d0 = (unsigned __int128)state.h0 * state.r0 +
-                           (unsigned __int128)state.h1 * state.s4 +
-                           (unsigned __int128)state.h2 * state.s3 +
-                           (unsigned __int128)state.h3 * state.s2 +
-                           (unsigned __int128)state.h4 * state.s1;
-    unsigned __int128 d1 = (unsigned __int128)state.h0 * state.r1 +
-                           (unsigned __int128)state.h1 * state.r0 +
-                           (unsigned __int128)state.h2 * state.s4 +
-                           (unsigned __int128)state.h3 * state.s3 +
-                           (unsigned __int128)state.h4 * state.s2;
-    unsigned __int128 d2 = (unsigned __int128)state.h0 * state.r2 +
-                           (unsigned __int128)state.h1 * state.r1 +
-                           (unsigned __int128)state.h2 * state.r0 +
-                           (unsigned __int128)state.h3 * state.s4 +
-                           (unsigned __int128)state.h4 * state.s3;
-    unsigned __int128 d3 = (unsigned __int128)state.h0 * state.r3 +
-                           (unsigned __int128)state.h1 * state.r2 +
-                           (unsigned __int128)state.h2 * state.r1 +
-                           (unsigned __int128)state.h3 * state.r0 +
-                           (unsigned __int128)state.h4 * state.s4;
-    unsigned __int128 d4 = (unsigned __int128)state.h0 * state.r4 +
-                           (unsigned __int128)state.h1 * state.r3 +
-                           (unsigned __int128)state.h2 * state.r2 +
-                           (unsigned __int128)state.h3 * state.r1 +
-                           (unsigned __int128)state.h4 * state.r0;
+    u128 d0 = (u128)state.h0 * state.r0 +
+              (u128)state.h1 * state.s4 +
+              (u128)state.h2 * state.s3 +
+              (u128)state.h3 * state.s2 +
+              (u128)state.h4 * state.s1;
+    u128 d1 = (u128)state.h0 * state.r1 +
+              (u128)state.h1 * state.r0 +
+              (u128)state.h2 * state.s4 +
+              (u128)state.h3 * state.s3 +
+              (u128)state.h4 * state.s2;
+    u128 d2 = (u128)state.h0 * state.r2 +
+              (u128)state.h1 * state.r1 +
+              (u128)state.h2 * state.r0 +
+              (u128)state.h3 * state.s4 +
+              (u128)state.h4 * state.s3;
+    u128 d3 = (u128)state.h0 * state.r3 +
+              (u128)state.h1 * state.r2 +
+              (u128)state.h2 * state.r1 +
+              (u128)state.h3 * state.r0 +
+              (u128)state.h4 * state.s4;
+    u128 d4 = (u128)state.h0 * state.r4 +
+              (u128)state.h1 * state.r3 +
+              (u128)state.h2 * state.r2 +
+              (u128)state.h3 * state.r1 +
+              (u128)state.h4 * state.r0;
 
     u64 h0 = (u64)(d0 & 0x3ffffffu);
     u64 carry = (u64)(d0 >> 26u);
@@ -7232,14 +7235,14 @@ static void poly1305_finish(Poly1305State& state, const u8 pad[16], u8 tag[16]) 
     state.h3 = (state.h3 & mask) | g3;
     state.h4 = (state.h4 & mask) | g4;
 
-    unsigned __int128 acc = (unsigned __int128)state.h0 |
-                            ((unsigned __int128)state.h1 << 26u) |
-                            ((unsigned __int128)state.h2 << 52u) |
-                            ((unsigned __int128)state.h3 << 78u) |
-                            ((unsigned __int128)state.h4 << 104u);
-    unsigned __int128 sum0 = acc + (unsigned __int128)read_le_u64(pad);
+    u128 acc = (u128)state.h0 |
+               ((u128)state.h1 << 26u) |
+               ((u128)state.h2 << 52u) |
+               ((u128)state.h3 << 78u) |
+               ((u128)state.h4 << 104u);
+    u128 sum0 = acc + (u128)read_le_u64(pad);
     u64 f0 = (u64)sum0;
-    unsigned __int128 sum1 = ((acc >> 64u) + (unsigned __int128)read_le_u64(pad + 8u) + (sum0 >> 64u));
+    u128 sum1 = ((acc >> 64u) + (u128)read_le_u64(pad + 8u) + (sum0 >> 64u));
     u64 f1 = (u64)sum1;
     write_le_u64(tag, f0);
     write_le_u64(tag + 8u, f1);
