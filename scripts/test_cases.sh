@@ -11,13 +11,13 @@
 # namespace the artifacts written under test/.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' baseline" \
-    --size 1 --ecc 0 --width 320 --height 140 \
+    --size 1 --ecc 0 --width 55 --height 55 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \
-    --size 8 --ecc 0 --width 320 --height 140 \
+    --size 8 --ecc 0 --width 55 --height 55 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
     --payload-literal "makocode"

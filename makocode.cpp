@@ -14637,7 +14637,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    ? (u32)state.page_height_pixels_value
                                    : 0u;
         u32 affine_data_height_hint = data_height_hint;
-        if (footer_rows_hint == 0u && affine_data_height_hint > 8u) {
+        if (footer_rows_hint == 0u &&
+            affine_data_height_hint > MetadataTile::TILE_SIDE + 8u) {
             // Prioritize the common eight-row footer when estimating the tile center.
             affine_data_height_hint -= 8u;
         }
@@ -15479,7 +15480,81 @@ struct RotationEstimateCandidate {
                                           : 0.20;
         tile_affine_hint_trusted = independent_angle_error < tile_angle_tolerance;
     }
+    bool fiducial_grid_visible = true;
+    if (tile_available && width_known && height_known &&
+        state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_size &&
+        state.fiducial_columns_value > 0u && state.fiducial_rows_value > 0u &&
+        expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull) {
+        u32 marker_columns = (u32)state.fiducial_columns_value;
+        u32 marker_rows = (u32)state.fiducial_rows_value;
+        u32 marker_size = (state.fiducial_size_value > 0u)
+                              ? (u32)state.fiducial_size_value
+                              : 1u;
+        u32 marker_margin = state.has_fiducial_margin
+                                ? (u32)state.fiducial_margin_value
+                                : 0u;
+        u32 logical_data_height = (u32)expected_height;
+        if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
+            logical_data_height -= (u32)state.footer_rows_value;
+        }
+        MetadataTile::Placement logical_tile = MetadataTile::compute_tile_placement(
+            (u32)expected_width, logical_data_height);
+        if (logical_tile.valid) {
+            double min_x = (marker_margin < expected_width) ? (double)marker_margin : 0.0;
+            double max_x = (expected_width > marker_margin)
+                               ? (double)(expected_width - 1u - marker_margin)
+                               : (double)(expected_width - 1u);
+            double min_y = (marker_margin < logical_data_height)
+                               ? (double)marker_margin
+                               : 0.0;
+            double max_y = (logical_data_height > marker_margin)
+                               ? (double)(logical_data_height - 1u - marker_margin)
+                               : (double)(logical_data_height - 1u);
+            bool any_marker_pixel_visible = false;
+            const u32 hole_side = MetadataTile::tile_hole_side(MetadataTile::TILE_SCHEMA_VERSION);
+            const u32 hole_x0 = (MetadataTile::TILE_SIDE - hole_side) / 2u;
+            const u32 hole_y0 = (MetadataTile::TILE_SIDE - hole_side) / 2u;
+            for (u32 grid_row = 0u; grid_row < marker_rows && !any_marker_pixel_visible; ++grid_row) {
+                double ty = (marker_rows == 1u)
+                                ? 0.5
+                                : ((double)grid_row / (double)(marker_rows - 1u));
+                double center_y = min_y + (max_y - min_y) * ty;
+                int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+                for (u32 grid_col = 0u; grid_col < marker_columns && !any_marker_pixel_visible; ++grid_col) {
+                    double tx = (marker_columns == 1u)
+                                    ? 0.5
+                                    : ((double)grid_col / (double)(marker_columns - 1u));
+                    double center_x = min_x + (max_x - min_x) * tx;
+                    int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
+                    for (u32 marker_y = 0u; marker_y < marker_size && !any_marker_pixel_visible; ++marker_y) {
+                        int y = start_y + (int)marker_y;
+                        if (y < 0 || (u32)y >= logical_data_height) continue;
+                        for (u32 marker_x = 0u; marker_x < marker_size; ++marker_x) {
+                            int x = start_x + (int)marker_x;
+                            if (x < 0 || (u32)x >= expected_width) continue;
+                            if ((u32)x < logical_tile.x0 ||
+                                (u32)x >= logical_tile.x0 + MetadataTile::TILE_SIDE ||
+                                (u32)y < logical_tile.y0 ||
+                                (u32)y >= logical_tile.y0 + MetadataTile::TILE_SIDE) {
+                                any_marker_pixel_visible = true;
+                                break;
+                            }
+                            u32 local_x = (u32)x - logical_tile.x0;
+                            u32 local_y = (u32)y - logical_tile.y0;
+                            if (local_x >= hole_x0 && local_x < hole_x0 + hole_side &&
+                                local_y >= hole_y0 && local_y < hole_y0 + hole_side) {
+                                any_marker_pixel_visible = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            fiducial_grid_visible = any_marker_pixel_visible;
+        }
+    }
     if (width_known && height_known &&
+        fiducial_grid_visible &&
         state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_size &&
         state.fiducial_columns_value >= 1u && state.fiducial_rows_value >= 1u) {
         if (state.fiducial_columns_value <= 0xFFFFFFFFull && state.fiducial_rows_value <= 0xFFFFFFFFull) {
@@ -19331,6 +19406,9 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     // Build metadata tile bits (2-color endpoints) so reserved pixels in the tile
     // region render as metadata rather than blank white.
     MetadataTile::Placement tile_placement = MetadataTile::compute_tile_placement(width_pixels, data_height_pixels);
+    const u32 tile_hole_side = MetadataTile::tile_hole_side(MetadataTile::TILE_SCHEMA_VERSION);
+    const u32 tile_hole_x0 = (MetadataTile::TILE_SIDE - tile_hole_side) / 2u;
+    const u32 tile_hole_y0 = (MetadataTile::TILE_SIDE - tile_hole_side) / 2u;
     const char* disable_tile_env = getenv("MAKO_DISABLE_METADATA_TILE");
     bool have_metadata_tile = tile_placement.valid && !(disable_tile_env && disable_tile_env[0]);
     PaletteColor tile_light = {255u, 255u, 255u};
@@ -19450,20 +19528,24 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 }
             }
             if (!is_footer_row && inside_tile) {
+                u32 local_x = column - tile_placement.x0;
+                u32 local_y = row - tile_placement.y0;
                 bool is_fiducial_marker_pixel = false;
                 if (fiducial_marker_mask.data && fiducial_marker_mask.size) {
                     if (mask_index < fiducial_marker_mask.size) {
                         is_fiducial_marker_pixel = (fiducial_marker_mask.data[mask_index] != 0u);
                     }
                 }
-                if (is_fiducial_marker_pixel) {
-                    // Preserve fiducial markers as pure white (255,255,255).
+                bool inside_tile_hole = local_x >= tile_hole_x0 &&
+                                        local_x < tile_hole_x0 + tile_hole_side &&
+                                        local_y >= tile_hole_y0 &&
+                                        local_y < tile_hole_y0 + tile_hole_side;
+                if (is_fiducial_marker_pixel && inside_tile_hole) {
+                    // The tile hole is excluded from its codeword, so retain marker pixels there.
                     rgb[0] = 255u;
                     rgb[1] = 255u;
                     rgb[2] = 255u;
                 } else {
-                    u32 local_x = column - tile_placement.x0;
-                    u32 local_y = row - tile_placement.y0;
                     u8 bit = tile_bitfield.data[(usize)local_y * (usize)MetadataTile::TILE_SIDE + (usize)local_x];
                     const PaletteColor& c = bit ? tile_dark : tile_light;
                     rgb[0] = c.r;
