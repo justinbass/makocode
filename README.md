@@ -66,6 +66,17 @@ This rebuilds `makocode` with `--coverage -O0 -g`, executes every case in
 `test/run_test_suite.sh`, and writes `test_output/makocode.info` plus an HTML
 dashboard under `test_output/coverage/index.html`.
 
+### Calibration
+
+```
+python3 scripts/calibration.py encode --width 4797 --height 5915
+```
+
+```
+python3 scripts/calibration.py decode scan.ppm --width 2399 --height 2399
+Smallest scale that worked (every copy decoded): 1x
+```
+
 ### Converting Scans
 
 To turn a scanned image into a P3 `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -compress none scan.ppm`.

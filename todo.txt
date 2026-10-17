@@ -1,6 +1,7 @@
 Features
 - Footer title and metadata just on first page - or middle page?
 - Compress metadata (confirm it saves space worth the risk of corruption)
+- Handle compressed ppm natively
 - Footer text scaling glyphs? Could use an internal vector image. May not look good in practice.
 - Footer title wrap, confirm page-height/width applies as a hard limit
 - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
