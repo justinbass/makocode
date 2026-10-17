@@ -13,7 +13,7 @@ Features
  - What if white/black or light/dark are inverted for the metadata?
 
 Tests
-- Fix seed 798833406
+- Fix seed 798833406, 1929952598
 - Wavy distortion test
 - Page height or width too small for title or metadata, fails to encode
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
