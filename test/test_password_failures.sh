@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
+. "$script_dir/lib/fiducials.sh"
 
 usage() {
     cat <<'USAGE'
@@ -134,9 +135,17 @@ encode_cmd=(
     --page-height=720
     "--password=$password"
     "--output-dir=$work_dir"
+    "--prefix=${label}_page"
+    --debug
 )
 print_labelled "encode" "${encode_cmd[@]}"
 "${encode_cmd[@]}" >/dev/null
+encode_csv="$work_dir/${label}_page_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_password_failures: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -153,10 +162,30 @@ decoded_wrong_pw="$work_dir/decoded_wrong_pw"
 mkdir -p "$decoded_no_pw" "$decoded_wrong_pw"
 
 run_expect_failure "decode-missing-password" \
-    "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_no_pw"
+    "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_no_pw" --debug
+missing_password_csv="$decoded_no_pw/decode_fiducials.csv"
+if [[ ! -f $missing_password_csv ]]; then
+    echo "test_password_failures: missing-password decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$missing_password_csv" "$test_dir/${label}_missing_password_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_missing_password_decode_fiducials.csv" \
+    "$label missing password"
 
 run_expect_failure "decode-wrong-password" \
-    "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_wrong_pw" --password=bad-password
+    "$makocode_bin" decode "$ppm_target" --output-dir "$decoded_wrong_pw" --password=bad-password --debug
+wrong_password_csv="$decoded_wrong_pw/decode_fiducials.csv"
+if [[ ! -f $wrong_password_csv ]]; then
+    echo "test_password_failures: wrong-password decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$wrong_password_csv" "$test_dir/${label}_wrong_password_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_wrong_password_decode_fiducials.csv" \
+    "$label wrong password"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS password failures enforced\n' "$label_fmt"

@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
+. "$script_dir/lib/fiducials.sh"
 makocode_bin="$repo_root/makocode"
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
@@ -78,6 +79,8 @@ encode_cmd=(
     --page-width=1000
     --page-height=1000
     "--output-dir=$work_dir"
+    "--prefix=${label}_overlay"
+    --debug
 )
 if [[ -n "${MAKO_OVERLAY_PALETTE:-}" ]]; then
     encode_cmd+=(--palette "${MAKO_OVERLAY_PALETTE}")
@@ -92,6 +95,12 @@ fi
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_csv="$work_dir/${label}_overlay_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_overlay_e2e: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -127,7 +136,17 @@ overlay_cmd+=("$encoded_path" "$overlay_path" "$fraction")
 
 decoded_dir="$work_dir/decoded"
 mkdir -p "$decoded_dir"
-"$makocode_bin" decode "$merged_path" --output-dir "$decoded_dir"
+"$makocode_bin" decode "$merged_path" --output-dir "$decoded_dir" --debug
+decode_csv="$decoded_dir/decode_fiducials.csv"
+if [[ ! -f $decode_csv ]]; then
+    echo "test_overlay_e2e: decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_decode_fiducials.csv" \
+    "$label overlay"
 decoded_source="$decoded_dir/payload.bin"
 if [[ ! -f $decoded_source ]]; then
     echo "test_overlay_e2e: decode missing payload.bin" >&2

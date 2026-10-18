@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
+. "$script_dir/lib/fiducials.sh"
 
 format_command() {
     local formatted="" quoted=""
@@ -327,7 +328,8 @@ else
 fi
 cp "$payload_final" "$payload_work"
 
-encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=$ecc" "--page-width=$width" "--page-height=$height" "--output-dir=$work_dir")
+encode_prefix="${label}_random_payload"
+encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=$ecc" "--page-width=$width" "--page-height=$height" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
 if [[ -n $palette ]]; then
     encode_cmd+=("--palette" "$palette")
 fi
@@ -350,6 +352,12 @@ print_makocode_cmd "encode" "${encode_cmd[@]}"
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_fiducial_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
+if [[ ! -f $encode_fiducial_csv ]]; then
+    echo "run_roundtrip: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_fiducial_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppm_paths=("$work_dir"/*.ppm)
@@ -396,9 +404,20 @@ if [[ -n $password ]]; then
     decode_cmd+=("--password=$password")
 fi
 decode_cmd+=("--output-dir=$baseline_decode_dir")
+decode_cmd+=(--debug)
 decode_cmd+=("${baseline_targets[@]}")
 print_makocode_cmd "decode" "${decode_cmd[@]}"
 "${decode_cmd[@]}" >/dev/null
+baseline_fiducial_csv="$baseline_decode_dir/decode_fiducials.csv"
+if [[ ! -f $baseline_fiducial_csv ]]; then
+    echo "run_roundtrip: baseline decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$baseline_fiducial_csv" "$test_dir/${label}_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_decode_fiducials.csv" \
+    "$label baseline"
 
 baseline_decoded_payload="$baseline_decode_dir/random.bin"
 if [[ ! -f $baseline_decoded_payload ]]; then
@@ -482,6 +501,7 @@ if [[ $transform_needed -eq 1 ]]; then
         transform_decode_cmd+=("--password=$password")
     fi
     transform_decode_cmd+=("--output-dir=$transformed_decode_dir")
+    transform_decode_cmd+=(--debug)
     if [[ $multi_page -eq 1 ]]; then
         transform_decode_cmd+=("${transformed_targets[@]}")
     else
@@ -489,6 +509,16 @@ if [[ $transform_needed -eq 1 ]]; then
     fi
     print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
     "${transform_decode_cmd[@]}" >/dev/null
+    transformed_fiducial_csv="$transformed_decode_dir/decode_fiducials.csv"
+    if [[ ! -f $transformed_fiducial_csv ]]; then
+        echo "run_roundtrip: transformed decode did not write fiducial CSV" >&2
+        exit 1
+    fi
+    cp "$transformed_fiducial_csv" "$test_dir/${label}_transformed_decode_fiducials.csv"
+    mako_check_fiducials \
+        "$test_dir/${label}_encode_fiducials.csv" \
+        "$test_dir/${label}_transformed_decode_fiducials.csv" \
+        "$label transformed"
     transformed_decoded_payload="$transformed_decode_dir/random.bin"
     if [[ ! -f $transformed_decoded_payload ]]; then
         echo "run_roundtrip: transformed decode missing random.bin" >&2

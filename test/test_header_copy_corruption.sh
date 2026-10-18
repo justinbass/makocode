@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
+. "$script_dir/lib/fiducials.sh"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
@@ -74,8 +75,15 @@ rm -f "$payload_final" "$encoded_ppm"
 "$ppm_transform_bin" bytes --output "$payload_final" --size 4096 --seed "$payload_seed"
 cp "$payload_final" "$work_dir/random.bin"
 
-encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--no-filename" "--no-page-count" "--output-dir=$work_dir")
+encode_prefix="${label}_page"
+encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--no-filename" "--no-page-count" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
 (cd "$work_dir" && "${encode_cmd[@]}") >/dev/null
+encode_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_header_copy_corruption: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppm_paths=("$work_dir"/*.ppm)
@@ -108,7 +116,7 @@ run_decode_expect() {
         --output "$damaged_ppm" \
         --corrupt-header-copies "$corrupt_count" >/dev/null
 
-    local decode_cmd=("$makocode_bin" decode "--output-dir=$output_dir")
+    local decode_cmd=("$makocode_bin" decode "--output-dir=$output_dir" --debug)
     decode_cmd+=("$damaged_ppm")
 
     set +e
@@ -131,6 +139,16 @@ run_decode_expect() {
         echo "test_header_copy_corruption: decode ${scenario} bypassed surviving header copies" >&2
         exit 1
     fi
+    local fiducial_csv="$output_dir/decode_fiducials.csv"
+    if [[ ! -f $fiducial_csv ]]; then
+        echo "test_header_copy_corruption: decode ${scenario} did not write fiducial CSV" >&2
+        exit 1
+    fi
+    cp "$fiducial_csv" "$test_dir/${label}_${scenario}_decode_fiducials.csv"
+    mako_check_fiducials \
+        "$test_dir/${label}_encode_fiducials.csv" \
+        "$test_dir/${label}_${scenario}_decode_fiducials.csv" \
+        "$label $scenario"
     if [[ $expect_success -eq 1 ]]; then
         if [[ ! -f "$output_dir/random.bin" ]]; then
             echo "test_header_copy_corruption: decode ${scenario} missing random.bin" >&2

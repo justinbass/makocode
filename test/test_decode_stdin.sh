@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/fiducials.sh"
 
 usage() {
     cat <<'USAGE'
@@ -100,12 +101,19 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir"
 printf '\000stdin coverage payload\377\n' > "$payload"
 
-encode_cmd=("$makocode_bin" encode --input=payload.bin --ecc=0.5 --page-width=500 --page-height=500 "--output-dir=$work_dir" --no-filename --no-page-count)
+encode_prefix="${label}_stdin"
+encode_cmd=("$makocode_bin" encode --input=payload.bin --ecc=0.5 --page-width=500 --page-height=500 "--output-dir=$work_dir" --no-filename --no-page-count "--prefix=$encode_prefix" --debug)
 print_labelled "encode" "${encode_cmd[@]}"
 (
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_decode_stdin: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppm_paths=("$work_dir"/*.ppm)
@@ -116,9 +124,19 @@ if [[ ${#ppm_paths[@]} -ne 1 ]]; then
 fi
 
 mkdir -p "$decoded_dir"
-decode_cmd=("$makocode_bin" decode "--output-dir=$decoded_dir")
+decode_cmd=("$makocode_bin" decode "--output-dir=$decoded_dir" --debug)
 print_labelled "decode-stdin" cat "${ppm_paths[0]}" '|' "${decode_cmd[@]}"
 cat "${ppm_paths[0]}" | "${decode_cmd[@]}" >/dev/null
+decode_csv="$decoded_dir/decode_fiducials.csv"
+if [[ ! -f $decode_csv ]]; then
+    echo "test_decode_stdin: stdin decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_decode_fiducials.csv" \
+    "$label stdin"
 
 decoded_payload="$decoded_dir/payload.bin"
 if [[ ! -f $decoded_payload ]]; then

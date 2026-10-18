@@ -12,6 +12,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/fiducials.sh"
 
 usage() {
     cat <<'USAGE'
@@ -97,12 +98,19 @@ encode_cmd=(
     --no-filename
     --no-page-count
     --prefix=archive_tree
+    --debug
     "--output-dir=$page_dir"
 )
 (
     cd "$source_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_csv="$page_dir/archive_tree_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_archive_tree_roundtrip: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$page_dir"/*.ppm)
@@ -113,8 +121,18 @@ if [[ ${#ppms[@]} -eq 0 ]]; then
 fi
 
 mkdir -p "$decoded_dir"
-decode_cmd=("$makocode_bin" decode "--output-dir=$decoded_dir" "${ppms[@]}")
+decode_cmd=("$makocode_bin" decode "--output-dir=$decoded_dir" --debug "${ppms[@]}")
 "${decode_cmd[@]}" >/dev/null
+decode_csv="$decoded_dir/decode_fiducials.csv"
+if [[ ! -f $decode_csv ]]; then
+    echo "test_archive_tree_roundtrip: decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_decode_fiducials.csv" \
+    "$label"
 
 for tree_name in tree empty_only; do
     source_manifest="$work_dir/${tree_name}_source.manifest"

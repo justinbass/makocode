@@ -12,6 +12,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/fiducials.sh"
 
 usage() {
     cat <<'USAGE'
@@ -79,6 +80,7 @@ work_dir="$test_dir/${label}_cli_work"
 payload="$test_dir/${label}_cli_payload.bin"
 payload_source_name="cli_payload.bin"
 payload_work="$work_dir/$payload_source_name"
+encode_prefix="${label}_cli_payload"
 ppm_target="$test_dir/${label}_cli_payload_encoded.ppm"
 decoded_payload="$test_dir/${label}_cli_payload_decoded.bin"
 
@@ -112,12 +114,20 @@ encode_cmd=(
     --no-filename
     --no-page-count
     "--output-dir=$work_dir"
+    "--prefix=$encode_prefix"
+    --debug
 )
 print_makocode_cmd "encode" "${encode_cmd[@]}"
 (
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_cli_output_dir: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -130,9 +140,19 @@ ppm_path="${ppms[0]}"
 mv -f "$ppm_path" "$ppm_target"
 decode_dir="$work_dir/decoded"
 mkdir -p "$decode_dir"
-decode_cmd=("$makocode_bin" decode "$ppm_target" --output-dir "$decode_dir")
+decode_cmd=("$makocode_bin" decode "$ppm_target" --output-dir "$decode_dir" --debug)
 print_makocode_cmd "decode" "${decode_cmd[@]}"
 "${decode_cmd[@]}" >/dev/null
+decode_csv="$decode_dir/decode_fiducials.csv"
+if [[ ! -f $decode_csv ]]; then
+    echo "test_cli_output_dir: decode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_decode_fiducials.csv" \
+    "$label"
 
 decoded_source="$decode_dir/$payload_source_name"
 if [[ ! -f $decoded_source ]]; then

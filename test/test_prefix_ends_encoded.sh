@@ -12,6 +12,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/fiducials.sh"
 
 label="0057_prefix_ends_encoded"
 while [[ $# -gt 0 ]]; do
@@ -79,6 +80,7 @@ encode_cmd=(
     --no-page-count
     "--prefix=$prefix"
     "--output-dir=$pages_dir"
+    --debug
 )
 printf '%s encode: %q ' "$(mako_format_label "$label")" "${encode_cmd[0]}"
 printf '%q ' "${encode_cmd[@]:1}"
@@ -87,6 +89,12 @@ printf '\n'
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_csv="$pages_dir/${prefix}_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo 'test_prefix_ends_encoded: encode did not write fiducial CSV' >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$pages_dir"/*.ppm)
@@ -118,7 +126,17 @@ if ! awk '
     exit 1
 fi
 
-"$makocode_bin" decode "$encoded_ppm" "--output-dir=$decoded_dir" >/dev/null
+"$makocode_bin" decode "$encoded_ppm" "--output-dir=$decoded_dir" --debug >/dev/null
+decode_csv="$decoded_dir/decode_fiducials.csv"
+if [[ ! -f $decode_csv ]]; then
+    echo 'test_prefix_ends_encoded: decode did not write fiducial CSV' >&2
+    exit 1
+fi
+cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
+mako_check_fiducials \
+    "$test_dir/${label}_encode_fiducials.csv" \
+    "$test_dir/${label}_decode_fiducials.csv" \
+    "$label"
 if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; then
     echo 'test_prefix_ends_encoded: decoded payload differs from input' >&2
     exit 1

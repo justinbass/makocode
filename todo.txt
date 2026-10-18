@@ -1,5 +1,5 @@
 Tests
-- --debug option to print out (for now) fiducial marking data, E2E tests must verify they are where they're expected. CSV files per type.
+- Reduce FIDUCIAL_TOLERANCE
 - Test --overlay-ecc-target, --compact-page, --fiducials
 - Reject archive dirs outside current, it's an attacl (../path)
 - Remove ALL uncovered code

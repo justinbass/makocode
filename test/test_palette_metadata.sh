@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
+. "$script_dir/lib/fiducials.sh"
 
 usage() {
     cat <<'USAGE'
@@ -135,12 +136,20 @@ encode_cmd=(
     --page-height=640
     --palette "$palette"
     "--output-dir=$work_dir"
+    "--prefix=${label}_page"
+    --debug
 )
 print_labelled "encode" "${encode_cmd[@]}"
 (
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
+encode_csv="$work_dir/${label}_page_encode_fiducials.csv"
+if [[ ! -f $encode_csv ]]; then
+    echo "test_palette_metadata: encode did not write fiducial CSV" >&2
+    exit 1
+fi
+cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -158,9 +167,19 @@ decoded_payload="$decoded_dir/payload.bin"
 
 case "$mode" in
     auto)
-        decode_cmd=("$makocode_bin" decode "$ppm_target" --output-dir "$decoded_dir")
+        decode_cmd=("$makocode_bin" decode "$ppm_target" --output-dir "$decoded_dir" --debug)
         print_labelled "decode-auto" "${decode_cmd[@]}"
         "${decode_cmd[@]}" >/dev/null
+        decode_csv="$decoded_dir/decode_fiducials.csv"
+        if [[ ! -f $decode_csv ]]; then
+            echo "test_palette_metadata: auto decode did not write fiducial CSV" >&2
+            exit 1
+        fi
+        cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
+        mako_check_fiducials \
+            "$test_dir/${label}_encode_fiducials.csv" \
+            "$test_dir/${label}_decode_fiducials.csv" \
+            "$label auto"
         if [[ ! -f $decoded_payload ]]; then
             echo "test_palette_metadata: decode missing payload.bin in auto mode" >&2
             exit 1
@@ -173,6 +192,7 @@ case "$mode" in
             "$ppm_target"
             --output-dir "$decoded_dir"
             --palette "White Black"
+            --debug
         )
         print_labelled "decode-wrong" "${decode_cmd[@]}"
         set +e
@@ -183,6 +203,12 @@ case "$mode" in
             echo "test_palette_metadata: decode unexpectedly succeeded with wrong palette" >&2
             exit 1
         fi
+        wrong_decode_csv="$decoded_dir/decode_fiducials.csv"
+        if [[ ! -f $wrong_decode_csv ]]; then
+            echo "test_palette_metadata: wrong-palette decode did not write fiducial CSV" >&2
+            exit 1
+        fi
+        cp "$wrong_decode_csv" "$test_dir/${label}_wrong_decode_fiducials.csv"
         ;;
 esac
 

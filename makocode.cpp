@@ -1212,6 +1212,29 @@ struct ByteBuffer {
     }
 };
 
+static bool append_fiducial_csv_row(makocode::ByteBuffer& csv,
+                                    u64 page,
+                                    u32 row,
+                                    u32 column,
+                                    double x,
+                                    double y) {
+    char x_text[32];
+    char y_text[32];
+    char page_text[32];
+    char row_text[32];
+    char column_text[32];
+    format_fixed_3(x, x_text, sizeof(x_text));
+    format_fixed_3(y, y_text, sizeof(y_text));
+    u64_to_ascii(page, page_text, sizeof(page_text));
+    u64_to_ascii(row, row_text, sizeof(row_text));
+    u64_to_ascii(column, column_text, sizeof(column_text));
+    return csv.append_ascii(page_text) && csv.append_char(',') &&
+           csv.append_ascii(row_text) && csv.append_char(',') &&
+           csv.append_ascii(column_text) && csv.append_char(',') &&
+           csv.append_ascii(x_text) && csv.append_char(',') &&
+           csv.append_ascii(y_text) && csv.append_char('\n');
+}
+
 /* ===== Begin Embedded LZMA SDK (Public Domain, Igor Pavlov) ===== */
 
 // --- Types.h ---
@@ -12395,7 +12418,10 @@ static bool write_bytes_to_file(const char* path, const u8* data, usize length) 
     return ok;
 }
 
-static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::ByteBuffer& buffer);
+static bool write_ppm_with_fiducials_to_file(const char* path,
+                                             const makocode::ByteBuffer& buffer,
+                                             makocode::ByteBuffer* debug_csv = 0,
+                                             u64 debug_page = 1u);
 
 static bool path_contains_substring(const char* path, const char* needle) {
     if (!path || !needle || !needle[0]) {
@@ -12433,9 +12459,12 @@ static bool should_embed_fiducials_for_path(const char* path) {
     return true;
 }
 
-static bool write_buffer_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+static bool write_buffer_to_file(const char* path,
+                                 const makocode::ByteBuffer& buffer,
+                                 makocode::ByteBuffer* debug_csv = 0,
+                                 u64 debug_page = 1u) {
     if (should_embed_fiducials_for_path(path)) {
-        return write_ppm_with_fiducials_to_file(path, buffer);
+        return write_ppm_with_fiducials_to_file(path, buffer, debug_csv, debug_page);
     }
     return write_bytes_to_file(path, buffer.data, buffer.size);
 }
@@ -14349,7 +14378,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    u64& frame_bit_count,
                                    PpmParserState& metadata_out,
                                    bool force_disable_fiducial_subgrid,
-                                   bool* retry_without_subgrid_out = 0) {
+                                   bool* retry_without_subgrid_out = 0,
+                                   makocode::ByteBuffer* debug_fiducial_csv = 0,
+                                   u64 debug_page = 1u) {
     if (retry_without_subgrid_out) {
         *retry_without_subgrid_out = false;
     }
@@ -16497,6 +16528,76 @@ struct RotationEstimateCandidate {
     u32 fiducial_column_count = 0u;
     u32 fiducial_row_count = 0u;
     bool fiducial_displacement_active = false;
+    auto append_debug_fiducials = [&]() -> bool {
+        if (!debug_fiducial_csv ||
+            !fiducial_storage.centers_x ||
+            !fiducial_storage.centers_y ||
+            fiducial_column_count == 0u ||
+            fiducial_row_count == 0u) {
+            return true;
+        }
+        u32 fiducial_marker_size = state.has_fiducial_size && state.fiducial_size_value > 0u
+                                       ? (u32)state.fiducial_size_value
+                                       : 1u;
+        double fiducial_margin = state.has_fiducial_margin
+                                     ? (double)state.fiducial_margin_value
+                                     : 0.0;
+        double fiducial_min_x = fiducial_margin;
+        double fiducial_max_x = (logical_width > 0u)
+                                    ? (double)(logical_width - 1u) - fiducial_margin
+                                    : 0.0;
+        double fiducial_min_y = fiducial_margin;
+        double fiducial_max_y = (data_height > 0u)
+                                    ? (double)(data_height - 1u) - fiducial_margin
+                                    : 0.0;
+        if (fiducial_max_x < fiducial_min_x) fiducial_max_x = fiducial_min_x;
+        if (fiducial_max_y < fiducial_min_y) fiducial_max_y = fiducial_min_y;
+        MetadataTile::Placement debug_metadata_tile =
+            (logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull)
+                ? MetadataTile::compute_tile_placement((u32)logical_width, (u32)data_height)
+                : MetadataTile::Placement();
+        for (u32 row_index = 0u; row_index < fiducial_row_count; ++row_index) {
+            for (u32 col_index = 0u; col_index < fiducial_column_count; ++col_index) {
+                usize point_index = (usize)row_index * (usize)fiducial_column_count + (usize)col_index;
+                double t_col = (fiducial_column_count == 1u)
+                                   ? 0.5
+                                   : ((double)col_index / (double)(fiducial_column_count - 1u));
+                double t_row = (fiducial_row_count == 1u)
+                                   ? 0.5
+                                   : ((double)row_index / (double)(fiducial_row_count - 1u));
+                double marker_center_x = fiducial_min_x +
+                                         (fiducial_max_x - fiducial_min_x) * t_col;
+                double marker_center_y = fiducial_min_y +
+                                         (fiducial_max_y - fiducial_min_y) * t_row;
+                int marker_x0 = (int)(marker_center_x - ((double)fiducial_marker_size - 1.0) * 0.5);
+                int marker_y0 = (int)(marker_center_y - ((double)fiducial_marker_size - 1.0) * 0.5);
+                if (debug_metadata_tile.valid &&
+                    marker_x0 < (int)(debug_metadata_tile.x0 + MetadataTile::TILE_SIDE) &&
+                    marker_x0 + (int)fiducial_marker_size > (int)debug_metadata_tile.x0 &&
+                    marker_y0 < (int)(debug_metadata_tile.y0 + MetadataTile::TILE_SIDE) &&
+                    marker_y0 + (int)fiducial_marker_size > (int)debug_metadata_tile.y0) {
+                    continue;
+                }
+                double guessed_x = fiducial_storage.centers_x[point_index];
+                double guessed_y = fiducial_storage.centers_y[point_index];
+                if (width > 1u && logical_width > 1u) {
+                    guessed_x *= (double)(logical_width - 1u) / (double)(width - 1u);
+                }
+                if (height > 1u && logical_height > 1u) {
+                    guessed_y *= (double)(logical_height - 1u) / (double)(height - 1u);
+                }
+                if (!makocode::append_fiducial_csv_row(*debug_fiducial_csv,
+                                             debug_page,
+                                             row_index,
+                                             col_index,
+                                             guessed_x,
+                                             guessed_y)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
     if ((!has_rotation || rotation_metadata_present || fiducial_rotation_detected) &&
         state.has_fiducial_columns && state.has_fiducial_rows &&
         state.has_fiducial_size &&
@@ -17905,6 +18006,9 @@ struct RotationEstimateCandidate {
                 frame_bits.data[i] = rotate_right_u8(frame_bits.data[i], rotate);
             }
         }
+        if (!append_debug_fiducials()) {
+            return false;
+        }
         metadata_out = state;
         metadata_out.data = 0;
         metadata_out.size = 0u;
@@ -17998,6 +18102,10 @@ struct RotationEstimateCandidate {
             frame_bits.data[i] = simple_data ? simple_data[i] : 0u;
         }
         frame_bits.size = simple_bytes;
+    }
+
+    if (!append_debug_fiducials()) {
+        return false;
     }
 
     metadata_out = state;
@@ -18468,7 +18576,9 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      u32 grid_rows,
                                      u32 margin_pixels,
                                      u32 grid_height_limit,
-                                     makocode::ByteBuffer& output) {
+                                     makocode::ByteBuffer& output,
+                                     makocode::ByteBuffer* debug_csv = 0,
+                                     u64 debug_page = 1u) {
     if (!input.data || input.size == 0u) {
         return false;
     }
@@ -18700,6 +18810,15 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
             if (marker_overlaps_metadata(start_x, start_y, marker_size)) {
                 continue;
             }
+            if (debug_csv &&
+                !makocode::append_fiducial_csv_row(*debug_csv,
+                                         debug_page,
+                                         grid_row,
+                                         grid_col,
+                                         (double)start_x + ((double)marker_size - 1.0) * 0.5,
+                                         (double)start_y + ((double)marker_size - 1.0) * 0.5)) {
+                return false;
+            }
             for (u32 dy = 0u; dy < marker_size; ++dy) {
                 int pixel_y = start_y + (int)dy;
                 if (pixel_y < 0 || pixel_y >= (int)draw_height) {
@@ -18792,7 +18911,9 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
 // so markers stay within the data area.
 static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                         makocode::ByteBuffer& output,
-                                        u32 data_height_pixels = 0u) {
+                                        u32 data_height_pixels = 0u,
+                                        makocode::ByteBuffer* debug_csv = 0,
+                                        u64 debug_page = 1u) {
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
@@ -18880,17 +19001,26 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                     fiducial_rows,
                                     fiducial_margin,
                                     grid_height,
-                                    output);
+                                    output,
+                                    debug_csv,
+                                    debug_page);
 }
 
-static bool write_ppm_with_fiducials_to_file(const char* path, const makocode::ByteBuffer& buffer) {
+static bool write_ppm_with_fiducials_to_file(const char* path,
+                                             const makocode::ByteBuffer& buffer,
+                                             makocode::ByteBuffer* debug_csv,
+                                             u64 debug_page) {
     makocode::ByteBuffer fiducial_buffer;
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     if (!ppm_measure_dimensions(buffer, width_pixels, height_pixels)) {
         return false;
     }
-    if (!apply_default_fiducial_grid(buffer, fiducial_buffer)) {
+    if (!apply_default_fiducial_grid(buffer,
+                                     fiducial_buffer,
+                                     0u,
+                                     debug_csv,
+                                     debug_page)) {
         return false;
     }
     return write_bytes_to_file(path, fiducial_buffer.data, fiducial_buffer.size);
@@ -20793,6 +20923,7 @@ static void write_encode_help() {
     console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
     console_line(1, "  --compact-page       Shrink single-page output height to minimal fit (disables fixed barcode placement).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
+    console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
     console_line(1, "  --ecc RATIO          Reed-Solomon redundancy (default 0.20, 0 disables).");
@@ -20824,6 +20955,7 @@ static void write_decode_help() {
     console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
+    console_line(1, "  --debug              Write decode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "General:");
     console_line(1, "  --help               Show this message.");
@@ -21306,6 +21438,7 @@ static int command_encode(int arg_count, char** args) {
     bool have_prefix = false;
     bool ecc_fill_requested = false;
     bool compact_page = false;
+    bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "encode", &handled)) {
@@ -21430,6 +21563,10 @@ static int command_encode(int arg_count, char** args) {
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--compact-page")) {
             compact_page = true;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
+            debug_requested = true;
             continue;
         }
         const char ecc_prefix[] = "--ecc=";
@@ -21914,6 +22051,25 @@ static int command_encode(int arg_count, char** args) {
         }
         page_name_prefix = timestamp_name;
     }
+    bool debug_reapplied_by_filename = debug_requested &&
+                                       path_contains_substring(page_name_prefix, "_encoded");
+    makocode::ByteBuffer debug_fiducial_csv;
+    makocode::ByteBuffer debug_fiducial_path;
+    if (debug_requested) {
+        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y\n")) {
+            console_line(2, "encode: failed to prepare fiducial CSV");
+            return 1;
+        }
+        makocode::ByteBuffer debug_fiducial_name;
+        if (!debug_fiducial_name.append_ascii(page_name_prefix) ||
+            !debug_fiducial_name.append_ascii("_encode_fiducials.csv") ||
+            !join_output_path(output_dir,
+                              (const char*)debug_fiducial_name.data,
+                              debug_fiducial_path)) {
+            console_line(2, "encode: failed to prepare fiducial CSV path");
+            return 1;
+        }
+    }
     makocode::ByteBuffer footer_text_buffer;
     const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
     if (page_count == 1u) {
@@ -21996,7 +22152,13 @@ static int command_encode(int arg_count, char** args) {
        }
         makocode::ByteBuffer fiducial_page;
         // Clip fiducials to the data area so they don't overlap footer text.
-        if (!apply_default_fiducial_grid(page_output, fiducial_page, output_data_height_pixels)) {
+        if (!apply_default_fiducial_grid(page_output,
+                                         fiducial_page,
+                                         output_data_height_pixels,
+                                         (debug_requested && !debug_reapplied_by_filename)
+                                             ? &debug_fiducial_csv
+                                             : (makocode::ByteBuffer*)0,
+                                         1u)) {
             console_line(2, "encode: failed to embed fiducial grid");
             return 1;
         }
@@ -22015,7 +22177,10 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to prepare output directories");
             return 1;
         }
-        if (!write_buffer_to_file((const char*)output_path.data, page_output)) {
+        if (!write_buffer_to_file((const char*)output_path.data,
+                                  page_output,
+                                  debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
+                                  1u)) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
@@ -22053,7 +22218,13 @@ static int command_encode(int arg_count, char** args) {
             }
             makocode::ByteBuffer fiducial_page;
             // Clip fiducials to the data area so they don't overlap footer text.
-            if (!apply_default_fiducial_grid(page_output, fiducial_page, footer_layout.data_height_pixels)) {
+            if (!apply_default_fiducial_grid(page_output,
+                                             fiducial_page,
+                                             footer_layout.data_height_pixels,
+                                             (debug_requested && !debug_reapplied_by_filename)
+                                                 ? &debug_fiducial_csv
+                                                 : (makocode::ByteBuffer*)0,
+                                             page + 1u)) {
                 console_line(2, "encode: failed to embed fiducial grid");
                 return 1;
             }
@@ -22070,7 +22241,10 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to prepare output directories");
                 return 1;
             }
-            if (!write_buffer_to_file((const char*)path_buffer.data, page_output)) {
+            if (!write_buffer_to_file((const char*)path_buffer.data,
+                                      page_output,
+                                      debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
+                                      page + 1u)) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }
@@ -22092,6 +22266,14 @@ static int command_encode(int arg_count, char** args) {
         console_write(1, " pages (");
         console_write(1, summary_name);
         console_line(1, " ...)");
+    }
+    if (debug_requested &&
+        (!ensure_parent_directories((const char*)debug_fiducial_path.data) ||
+         !write_bytes_to_file((const char*)debug_fiducial_path.data,
+                              debug_fiducial_csv.data,
+                              debug_fiducial_csv.size))) {
+        console_line(2, "encode: failed to write fiducial CSV");
+        return 1;
     }
     return 0;
 }
@@ -23893,6 +24075,7 @@ static int command_decode(int arg_count, char** args) {
     makocode::ByteBuffer output_dir_buffer;
     const char* output_dir = ".";
     bool have_output_dir = false;
+    bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "decode", &handled)) {
@@ -23903,6 +24086,10 @@ static int command_decode(int arg_count, char** args) {
         }
         const char* arg = args[i];
         if (!arg) {
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
+            debug_requested = true;
             continue;
         }
         
@@ -24011,7 +24198,30 @@ static int command_decode(int arg_count, char** args) {
     bool have_metadata = false;
     bool force_disable_subgrid = false;
     bool retried_subgrid = false;
+    makocode::ByteBuffer debug_fiducial_csv;
+    makocode::ByteBuffer debug_fiducial_path;
+    const usize debug_fiducial_header_size = (usize)sizeof("page,row,column,x,y\n") - 1u;
+    if (debug_requested) {
+        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y\n") ||
+            !join_output_path(output_dir, "decode_fiducials.csv", debug_fiducial_path) ||
+            !ensure_parent_directories((const char*)debug_fiducial_path.data) ||
+            !write_bytes_to_file((const char*)debug_fiducial_path.data,
+                                 debug_fiducial_csv.data,
+                                 debug_fiducial_csv.size)) {
+            console_line(2, "decode: failed to prepare fiducial CSV");
+            return 1;
+        }
+    }
 retry_decode:
+    if (debug_requested && debug_fiducial_csv.size > debug_fiducial_header_size) {
+        debug_fiducial_csv.size = debug_fiducial_header_size;
+        if (!write_bytes_to_file((const char*)debug_fiducial_path.data,
+                                 debug_fiducial_csv.data,
+                                 debug_fiducial_csv.size)) {
+            console_line(2, "decode: failed to reset fiducial CSV");
+            return 1;
+        }
+    }
     bitstream.release();
     bit_count = 0u;
     aggregate_state = PpmParserState();
@@ -24033,7 +24243,9 @@ retry_decode:
                                                       frame_bit_count,
                                                       single_state,
                                                       force_disable_subgrid,
-                                                      &retry_without_subgrid_allowed);
+                                                      &retry_without_subgrid_allowed,
+                                                      debug_requested ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
+                                                      1u);
 
         if (!frame_extracted) {
             if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
@@ -24044,6 +24256,13 @@ retry_decode:
                 goto retry_decode;
             }
             console_line(2, "decode: invalid ppm input");
+            return 1;
+        }
+        if (debug_requested &&
+            !write_bytes_to_file((const char*)debug_fiducial_path.data,
+                                 debug_fiducial_csv.data,
+                                 debug_fiducial_csv.size)) {
+            console_line(2, "decode: failed to write fiducial CSV");
             return 1;
         }
         bool payload_extracted = frame_bits_to_payload(frame_bits.data,
@@ -24092,7 +24311,9 @@ retry_decode:
                                                           page_bit_count,
                                                           page_state,
                                                           force_disable_subgrid,
-                                                          &retry_without_subgrid_allowed);
+                                                          &retry_without_subgrid_allowed,
+                                                          debug_requested ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
+                                                          (u64)file_index + 1u);
 
             if (!frame_extracted) {
                 if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
@@ -24104,6 +24325,13 @@ retry_decode:
                 }
                 console_write(2, "decode: invalid ppm in ");
                 console_line(2, input_files[file_index]);
+                return 1;
+            }
+            if (debug_requested &&
+                !write_bytes_to_file((const char*)debug_fiducial_path.data,
+                                     debug_fiducial_csv.data,
+                                     debug_fiducial_csv.size)) {
+                console_line(2, "decode: failed to write fiducial CSV");
                 return 1;
             }
             if (!aggregate_initialized) {

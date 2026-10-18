@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
+. "$script_dir/lib/fiducials.sh"
 
 usage() {
     cat <<'USAGE'
@@ -91,11 +92,18 @@ for ecc in 0 0.5; do
         printf 'LZMA CLI decoder path regression payload; repetition=%03d\n' "$i" >> "$payload"
     done
 
-    encode_cmd=("$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --page-width=500 --page-height=500 --no-filename --no-page-count "--output-dir=$ppm_dir")
+    encode_prefix="${label}_ecc_${ecc}"
+    encode_cmd=("$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --page-width=500 --page-height=500 --no-filename --no-page-count "--output-dir=$ppm_dir" "--prefix=$encode_prefix" --debug)
     printf '%s encode (ECC %s):' "$(mako_format_label "$label")" "$ecc"
     printf ' %q' "${encode_cmd[@]}"
     printf '\n'
     (cd "$input_dir" && "${encode_cmd[@]}") >/dev/null
+    encode_csv="$ppm_dir/${encode_prefix}_encode_fiducials.csv"
+    if [[ ! -f $encode_csv ]]; then
+        echo "test_cli_decoder_paths: encode did not write fiducial CSV for ECC $ecc" >&2
+        exit 1
+    fi
+    cp "$encode_csv" "$test_dir/${label}_ecc_${ecc}_encode_fiducials.csv"
 
     shopt -s nullglob
     ppm_paths=("$ppm_dir"/*.ppm)
@@ -104,11 +112,21 @@ for ecc in 0 0.5; do
         echo "test_cli_decoder_paths: encode emitted no PPM pages for ECC $ecc" >&2
         exit 1
     fi
-    decode_cmd=("$makocode_bin" decode "--output-dir=$decoded_dir" "${ppm_paths[@]}")
+    decode_cmd=("$makocode_bin" decode "--output-dir=$decoded_dir" --debug "${ppm_paths[@]}")
     printf '%s decode (ECC %s):' "$(mako_format_label "$label")" "$ecc"
     printf ' %q' "${decode_cmd[@]}"
     printf '\n'
     "${decode_cmd[@]}" >/dev/null
+    decode_csv="$decoded_dir/decode_fiducials.csv"
+    if [[ ! -f $decode_csv ]]; then
+        echo "test_cli_decoder_paths: decode did not write fiducial CSV for ECC $ecc" >&2
+        exit 1
+    fi
+    cp "$decode_csv" "$test_dir/${label}_ecc_${ecc}_decode_fiducials.csv"
+    mako_check_fiducials \
+        "$test_dir/${label}_ecc_${ecc}_encode_fiducials.csv" \
+        "$test_dir/${label}_ecc_${ecc}_decode_fiducials.csv" \
+        "$label ECC $ecc"
     decoded_payload="$decoded_dir/payload.bin"
     if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; then
         echo "test_cli_decoder_paths: decoded payload mismatch for ECC $ecc" >&2
