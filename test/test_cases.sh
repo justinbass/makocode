@@ -249,3 +249,12 @@ test_case 0058_cli_decoder_paths script "Grayscale loader, border cleanup, and L
 
 test_case 0057_prefix_ends_encoded script "--prefix ending in _encoded keeps its filename and fiducials" \
     test_prefix_ends_encoded.sh
+
+test_case 0059_overlay_ecc_target script "Overlay ECC target happy path" \
+    test_overlay_ecc_target.sh
+
+test_case 0060_compact_page script "Compact single-page output happy path" \
+    test_compact_page.sh
+
+test_case 0061_fiducials script "Custom fiducial dimensions happy path" \
+    test_fiducials.sh

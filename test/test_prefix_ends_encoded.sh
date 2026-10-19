@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 label="0057_prefix_ends_encoded"
 while [[ $# -gt 0 ]]; do
@@ -141,5 +142,8 @@ if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; 
     echo 'test_prefix_ends_encoded: decoded payload differs from input' >&2
     exit 1
 fi
+visual_ppm="$test_dir/${label}_prefix_encoded.ppm"
+cp "$encoded_ppm" "$visual_ppm"
+mako_register_visual_artifacts "$repo_root" "$visual_ppm"
 
 printf '%s SUCCESS prefix filename, fiducials, and payload round-trip\n' "$(mako_format_label "$label")"

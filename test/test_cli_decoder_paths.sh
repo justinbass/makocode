@@ -14,6 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -132,6 +133,15 @@ for ecc in 0 0.5; do
         echo "test_cli_decoder_paths: decoded payload mismatch for ECC $ecc" >&2
         exit 1
     fi
+    visual_targets=()
+    page_index=0
+    for ppm in "${ppm_paths[@]}"; do
+        page_index=$((page_index + 1))
+        visual_ppm="$test_dir/${label}_ecc_${ecc}_page_${page_index}.ppm"
+        cp "$ppm" "$visual_ppm"
+        visual_targets+=("$visual_ppm")
+    done
+    mako_register_visual_artifacts "$repo_root" "${visual_targets[@]}"
 done
 
 label_fmt=$(mako_format_label "$label")

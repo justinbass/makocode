@@ -14,6 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 makocode_bin="$repo_root/makocode"
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
@@ -157,5 +158,6 @@ mv "$decoded_source" "$decoded_path"
 
 skip_grayscale="${MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK:-0}"
 "$ppm_transform_bin" overlay-check --base "$encoded_path" --merged "$merged_path" --skip-grayscale "$skip_grayscale"
+mako_register_visual_artifacts "$repo_root" "$merged_path"
 
 echo "overlay e2e ok (label=$label, artifacts prefix ${label}_overlay_*)"

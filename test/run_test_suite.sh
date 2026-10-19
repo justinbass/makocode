@@ -32,27 +32,7 @@ prepare_suite() {
 
 finalize_suite() {
     local visual_dir="$repo_root/test_output/visual"
-    local visual_ppms=()
-    shopt -s nullglob
-    visual_ppms+=("$repo_root"/test_output/*_random_payload_transformed_encoded*.ppm)
-    for ppm in "$repo_root"/test_output/*_random_payload_encoded*.ppm; do
-        transformed_ppm=${ppm/_random_payload_encoded/_random_payload_transformed_encoded}
-        if [[ ! -f $transformed_ppm ]]; then
-            visual_ppms+=("$ppm")
-        fi
-    done
-    visual_ppms+=("$repo_root"/test_output/*_cli_payload_encoded.ppm)
-    visual_ppms+=("$repo_root"/test_output/*_archive_tree_encoded_*.ppm)
-    shopt -u nullglob
-
     mkdir -p "$visual_dir"
-    if ((${#visual_ppms[@]})); then
-        for ppm in "${visual_ppms[@]}"; do
-            local ppm_name
-            ppm_name=$(basename "$ppm")
-            ln -s "../$ppm_name" "$visual_dir/$ppm_name"
-        done
-    fi
 }
 
 if [[ $# -ne 1 ]]; then

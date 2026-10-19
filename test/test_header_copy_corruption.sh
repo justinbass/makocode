@@ -14,6 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
@@ -162,6 +163,7 @@ run_decode_expect "one_copy" 1 1
 run_decode_expect "two_copies" 1 2
 # The metadata tile reconstructs the ECC header after all three protected copies are damaged.
 run_decode_expect "all_copies" 1 3
+mako_register_visual_artifacts "$repo_root" "$encoded_ppm"
 
 label_fmt="$label"
 printf '%s SUCCESS header copy corruption expectations met\n' "$label_fmt"

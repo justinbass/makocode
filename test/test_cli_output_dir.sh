@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -161,6 +162,7 @@ if [[ ! -f $decoded_source ]]; then
 fi
 cmp --silent "$payload" "$decoded_source"
 mv "$decoded_source" "$decoded_payload"
+mako_register_visual_artifacts "$repo_root" "$ppm_target"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS CLI output-dir workflow\n' "$label_fmt"

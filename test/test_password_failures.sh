@@ -14,6 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -186,6 +187,7 @@ mako_check_fiducials \
     "$test_dir/${label}_encode_fiducials.csv" \
     "$test_dir/${label}_wrong_password_decode_fiducials.csv" \
     "$label wrong password"
+mako_register_visual_artifacts "$repo_root" "$ppm_target"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS password failures enforced\n' "$label_fmt"

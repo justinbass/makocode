@@ -14,6 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -215,6 +216,7 @@ esac
 if [[ -f $decoded_payload ]]; then
     mv "$decoded_payload" "$decoded_target"
 fi
+mako_register_visual_artifacts "$repo_root" "$ppm_target"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS mode=%s\n' "$label_fmt" "$mode"

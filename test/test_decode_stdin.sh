@@ -14,6 +14,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -147,6 +148,9 @@ if ! cmp --silent "$payload" "$decoded_payload"; then
     echo "test_decode_stdin: stdin decode payload differs from encoded payload" >&2
     exit 1
 fi
+visual_ppm="$test_dir/${label}_stdin_encoded.ppm"
+cp "${ppm_paths[0]}" "$visual_ppm"
+mako_register_visual_artifacts "$repo_root" "$visual_ppm"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS stdin payload matched byte-for-byte\n' "$label_fmt"

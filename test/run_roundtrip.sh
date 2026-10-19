@@ -16,6 +16,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/fiducials.sh"
 . "$script_dir/lib/affine.sh"
 . "$script_dir/lib/payload.sh"
+. "$script_dir/lib/visual_artifacts.sh"
 
 format_command() {
     local formatted="" quoted=""
@@ -573,6 +574,9 @@ fi
 suffix=""
 if [[ $transform_needed -eq 1 ]]; then
     suffix=" (transformed)"
+    mako_register_visual_artifacts "$repo_root" "${transformed_targets[@]}"
+else
+    mako_register_visual_artifacts "$repo_root" "${baseline_targets[@]}"
 fi
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS ecc=%s size=%s pages=%d%s\n\n' \
