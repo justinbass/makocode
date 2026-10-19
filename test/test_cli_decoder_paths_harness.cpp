@@ -18,8 +18,8 @@ the LICENSE file for the full license text.
 #undef main
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        fprintf(stderr, "decoder paths harness: expected P5 and P6 fixture paths\n");
+    if (argc != 4) {
+        fprintf(stderr, "decoder paths harness: expected P5, P6, and archive output paths\n");
         return 1;
     }
 
@@ -39,6 +39,36 @@ int main(int argc, char** argv) {
         return 1;
     }
     makocode::image::release(loaded);
+
+    ArchiveBuildContext traversal_archive;
+    const char* traversal_path = "../traversal_escape";
+    usize traversal_path_length = ascii_length(traversal_path);
+    if (!archive_init(traversal_archive) ||
+        !archive_append_u8(traversal_archive.buffer, 1u) ||
+        !archive_append_u32(traversal_archive.buffer, (u32)traversal_path_length) ||
+        !archive_append_bytes(traversal_archive.buffer,
+                              (const u8*)traversal_path,
+                              traversal_path_length)) {
+        fprintf(stderr, "decoder paths harness: traversal archive setup failed\n");
+        return 1;
+    }
+    traversal_archive.entry_count = 1u;
+    if (!archive_finalize(traversal_archive)) {
+        fprintf(stderr, "decoder paths harness: traversal archive finalization failed\n");
+        return 1;
+    }
+    struct stat outside_entry;
+    char outside_path[4096];
+    int outside_path_length = snprintf(outside_path,
+                                       sizeof(outside_path),
+                                       "%s/../traversal_escape",
+                                       argv[3]);
+    if (outside_path_length < 0 || (usize)outside_path_length >= sizeof(outside_path) ||
+        unpack_archive_to_directory(traversal_archive.buffer, argv[3]) ||
+        stat(outside_path, &outside_entry) == 0) {
+        fprintf(stderr, "decoder paths harness: archive directory traversal was not rejected\n");
+        return 1;
+    }
 
     makocode::image::ImageBuffer border_image = {};
     border_image.width = 7u;
@@ -118,6 +148,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("direct P5/P6 grayscale loader, border cleanup, and LzmaDec_DecodeToBuf checks passed\n");
+    printf("direct P5/P6 grayscale loader, archive traversal rejection, border cleanup, and LzmaDec_DecodeToBuf checks passed\n");
     return 0;
 }

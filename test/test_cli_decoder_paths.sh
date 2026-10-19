@@ -68,7 +68,8 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir"
 harness_bin="$work_dir/decoder_paths_harness"
 harness_inputs="$work_dir/harness_inputs"
-mkdir -p "$harness_inputs"
+harness_output="$work_dir/archive_output"
+mkdir -p "$harness_inputs" "$harness_output"
 p5_fixture="$harness_inputs/grayscale.pgm"
 p6_fixture="$harness_inputs/color.ppm"
 printf 'P5\n3 1\n255\n\000\177\377' > "$p5_fixture"
@@ -80,7 +81,7 @@ else
 fi
 printf '%s compile test-only decoder paths harness\n' "$(mako_format_label "$label")"
 "${CXX:-g++}" "${cxx_flags[@]}" "$harness_src" -o "$harness_bin"
-"$harness_bin" "$p5_fixture" "$p6_fixture"
+"$harness_bin" "$p5_fixture" "$p6_fixture" "$harness_output"
 for ecc in 0 0.5; do
     mode_dir="$work_dir/ecc_$ecc"
     input_dir="$mode_dir/input"

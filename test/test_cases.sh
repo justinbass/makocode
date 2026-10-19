@@ -244,7 +244,7 @@ test_case 0054_minify_literals script "Minify preserves literals and directives 
 test_case 0055_decode_stdin script "Decoder reads one PPM page from stdin" \
     test_decode_stdin.sh
 
-test_case 0058_cli_decoder_paths script "Grayscale loader, border cleanup, and LZMA decoder paths" \
+test_case 0058_cli_decoder_paths script "Decoder paths and archive traversal rejection" \
     test_cli_decoder_paths.sh
 
 test_case 0057_prefix_ends_encoded script "--prefix ending in _encoded keeps its filename and fiducials" \

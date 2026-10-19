@@ -1,5 +1,5 @@
 Tests
-- Reject archive dirs outside current, it's an attacl (../path)
+- Check that symlinks can't write outside
 - Run 10 'make coverage' runs, figure out how to cover all random pathways.
 - Remove ALL uncovered code
 - Wavy distortion test
@@ -10,6 +10,7 @@ Tests
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
 
 Features
+- Security concerns with altered code, invalid dir attacks, etc. How to prove encoder/decoder is not altered?
 - Footer title and metadata just on first page - or middle page?
 - Compress metadata (confirm it saves space worth the risk of corruption)
 - Handle compressed ppm natively
