@@ -16677,11 +16677,6 @@ struct RotationEstimateCandidate {
                                                : ((double)row_index / (double)(fiducial_rows - 1u));
                             double logical_x = logical_min_x + (logical_max_x - logical_min_x) * t_col;
                             double logical_y = logical_min_y + (logical_max_y - logical_min_y) * t_row;
-                            if (!has_rotation) {
-                                screen_x = min_x + (max_x - min_x) * t_col;
-                                screen_y = min_y + (max_y - min_y) * t_row;
-                                return;
-                            }
                             logical_x = (double)(int)(logical_x - marker_half_span) + marker_half_span;
                             logical_y = (double)(int)(logical_y - marker_half_span) + marker_half_span;
                             double sample_x = ((logical_x + 0.5) * scale_xd) - 0.5;
