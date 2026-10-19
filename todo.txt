@@ -3,7 +3,7 @@ Tests
 - Test --overlay-ecc-target, --compact-page, --fiducials
 - Reject archive dirs outside current, it's an attacl (../path)
 - Remove ALL uncovered code
-- Fix seed 798833406, 1929952598
+- Fix seed 798833406, 1929952598, 1270847312
 - Wavy distortion test
 - Page height or width too small for title or metadata, fails to encode
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color

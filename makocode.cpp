@@ -14017,7 +14017,7 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 int best_x = base_x;
                 int best_y = base_y;
                 int marker_search_radius = use_screen_transform_hint
-                                               ? (int)(scale_est * 3.0 + 2.0)
+                                               ? (int)(scale_est * 1.5 + 2.0)
                                                : (int)(scale_est * 4.0 + 2.0);
                 if (marker_search_radius < 4) marker_search_radius = 4;
                 for (int dy = -marker_search_radius; dy <= marker_search_radius; ++dy) {
@@ -15518,6 +15518,8 @@ struct RotationEstimateCandidate {
     bool tile_affine_hint_trusted = false;
     AffineTransform initial_fiducial_affine_hint = {};
     bool initial_fiducial_affine_hint_available = false;
+    AffineTransform measured_fiducial_affine_hint = {};
+    bool measured_fiducial_affine_hint_available = false;
     if (tile_affine_hint_available && (auto_candidate.valid || gradient_candidate.valid)) {
         double tile_angle_degrees = tile_affine_hint.angle_rad * (180.0 / 3.14159265358979323846);
         double independent_angle_error = 180.0;
@@ -16623,6 +16625,8 @@ struct RotationEstimateCandidate {
                 const bool has_visual_debug_centers = fiducial_storage.debug_centers_x &&
                                                       fiducial_storage.debug_centers_y &&
                                                       initial_fiducial_affine_hint_available;
+                const bool has_measured_fiducial_affine = !has_visual_debug_centers &&
+                                                          measured_fiducial_affine_hint_available;
                 double guessed_x = has_visual_debug_centers
                                        ? fiducial_storage.debug_centers_x[point_index]
                                        : fiducial_storage.centers_x[point_index];
@@ -16632,12 +16636,14 @@ struct RotationEstimateCandidate {
                 double logical_x = guessed_x;
                 double logical_y = guessed_y;
                 bool affine_coordinates = false;
-                if (has_visual_debug_centers || state.has_affine_transform) {
+                if (has_visual_debug_centers || has_measured_fiducial_affine || state.has_affine_transform) {
                     const AffineTransform& affine = has_visual_debug_centers
                                                         ? initial_fiducial_affine_hint
-                                                        : state.affine_transform;
+                                                        : (has_measured_fiducial_affine
+                                                               ? measured_fiducial_affine_hint
+                                                               : state.affine_transform);
                     double determinant = affine.a00 * affine.a11 - affine.a01 * affine.a10;
-                    if (fabs(determinant) > 1e-9) {
+                    if (!affine_coordinates && fabs(determinant) > 1e-9) {
                         double offset_x = guessed_x - affine.tx;
                         double offset_y = guessed_y - affine.ty;
                         logical_x = (offset_x * affine.a11 - offset_y * affine.a01) / determinant - 0.5;
@@ -16842,7 +16848,11 @@ struct RotationEstimateCandidate {
                                             }
                                         }
                                         double marker_area = (double)marker_width * (double)marker_height;
-                                        marker_center_visible = marker_intensity / marker_area >= 140.0;
+                                        // A partially occluded white marker can still exceed a
+                                        // low brightness threshold while its centroid is badly
+                                        // biased. Use the projected grid center unless most of
+                                        // the marker remains bright.
+                                        marker_center_visible = marker_intensity / marker_area >= 200.0;
                                     }
                                 }
                                 if (sum_w > 0.0 && marker_center_visible) {
@@ -16943,6 +16953,57 @@ struct RotationEstimateCandidate {
                                                                                             rotation_margin_est,
                                                                                             &fiducial_affine,
                                                                                             &fiducial_affine_valid);
+                                if (rotation_success && has_rotation && fiducial_affine_valid) {
+                                    measured_fiducial_affine_hint = fiducial_affine;
+                                    measured_fiducial_affine_hint_available = true;
+                                    double debug_scale = (scale_xd + scale_yd) * 0.5;
+                                    // At low resolution, correct isolated pixel-centroid outliers
+                                    // from the robust affine fit of the other detected markers.
+                                    if (debug_scale < 1.5 && !fiducial_storage.debug_centers_x) {
+                                        double marker_half_span = (fiducial_size_pixels - 1.0) * 0.5;
+                                        for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
+                                            double t_row = (fiducial_rows <= 1u)
+                                                               ? 0.5
+                                                               : ((double)row_index / (double)(fiducial_rows - 1u));
+                                            double logical_center_y = margin_pixels +
+                                                                      ((double)data_height - 1.0 -
+                                                                       2.0 * margin_pixels) * t_row;
+                                            logical_center_y = (double)(int)(logical_center_y - marker_half_span) +
+                                                               marker_half_span;
+                                            for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
+                                                double t_col = (fiducial_columns <= 1u)
+                                                                   ? 0.5
+                                                                   : ((double)col_index / (double)(fiducial_columns - 1u));
+                                                double logical_center_x = margin_pixels +
+                                                                          ((double)logical_width - 1.0 -
+                                                                           2.0 * margin_pixels) * t_col;
+                                                logical_center_x = (double)(int)(logical_center_x - marker_half_span) +
+                                                                   marker_half_span;
+                                                double predicted_screen_x = fiducial_affine.a00 *
+                                                                                (logical_center_x + 0.5) +
+                                                                            fiducial_affine.a01 *
+                                                                                (logical_center_y + 0.5) +
+                                                                            fiducial_affine.tx;
+                                                double predicted_screen_y = fiducial_affine.a10 *
+                                                                                (logical_center_x + 0.5) +
+                                                                            fiducial_affine.a11 *
+                                                                                (logical_center_y + 0.5) +
+                                                                            fiducial_affine.ty;
+                                                usize point_index = (usize)row_index *
+                                                                        (usize)fiducial_columns +
+                                                                    (usize)col_index;
+                                                double residual_x = fiducial_storage.centers_x[point_index] -
+                                                                    predicted_screen_x;
+                                                double residual_y = fiducial_storage.centers_y[point_index] -
+                                                                    predicted_screen_y;
+                                                if (residual_x * residual_x + residual_y * residual_y > 6.25) {
+                                                    fiducial_storage.centers_x[point_index] = predicted_screen_x;
+                                                    fiducial_storage.centers_y[point_index] = predicted_screen_y;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 if (rotation_success && has_rotation && fiducial_affine_valid &&
                                     tile_affine_hint_available &&
                                     logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull) {
