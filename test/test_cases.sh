@@ -253,6 +253,9 @@ test_case 0057_prefix_ends_encoded script "--prefix ending in _encoded keeps its
 test_case 0059_overlay_ecc_target script "Overlay ECC target happy path" \
     test_overlay_ecc_target.sh
 
+test_case 0062_archive_symlink_roundtrip script "Directory symlink target decodes as a regular file" \
+    test_archive_symlink_roundtrip.sh
+
 test_case 0060_compact_page script "Compact single-page output happy path" \
     test_compact_page.sh
 
