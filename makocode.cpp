@@ -13995,8 +13995,10 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 if (ring_y == 0u) ring_y = 1u;
                 if (ring_x > 8u) ring_x = 8u;
                 if (ring_y > 8u) ring_y = 8u;
-                int base_x = (int)(center_x - ((double)marker_width - 1.0) * 0.5);
-                int base_y = (int)(center_y - ((double)marker_height - 1.0) * 0.5);
+                int base_x = (int)((use_affine_hint ? approx_x : center_x) -
+                                   ((double)marker_width - 1.0) * 0.5);
+                int base_y = (int)((use_affine_hint ? approx_y : center_y) -
+                                   ((double)marker_height - 1.0) * 0.5);
                 double best_contrast = 0.0;
                 int best_x = base_x;
                 int best_y = base_y;
@@ -14044,6 +14046,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 if (best_contrast >= 8.0) {
                     center_x = (double)best_x + ((double)marker_width - 1.0) * 0.5;
                     center_y = (double)best_y + ((double)marker_height - 1.0) * 0.5;
+                } else if (use_affine_hint) {
+                    center_x = approx_x;
+                    center_y = approx_y;
                 }
             }
             usize point_index = (usize)row_index * (usize)fiducial_columns + (usize)col_index;
@@ -16778,7 +16783,31 @@ struct RotationEstimateCandidate {
                                         }
                                     }
                                 }
-                                if (sum_w > 0.0) {
+                                bool marker_center_visible = true;
+                                u32 marker_width = (u32)(fiducial_size_pixels * scale_xd + 0.5);
+                                u32 marker_height = (u32)(fiducial_size_pixels * scale_yd + 0.5);
+                                if (marker_width > 0u && marker_height > 0u &&
+                                    marker_width <= 128u && marker_height <= 128u) {
+                                    int marker_x0 = (int)(approx_x - ((double)marker_width - 1.0) * 0.5);
+                                    int marker_y0 = (int)(approx_y - ((double)marker_height - 1.0) * 0.5);
+                                    if (marker_x0 >= 0 && marker_y0 >= 0 &&
+                                        marker_x0 + (int)marker_width <= (int)width &&
+                                        marker_y0 + (int)marker_height <= (int)height) {
+                                        double marker_intensity = 0.0;
+                                        for (u32 marker_y = 0u; marker_y < marker_height; ++marker_y) {
+                                            for (u32 marker_x = 0u; marker_x < marker_width; ++marker_x) {
+                                                usize sample_index = ((usize)(marker_y0 + (int)marker_y) * (usize)width +
+                                                                      (usize)(marker_x0 + (int)marker_x)) * 3u;
+                                                marker_intensity += ((double)pixel_data[sample_index + 0u] +
+                                                                     (double)pixel_data[sample_index + 1u] +
+                                                                     (double)pixel_data[sample_index + 2u]) / 3.0;
+                                            }
+                                        }
+                                        double marker_area = (double)marker_width * (double)marker_height;
+                                        marker_center_visible = marker_intensity / marker_area >= 140.0;
+                                    }
+                                }
+                                if (sum_w > 0.0 && marker_center_visible) {
                                     center_x = sum_x / sum_w;
                                     center_y = sum_y / sum_w;
                                 }

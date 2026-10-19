@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-FIDUCIAL_TOLERANCE=14
+FIDUCIAL_TOLERANCE=11
 FIDUCIAL_COUNT_TOLERANCE=0
 
 mako_check_fiducials() {
