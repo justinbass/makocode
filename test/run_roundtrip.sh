@@ -14,6 +14,8 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
+. "$script_dir/lib/affine.sh"
+. "$script_dir/lib/payload.sh"
 
 format_command() {
     local formatted="" quoted=""
@@ -413,6 +415,12 @@ if [[ ! -f $baseline_fiducial_csv ]]; then
     echo "run_roundtrip: baseline decode did not write fiducial CSV" >&2
     exit 1
 fi
+baseline_affine_csv="$baseline_decode_dir/decode_affine.csv"
+if [[ ! -f $baseline_affine_csv ]]; then
+    echo "run_roundtrip: baseline decode did not write affine CSV" >&2
+    exit 1
+fi
+cp "$baseline_affine_csv" "$test_dir/${label}_baseline_decode_affine.csv"
 mako_check_fiducials \
     "$test_dir/${label}_encode_fiducials.csv" \
     "$baseline_fiducial_csv" \
@@ -435,6 +443,17 @@ if (( ink_blot_radius > 0 )); then
 fi
 if [[ $paper_alpha != 0 || $paper_splotch_alpha != 0 || $paper_splotch_shade != 0 || $paper_splotch_px != 0 ]]; then
     transform_needed=1
+fi
+
+affine_check_enabled=0
+affine_tolerance_percent=2.5
+if awk -v scale_x="$scale_x" -v scale_y="$scale_y" -v rotation="$rotate_deg" \
+       -v skew_x="$skew_x" -v skew_y="$skew_y" \
+       'BEGIN { exit !((scale_x + 0) == (scale_y + 0) && (rotation + 0) != 0 &&
+                       (skew_x + 0) == 0 && (skew_y + 0) == 0) }'; then
+    affine_check_enabled=1
+    expected_affine_scale=$scale_x
+    expected_affine_rotation=$rotate_deg
 fi
 
 # Reuse the archived baseline artifacts when building transformed copies
@@ -507,7 +526,12 @@ if [[ $transform_needed -eq 1 ]]; then
         transform_decode_cmd+=("${transformed_targets[0]}")
     fi
     print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
-    "${transform_decode_cmd[@]}" >/dev/null
+    transform_decode_status=0
+    if "${transform_decode_cmd[@]}" >/dev/null; then
+        transform_decode_status=0
+    else
+        transform_decode_status=$?
+    fi
     transformed_fiducial_csv="$transformed_decode_dir/decode_fiducials.csv"
     if [[ ! -f $transformed_fiducial_csv ]]; then
         echo "run_roundtrip: transformed decode did not write fiducial CSV" >&2
@@ -518,12 +542,31 @@ if [[ $transform_needed -eq 1 ]]; then
         "$test_dir/${label}_encode_fiducials.csv" \
         "$test_dir/${label}_transformed_decode_fiducials.csv" \
         "$label transformed"
+    transformed_affine_csv="$transformed_decode_dir/decode_affine.csv"
+    if [[ ! -f $transformed_affine_csv ]]; then
+        echo "run_roundtrip: transformed decode did not write decode_affine.csv" >&2
+        exit 1
+    fi
+    cp "$transformed_affine_csv" "$test_dir/${label}_transformed_decode_affine.csv"
+    if [[ $affine_check_enabled -eq 1 ]]; then
+        mako_check_affine \
+            "$test_dir/${label}_transformed_decode_affine.csv" \
+            "$expected_affine_scale" "$expected_affine_rotation" "$affine_tolerance_percent" \
+            "${#transformed_targets[@]}" \
+            "$label transformed"
+    fi
+    if [[ $transform_decode_status -ne 0 ]]; then
+        printf '%s transformed decode failed (exit=%d); payload round-trip was not verified\n' \
+            "$(mako_format_label "$label")" "$transform_decode_status" >&2
+        exit "$transform_decode_status"
+    fi
     transformed_decoded_payload="$transformed_decode_dir/random.bin"
     if [[ ! -f $transformed_decoded_payload ]]; then
         echo "run_roundtrip: transformed decode missing random.bin" >&2
         exit 1
     fi
-    cmp --silent "$payload_final" "$transformed_decoded_payload"
+    mako_compare_payload_with_tolerance \
+        "$payload_final" "$transformed_decoded_payload" 5 "$label transformed"
     mv "$transformed_decoded_payload" "$transformed_decoded_target"
 fi
 

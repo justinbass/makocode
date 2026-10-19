@@ -1243,6 +1243,47 @@ static bool append_fiducial_csv_row(makocode::ByteBuffer& csv,
            csv.append_ascii(logical_y_text) && csv.append_char('\n');
 }
 
+static bool append_affine_csv_row(makocode::ByteBuffer& csv,
+                                  u64 page,
+                                  bool has_affine,
+                                  double a00,
+                                  double a01,
+                                  double a10,
+                                  double a11,
+                                  double tx,
+                                  double ty) {
+    char page_text[32];
+    char scale_text[32];
+    char rotation_text[32];
+    char a00_text[32];
+    char a01_text[32];
+    char a10_text[32];
+    char a11_text[32];
+    char tx_text[32];
+    char ty_text[32];
+    double scale = sqrt(a00 * a00 + a10 * a10);
+    double rotation = atan2(a10, a00) * (180.0 / 3.14159265358979323846);
+    u64_to_ascii(page, page_text, sizeof(page_text));
+    format_fixed_3(scale, scale_text, sizeof(scale_text));
+    format_fixed_3(rotation, rotation_text, sizeof(rotation_text));
+    format_fixed_3(a00, a00_text, sizeof(a00_text));
+    format_fixed_3(a01, a01_text, sizeof(a01_text));
+    format_fixed_3(a10, a10_text, sizeof(a10_text));
+    format_fixed_3(a11, a11_text, sizeof(a11_text));
+    format_fixed_3(tx, tx_text, sizeof(tx_text));
+    format_fixed_3(ty, ty_text, sizeof(ty_text));
+    return csv.append_ascii(page_text) && csv.append_char(',') &&
+           csv.append_ascii(has_affine ? "1" : "0") && csv.append_char(',') &&
+           csv.append_ascii(scale_text) && csv.append_char(',') &&
+           csv.append_ascii(rotation_text) && csv.append_char(',') &&
+           csv.append_ascii(a00_text) && csv.append_char(',') &&
+           csv.append_ascii(a01_text) && csv.append_char(',') &&
+           csv.append_ascii(a10_text) && csv.append_char(',') &&
+           csv.append_ascii(a11_text) && csv.append_char(',') &&
+           csv.append_ascii(tx_text) && csv.append_char(',') &&
+           csv.append_ascii(ty_text) && csv.append_char('\n');
+}
+
 /* ===== Begin Embedded LZMA SDK (Public Domain, Igor Pavlov) ===== */
 
 // --- Types.h ---
@@ -21173,7 +21214,7 @@ static void write_decode_help() {
     console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
     console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
-    console_line(1, "  --debug              Write decode_fiducials.csv under --output-dir.");
+    console_line(1, "  --debug              Write decode_fiducials.csv and decode_affine.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "General:");
     console_line(1, "  --help               Show this message.");
@@ -24419,13 +24460,22 @@ static int command_decode(int arg_count, char** args) {
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
     const usize debug_fiducial_header_size = (usize)sizeof("page,row,column,x,y,logical_x,logical_y\n") - 1u;
+    makocode::ByteBuffer debug_affine_csv;
+    makocode::ByteBuffer debug_affine_path;
+    const usize debug_affine_header_size = (usize)sizeof("page,has_affine,scale,rotation_degrees,a00,a01,a10,a11,tx,ty\n") - 1u;
     if (debug_requested) {
         if (!debug_fiducial_csv.append_ascii("page,row,column,x,y,logical_x,logical_y\n") ||
             !join_output_path(output_dir, "decode_fiducials.csv", debug_fiducial_path) ||
             !ensure_parent_directories((const char*)debug_fiducial_path.data) ||
             !write_bytes_to_file((const char*)debug_fiducial_path.data,
                                  debug_fiducial_csv.data,
-                                 debug_fiducial_csv.size)) {
+                                 debug_fiducial_csv.size) ||
+            !debug_affine_csv.append_ascii("page,has_affine,scale,rotation_degrees,a00,a01,a10,a11,tx,ty\n") ||
+            !join_output_path(output_dir, "decode_affine.csv", debug_affine_path) ||
+            !ensure_parent_directories((const char*)debug_affine_path.data) ||
+            !write_bytes_to_file((const char*)debug_affine_path.data,
+                                 debug_affine_csv.data,
+                                 debug_affine_csv.size)) {
             console_line(2, "decode: failed to prepare fiducial CSV");
             return 1;
         }
@@ -24437,6 +24487,15 @@ retry_decode:
                                  debug_fiducial_csv.data,
                                  debug_fiducial_csv.size)) {
             console_line(2, "decode: failed to reset fiducial CSV");
+            return 1;
+        }
+    }
+    if (debug_requested && debug_affine_csv.size > debug_affine_header_size) {
+        debug_affine_csv.size = debug_affine_header_size;
+        if (!write_bytes_to_file((const char*)debug_affine_path.data,
+                                 debug_affine_csv.data,
+                                 debug_affine_csv.size)) {
+            console_line(2, "decode: failed to reset affine CSV");
             return 1;
         }
     }
@@ -24474,6 +24533,21 @@ retry_decode:
                 goto retry_decode;
             }
             console_line(2, "decode: invalid ppm input");
+            return 1;
+        }
+        if (debug_requested &&
+            !append_affine_csv_row(debug_affine_csv, 1u, single_state.has_affine_transform,
+                                   single_state.affine_transform.a00, single_state.affine_transform.a01,
+                                   single_state.affine_transform.a10, single_state.affine_transform.a11,
+                                   single_state.affine_transform.tx, single_state.affine_transform.ty)) {
+            console_line(2, "decode: failed to append affine CSV");
+            return 1;
+        }
+        if (debug_requested &&
+            !write_bytes_to_file((const char*)debug_affine_path.data,
+                                 debug_affine_csv.data,
+                                 debug_affine_csv.size)) {
+            console_line(2, "decode: failed to write affine CSV");
             return 1;
         }
         if (debug_requested &&
@@ -24543,6 +24617,22 @@ retry_decode:
                 }
                 console_write(2, "decode: invalid ppm in ");
                 console_line(2, input_files[file_index]);
+                return 1;
+            }
+            if (debug_requested &&
+                !append_affine_csv_row(debug_affine_csv, (u64)file_index + 1u,
+                                       page_state.has_affine_transform,
+                                       page_state.affine_transform.a00, page_state.affine_transform.a01,
+                                       page_state.affine_transform.a10, page_state.affine_transform.a11,
+                                       page_state.affine_transform.tx, page_state.affine_transform.ty)) {
+                console_line(2, "decode: failed to append affine CSV");
+                return 1;
+            }
+            if (debug_requested &&
+                !write_bytes_to_file((const char*)debug_affine_path.data,
+                                     debug_affine_csv.data,
+                                     debug_affine_csv.size)) {
+                console_line(2, "decode: failed to write affine CSV");
                 return 1;
             }
             if (debug_requested &&
