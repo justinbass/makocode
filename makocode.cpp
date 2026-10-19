@@ -1217,14 +1217,20 @@ static bool append_fiducial_csv_row(makocode::ByteBuffer& csv,
                                     u32 row,
                                     u32 column,
                                     double x,
-                                    double y) {
+                                    double y,
+                                    double logical_x,
+                                    double logical_y) {
     char x_text[32];
     char y_text[32];
+    char logical_x_text[32];
+    char logical_y_text[32];
     char page_text[32];
     char row_text[32];
     char column_text[32];
     format_fixed_3(x, x_text, sizeof(x_text));
     format_fixed_3(y, y_text, sizeof(y_text));
+    format_fixed_3(logical_x, logical_x_text, sizeof(logical_x_text));
+    format_fixed_3(logical_y, logical_y_text, sizeof(logical_y_text));
     u64_to_ascii(page, page_text, sizeof(page_text));
     u64_to_ascii(row, row_text, sizeof(row_text));
     u64_to_ascii(column, column_text, sizeof(column_text));
@@ -1232,7 +1238,9 @@ static bool append_fiducial_csv_row(makocode::ByteBuffer& csv,
            csv.append_ascii(row_text) && csv.append_char(',') &&
            csv.append_ascii(column_text) && csv.append_char(',') &&
            csv.append_ascii(x_text) && csv.append_char(',') &&
-           csv.append_ascii(y_text) && csv.append_char('\n');
+           csv.append_ascii(y_text) && csv.append_char(',') &&
+           csv.append_ascii(logical_x_text) && csv.append_char(',') &&
+           csv.append_ascii(logical_y_text) && csv.append_char('\n');
 }
 
 /* ===== Begin Embedded LZMA SDK (Public Domain, Igor Pavlov) ===== */
@@ -16580,18 +16588,36 @@ struct RotationEstimateCandidate {
                 }
                 double guessed_x = fiducial_storage.centers_x[point_index];
                 double guessed_y = fiducial_storage.centers_y[point_index];
-                if (width > 1u && logical_width > 1u) {
-                    guessed_x *= (double)(logical_width - 1u) / (double)(width - 1u);
+                double logical_x = guessed_x;
+                double logical_y = guessed_y;
+                bool affine_coordinates = false;
+                if (state.has_affine_transform) {
+                    const AffineTransform& affine = state.affine_transform;
+                    double determinant = affine.a00 * affine.a11 - affine.a01 * affine.a10;
+                    if (fabs(determinant) > 1e-9) {
+                        double offset_x = guessed_x - affine.tx;
+                        double offset_y = guessed_y - affine.ty;
+                        logical_x = (offset_x * affine.a11 - offset_y * affine.a01) / determinant - 0.5;
+                        logical_y = (offset_y * affine.a00 - offset_x * affine.a10) / determinant - 0.5;
+                        affine_coordinates = true;
+                    }
                 }
-                if (height > 1u && logical_height > 1u) {
-                    guessed_y *= (double)(logical_height - 1u) / (double)(height - 1u);
+                if (!affine_coordinates) {
+                    if (width > 1u && logical_width > 1u) {
+                        logical_x *= (double)(logical_width - 1u) / (double)(width - 1u);
+                    }
+                    if (height > 1u && logical_height > 1u) {
+                        logical_y *= (double)(logical_height - 1u) / (double)(height - 1u);
+                    }
                 }
                 if (!makocode::append_fiducial_csv_row(*debug_fiducial_csv,
                                              debug_page,
                                              row_index,
                                              col_index,
                                              guessed_x,
-                                             guessed_y)) {
+                                             guessed_y,
+                                             logical_x,
+                                             logical_y)) {
                     return false;
                 }
             }
@@ -18810,15 +18836,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
             if (marker_overlaps_metadata(start_x, start_y, marker_size)) {
                 continue;
             }
-            if (debug_csv &&
-                !makocode::append_fiducial_csv_row(*debug_csv,
-                                         debug_page,
-                                         grid_row,
-                                         grid_col,
-                                         (double)start_x + ((double)marker_size - 1.0) * 0.5,
-                                         (double)start_y + ((double)marker_size - 1.0) * 0.5)) {
-                return false;
-            }
+            bool marker_visible = false;
             for (u32 dy = 0u; dy < marker_size; ++dy) {
                 int pixel_y = start_y + (int)dy;
                 if (pixel_y < 0 || pixel_y >= (int)draw_height) {
@@ -18830,10 +18848,57 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                         continue;
                     }
                     usize index = ((usize)pixel_y * (usize)width_px + (usize)pixel_x) * 3u;
+                    if (pixel_data[index + 0u] < 255u ||
+                        pixel_data[index + 1u] < 255u ||
+                        pixel_data[index + 2u] < 255u) {
+                        marker_visible = true;
+                    }
                     pixel_data[index + 0u] = 255u;
                     pixel_data[index + 1u] = 255u;
                     pixel_data[index + 2u] = 255u;
                 }
+            }
+            int visibility_radius = (int)marker_size;
+            int ring_x0 = start_x - visibility_radius;
+            int ring_y0 = start_y - visibility_radius;
+            int ring_x1 = start_x + (int)marker_size + visibility_radius;
+            int ring_y1 = start_y + (int)marker_size + visibility_radius;
+            if (ring_x0 < 0) ring_x0 = 0;
+            if (ring_y0 < 0) ring_y0 = 0;
+            if (ring_x1 > (int)width_px) ring_x1 = (int)width_px;
+            if (ring_y1 > (int)draw_height) ring_y1 = (int)draw_height;
+            for (int ring_y = ring_y0; ring_y < ring_y1 && !marker_visible; ++ring_y) {
+                for (int ring_x = ring_x0; ring_x < ring_x1; ++ring_x) {
+                    if (ring_x >= start_x && ring_x < start_x + (int)marker_size &&
+                        ring_y >= start_y && ring_y < start_y + (int)marker_size) {
+                        continue;
+                    }
+                    if (metadata_tile.valid &&
+                        (u32)ring_x >= metadata_tile.x0 &&
+                        (u32)ring_x < metadata_tile.x0 + MetadataTile::TILE_SIDE &&
+                        (u32)ring_y >= metadata_tile.y0 &&
+                        (u32)ring_y < metadata_tile.y0 + MetadataTile::TILE_SIDE) {
+                        continue;
+                    }
+                    usize index = ((usize)ring_y * (usize)width_px + (usize)ring_x) * 3u;
+                    if (pixel_data[index + 0u] < 255u ||
+                        pixel_data[index + 1u] < 255u ||
+                        pixel_data[index + 2u] < 255u) {
+                        marker_visible = true;
+                        break;
+                    }
+                }
+            }
+            if (debug_csv && marker_visible &&
+                !makocode::append_fiducial_csv_row(*debug_csv,
+                                         debug_page,
+                                         grid_row,
+                                         grid_col,
+                                         (double)start_x + ((double)marker_size - 1.0) * 0.5,
+                                         (double)start_y + ((double)marker_size - 1.0) * 0.5,
+                                         (double)start_x + ((double)marker_size - 1.0) * 0.5,
+                                         (double)start_y + ((double)marker_size - 1.0) * 0.5)) {
+                return false;
             }
         }
     }
@@ -22056,7 +22121,7 @@ static int command_encode(int arg_count, char** args) {
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
     if (debug_requested) {
-        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y\n")) {
+        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y,logical_x,logical_y\n")) {
             console_line(2, "encode: failed to prepare fiducial CSV");
             return 1;
         }
@@ -24200,9 +24265,9 @@ static int command_decode(int arg_count, char** args) {
     bool retried_subgrid = false;
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
-    const usize debug_fiducial_header_size = (usize)sizeof("page,row,column,x,y\n") - 1u;
+    const usize debug_fiducial_header_size = (usize)sizeof("page,row,column,x,y,logical_x,logical_y\n") - 1u;
     if (debug_requested) {
-        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y\n") ||
+        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y,logical_x,logical_y\n") ||
             !join_output_path(output_dir, "decode_fiducials.csv", debug_fiducial_path) ||
             !ensure_parent_directories((const char*)debug_fiducial_path.data) ||
             !write_bytes_to_file((const char*)debug_fiducial_path.data,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-FIDUCIAL_TOLERANCE=17
+FIDUCIAL_TOLERANCE=15
 FIDUCIAL_COUNT_TOLERANCE=0
 
 mako_check_fiducials() {
@@ -27,9 +27,8 @@ mako_check_fiducials() {
         }
         {
             key = $1 "," $2 "," $3
-            decoded_x[key] = $4
-            decoded_y[key] = $5
-            decoded_count++
+            decoded_x[key] = $6
+            decoded_y[key] = $7
             if (key in encoded_x) {
                 matched_count++
                 dx = encoded_x[key] - decoded_x[key]
@@ -44,21 +43,13 @@ mako_check_fiducials() {
             }
         }
         END {
-            count_delta = encoded_count - decoded_count
-            if (count_delta < 0) count_delta = -count_delta
-            if (count_delta > count_tolerance) {
-                printf "%s fiducial count differs: encode=%d decode=%d (allowed difference %d)\n", \
-                    label, encoded_count, decoded_count, count_tolerance
-                failures++
-            }
-            minimum_matches = (encoded_count < decoded_count) ? encoded_count : decoded_count
-            if (matched_count + count_tolerance < minimum_matches) {
-                printf "%s matched only %d of %d comparable fiducials\n", label, matched_count, minimum_matches
+            if (matched_count + count_tolerance < encoded_count) {
+                printf "%s matched only %d of %d visible fiducials\n", label, matched_count, encoded_count
                 failures++
             }
             if (failures) exit 1
-            printf "%s fiducials match: encode=%d decode=%d tolerance=+/-%.0f px\n", \
-                label, encoded_count, decoded_count, position_tolerance
+            printf "%s visible fiducials match: matched=%d expected=%d tolerance=+/-%.0f px\n", \
+                label, matched_count, encoded_count, position_tolerance
         }
     ' "$encoded_csv" "$decoded_csv"
 }

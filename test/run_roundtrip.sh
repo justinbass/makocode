@@ -413,10 +413,9 @@ if [[ ! -f $baseline_fiducial_csv ]]; then
     echo "run_roundtrip: baseline decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$baseline_fiducial_csv" "$test_dir/${label}_decode_fiducials.csv"
 mako_check_fiducials \
     "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_decode_fiducials.csv" \
+    "$baseline_fiducial_csv" \
     "$label baseline"
 
 baseline_decoded_payload="$baseline_decode_dir/random.bin"
