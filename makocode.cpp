@@ -13746,6 +13746,7 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                                     double fiducial_size_value,
                                     u64 expected_width,
                                     u64 expected_height,
+                                    u64 expected_data_height,
                                     bool refine_marker_centers,
                                     double*& centers_x_out,
                                     double*& centers_y_out,
@@ -13788,9 +13789,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     double marker_half_span = (fiducial_size_value > 0.0) ? ((fiducial_size_value - 1.0) * 0.5) : 0.0;
     MetadataTile::Placement logical_tile = {};
     bool use_affine_hint = affine_hint && affine_hint->pitch_pixels > 0.0 &&
-                           expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull;
+                           expected_width <= 0xFFFFFFFFull && expected_data_height <= 0xFFFFFFFFull;
     if (use_affine_hint) {
-        logical_tile = MetadataTile::compute_tile_placement((u32)expected_width, (u32)expected_height);
+        logical_tile = MetadataTile::compute_tile_placement((u32)expected_width, (u32)expected_data_height);
         use_affine_hint = logical_tile.valid;
     }
     double logical_tile_center_x = use_affine_hint
@@ -13838,9 +13839,11 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     if (!(disable_tile_env && disable_tile_env[0]) &&
         expected_width <= 0xFFFFFFFFull &&
         expected_height <= 0xFFFFFFFFull &&
+        expected_data_height <= 0xFFFFFFFFull &&
         expected_width >= (u64)MetadataTile::TILE_SIDE &&
-        expected_height >= (u64)MetadataTile::TILE_SIDE) {
-        MetadataTile::Placement placement = MetadataTile::compute_tile_placement((u32)expected_width, (u32)expected_height);
+        expected_data_height >= (u64)MetadataTile::TILE_SIDE) {
+        MetadataTile::Placement placement = MetadataTile::compute_tile_placement((u32)expected_width,
+                                                                                 (u32)expected_data_height);
         if (placement.valid) {
             tile_x0 = (int)floor((double)placement.x0 * scale_x_est);
             tile_y0 = (int)floor((double)placement.y0 * scale_y_est);
@@ -13908,7 +13911,7 @@ static bool sample_fiducial_centers(const u8* pixel_data,
             if (use_affine_hint) {
                 double logical_center_x = (fiducial_margin + ((double)expected_width - 1.0 - 2.0 * fiducial_margin) * t_col);
                 logical_center_x = (double)(int)(logical_center_x - marker_half_span) + marker_half_span;
-                double logical_center_y = (fiducial_margin + ((double)expected_height - 1.0 - 2.0 * fiducial_margin) * t_row);
+                double logical_center_y = (fiducial_margin + ((double)expected_data_height - 1.0 - 2.0 * fiducial_margin) * t_row);
                 logical_center_y = (double)(int)(logical_center_y - marker_half_span) + marker_half_span;
                 double logical_dx = logical_center_x - logical_tile_center_x;
                 double logical_dy = logical_center_y - logical_tile_center_y;
@@ -15638,6 +15641,7 @@ struct RotationEstimateCandidate {
                                         fiducial_size_pixels,
                                         expected_width,
                                         expected_height_eff,
+                                        expected_height_eff,
                                         refine_marker_centers,
                                         centers_x,
                                         centers_y,
@@ -16667,7 +16671,7 @@ struct RotationEstimateCandidate {
                         double logical_min_x = margin_pixels;
                         double logical_max_x = (double)(logical_width - 1u) - margin_pixels;
                         double logical_min_y = margin_pixels;
-                        double logical_max_y = (double)(logical_height - 1u) - margin_pixels;
+                        double logical_max_y = (double)(data_height - 1u) - margin_pixels;
                         if (logical_max_x < logical_min_x) logical_max_x = logical_min_x;
                         if (logical_max_y < logical_min_y) logical_max_y = logical_min_y;
                         auto fiducial_screen_position = [&](u32 row_index,
@@ -16817,13 +16821,15 @@ struct RotationEstimateCandidate {
                             }
                         }
 
-                        if (has_rotation && width_known && height_known) {
+                        if (has_rotation && width_known && height_known && tile_affine_hint_available) {
                             double* refined_centers_x = 0;
                             double* refined_centers_y = 0;
                             MetadataTile::AffineParams local_affine_hint = tile_affine_hint;
                             const MetadataTile::AffineParams* local_affine_hint_ptr = 0;
                             if (tile_affine_hint_available) {
-                                local_affine_hint.angle_rad = rotation_radians;
+                                double angle_delta = atan2(sin(local_affine_hint.angle_rad - rotation_radians),
+                                                           cos(local_affine_hint.angle_rad - rotation_radians));
+                                local_affine_hint.angle_rad = rotation_radians + angle_delta * 0.25;
                                 local_affine_hint_ptr = &local_affine_hint;
                             }
                             if (sample_fiducial_centers(pixel_data,
@@ -16835,6 +16841,7 @@ struct RotationEstimateCandidate {
                                                         fiducial_size_pixels,
                                                         expected_width,
                                                         expected_height,
+                                                        data_height,
                                                         true,
                                                         refined_centers_x,
                                                         refined_centers_y,
