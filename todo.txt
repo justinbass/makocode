@@ -1,5 +1,4 @@
 Tests
-- Reduce FIDUCIAL_TOLERANCE
 - Test --overlay-ecc-target, --compact-page, --fiducials
 - Reject archive dirs outside current, it's an attacl (../path)
 - Remove ALL uncovered code

@@ -17432,6 +17432,25 @@ struct RotationEstimateCandidate {
         tile_affine_hint.pitch_pixels > 1.005 && tile_affine_hint.pitch_pixels <= 1.25) {
         double scale = tile_affine_hint.pitch_pixels;
         double angle = state.rotation_degrees_value;
+        double scale_reference = scale;
+        if (measured_fiducial_affine_hint_available) {
+            double measured_scale_x = sqrt(measured_fiducial_affine_hint.a00 *
+                                               measured_fiducial_affine_hint.a00 +
+                                           measured_fiducial_affine_hint.a10 *
+                                               measured_fiducial_affine_hint.a10);
+            double measured_scale_y = sqrt(measured_fiducial_affine_hint.a01 *
+                                               measured_fiducial_affine_hint.a01 +
+                                           measured_fiducial_affine_hint.a11 *
+                                               measured_fiducial_affine_hint.a11);
+            double measured_scale = 0.5 * (measured_scale_x + measured_scale_y);
+            if (measured_scale > 0.0 && fabs(measured_scale - scale) <= scale * 0.05) {
+                scale_reference = measured_scale;
+            }
+        }
+        double half_degree = floor(angle * 2.0 + 0.5) * 0.5;
+        if (fabs(angle - half_degree) < 0.12) {
+            angle = half_degree;
+        }
         double angle_rad = angle * (3.14159265358979323846 / 180.0);
         double c = cos(angle_rad);
         double s = sin(angle_rad);
@@ -17441,7 +17460,7 @@ struct RotationEstimateCandidate {
                                     fabs((double)scaled_height * s) + 0.5);
         u64 predicted_height = (u64)(fabs((double)scaled_width * s) +
                                      fabs((double)scaled_height * c) + 0.5);
-        if (predicted_width != width || predicted_height != height) {
+        {
             bool found_dimension_scale = false;
             double best_scale_distance = 1.0e30;
             double dimension_scale = scale;
@@ -17480,11 +17499,11 @@ struct RotationEstimateCandidate {
                         candidate_predicted_height != height) {
                         continue;
                     }
-                    double candidate_scale = scale;
+                    double candidate_scale = scale_reference;
                     if (candidate_scale < common_scale_min || candidate_scale > common_scale_max) {
                         candidate_scale = (common_scale_min + common_scale_max) * 0.5;
                     }
-                    double scale_distance = fabs(candidate_scale - scale);
+                    double scale_distance = fabs(candidate_scale - scale_reference);
                     if (!found_dimension_scale || scale_distance < best_scale_distance) {
                         found_dimension_scale = true;
                         best_scale_distance = scale_distance;

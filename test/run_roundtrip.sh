@@ -446,7 +446,7 @@ if [[ $paper_alpha != 0 || $paper_splotch_alpha != 0 || $paper_splotch_shade != 
 fi
 
 affine_check_enabled=0
-affine_tolerance_percent=2.5
+affine_tolerance_percent=1
 if awk -v scale_x="$scale_x" -v scale_y="$scale_y" -v rotation="$rotate_deg" \
        -v skew_x="$skew_x" -v skew_y="$skew_y" \
        'BEGIN { exit !((scale_x + 0) == (scale_y + 0) && (rotation + 0) != 0 &&
