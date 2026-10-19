@@ -1,7 +1,4 @@
 Tests
-- Default encode naming: timestamped path is uncovered; tests pass prefixes.
-- ECC-target mixed-color overlays have untested candidate counting and raw-pixel handling.
-- Raw decode fallback writes payload.bin after archive unpacking fails; environment-gated.
 - Run 10 'make coverage' runs, figure out how to cover all random pathways.
 - Remove ALL uncovered code
 - Wavy distortion test
@@ -25,6 +22,7 @@ Features
 - Metadata recovery mode to brute force guess it if missing, exponentially difficult
  - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
  - What if white/black or light/dark are inverted for the metadata?
+- SVG for overlay, so it scales? Overlay picture across multiple images, so they can be lined up as a block like a mosaic?
 
 Finalize
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference

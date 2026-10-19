@@ -261,3 +261,12 @@ test_case 0060_compact_page script "Compact single-page output happy path" \
 
 test_case 0061_fiducials script "Custom fiducial dimensions happy path" \
     test_fiducials.sh
+
+test_case 0063_default_encode_naming script "Default encode output uses a timestamped filename" \
+    test_default_encode_naming.sh
+
+test_case 0064_overlay_ecc_target_mixed script "Mixed-color overlay ECC target filters candidates and copies raw pixels" \
+    test_overlay_ecc_target_mixed.sh
+
+test_case 0065_decode_raw_fallback script "Raw decode fallback is gated and writes recovered payload bytes" \
+    test_decode_raw_fallback.sh

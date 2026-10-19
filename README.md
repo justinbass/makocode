@@ -27,6 +27,8 @@ make test
 ./makocode decode scan.ppm
 ```
 
+Archive paths cannot be absolute or contain `..`. Decoding may follow symlinks in the output directory; use a fresh, trusted directory for untrusted input.
+
 ## Tests
 
 `make test` now drives the CLI end-to-end through the shell scripts in `test/`
