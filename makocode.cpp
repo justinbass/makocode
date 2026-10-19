@@ -13750,7 +13750,8 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                                     bool refine_marker_centers,
                                     double*& centers_x_out,
                                     double*& centers_y_out,
-                                    const MetadataTile::AffineParams* affine_hint = 0) {
+                                    const MetadataTile::AffineParams* affine_hint = 0,
+                                    const AffineTransform* screen_transform_hint = 0) {
     if (!pixel_data || !width || !height || !fiducial_columns || !fiducial_rows) {
         return false;
     }
@@ -13790,6 +13791,7 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     MetadataTile::Placement logical_tile = {};
     bool use_affine_hint = affine_hint && affine_hint->pitch_pixels > 0.0 &&
                            expected_width <= 0xFFFFFFFFull && expected_data_height <= 0xFFFFFFFFull;
+    bool use_screen_transform_hint = screen_transform_hint != 0;
     if (use_affine_hint) {
         logical_tile = MetadataTile::compute_tile_placement((u32)expected_width, (u32)expected_data_height);
         use_affine_hint = logical_tile.valid;
@@ -13908,11 +13910,20 @@ static bool sample_fiducial_centers(const u8* pixel_data,
         for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
             double t_col = (fiducial_columns == 1u) ? 0.5 : ((double)col_index / (double)(fiducial_columns - 1u));
             double approx_x = min_x + (max_x - min_x) * t_col;
-            if (use_affine_hint) {
-                double logical_center_x = (fiducial_margin + ((double)expected_width - 1.0 - 2.0 * fiducial_margin) * t_col);
-                logical_center_x = (double)(int)(logical_center_x - marker_half_span) + marker_half_span;
-                double logical_center_y = (fiducial_margin + ((double)expected_data_height - 1.0 - 2.0 * fiducial_margin) * t_row);
-                logical_center_y = (double)(int)(logical_center_y - marker_half_span) + marker_half_span;
+            double logical_center_x = fiducial_margin +
+                                      ((double)expected_width - 1.0 - 2.0 * fiducial_margin) * t_col;
+            logical_center_x = (double)(int)(logical_center_x - marker_half_span) + marker_half_span;
+            double logical_center_y = fiducial_margin +
+                                      ((double)expected_data_height - 1.0 - 2.0 * fiducial_margin) * t_row;
+            logical_center_y = (double)(int)(logical_center_y - marker_half_span) + marker_half_span;
+            if (use_screen_transform_hint) {
+                approx_x = screen_transform_hint->a00 * logical_center_x +
+                           screen_transform_hint->a01 * logical_center_y +
+                           screen_transform_hint->tx;
+                approx_y = screen_transform_hint->a10 * logical_center_x +
+                           screen_transform_hint->a11 * logical_center_y +
+                           screen_transform_hint->ty;
+            } else if (use_affine_hint) {
                 double logical_dx = logical_center_x - logical_tile_center_x;
                 double logical_dy = logical_center_y - logical_tile_center_y;
                 approx_x = affine_hint->center_x + affine_hint_pitch *
@@ -13998,14 +14009,16 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 if (ring_y == 0u) ring_y = 1u;
                 if (ring_x > 8u) ring_x = 8u;
                 if (ring_y > 8u) ring_y = 8u;
-                int base_x = (int)((use_affine_hint ? approx_x : center_x) -
+                int base_x = (int)((use_affine_hint || use_screen_transform_hint ? approx_x : center_x) -
                                    ((double)marker_width - 1.0) * 0.5);
-                int base_y = (int)((use_affine_hint ? approx_y : center_y) -
+                int base_y = (int)((use_affine_hint || use_screen_transform_hint ? approx_y : center_y) -
                                    ((double)marker_height - 1.0) * 0.5);
                 double best_contrast = 0.0;
                 int best_x = base_x;
                 int best_y = base_y;
-                int marker_search_radius = (int)(scale_est * 4.0 + 2.0);
+                int marker_search_radius = use_screen_transform_hint
+                                               ? (int)(scale_est * 3.0 + 2.0)
+                                               : (int)(scale_est * 4.0 + 2.0);
                 if (marker_search_radius < 4) marker_search_radius = 4;
                 for (int dy = -marker_search_radius; dy <= marker_search_radius; ++dy) {
                     for (int dx = -marker_search_radius; dx <= marker_search_radius; ++dx) {
@@ -15503,6 +15516,8 @@ struct RotationEstimateCandidate {
         }
     }
     bool tile_affine_hint_trusted = false;
+    AffineTransform initial_fiducial_affine_hint = {};
+    bool initial_fiducial_affine_hint_available = false;
     if (tile_affine_hint_available && (auto_candidate.valid || gradient_candidate.valid)) {
         double tile_angle_degrees = tile_affine_hint.angle_rad * (180.0 / 3.14159265358979323846);
         double independent_angle_error = 180.0;
@@ -15669,6 +15684,10 @@ struct RotationEstimateCandidate {
                                                                             rotation_margin_est,
                                                                             &fiducial_affine,
                                                                             &fiducial_affine_valid);
+                if (rotation_success && fiducial_affine_valid) {
+                    initial_fiducial_affine_hint = fiducial_affine;
+                    initial_fiducial_affine_hint_available = true;
+                }
                 double fiducial_grid_angle_est = rotation_degrees_est;
                 bool tile_affine_anchor_applied = false;
                 if (rotation_success && fiducial_affine_valid && tile_affine_hint_trusted &&
@@ -16504,6 +16523,8 @@ struct RotationEstimateCandidate {
     struct FiducialGridStorage {
         double* centers_x;
         double* centers_y;
+        double* debug_centers_x;
+        double* debug_centers_y;
         double* column_weights;
         double* row_weights;
         u64* column_offsets;
@@ -16515,6 +16536,8 @@ struct RotationEstimateCandidate {
         FiducialGridStorage()
             : centers_x(0),
               centers_y(0),
+              debug_centers_x(0),
+              debug_centers_y(0),
               column_weights(0),
               row_weights(0),
               column_offsets(0),
@@ -16526,6 +16549,8 @@ struct RotationEstimateCandidate {
         ~FiducialGridStorage() {
             if (centers_x) free(centers_x);
             if (centers_y) free(centers_y);
+            if (debug_centers_x) free(debug_centers_x);
+            if (debug_centers_y) free(debug_centers_y);
             if (column_weights) free(column_weights);
             if (row_weights) free(row_weights);
             if (column_offsets) free(column_offsets);
@@ -16595,13 +16620,22 @@ struct RotationEstimateCandidate {
                     marker_y0 + (int)fiducial_marker_size > (int)debug_metadata_tile.y0) {
                     continue;
                 }
-                double guessed_x = fiducial_storage.centers_x[point_index];
-                double guessed_y = fiducial_storage.centers_y[point_index];
+                const bool has_visual_debug_centers = fiducial_storage.debug_centers_x &&
+                                                      fiducial_storage.debug_centers_y &&
+                                                      initial_fiducial_affine_hint_available;
+                double guessed_x = has_visual_debug_centers
+                                       ? fiducial_storage.debug_centers_x[point_index]
+                                       : fiducial_storage.centers_x[point_index];
+                double guessed_y = has_visual_debug_centers
+                                       ? fiducial_storage.debug_centers_y[point_index]
+                                       : fiducial_storage.centers_y[point_index];
                 double logical_x = guessed_x;
                 double logical_y = guessed_y;
                 bool affine_coordinates = false;
-                if (state.has_affine_transform) {
-                    const AffineTransform& affine = state.affine_transform;
+                if (has_visual_debug_centers || state.has_affine_transform) {
+                    const AffineTransform& affine = has_visual_debug_centers
+                                                        ? initial_fiducial_affine_hint
+                                                        : state.affine_transform;
                     double determinant = affine.a00 * affine.a11 - affine.a01 * affine.a10;
                     if (fabs(determinant) > 1e-9) {
                         double offset_x = guessed_x - affine.tx;
@@ -16825,13 +16859,10 @@ struct RotationEstimateCandidate {
                             double* refined_centers_x = 0;
                             double* refined_centers_y = 0;
                             MetadataTile::AffineParams local_affine_hint = tile_affine_hint;
-                            const MetadataTile::AffineParams* local_affine_hint_ptr = 0;
-                            if (tile_affine_hint_available) {
-                                double angle_delta = atan2(sin(local_affine_hint.angle_rad - rotation_radians),
-                                                           cos(local_affine_hint.angle_rad - rotation_radians));
-                                local_affine_hint.angle_rad = rotation_radians + angle_delta * 0.25;
-                                local_affine_hint_ptr = &local_affine_hint;
-                            }
+                            const MetadataTile::AffineParams* local_affine_hint_ptr = &local_affine_hint;
+                            double angle_delta = atan2(sin(local_affine_hint.angle_rad - rotation_radians),
+                                                       cos(local_affine_hint.angle_rad - rotation_radians));
+                            local_affine_hint.angle_rad = rotation_radians + angle_delta * 0.25;
                             if (sample_fiducial_centers(pixel_data,
                                                         width,
                                                         height,
@@ -16850,6 +16881,36 @@ struct RotationEstimateCandidate {
                                 free(fiducial_storage.centers_y);
                                 fiducial_storage.centers_x = refined_centers_x;
                                 fiducial_storage.centers_y = refined_centers_y;
+                            }
+                            double debug_scale = (scale_xd + scale_yd) * 0.5;
+                            if (initial_fiducial_affine_hint_available && debug_scale >= 1.5) {
+                                AffineTransform screen_transform_hint = initial_fiducial_affine_hint;
+                                screen_transform_hint.tx +=
+                                    (screen_transform_hint.a00 + screen_transform_hint.a01) * 0.5;
+                                screen_transform_hint.ty +=
+                                    (screen_transform_hint.a10 + screen_transform_hint.a11) * 0.5;
+                                double* debug_centers_x = 0;
+                                double* debug_centers_y = 0;
+                                if (sample_fiducial_centers(pixel_data,
+                                                            width,
+                                                            height,
+                                                            fiducial_columns,
+                                                            fiducial_rows,
+                                                            margin_pixels,
+                                                            fiducial_size_pixels,
+                                                            expected_width,
+                                                            expected_height,
+                                                            data_height,
+                                                            true,
+                                                            debug_centers_x,
+                                                            debug_centers_y,
+                                                            (const MetadataTile::AffineParams*)0,
+                                                            &screen_transform_hint)) {
+                                    if (fiducial_storage.debug_centers_x) free(fiducial_storage.debug_centers_x);
+                                    if (fiducial_storage.debug_centers_y) free(fiducial_storage.debug_centers_y);
+                                    fiducial_storage.debug_centers_x = debug_centers_x;
+                                    fiducial_storage.debug_centers_y = debug_centers_y;
+                                }
                             }
                         }
 
