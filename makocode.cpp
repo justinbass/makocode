@@ -13857,60 +13857,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (retry_without_subgrid_out) {
         *retry_without_subgrid_out = true;
     }
-    if (!state.has_footer_rows && !tile_available) {
-        auto row_black_count = [&](u64 row_index) -> u64 {
-            if (!pixel_data || row_index >= height || width == 0u) return 0u;
-            u64 count = 0u;
-            const u8* row_ptr = pixel_data + ((usize)row_index * (usize)width) * 3u;
-            for (u64 col = 0u; col < width; ++col) {
-                u8 r = row_ptr[col * 3u + 0u];
-                u8 g = row_ptr[col * 3u + 1u];
-                u8 b = row_ptr[col * 3u + 2u];
-                // Simple luminance threshold at mid-range.
-                if ((u16)r * 2126u + (u16)g * 7152u + (u16)b * 722u < 1280000u) {
-                    ++count;
-                }
-            }
-            return count;
-        };
-        double mid_sum = 0.0;
-        u64 mid_rows = 0u;
-        u64 mid_start = height / 4u;
-        u64 mid_end = (height * 3u) / 4u;
-        for (u64 row = mid_start; row < mid_end && row < height; ++row) {
-            mid_sum += (double)row_black_count(row);
-            ++mid_rows;
-        }
-        if (mid_rows > 0u) {
-            double mid_mean = mid_sum / (double)mid_rows;
-            u64 footer_guess = 0u;
-            for (u64 row = height; row-- > 0u;) {
-                u64 black = row_black_count(row);
-                if (black < mid_mean * 0.6) {
-                    ++footer_guess;
-                } else {
-                    break;
-                }
-                if (footer_guess >= 256u) {
-                    break;
-                }
-            }
-            if (footer_guess > 64u) {
-                footer_guess = 64u;
-            }
-            if (footer_guess > 0u) {
-                state.has_footer_rows = true;
-                state.footer_rows_value = footer_guess;
-            }
-        }
-        if (!state.has_footer_rows) {
-            u64 fallback_footer = (height >= 256u) ? 32u : (height / 8u);
-            if (fallback_footer > 0u) {
-                state.has_footer_rows = true;
-                state.footer_rows_value = fallback_footer;
-            }
-        }
-    }
     // Snap obvious two-color pages to strict black/white to reduce overlay and binarization noise.
     auto binarize_monochrome_image = [&](u8* buffer, u64 w, u64 h, bool& contains_interpolated_pixels) {
         if (!buffer || w == 0u || h == 0u) return;
