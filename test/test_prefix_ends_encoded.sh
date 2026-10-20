@@ -15,7 +15,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/fiducials.sh"
 . "$script_dir/lib/visual_artifacts.sh"
 
-label="0057_prefix_ends_encoded"
+label="0059_prefix_ends_encoded"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --label)

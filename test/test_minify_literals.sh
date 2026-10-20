@@ -13,7 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 
-label="0054_minify_literals"
+label="0056_minify_literals"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --label)

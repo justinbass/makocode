@@ -213,60 +213,68 @@ test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obe
     "MAKO_OVERLAY_ALLOWED_COLORS=0 0 0;255 255 255" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
-test_case 0050_paper_offwhite_bw roundtrip "Slightly off-white, splotchy paper tint (BW)" \
+test_case 0050_overlay_ecc_target_gray_base_color overlay "Grayscale base with color overlay exercises pixel candidate counting" \
+    MAKO_OVERLAY_ECC_TARGET=0.25 \
+    MAKO_OVERLAY_FRACTION=0.1 \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill --no-filename --no-page-count" \
+    "MAKO_OVERLAY_CIRCLE_COLOR=255 0 0" \
+    "MAKO_OVERLAY_BACKGROUND_COLOR=0 255 0" \
+    MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
+
+test_case 0051_paper_offwhite_bw roundtrip "Slightly off-white, splotchy paper tint (BW)" \
     --size 8192 --ecc 0.5 --width 600 --height 600 --palette "White Black" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
-test_case 0051_paper_offwhite_cmyk roundtrip "Slightly off-white, splotchy paper tint (CMYK)" \
+test_case 0052_paper_offwhite_cmyk roundtrip "Slightly off-white, splotchy paper tint (CMYK)" \
     --size 8192 --ecc 0.5 --width 640 --height 640 --palette "White Cyan Magenta Yellow" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
-test_case 0052_paper_offwhite_cmykwrbg roundtrip "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
+test_case 0053_paper_offwhite_cmykwrbg roundtrip "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
     --size 8192 --ecc 0.5 --width 720 --height 720 \
     --palette "FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
-test_case 0053_archive_tree_roundtrip script "Nested and empty archive directories round-trip" \
+test_case 0054_archive_tree_roundtrip script "Nested and empty archive directories round-trip" \
     test_archive_tree_roundtrip.sh
 
-test_case 0056_cli_help script "CLI usage and command help smoke test" \
+test_case 0055_cli_help script "CLI usage and command help smoke test" \
     test_cli_help.sh
 
-test_case 0054_minify_literals script "Minify preserves literals and directives and emits compilable C++" \
+test_case 0056_minify_literals script "Minify preserves literals and directives and emits compilable C++" \
     test_minify_literals.sh
 
-test_case 0055_decode_stdin script "Decoder reads one PPM page from stdin" \
+test_case 0057_decode_stdin script "Decoder reads one PPM page from stdin" \
     test_decode_stdin.sh
 
 test_case 0058_cli_decoder_paths script "Decoder paths and archive traversal rejection" \
     test_cli_decoder_paths.sh
 
-test_case 0057_prefix_ends_encoded script "--prefix ending in _encoded keeps its filename and fiducials" \
+test_case 0059_prefix_ends_encoded script "--prefix ending in _encoded keeps its filename and fiducials" \
     test_prefix_ends_encoded.sh
 
-test_case 0059_overlay_ecc_target script "Overlay ECC target happy path" \
+test_case 0060_overlay_ecc_target script "Overlay ECC target happy path" \
     test_overlay_ecc_target.sh
 
-test_case 0062_archive_symlink_roundtrip script "Directory symlink target decodes as a regular file" \
+test_case 0061_archive_symlink_roundtrip script "Directory symlink target decodes as a regular file" \
     test_archive_symlink_roundtrip.sh
 
-test_case 0060_compact_page script "Compact single-page output happy path" \
+test_case 0062_compact_page script "Compact single-page output happy path" \
     test_compact_page.sh
 
-test_case 0061_fiducials script "Custom fiducial dimensions happy path" \
+test_case 0063_fiducials script "Custom fiducial dimensions happy path" \
     test_fiducials.sh
 
-test_case 0063_default_encode_naming script "Default encode output uses a timestamped filename" \
+test_case 0064_default_encode_naming script "Default encode output uses a timestamped filename" \
     test_default_encode_naming.sh
 
-test_case 0064_overlay_ecc_target_mixed script "Mixed-color overlay ECC target filters candidates and copies raw pixels" \
+test_case 0065_overlay_ecc_target_mixed script "Mixed-color overlay ECC target filters candidates and copies raw pixels" \
     test_overlay_ecc_target_mixed.sh
 
-test_case 0065_decode_raw_fallback script "Raw decode fallback is gated and writes recovered payload bytes" \
+test_case 0066_decode_raw_fallback script "Raw decode fallback is gated and writes recovered payload bytes" \
     test_decode_raw_fallback.sh
