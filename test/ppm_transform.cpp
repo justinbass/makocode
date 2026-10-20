@@ -109,11 +109,6 @@ static void trim_right_in_place(char* s) {
     }
 }
 
-static int starts_with(const char* s, const char* prefix) {
-    size_t n = strlen(prefix);
-    return strncmp(s, prefix, n) == 0;
-}
-
 static int parse_i32(const char* text, const char* what) {
     if (!text || !*text) die2("ppm_transform: missing ", what);
     errno = 0;
@@ -722,23 +717,6 @@ static int parse_rgb_triplet(const char* text, int out_rgb[3]) {
     return 1;
 }
 
-static int footer_rows_from_comments(const StrVec* comments) {
-    if (!comments) return 0;
-    for (size_t i = 0; i < comments->size; i++) {
-        const char* line = comments->data[i];
-        const char* s = line;
-        if (*s == '#') s++;
-        s = trim_left((char*)s);
-        if (!starts_with(s, "MAKOCODE_FOOTER_ROWS")) continue;
-        s += strlen("MAKOCODE_FOOTER_ROWS");
-        s = trim_left((char*)s);
-        int rows = 0;
-        if (sscanf(s, "%d", &rows) == 1) return rows;
-        return 0;
-    }
-    return 0;
-}
-
 static uint32_t pack_rgb(int r, int g, int b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
@@ -765,7 +743,6 @@ static void usage() {
             "  ppm_transform corrupt-footer-data-destroyed --input IN --output OUT [--seed N] [--footer-height-px N]\n"
             "  ppm_transform corrupt-footer-valid-data-too-corrupt --input IN --output OUT [--seed N] [--footer-height-px N] [--border-keep N]\n"
             "  ppm_transform overlay-mask --output OUT --circle-color \"R G B\" --background-color \"R G B\" [--width W] [--height H]\n"
-            "  ppm_transform copy-footer-rows --encoded IN --merged INOUT\n"
             "  ppm_transform overlay-check --base IN --merged IN [--skip-grayscale 0|1]\n"
             "  ppm_transform bytes --output OUT --size N --seed N\n"
             "  ppm_transform bytes-len TEXT\n");
@@ -1029,35 +1006,6 @@ static void cmd_overlay_mask(int argc, char** argv) {
     free(circle_palette);
     intvec_free(&pixels);
     strvec_free(&comments);
-}
-
-static void cmd_copy_footer_rows(int argc, char** argv) {
-    const char* encoded = nullptr;
-    const char* merged = nullptr;
-    for (int i = 2; i < argc; i++) {
-        const char* arg = argv[i];
-        auto require_value = [&](const char* flag) -> const char* {
-            if (i + 1 >= argc) die2("ppm_transform: missing value for ", flag);
-            return argv[++i];
-        };
-        if (strcmp(arg, "--encoded") == 0) encoded = require_value("--encoded");
-        else if (strcmp(arg, "--merged") == 0) merged = require_value("--merged");
-        else die2("ppm_transform: unknown flag ", arg);
-    }
-    if (!encoded || !merged) die("ppm_transform: copy-footer-rows requires --encoded/--merged");
-    Ppm enc = read_ppm_p3_ascii(encoded);
-    Ppm mer = read_ppm_p3_ascii(merged);
-    if (enc.width != mer.width || enc.height != mer.height) die("ppm_transform: dimension mismatch");
-    int footer_rows = footer_rows_from_comments(&enc.comments);
-    if (footer_rows > 0 && footer_rows < enc.height) {
-        size_t row_stride = (size_t)enc.width * 3;
-        size_t start = (size_t)(enc.height - footer_rows) * row_stride;
-        memcpy(mer.pixels.data + start, enc.pixels.data + start, (enc.pixels.size - start) * sizeof(int));
-        const StrVec* comments = (mer.comments.size > 0) ? &mer.comments : &enc.comments;
-        write_ppm_p3_ascii(merged, comments, mer.width, mer.height, &mer.pixels, 1);
-    }
-    ppm_free(&enc);
-    ppm_free(&mer);
 }
 
 static void cmd_overlay_check(int argc, char** argv) {
@@ -1427,10 +1375,6 @@ int main(int argc, char** argv) {
     }
     if (strcmp(cmd, "overlay-mask") == 0) {
         cmd_overlay_mask(argc, argv);
-        return 0;
-    }
-    if (strcmp(cmd, "copy-footer-rows") == 0) {
-        cmd_copy_footer_rows(argc, argv);
         return 0;
     }
     if (strcmp(cmd, "overlay-check") == 0) {

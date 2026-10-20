@@ -132,9 +132,6 @@ fi
 overlay_cmd+=("$encoded_path" "$overlay_path" "$fraction")
 "${overlay_cmd[@]}" > "$merged_path"
 
-# Preserve footer stripe rows from the original to avoid damaging the barcode.
-"$ppm_transform_bin" copy-footer-rows --encoded "$encoded_path" --merged "$merged_path"
-
 decoded_dir="$work_dir/decoded"
 mkdir -p "$decoded_dir"
 "$makocode_bin" decode "$merged_path" --output-dir "$decoded_dir" --debug
