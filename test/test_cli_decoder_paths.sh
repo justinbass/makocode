@@ -72,8 +72,10 @@ harness_output="$work_dir/archive_output"
 mkdir -p "$harness_inputs" "$harness_output"
 p5_fixture="$harness_inputs/grayscale.pgm"
 p6_fixture="$harness_inputs/color.ppm"
+bad_format_fixture="$harness_inputs/unsupported.ppm"
 printf 'P5\n3 1\n255\n\000\177\377' > "$p5_fixture"
 printf 'P6\n2 1\n255\n\001\002\003\376\144\000' > "$p6_fixture"
+printf 'P3\n1 1\n255\n0 0 0\n' > "$bad_format_fixture"
 if [[ ${MAKOCODE_COVERAGE_PROBES:-0} == 1 ]]; then
     cxx_flags=(-std=c++17 -Wall -Wextra -pedantic -O0 -g --coverage)
 else
@@ -81,7 +83,7 @@ else
 fi
 printf '%s compile test-only decoder paths harness\n' "$(mako_format_label "$label")"
 "${CXX:-g++}" "${cxx_flags[@]}" "$harness_src" -o "$harness_bin"
-"$harness_bin" "$p5_fixture" "$p6_fixture" "$harness_output"
+"$harness_bin" "$p5_fixture" "$p6_fixture" "$bad_format_fixture" "$harness_output"
 for ecc in 0 0.5; do
     mode_dir="$work_dir/ecc_$ecc"
     input_dir="$mode_dir/input"

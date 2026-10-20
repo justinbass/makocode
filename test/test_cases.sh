@@ -278,3 +278,6 @@ test_case 0065_overlay_ecc_target_mixed script "Mixed-color overlay ECC target f
 
 test_case 0066_decode_raw_fallback script "Raw decode fallback is gated and writes recovered payload bytes" \
     test_decode_raw_fallback.sh
+
+test_case 0067_ppm_transform_cli script "ppm_transform help and fatal error paths" \
+    test_ppm_transform_cli.sh

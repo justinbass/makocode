@@ -20,8 +20,16 @@ the LICENSE file for the full license text.
 using namespace MetadataTile;
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        fprintf(stderr, "decoder paths harness: expected P5, P6, and archive output paths\n");
+    if (argc != 5) {
+        fprintf(stderr, "decoder paths harness: expected P5, P6, malformed PPM, and archive output paths\n");
+        return 1;
+    }
+
+    char cli_name[] = "makocode";
+    char cli_help[] = "--help";
+    char* cli_args[] = {cli_name, cli_help};
+    if (makocode_embedded_cli_main(2, cli_args) != 0) {
+        fprintf(stderr, "decoder paths harness: embedded CLI help failed\n");
         return 1;
     }
 
@@ -37,6 +45,15 @@ int main(int argc, char** argv) {
         loaded.width != 2u || loaded.height != 1u ||
         loaded.pixels[0] != 2u || loaded.pixels[1] != 118u) {
         fprintf(stderr, "decoder paths harness: P6 grayscale conversion mismatch\n");
+        makocode::image::release(loaded);
+        return 1;
+    }
+
+    makocode::image::LoadDiagnostics diagnostics = {};
+    if (makocode::image::load_ppm_grayscale(argv[3], loaded, &diagnostics) !=
+            makocode::image::LoadUnsupportedFormat ||
+        strcmp(diagnostics.message, "unsupported PPM format") != 0) {
+        fprintf(stderr, "decoder paths harness: malformed PPM diagnostic mismatch\n");
         makocode::image::release(loaded);
         return 1;
     }
@@ -64,9 +81,9 @@ int main(int argc, char** argv) {
     int outside_path_length = snprintf(outside_path,
                                        sizeof(outside_path),
                                        "%s/../traversal_escape",
-                                       argv[3]);
+                                       argv[4]);
     if (outside_path_length < 0 || (usize)outside_path_length >= sizeof(outside_path) ||
-        unpack_archive_to_directory(traversal_archive.buffer, argv[3]) ||
+        unpack_archive_to_directory(traversal_archive.buffer, argv[4]) ||
         stat(outside_path, &outside_entry) == 0) {
         fprintf(stderr, "decoder paths harness: archive directory traversal was not rejected\n");
         return 1;
