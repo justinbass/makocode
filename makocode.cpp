@@ -23676,9 +23676,6 @@ retry_decode:
 }
 
 static bool read_file_into_buffer(const char* path, makocode::ByteBuffer& buffer) {
-    if (!path) {
-        return false;
-    }
     buffer.release();
     int fd = open(path, O_RDONLY);
     if (fd < 0) {

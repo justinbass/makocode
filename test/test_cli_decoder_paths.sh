@@ -121,6 +121,24 @@ for ecc in 0 0.5; do
     printf ' %q' "${decode_cmd[@]}"
     printf '\n'
     "${decode_cmd[@]}" >/dev/null
+    if [[ $ecc == 0 ]]; then
+        password_decode_dir="$mode_dir/decoded_with_ignored_password"
+        mkdir -p "$password_decode_dir"
+        password_decode_output="$mode_dir/decode_with_ignored_password_output.txt"
+        if ! "$makocode_bin" decode "--output-dir=$password_decode_dir" \
+            --password=unused-password "${ppm_paths[@]}" >"$password_decode_output" 2>&1; then
+            echo 'test_cli_decoder_paths: decode with an ignored password failed' >&2
+            cat "$password_decode_output" >&2
+            exit 1
+        fi
+        if ! grep -Fq 'decode: warning: payload was not encrypted; password ignored' \
+            "$password_decode_output" ||
+           ! cmp --silent "$payload" "$password_decode_dir/payload.bin"; then
+            echo 'test_cli_decoder_paths: unencrypted payload password warning or output mismatch' >&2
+            cat "$password_decode_output" >&2
+            exit 1
+        fi
+    fi
     decode_csv="$decoded_dir/decode_fiducials.csv"
     if [[ ! -f $decode_csv ]]; then
         echo "test_cli_decoder_paths: decode did not write fiducial CSV for ECC $ecc" >&2
