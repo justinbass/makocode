@@ -34,7 +34,7 @@ Finalize
 - Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
 - Determine proper defaults
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
-- Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc) into an OS-relevant C++ module.
+- Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Much better documentation, or a spec
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code.

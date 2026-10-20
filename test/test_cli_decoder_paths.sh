@@ -62,7 +62,7 @@ if [[ ! -f $harness_src ]]; then
     echo "test_cli_decoder_paths: decoder paths harness not found at $harness_src" >&2
     exit 1
 fi
-trap 'status=$?; if [[ $status -eq 0 && ${MAKOCODE_COVERAGE_PROBES:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
+trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
 
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
@@ -76,7 +76,7 @@ bad_format_fixture="$harness_inputs/unsupported.ppm"
 printf 'P5\n3 1\n255\n\000\177\377' > "$p5_fixture"
 printf 'P6\n2 1\n255\n\001\002\003\376\144\000' > "$p6_fixture"
 printf 'P3\n1 1\n255\n0 0 0\n' > "$bad_format_fixture"
-if [[ ${MAKOCODE_COVERAGE_PROBES:-0} == 1 ]]; then
+if [[ ${COVERAGE:-0} == 1 ]]; then
     cxx_flags=(-std=c++17 -Wall -Wextra -pedantic -O0 -g --coverage)
 else
     cxx_flags=(-std=c++17 -Wall -Wextra -pedantic -O2)

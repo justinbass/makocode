@@ -23929,42 +23929,7 @@ static int command_minify(int arg_count, char** args) {
     return 0;
 }
 
-static void run_coverage_probes() {
-    const char* probes = getenv("MAKOCODE_COVERAGE_PROBES");
-    if (!probes || probes[0] == '\0') {
-        return;
-    }
-
-    makocode::ByteBuffer pad_target;
-    if (pad_target.ensure(1u)) {
-        pad_target.size = 1u;
-        pad_target.data[0] = 0xAAu;
-        normalize_bits_output_size(pad_target, 3u);
-    }
-
-    makocode::ByteBuffer trim_target;
-    if (trim_target.ensure(4u)) {
-        trim_target.size = 4u;
-        for (usize i = 0u; i < trim_target.size; ++i) {
-            trim_target.data[i] = 0u;
-        }
-        normalize_bits_output_size(trim_target, 2u);
-    }
-
-    makocode::ByteBuffer scratch_bits;
-    makocode::ByteBuffer digit_buffer;
-    if (scratch_bits.ensure(2u)) {
-        scratch_bits.size = 2u;
-        scratch_bits.data[0] = 0xA5u;
-        scratch_bits.data[1] = 0x5Au;
-        u64 digits_used = 0u;
-        bits_to_base_digits(scratch_bits, 12u, 5u, digit_buffer, digits_used);
-        (void)digits_used;
-    }
-}
-
 int main(int argc, char** argv) {
-    run_coverage_probes();
     if (argc < 2) {
         write_usage();
         return 0;

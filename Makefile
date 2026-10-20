@@ -42,7 +42,7 @@ test-finalize: $(TEST_CASE_TARGETS)
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
 	@$(STATUS) coverage "check genhtml" sh -c 'command -v genhtml >/dev/null 2>&1'
-	@$(STATUS) coverage "run tests (COVERAGE=1)" env MAKOCODE_COVERAGE_PROBES=1 $(MAKE) COVERAGE=1 test
+	@$(STATUS) coverage "run tests (COVERAGE=1)" $(MAKE) COVERAGE=1 test
 	@$(STATUS) coverage "capture lcov" lcov --capture --no-external --directory . --output-file $(LCOV_REPORT) $(LCOV_FLAGS) $(LCOV_RC)
 	@$(STATUS) coverage "generate html" genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS) --branch-coverage
 

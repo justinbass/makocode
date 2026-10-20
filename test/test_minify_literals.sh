@@ -48,7 +48,7 @@ if ! command -v "$compiler" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [[ ${MAKOCODE_COVERAGE_PROBES:-0} == 1 ]]; then
+if [[ ${COVERAGE:-0} == 1 ]]; then
     mkdir -p "$repo_root/test_output"
     work_dir=$(mktemp -d "$repo_root/test_output/${label}_minify.XXXXXX")
     trap 'status=$?; if [[ $status -ne 0 ]]; then rm -rf "$work_dir"; fi' EXIT
@@ -158,7 +158,7 @@ fi
 allocation_failure_dir="$work_dir/allocation_failure"
 mkdir -p "$allocation_failure_dir"
 printf 'int value;\n' > "$allocation_failure_dir/makocode.cpp"
-if [[ ${MAKOCODE_COVERAGE_PROBES:-0} == 1 ]]; then
+if [[ ${COVERAGE:-0} == 1 ]]; then
     allocation_harness_flags=(-std=c++17 -Wall -Wextra -pedantic -O0 -g --coverage)
 else
     allocation_harness_flags=(-std=c++17 -Wall -Wextra -pedantic -O2)
