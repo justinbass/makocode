@@ -48,8 +48,14 @@ if ! command -v "$compiler" >/dev/null 2>&1; then
     exit 1
 fi
 
-work_dir=$(mktemp -d "/tmp/$label.XXXXXX")
-trap 'rm -rf "$work_dir"' EXIT
+if [[ ${MAKOCODE_COVERAGE_PROBES:-0} == 1 ]]; then
+    mkdir -p "$repo_root/test_output"
+    work_dir=$(mktemp -d "$repo_root/test_output/${label}_minify.XXXXXX")
+    trap 'status=$?; if [[ $status -ne 0 ]]; then rm -rf "$work_dir"; fi' EXIT
+else
+    work_dir=$(mktemp -d "/tmp/$label.XXXXXX")
+    trap 'rm -rf "$work_dir"' EXIT
+fi
 cat > "$work_dir/makocode.cpp" <<'CPP'
   #define MINIFY_DIRECTIVE_SWITCH 1
 #if MINIFY_DIRECTIVE_SWITCH
@@ -95,5 +101,61 @@ if rg -q 'MINIFY_(BLOCK|LINE)_COMMENT_SENTINEL' "$minified_source"; then
 fi
 "$compiler" -std=c++17 -Wall -Wextra -pedantic "$minified_source" -o "$work_dir/minified_test"
 "$work_dir/minified_test"
+write_failure_dir="$work_dir/write_failure"
+mkdir -p "$write_failure_dir/makocode_minified.cpp"
+cp "$work_dir/makocode.cpp" "$write_failure_dir/makocode.cpp"
+write_failure_output="$work_dir/write_failure_output.txt"
+write_failure_status=0
+if (cd "$write_failure_dir" && "$makocode_bin" minify) >"$write_failure_output" 2>&1; then
+    write_failure_status=0
+else
+    write_failure_status=$?
+fi
+if [[ $write_failure_status -ne 1 ]] ||
+   ! grep -Fq 'minify: failed to write makocode_minified.cpp' "$write_failure_output"; then
+    echo 'test_minify_literals: minify write failure was not reported as expected' >&2
+    cat "$write_failure_output" >&2
+    exit 1
+fi
+allocation_failure_dir="$work_dir/allocation_failure"
+mkdir -p "$allocation_failure_dir"
+printf 'int value;\n' > "$allocation_failure_dir/makocode.cpp"
+if [[ ${MAKOCODE_COVERAGE_PROBES:-0} == 1 ]]; then
+    allocation_harness_flags=(-std=c++17 -Wall -Wextra -pedantic -O0 -g --coverage)
+else
+    allocation_harness_flags=(-std=c++17 -Wall -Wextra -pedantic -O2)
+fi
+allocation_harness="$work_dir/minify_allocation_failure_harness"
+"$compiler" "${allocation_harness_flags[@]}" \
+    "$script_dir/test_minify_allocation_failure_harness.cpp" -o "$allocation_harness"
+allocation_failure_output="$work_dir/allocation_failure_output.txt"
+if (cd "$allocation_failure_dir" && "$allocation_harness") \
+    >"$allocation_failure_output" 2>&1; then
+    allocation_failure_status=0
+else
+    allocation_failure_status=$?
+fi
+if [[ $allocation_failure_status -ne 0 ]] ||
+   ! grep -Fq 'minify: failed to compact whitespace' "$allocation_failure_output"; then
+    echo 'test_minify_literals: minify allocation failure was not reported as expected' >&2
+    cat "$allocation_failure_output" >&2
+    exit 1
+fi
+directive_failure_dir="$work_dir/directive_allocation_failure"
+mkdir -p "$directive_failure_dir"
+printf '#define VALUE 1\n' > "$directive_failure_dir/makocode.cpp"
+directive_failure_output="$work_dir/directive_allocation_failure_output.txt"
+if (cd "$directive_failure_dir" && "$allocation_harness") \
+    >"$directive_failure_output" 2>&1; then
+    directive_failure_status=0
+else
+    directive_failure_status=$?
+fi
+if [[ $directive_failure_status -ne 0 ]] ||
+   ! grep -Fq 'minify: failed to compact whitespace' "$directive_failure_output"; then
+    echo 'test_minify_literals: preprocessor allocation failure was not reported as expected' >&2
+    cat "$directive_failure_output" >&2
+    exit 1
+fi
 label_fmt=$(mako_format_label "$label")
-printf '%s SUCCESS minify preserves literals and directives; emitted C++ compiles and runs\n' "$label_fmt"
+printf '%s SUCCESS minify preserves literals/directives and reports output/allocation failures\n' "$label_fmt"

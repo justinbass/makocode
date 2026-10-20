@@ -1,6 +1,9 @@
 Tests
-- Run 10 'make coverage' runs, figure out how to cover all random pathways.
 - Remove ALL uncovered code
+  - I ran 'make -j coverage', review the output. My goal is to get to 100% CC by either removing dead untested code, or adding tests if the code is business valuable. A previous task found that it was 50/50 between delete/cover. We'll go through one by one, from end to beginning so that deletions don't change the line numbers. Give me literally the last block, and tell me if you think it's delete (slop) or cover (business valuable). If it's cover, you need to suggest a specific test implementation. If it's delete, you'll clip it out, clean it up including fixing compiler/test warnings, run 'make -j test' until it succeeds.
+  - add the test but only test the new test, not the full suite, then proceed to the previous code block.
+  - proceed to the previous code block then
+- Run 10 'make coverage' runs, figure out how to cover all random pathways.
 - Wavy distortion test
 - Page height or width too small for title or metadata, fails to encode
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color

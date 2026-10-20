@@ -23888,12 +23888,6 @@ static int command_minify(int arg_count, char** args) {
                 u8& previous = minified.data[minified.size - 1u];
                 if (previous == ' ') {
                     previous = '\n';
-                } else if (previous != '\n') {
-                    if (!minified.push('\n')) {
-                        minified.release();
-                        console_line(2, "minify: failed to compact whitespace");
-                        return 1;
-                    }
                 }
             }
             if (!minified.push('#')) {
@@ -23921,22 +23915,12 @@ static int command_minify(int arg_count, char** args) {
     minified.data = 0;
     minified.size = 0;
     minified.capacity = 0;
-    usize start_index = 0u;
-    while (start_index < stripped.size &&
-           (stripped.data[start_index] == ' ' || stripped.data[start_index] == '\n')) {
-        start_index += 1u;
-    }
     usize end_index = stripped.size;
-    while (end_index > start_index &&
+    while (end_index > 0u &&
            (stripped.data[end_index - 1u] == ' ' || stripped.data[end_index - 1u] == '\n')) {
         end_index -= 1u;
     }
-    if (start_index > 0u && end_index > start_index) {
-        for (usize i = start_index; i < end_index; ++i) {
-            stripped.data[i - start_index] = stripped.data[i];
-        }
-    }
-    stripped.size = (end_index > start_index) ? (end_index - start_index) : 0u;
+    stripped.size = end_index;
     if (!write_bytes_to_file("makocode_minified.cpp", stripped.data, stripped.size)) {
         console_line(2, "minify: failed to write makocode_minified.cpp");
         return 1;
@@ -23985,29 +23969,15 @@ int main(int argc, char** argv) {
         write_usage();
         return 0;
     }
-    int arg_index = 1;
-    while (arg_index < argc) {
-        char* arg = argv[arg_index];
-        if (!arg) {
-            ++arg_index;
-            continue;
-        }
-        
-        usize length = ascii_length(arg);
-        if (ascii_equals_token(arg, length, "--help") ||
-            ascii_equals_token(arg, length, "-h")) {
-            write_usage();
-            return 0;
-        }
-        break;
-    }
-    if (arg_index >= argc) {
+    const char* command = argv[1];
+    usize length = ascii_length(command);
+    if (ascii_equals_token(command, length, "--help") ||
+        ascii_equals_token(command, length, "-h")) {
         write_usage();
         return 0;
     }
-    const char* command = argv[arg_index];
-    int command_argc = argc - arg_index - 1;
-    char** command_argv = argv + arg_index + 1;
+    int command_argc = argc - 2;
+    char** command_argv = argv + 2;
     if (ascii_compare(command, "encode") == 0) {
         return command_encode(command_argc, command_argv);
     }
