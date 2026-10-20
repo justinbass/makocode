@@ -23632,10 +23632,6 @@ retry_decode:
         console_write(1, percent_buffer);
         console_line(1, "% of available correction bits)");
     }
-    if (!decoder.has_payload) {
-        console_line(2, "decode: no payload recovered");
-        return 1;
-    }
     if (!unpack_archive_to_directory(decoder.payload, output_dir)) {
         const char* raw_fallback = getenv("MAKOCODE_DECODE_RAW_FALLBACK");
         bool allow_raw_fallback = (raw_fallback && *raw_fallback && raw_fallback[0] != '0');

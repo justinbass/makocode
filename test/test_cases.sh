@@ -281,3 +281,6 @@ test_case 0066_decode_raw_fallback script "Raw decode fallback is gated and writ
 
 test_case 0067_ppm_transform_cli script "ppm_transform help and fatal error paths" \
     test_ppm_transform_cli.sh
+
+test_case 0068_decode_parse_retry script "Generic decoder parse failure retries once, then fails" \
+    test_decode_parse_retry.sh
