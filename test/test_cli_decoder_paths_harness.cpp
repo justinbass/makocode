@@ -108,46 +108,26 @@ int main(int argc, char** argv) {
                                source,
                                sizeof(source),
                                properties,
-                               &properties_size,
-                               5,
-                               1u << 16u,
-                               3,
-                               0,
-                               2,
-                               64,
-                               1) != SZ_OK) {
+                               &properties_size) != SZ_OK) {
         fprintf(stderr, "decoder paths harness: LZMA fixture compression failed\n");
         return 1;
     }
 
-    makocode::CLzmaDec decoder;
-    LzmaDec_Construct(&decoder);
-    if (makocode::LzmaDec_Allocate(&decoder,
-                                   properties,
-                                   (unsigned)properties_size,
-                                   &makocode::g_Alloc) != SZ_OK) {
-        fprintf(stderr, "decoder paths harness: LZMA decoder allocation failed\n");
-        return 1;
-    }
-    makocode::LzmaDec_Init(&decoder);
     unsigned char decoded[sizeof(source)];
-    makocode::SizeT decoded_size = sizeof(decoded);
+    size_t decoded_size = sizeof(decoded);
     makocode::SizeT input_size = (makocode::SizeT)compressed_size;
-    makocode::ELzmaStatus decode_status = makocode::LZMA_STATUS_NOT_SPECIFIED;
-    makocode::SRes decode_result = makocode::LzmaDec_DecodeToBuf(&decoder,
-                                                       decoded,
-                                                       &decoded_size,
-                                                       compressed,
-                                                       &input_size,
-                                                       makocode::LZMA_FINISH_ANY,
-                                                       &decode_status);
-    makocode::LzmaDec_Free(&decoder, &makocode::g_Alloc);
+    makocode::SRes decode_result = makocode::LzmaUncompress(decoded,
+                                                           &decoded_size,
+                                                           compressed,
+                                                           &input_size,
+                                                           properties,
+                                                           properties_size);
     if (decode_result != SZ_OK || decoded_size != sizeof(source) ||
         memcmp(source, decoded, sizeof(source)) != 0) {
-        fprintf(stderr, "decoder paths harness: LzmaDec_DecodeToBuf output mismatch\n");
+        fprintf(stderr, "decoder paths harness: LZMA roundtrip output mismatch\n");
         return 1;
     }
 
-    printf("direct P5/P6 grayscale loader, archive traversal rejection, border cleanup, and LzmaDec_DecodeToBuf checks passed\n");
+    printf("direct P5/P6 grayscale loader, archive traversal rejection, border cleanup, and fixed LZMA roundtrip checks passed\n");
     return 0;
 }
