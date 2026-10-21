@@ -11,6 +11,7 @@
 """Build a labeled calibration sheet or measure decode success from its scan."""
 
 import argparse
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -206,19 +207,117 @@ def write_sample_crop(path, page_width, page_pixels, sample):
             write_p3_pixel_row(output, page_pixels[start:end])
 
 
-def map_coordinate(value, scan_size, original_size):
-    return (value * scan_size + original_size // 2) // original_size
+def fit_scan_transform(samples, scan_width, scan_height, scan_pixels):
+    """Fit a scale, rotation, and offset from the calibration grid's ink."""
+    expected_weight = sum(sample["width_px"] * sample["height_px"] for sample in samples)
+    expected_x = sum(
+        sample["width_px"] * sample["height_px"]
+        * (sample["x"] + sample["width_px"] / 2)
+        for sample in samples
+    ) / expected_weight
+    expected_y = sum(
+        sample["width_px"] * sample["height_px"]
+        * (sample["y"] + sample["height_px"] / 2)
+        for sample in samples
+    ) / expected_weight
+
+    expected_xx = expected_yy = expected_xy = 0.0
+    for sample in samples:
+        width = sample["width_px"]
+        height = sample["height_px"]
+        weight = width * height
+        dx = sample["x"] + width / 2 - expected_x
+        dy = sample["y"] + height / 2 - expected_y
+        expected_xx += weight * (dx * dx + width * width / 12)
+        expected_yy += weight * (dy * dy + height * height / 12)
+        expected_xy += weight * dx * dy
+    expected_xx /= expected_weight
+    expected_yy /= expected_weight
+    expected_xy /= expected_weight
+
+    # Sample at most about 1.5 million scan points. Ink is dark while paper
+    # texture and scanner background are much lighter.
+    step = max(1, (max(scan_width, scan_height) + 1499) // 1500)
+    ink_count = 0
+    observed_x = observed_y = 0.0
+    observed_xx = observed_yy = observed_xy = 0.0
+    for y in range(step // 2, scan_height, step):
+        for x in range(step // 2, scan_width, step):
+            offset = (y * scan_width + x) * 3
+            red = scan_pixels[offset]
+            green = scan_pixels[offset + 1]
+            blue = scan_pixels[offset + 2]
+            if (red * 299 + green * 587 + blue * 114) // 1000 > 160:
+                continue
+            ink_count += 1
+            observed_x += x + 0.5
+            observed_y += y + 0.5
+            observed_xx += (x + 0.5) ** 2
+            observed_yy += (y + 0.5) ** 2
+            observed_xy += (x + 0.5) * (y + 0.5)
+
+    if ink_count < 100:
+        raise ValueError("could not find the calibration marks in the scanned image")
+    observed_x /= ink_count
+    observed_y /= ink_count
+    observed_xx = observed_xx / ink_count - observed_x * observed_x
+    observed_yy = observed_yy / ink_count - observed_y * observed_y
+    observed_xy = observed_xy / ink_count - observed_x * observed_y
+
+    def principal_axis(xx, yy, xy):
+        return 0.5 * math.atan2(2 * xy, xx - yy)
+
+    expected_angle = principal_axis(expected_xx, expected_yy, expected_xy)
+    observed_angle = principal_axis(observed_xx, observed_yy, observed_xy)
+    angle = observed_angle - expected_angle
+    # A principal axis describes a line, so equivalent angles differ by pi.
+    angle = (angle + math.pi / 2) % math.pi - math.pi / 2
+
+    expected_gap = math.hypot(expected_xx - expected_yy, 2 * expected_xy)
+    observed_gap = math.hypot(observed_xx - observed_yy, 2 * observed_xy)
+    if expected_gap <= 0 or observed_gap <= 0:
+        raise ValueError("could not determine the calibration grid orientation")
+
+    expected_major = (expected_xx + expected_yy + expected_gap) / 2
+    expected_minor = (expected_xx + expected_yy - expected_gap) / 2
+    observed_major = (observed_xx + observed_yy + observed_gap) / 2
+    observed_minor = (observed_xx + observed_yy - observed_gap) / 2
+    scale = math.sqrt((observed_major / expected_major
+                       + observed_minor / expected_minor) / 2)
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("could not determine the calibration grid scale")
+
+    return expected_x, expected_y, observed_x, observed_y, scale, angle
 
 
-def map_sample_to_scan(sample, scan_width, scan_height, original_width, original_height):
-    mapped = dict(sample)
-    mapped["x"] = map_coordinate(sample["x"], scan_width, original_width)
-    mapped["y"] = map_coordinate(sample["y"], scan_height, original_height)
-    mapped["width_px"] = map_coordinate(sample["width_px"], scan_width, original_width)
-    mapped["height_px"] = map_coordinate(sample["height_px"], scan_height, original_height)
-    if mapped["width_px"] <= 0 or mapped["height_px"] <= 0:
-        raise ValueError("scan resolution is too low to crop every expected barcode")
-    return mapped
+def map_sample_to_scan(sample, transform, scan_width, scan_height):
+    expected_x, expected_y, observed_x, observed_y, scale, angle = transform
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    page_x = sample["x"] + sample["width_px"] / 2 - expected_x
+    page_y = sample["y"] + sample["height_px"] / 2 - expected_y
+    center_x = scale * (cosine * page_x - sine * page_y) + observed_x
+    center_y = scale * (sine * page_x + cosine * page_y) + observed_y
+    crop_width = scale * (
+        abs(cosine) * sample["width_px"] + abs(sine) * sample["height_px"]
+    )
+    crop_height = scale * (
+        abs(sine) * sample["width_px"] + abs(cosine) * sample["height_px"]
+    )
+    padding = max(2, round(scale * 2 + max(crop_width, crop_height) * 0.015))
+    left = max(0, math.floor(center_x - crop_width / 2) - padding)
+    top = max(0, math.floor(center_y - crop_height / 2) - padding)
+    right = min(scan_width, math.ceil(center_x + crop_width / 2) + padding)
+    bottom = min(scan_height, math.ceil(center_y + crop_height / 2) + padding)
+    if right <= left or bottom <= top:
+        raise ValueError("the detected calibration square is outside the scanned image")
+    return {
+        **sample,
+        "x": left,
+        "y": top,
+        "width_px": right - left,
+        "height_px": bottom - top,
+    }
 
 
 def analyze_scan(makocode_bin, scan_path, original_width, original_height):
@@ -227,25 +326,33 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height):
     if not rows:
         raise ValueError("original page dimensions are too small to contain a calibration sample")
 
+    transform = fit_scan_transform(samples, page_width, page_height, page_pixels)
+    print(
+        f"Detected calibration grid at {transform[4]:.3g}x, "
+        f"rotated {math.degrees(transform[5]):.2f} degrees.",
+        file=sys.stderr,
+        flush=True,
+    )
+
     total_samples = len(samples)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
         work_dir = Path(temporary_directory)
         decoded_samples = {}
 
         def decode_sample(original_sample, status):
-            sample = map_sample_to_scan(
-                original_sample, page_width, page_height, original_width, original_height
-            )
-            sample_dir = work_dir / f"sample-{sample['index']:04d}"
+            sample_dir = work_dir / f"sample-{original_sample['index']:04d}"
             sample_dir.mkdir()
             crop_path = sample_dir / "sample.ppm"
             decode_dir = sample_dir / "decoded"
             decode_dir.mkdir()
+            sample = map_sample_to_scan(
+                original_sample, transform, page_width, page_height
+            )
             write_sample_crop(crop_path, page_width, page_pixels, sample)
 
             print(
-                f"{status} {sample['index'] + 1}/{total_samples} "
-                f"({sample['scale']:g}x copy {sample['copy'] + 1})...",
+                f"{status} {original_sample['index'] + 1}/{total_samples} "
+                f"({original_sample['scale']:g}x copy {original_sample['copy'] + 1})...",
                 end="",
                 file=sys.stderr,
                 flush=True,
