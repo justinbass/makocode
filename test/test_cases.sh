@@ -284,3 +284,6 @@ test_case 0067_ppm_transform_cli script "ppm_transform help and fatal error path
 
 test_case 0068_decode_parse_retry script "Generic decoder parse failure retries once, then fails" \
     test_decode_parse_retry.sh
+
+test_case 0069_decode_scale_318 script "Decode a 55x55 page rendered at 3.18 pixels per module" \
+    test_decode_scale_318.sh
