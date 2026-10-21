@@ -138,6 +138,14 @@ def make_rows(source_width, source_height, page_width, page_height):
     return rows, samples
 
 
+def write_p3_pixel_row(output, pixels):
+    lines = (
+        f"{pixels[offset]} {pixels[offset + 1]} {pixels[offset + 2]}"
+        for offset in range(0, len(pixels), 3)
+    )
+    output.write("\n".join(lines) + "\n")
+
+
 def write_sheet(path, source_width, source_height, source_pixels,
                 page_width, page_height, rows, samples):
     # Row placement is based on scale bands. Keep each band indexed by its top
@@ -148,7 +156,6 @@ def write_sheet(path, source_width, source_height, source_pixels,
 
     with path.open("w", encoding="ascii", newline="\n") as output:
         output.write("P3\n")
-        output.write("# MakoCode calibration sheet\n")
         output.write(f"{page_width} {page_height}\n255\n")
 
         for page_y in range(page_height):
@@ -183,7 +190,7 @@ def write_sheet(path, source_width, source_height, source_pixels,
                                         offset = (px * 3)
                                         pixels[offset:offset + 3] = b"\x00\x00\x00"
 
-            output.write(" ".join(str(channel) for channel in pixels) + "\n")
+            write_p3_pixel_row(output, pixels)
 
 
 def write_sample_crop(path, page_width, page_pixels, sample):
@@ -196,7 +203,7 @@ def write_sample_crop(path, page_width, page_pixels, sample):
         for y in range(crop_y, crop_y + crop_height):
             start = (y * page_width + crop_x) * 3
             end = start + crop_width * 3
-            output.write(" ".join(str(channel) for channel in page_pixels[start:end]) + "\n")
+            write_p3_pixel_row(output, page_pixels[start:end])
 
 
 def map_coordinate(value, scan_size, original_size):

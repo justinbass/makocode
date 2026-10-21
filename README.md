@@ -79,6 +79,13 @@ python3 scripts/calibration.py decode scan.ppm --width 2399 --height 2399
 Smallest scale that worked (every copy decoded): 1x
 ```
 
+Handy linux printing command:
+
+```
+lpstat -p
+lp -d HL-L3220CDW -o ppi=600 -o natural-scaling=100 -o sides=one-sided calibration.ppm
+```
+
 ### Converting Scans
 
 To turn a scanned image into a P3 `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -compress none scan.ppm`.
