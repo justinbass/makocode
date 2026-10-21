@@ -227,59 +227,93 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height):
     if not rows:
         raise ValueError("original page dimensions are too small to contain a calibration sample")
 
-    results = []
     total_samples = len(samples)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
         work_dir = Path(temporary_directory)
+        decoded_samples = {}
+
+        def decode_sample(original_sample, status):
+            sample = map_sample_to_scan(
+                original_sample, page_width, page_height, original_width, original_height
+            )
+            sample_dir = work_dir / f"sample-{sample['index']:04d}"
+            sample_dir.mkdir()
+            crop_path = sample_dir / "sample.ppm"
+            decode_dir = sample_dir / "decoded"
+            decode_dir.mkdir()
+            write_sample_crop(crop_path, page_width, page_pixels, sample)
+
+            print(
+                f"{status} {sample['index'] + 1}/{total_samples} "
+                f"({sample['scale']:g}x copy {sample['copy'] + 1})...",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+            result = subprocess.run(
+                [str(makocode_bin), "decode", f"--output-dir={decode_dir}", str(crop_path)],
+                cwd=makocode_bin.parent,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            decoded = (result.returncode == 0 and any(
+                payload.is_file() and payload.read_bytes() == b"makocode"
+                for payload in decode_dir.rglob("makocode.bin")
+            ))
+            decoded_samples[original_sample["index"]] = decoded
+            print(" decoded" if decoded else " failed", file=sys.stderr, flush=True)
+            return decoded
+
+        # One representative from each scale row locates the first plausible
+        # success scale without decoding every copy in every smaller row.
+        print("Probing the first copy at each scale...", file=sys.stderr, flush=True)
+        first_success_row = None
         for row_index, row in enumerate(rows, start=1):
-            decoded_count = 0
-            row_samples = [samples[index] for index in row["sample_indexes"]]
-            for original_sample in row_samples:
-                sample = map_sample_to_scan(
-                    original_sample, page_width, page_height, original_width, original_height
-                )
-                sample_dir = work_dir / f"sample-{sample['index']:04d}"
-                sample_dir.mkdir()
-                crop_path = sample_dir / "sample.ppm"
-                decode_dir = sample_dir / "decoded"
-                decode_dir.mkdir()
-                write_sample_crop(crop_path, page_width, page_pixels, sample)
+            first_sample = samples[row["sample_indexes"][0]]
+            decode_sample(first_sample, f"Probe row {row_index}/{len(rows)}")
+            if decoded_samples[first_sample["index"]] and first_success_row is None:
+                first_success_row = row_index - 1
 
-                print(
-                    f"Decoding {row['scale']:g}x row {row_index}/{len(rows)}, "
-                    f"copy {sample['copy'] + 1}/{len(row_samples)} "
-                    f"(sample {sample['index'] + 1}/{total_samples})...",
-                    end="",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                result = subprocess.run(
-                    [str(makocode_bin), "decode", f"--output-dir={decode_dir}", str(crop_path)],
-                    cwd=makocode_bin.parent,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                decoded = (result.returncode == 0 and any(
-                    payload.is_file() and payload.read_bytes() == b"makocode"
-                    for payload in decode_dir.rglob("makocode.bin")
-                ))
-                print(" decoded" if decoded else " failed", file=sys.stderr, flush=True)
-                if decoded:
-                    decoded_count += 1
+        results = []
+        if first_success_row is not None:
+            print(
+                f"First-copy boundary begins at {rows[first_success_row]['scale']:g}x; "
+                "checking every copy from there upward.",
+                file=sys.stderr,
+                flush=True,
+            )
+            for row_index in range(first_success_row, len(rows)):
+                row = rows[row_index]
+                row_samples = [samples[index] for index in row["sample_indexes"]]
+                decoded_count = 0
+                for original_sample in row_samples:
+                    decoded = decoded_samples.get(original_sample["index"])
+                    if decoded is None:
+                        decoded = decode_sample(original_sample, f"Verify {row['scale']:g}x")
+                    if decoded:
+                        decoded_count += 1
 
-            results.append((row, decoded_count, len(row_samples)))
-            if decoded_count == len(row_samples):
-                print(
-                    f"Every copy decoded at {row['scale']:g}x; stopping at this row.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                break
+                results.append((row, decoded_count, len(row_samples)))
+                if decoded_count == len(row_samples):
+                    print(
+                        f"Every copy decoded at {row['scale']:g}x; stopping at this row.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    break
 
-    for row, decoded_count, sample_count in results:
-        percent = 100.0 * decoded_count / sample_count if sample_count else 0.0
-        print(f"{row['scale']:g}x: {decoded_count}/{sample_count} decoded ({percent:.1f}%)")
+    fully_scanned = {row["index"]: (decoded_count, sample_count)
+                     for row, decoded_count, sample_count in results}
+    for row_index, row in enumerate(rows):
+        if row_index in fully_scanned:
+            decoded_count, sample_count = fully_scanned[row_index]
+            percent = 100.0 * decoded_count / sample_count if sample_count else 0.0
+            print(f"{row['scale']:g}x: {decoded_count}/{sample_count} decoded ({percent:.1f}%)")
+        else:
+            sample = samples[row["sample_indexes"][0]]
+            state = "decoded" if decoded_samples[sample["index"]] else "failed"
+            print(f"{row['scale']:g}x: first copy {state}; other copies not checked")
 
     every_copy = next((row for row, count, total in results if count == total), None)
     print("Smallest scale that worked (every copy decoded): "
