@@ -9073,6 +9073,54 @@ namespace MetadataTile {
         double angle_rad;
     };
 
+    static double sample_affine_module_luminance(const u8* pixel_data_rgb,
+                                                 u32 width_pixels,
+                                                 u32 height_pixels,
+                                                 double x,
+                                                 double y,
+                                                 double pitch_x,
+                                                 double pitch_y,
+                                                 double cosine,
+                                                 double sine,
+                                                 bool sample_scaled_cells) {
+        if (!sample_scaled_cells || (pitch_x <= 1.25 && pitch_y <= 1.25)) {
+            return sample_luminance_bilinear(pixel_data_rgb, width_pixels, height_pixels, x, y);
+        }
+        double vx_x = pitch_x * cosine;
+        double vx_y = pitch_x * sine;
+        double vy_x = -pitch_y * sine;
+        double vy_y = pitch_y * cosine;
+        double radius_x = 0.5 * (fabs(vx_x) + fabs(vy_x));
+        double radius_y = 0.5 * (fabs(vx_y) + fabs(vy_y));
+        i64 x0 = (i64)ceil(x - radius_x);
+        i64 x1 = (i64)floor(x + radius_x);
+        i64 y0 = (i64)ceil(y - radius_y);
+        i64 y1 = (i64)floor(y + radius_y);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 >= (i64)width_pixels) x1 = (i64)width_pixels - 1;
+        if (y1 >= (i64)height_pixels) y1 = (i64)height_pixels - 1;
+        double luminance_sum = 0.0;
+        u32 sample_count = 0u;
+        for (i64 py = y0; py <= y1; ++py) {
+            for (i64 px = x0; px <= x1; ++px) {
+                double dx = (double)px - x;
+                double dy = (double)py - y;
+                double local_x = (dx * cosine + dy * sine) / pitch_x;
+                double local_y = (-dx * sine + dy * cosine) / pitch_y;
+                if (fabs(local_x) > 0.5 || fabs(local_y) > 0.5) continue;
+                usize idx = ((usize)py * (usize)width_pixels + (usize)px) * 3u;
+                luminance_sum += rgb_luminance_u8(pixel_data_rgb[idx + 0u],
+                                                   pixel_data_rgb[idx + 1u],
+                                                   pixel_data_rgb[idx + 2u]);
+                ++sample_count;
+            }
+        }
+        return sample_count > 0u
+                   ? luminance_sum / (double)sample_count
+                   : sample_luminance_bilinear(pixel_data_rgb, width_pixels, height_pixels, x, y);
+    }
+
     static bool match_tile_header_affine(const u8* pixel_data_rgb,
                                          u32 width_pixels,
                                          u32 height_pixels,
@@ -9082,7 +9130,8 @@ namespace MetadataTile {
                                          bool& inverted_out,
                                          double& confidence_out,
                                          bool allow_incomplete_palette = false,
-                                         bool header_only = false) {
+                                         bool header_only = false,
+                                         bool sample_scaled_cells = false) {
         header_out = 0u;
         inverted_out = false;
         confidence_out = 0.0;
@@ -9132,7 +9181,16 @@ namespace MetadataTile {
             double sy = (double)module_y - half;
             double x = affine.center_x + vx_x * sx + vy_x * sy;
             double y = affine.center_y + vx_y * sx + vy_y * sy;
-            return sample_luminance_bilinear(pixel_data_rgb, width_pixels, height_pixels, x, y);
+            return sample_affine_module_luminance(pixel_data_rgb,
+                                                  width_pixels,
+                                                  height_pixels,
+                                                  x,
+                                                  y,
+                                                  pitch_x,
+                                                  pitch_y,
+                                                  c,
+                                                  s,
+                                                  sample_scaled_cells);
         };
         // Estimate contrast from the repeated header modules themselves. A sparse
         // 4-pixel grid can miss one side of the near-native, resampled pattern and
@@ -9293,7 +9351,8 @@ namespace MetadataTile {
                                    const AffineParams& affine,
                                    Values& out_values,
                                    ByteBuffer& out_palette_text,
-                                   double* out_border_mismatch = 0) {
+                                   double* out_border_mismatch = 0,
+                                   bool sample_scaled_cells = false) {
         if (!pixel_data_rgb || width_pixels == 0u || height_pixels == 0u || data_height_pixels == 0u) return false;
         if (data_height_pixels > height_pixels) data_height_pixels = height_pixels;
         if (!(affine.pitch_pixels > 0.0)) return false;
@@ -9341,7 +9400,16 @@ namespace MetadataTile {
             double sy = (double)module_y - half;
             double x = affine.center_x + vx_x * sx + vy_x * sy;
             double y = affine.center_y + vx_y * sx + vy_y * sy;
-            return sample_luminance_bilinear(pixel_data_rgb, width_pixels, height_pixels, x, y);
+            return sample_affine_module_luminance(pixel_data_rgb,
+                                                  width_pixels,
+                                                  height_pixels,
+                                                  x,
+                                                  y,
+                                                  pitch_x,
+                                                  pitch_y,
+                                                  c,
+                                                  s,
+                                                  sample_scaled_cells);
         };
         auto header_module_luminance = [&](u32 module_x, u32 module_y) -> double {
             double sx = (double)module_x - half;
@@ -9659,7 +9727,8 @@ namespace MetadataTile {
                                           u32 expected_logical_height,
                                           Values& out_values,
                                           ByteBuffer& out_palette_text,
-                                          AffineParams* found_affine_out = 0) {
+                                          AffineParams* found_affine_out = 0,
+                                          bool sample_scaled_cells = false) {
         if (!pixel_data_rgb || width_pixels == 0u || height_pixels == 0u || data_height_pixels == 0u) return false;
         if (data_height_pixels > height_pixels) data_height_pixels = height_pixels;
 
@@ -9860,7 +9929,8 @@ namespace MetadataTile {
                                                               inverted,
                                                               confidence,
                                                               true,
-                                                              true) ||
+                                                              true,
+                                                              sample_scaled_cells) ||
                                     confidence < 0.80) {
                                     continue;
                                 }
@@ -9872,7 +9942,9 @@ namespace MetadataTile {
                                                         data_height_pixels,
                                                         affine,
                                                         candidate_values,
-                                                        candidate_palette_text) ||
+                                                        candidate_palette_text,
+                                                        0,
+                                                        sample_scaled_cells) ||
                                     !affine_page_geometry_matches(candidate_values, affine)) {
                                     continue;
                                 }
@@ -10000,7 +10072,10 @@ namespace MetadataTile {
                                                       affine,
                                                       header,
                                                       inverted,
-                                                      confidence)) {
+                                                      confidence,
+                                                      false,
+                                                      false,
+                                                      sample_scaled_cells)) {
                             continue;
                         }
                         if (confidence < 0.55) {
@@ -10015,7 +10090,9 @@ namespace MetadataTile {
                                                    data_height_pixels,
                                                    affine,
                                                    candidate_values,
-                                                   candidate_palette_text)) {
+                                                   candidate_palette_text,
+                                                   0,
+                                                   sample_scaled_cells)) {
                                 verified_values = candidate_values;
                                 byte_buffer_move(verified_palette_text, candidate_palette_text);
                                 verified_affine = affine;
@@ -10036,7 +10113,8 @@ namespace MetadataTile {
                                                    affine,
                                                    candidate_values,
                                                    candidate_palette_text,
-                                                   &candidate_border_mismatch) &&
+                                                   &candidate_border_mismatch,
+                                                   sample_scaled_cells) &&
                                 candidate_border_mismatch <= 0.05 &&
                                 affine_page_geometry_matches(candidate_values, affine)) {
                                 out_values = candidate_values;
@@ -10118,7 +10196,9 @@ namespace MetadataTile {
                                     data_height_pixels,
                                     candidate_affine,
                                     values,
-                                    pal_text) ||
+                                    pal_text,
+                                    0,
+                                    sample_scaled_cells) ||
                 !affine_page_geometry_matches(values, candidate_affine)) {
                 return false;
             }
@@ -10173,7 +10253,8 @@ namespace MetadataTile {
                                                       refined_inverted,
                                                       refined_confidence,
                                                       true,
-                                                      true)) {
+                                                      true,
+                                                      sample_scaled_cells)) {
                             continue;
                         }
                         double rank_score = -refined_confidence +
@@ -13435,6 +13516,26 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             return false;
         }
     }
+    u64 white_pixels_by_parity[2] = {0u, 0u};
+    u64 pixels_by_parity[2] = {0u, 0u};
+    for (u64 y = 0u; y < height; ++y) {
+        for (u64 x = 0u; x < width; ++x) {
+            u32 parity = (u32)((x + y) & 1u);
+            usize idx = ((usize)y * (usize)width + (usize)x) * 3u;
+            ++pixels_by_parity[parity];
+            if (pixel_data[idx + 0u] == 255u &&
+                pixel_data[idx + 1u] == 255u &&
+                pixel_data[idx + 2u] == 255u) {
+                ++white_pixels_by_parity[parity];
+            }
+        }
+    }
+    bool alternating_white_damage =
+        (white_pixels_by_parity[0] == pixels_by_parity[0] &&
+         white_pixels_by_parity[1] < pixels_by_parity[1]) ||
+        (white_pixels_by_parity[1] == pixels_by_parity[1] &&
+         white_pixels_by_parity[0] < pixels_by_parity[0]);
+    bool sample_scaled_cells = overrides.palette_set || alternating_white_damage;
     makocode::ByteBuffer affine_source_pixels;
     makocode::ByteBuffer downsampled_pixels;
     const u64 base_width = width;
@@ -13657,7 +13758,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                                          tile_height_hint,
                                                                          tile_values,
                                                                          tile_palette_text,
-                                                                         &found_affine);
+                                                                         &found_affine,
+                                                                         sample_scaled_cells);
         if (!affine_tile_found && affine_data_height_hint != data_height_hint) {
             affine_tile_found = MetadataTile::search_decode_tile_affine(pixel_data,
                                                                         (u32)width,
@@ -13668,7 +13770,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                                         tile_height_hint,
                                                                         tile_values,
                                                                         tile_palette_text,
-                                                                        &found_affine);
+                                                                        &found_affine,
+                                                                        sample_scaled_cells);
         }
         if (affine_tile_found && affine_data_height_hint != data_height_hint &&
             fabs(found_affine.angle_rad * (180.0 / 3.14159265358979323846)) < 0.5) {
@@ -13686,7 +13789,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                         tile_height_hint,
                                                         full_height_values,
                                                         full_height_palette_text,
-                                                        &full_height_affine)) {
+                                                        &full_height_affine,
+                                                        sample_scaled_cells)) {
                 tile_values = full_height_values;
                 byte_buffer_move(tile_palette_text, full_height_palette_text);
                 found_affine = full_height_affine;
@@ -16842,59 +16946,158 @@ struct RotationEstimateCandidate {
             u8 affine_rgb[3];
             u8 rotated_rgb[3];
             u8 skew_rgb[3];
-            u8 averaged_rgb[3];
-            // Fast path: undistorted scale-only pages benefit from box averaging over each
-            // logical cell to survive print/scan blur (e.g., 2.5x stretch in case 0016).
-            if (!has_rotation &&
+            u8 cell_rgb[3];
+            bool cell_sampled = false;
+            double cell_scale_x = scale_xd;
+            double cell_scale_y = scale_yd;
+            if (logical_width > 0u && data_height > 0u) {
+                double min_scale_x = ((double)analysis_width - 0.5) / (double)logical_width;
+                double max_scale_x = ((double)analysis_width + 0.5) / (double)logical_width;
+                double min_scale_y = ((double)analysis_height - 0.5) / (double)data_height;
+                double max_scale_y = ((double)analysis_height + 0.5) / (double)data_height;
+                double affine_scale_x = fabs(state.affine_transform.a00);
+                double affine_scale_y = fabs(state.affine_transform.a11);
+                if (!state.has_affine_transform || affine_scale_x < min_scale_x) {
+                    cell_scale_x = min_scale_x;
+                } else if (affine_scale_x <= max_scale_x) {
+                    cell_scale_x = affine_scale_x;
+                }
+                if (!state.has_affine_transform || affine_scale_y < min_scale_y) {
+                    cell_scale_y = min_scale_y;
+                } else if (affine_scale_y <= max_scale_y) {
+                    cell_scale_y = affine_scale_y;
+                }
+            }
+            bool axis_aligned_affine =
+                !state.has_affine_transform ||
+                (fabs(state.affine_transform.a01) <= 0.01 * cell_scale_x &&
+                 fabs(state.affine_transform.a10) <= 0.01 * cell_scale_y);
+            if ((sample_scaled_cells || use_custom_palette || alternating_white_damage) &&
+                !has_rotation &&
                 !has_skew &&
-                !state.has_affine_transform &&
-                scale_xd > 1.01 &&
-                scale_yd > 1.01 &&
+                axis_aligned_affine &&
+                cell_scale_x > 1.01 &&
+                cell_scale_y > 1.01 &&
                 analysis_width > 0u &&
                 analysis_height > 0u) {
-                double cell_x0 = (double)logical_col * scale_xd;
-                double cell_x1 = (double)(logical_col + 1u) * scale_xd;
-                double cell_y0 = (double)logical_row * scale_yd;
-                double cell_y1 = (double)(logical_row + 1u) * scale_yd;
-                int xi0 = (int)floor(cell_x0);
-                int xi1 = (int)ceil(cell_x1);
-                int yi0 = (int)floor(cell_y0);
-                int yi1 = (int)ceil(cell_y1);
-                if (xi0 < 0) xi0 = 0;
-                if (yi0 < 0) yi0 = 0;
-                if (xi1 > (int)analysis_width) xi1 = (int)analysis_width;
-                if (yi1 > (int)analysis_height) yi1 = (int)analysis_height;
-                u64 sum_r = 0u, sum_g = 0u, sum_b = 0u;
-                u64 count = 0u;
-                for (int yy = yi0; yy < yi1; ++yy) {
-                    double cy = (double)yy + 0.5;
-                    if (cy < cell_y0 || cy >= cell_y1) continue;
-                    for (int xx = xi0; xx < xi1; ++xx) {
-                        double cx = (double)xx + 0.5;
-                        if (cx < cell_x0 || cx >= cell_x1) continue;
+                double sample_center_x = (((double)logical_col + 0.5) * cell_scale_x) - 0.5 + warp_dx;
+                double sample_center_y = (((double)logical_row + 0.5) * cell_scale_y) - 0.5 + warp_dy;
+                double half_width = cell_scale_x * 0.4;
+                double half_height = cell_scale_y * 0.4;
+                double left = sample_center_x - half_width;
+                double right = sample_center_x + half_width;
+                double top = sample_center_y - half_height;
+                double bottom = sample_center_y + half_height;
+                u64 sample_width = state.has_affine_transform ? width : analysis_width;
+                u64 sample_height = state.has_affine_transform ? height : analysis_height;
+                int x0 = (int)ceil(left);
+                int x1 = (int)ceil(right);
+                int y0 = (int)ceil(top);
+                int y1 = (int)ceil(bottom);
+                if (x0 < 0) x0 = 0;
+                if (y0 < 0) y0 = 0;
+                if (x1 > (int)sample_width) x1 = (int)sample_width;
+                if (y1 > (int)sample_height) y1 = (int)sample_height;
+
+                const PaletteColor* cell_palette = use_custom_palette
+                                                       ? active_mapping.custom_palette
+                                                       : palette;
+                u32 cell_palette_size = use_custom_palette
+                                           ? active_mapping.custom_palette_count
+                                           : palette_size;
+                u64 sample_count = 0u;
+                u64 sum_nonwhite_r = 0u;
+                u64 sum_nonwhite_g = 0u;
+                u64 sum_nonwhite_b = 0u;
+                u64 nonwhite_count = 0u;
+                u64 white_count = 0u;
+                for (int yy = y0; yy < y1; ++yy) {
+                    if ((double)yy < top || (double)yy >= bottom) continue;
+                    for (int xx = x0; xx < x1; ++xx) {
+                        if ((double)xx < left || (double)xx >= right) continue;
                         usize idx = ((usize)yy * (usize)pixel_stride + (usize)xx) * 3u;
-                        sum_r += (u64)pixel_data[idx + 0u];
-                        sum_g += (u64)pixel_data[idx + 1u];
-                        sum_b += (u64)pixel_data[idx + 2u];
-                        ++count;
+                        ++sample_count;
+                        if (pixel_data[idx + 0u] != 255u ||
+                            pixel_data[idx + 1u] != 255u ||
+                            pixel_data[idx + 2u] != 255u) {
+                            sum_nonwhite_r += pixel_data[idx + 0u];
+                            sum_nonwhite_g += pixel_data[idx + 1u];
+                            sum_nonwhite_b += pixel_data[idx + 2u];
+                            ++nonwhite_count;
+                        } else {
+                            ++white_count;
+                        }
                     }
                 }
-                if (count > 0u) {
-                    averaged_rgb[0] = (u8)((sum_r + (count / 2u)) / count);
-                    averaged_rgb[1] = (u8)((sum_g + (count / 2u)) / count);
-                    averaged_rgb[2] = (u8)((sum_b + (count / 2u)) / count);
-                    rgb = averaged_rgb;
+                if (sample_count > 0u) {
+                    u8 mean_rgb[3] = {255u, 255u, 255u};
+                    if (nonwhite_count > 0u) {
+                        mean_rgb[0] = (u8)((sum_nonwhite_r + nonwhite_count / 2u) / nonwhite_count);
+                        mean_rgb[1] = (u8)((sum_nonwhite_g + nonwhite_count / 2u) / nonwhite_count);
+                        mean_rgb[2] = (u8)((sum_nonwhite_b + nonwhite_count / 2u) / nonwhite_count);
+                    }
+                    u32 best_symbol = 0u;
+                    u64 best_score = (u64)USIZE_MAX_VALUE;
+                    u32 white_symbol = 0xFFFFFFFFu;
+                    for (u32 symbol = 0u; symbol < cell_palette_size; ++symbol) {
+                        i64 dr = (i64)cell_palette[symbol].r - (i64)mean_rgb[0];
+                        i64 dg = (i64)cell_palette[symbol].g - (i64)mean_rgb[1];
+                        i64 db = (i64)cell_palette[symbol].b - (i64)mean_rgb[2];
+                        u64 score = (u64)(dr * dr + dg * dg + db * db);
+                        if (score < best_score) {
+                            best_score = score;
+                            best_symbol = symbol;
+                        }
+                        if (cell_palette[symbol].r == 255u &&
+                            cell_palette[symbol].g == 255u &&
+                            cell_palette[symbol].b == 255u) {
+                            white_symbol = symbol;
+                        }
+                    }
+                    bool white_cell_observed = white_symbol != 0xFFFFFFFFu &&
+                                               (nonwhite_count == 0u || white_count * 5u > sample_count * 3u);
+                    if (white_cell_observed) {
+                        best_symbol = white_symbol;
+                    }
+                    if (!white_cell_observed && best_symbol == white_symbol && white_symbol != 0xFFFFFFFFu) {
+                        u64 best_nonwhite_score = (u64)USIZE_MAX_VALUE;
+                        u32 best_nonwhite_symbol = 0xFFFFFFFFu;
+                        for (u32 symbol = 0u; symbol < cell_palette_size; ++symbol) {
+                            if (symbol == white_symbol) continue;
+                            i64 dr = (i64)cell_palette[symbol].r - (i64)mean_rgb[0];
+                            i64 dg = (i64)cell_palette[symbol].g - (i64)mean_rgb[1];
+                            i64 db = (i64)cell_palette[symbol].b - (i64)mean_rgb[2];
+                            u64 score = (u64)(dr * dr + dg * dg + db * db);
+                            i64 wr = (i64)cell_palette[symbol].r - 255;
+                            i64 wg = (i64)cell_palette[symbol].g - 255;
+                            i64 wb = (i64)cell_palette[symbol].b - 255;
+                            u64 white_distance = (u64)(wr * wr + wg * wg + wb * wb);
+                            if (score <= best_score + white_distance / 50u &&
+                                score < best_nonwhite_score) {
+                                best_nonwhite_score = score;
+                                best_nonwhite_symbol = symbol;
+                            }
+                        }
+                        if (best_nonwhite_symbol != 0xFFFFFFFFu) {
+                            best_symbol = best_nonwhite_symbol;
+                        }
+                    }
+                    cell_rgb[0] = cell_palette[best_symbol].r;
+                    cell_rgb[1] = cell_palette[best_symbol].g;
+                    cell_rgb[2] = cell_palette[best_symbol].b;
+                    rgb = cell_rgb;
+                    cell_sampled = true;
                 }
             }
 
-            if (state.has_affine_transform && affine_reconstructed_pixels.data) {
+            if (!cell_sampled && state.has_affine_transform && affine_reconstructed_pixels.data) {
                 usize recovered_index = ((usize)logical_row * (usize)logical_width +
                                          (usize)logical_col) * 3u;
                 if (recovered_index + 2u >= affine_reconstructed_pixels.size) {
                     return false;
                 }
                 rgb = affine_reconstructed_pixels.data + recovered_index;
-            } else if (state.has_affine_transform) {
+            } else if (!cell_sampled && state.has_affine_transform) {
                 double lx = (double)logical_col + 0.5;
                 double ly = (double)logical_row + 0.5;
                 double sample_x = state.affine_transform.a00 * lx +
@@ -16935,7 +17138,7 @@ struct RotationEstimateCandidate {
                     affine_rgb[channel] = (u8)(value + 0.5);
                 }
                 rgb = affine_rgb;
-            } else if (has_rotation) {
+            } else if (!cell_sampled && has_rotation) {
                 if (rotation_width == 0u || rotation_height == 0u || rotated_width == 0u || rotated_height == 0u) {
                     return false;
                 }
@@ -16990,7 +17193,7 @@ struct RotationEstimateCandidate {
                     rotated_rgb[channel] = (u8)(value + 0.5);
                 }
                 rgb = rotated_rgb;
-            } else if (has_skew) {
+            } else if (!cell_sampled && has_skew) {
                 if (sample_row < 0.0) sample_row = 0.0;
                 if (sample_col < 0.0) sample_col = 0.0;
                 double max_row = (analysis_height > 0u) ? (double)(analysis_height - 1u) : 0.0;
@@ -17026,7 +17229,7 @@ struct RotationEstimateCandidate {
                     skew_rgb[channel] = pixel_data[idx + channel];
                 }
                 rgb = skew_rgb;
-            } else {
+            } else if (!cell_sampled) {
                 if (sample_row < 0.0) sample_row = 0.0;
                 if (sample_col < 0.0) sample_col = 0.0;
                 double max_row = (analysis_height > 0u) ? (double)(analysis_height - 1u) : 0.0;

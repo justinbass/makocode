@@ -737,6 +737,7 @@ static void usage() {
             "                       [--seed N] [--ink-blot-radius PX] [--ink-blot-color C]\n"
             "                       [--paper-color C] [--paper-alpha A] [--paper-splotch-alpha A]\n"
             "                       [--paper-splotch-shade A] [--paper-splotch-px PX]\n"
+            "                       [--white-checker]\n"
             "                       [--corrupt-header-copies N]\n"
             "  ppm_transform solid --output OUT --width W --height H --r R --g G --b B\n"
             "  ppm_transform noise --output OUT --width W --height H --seed N\n"
@@ -1110,6 +1111,7 @@ static void cmd_transform(int argc, char** argv) {
     double paper_splotch_shade = 0.0;
     int paper_splotch_px = 0;
     int corrupt_header_copies = 0;
+    bool white_checker = false;
 
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
@@ -1134,6 +1136,7 @@ static void cmd_transform(int argc, char** argv) {
         else if (strcmp(arg, "--paper-splotch-alpha") == 0) paper_splotch_alpha = parse_f64(require_value("--paper-splotch-alpha"), "paper-splotch-alpha");
         else if (strcmp(arg, "--paper-splotch-shade") == 0) paper_splotch_shade = parse_f64(require_value("--paper-splotch-shade"), "paper-splotch-shade");
         else if (strcmp(arg, "--paper-splotch-px") == 0) paper_splotch_px = parse_i32(require_value("--paper-splotch-px"), "paper-splotch-px");
+        else if (strcmp(arg, "--white-checker") == 0) white_checker = true;
         else if (strcmp(arg, "--corrupt-header-copies") == 0) corrupt_header_copies = parse_i32(require_value("--corrupt-header-copies"), "corrupt-header-copies");
         else die2("ppm_transform: unknown flag ", arg);
     }
@@ -1335,6 +1338,19 @@ static void cmd_transform(int argc, char** argv) {
             die("ppm_transform: page does not contain all header parity carriers");
         }
         fprintf(stdout, "header parity carrier pixels modified: %zu\n", modified_pixels);
+    }
+
+    if (white_checker) {
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                if (((x + y) & 1) == 0) {
+                    size_t index = ((size_t)y * (size_t)w + (size_t)x) * 3u;
+                    current.data[index + 0u] = 255;
+                    current.data[index + 1u] = 255;
+                    current.data[index + 2u] = 255;
+                }
+            }
+        }
     }
 
     write_ppm_p3_ascii(output, &comments, w, h, &current, 0);

@@ -81,6 +81,7 @@ Distortions (applied after baseline roundtrip when requested):
   --paper-splotch-alpha A  Extra paper blend from a splotchy field (0-1).
   --paper-splotch-shade A  Splotchy shading/dimming (0-1).
   --paper-splotch-px PX    Splotch patch size in pixels.
+  --white-checker          Overwrite alternating pixels with white after transforms.
 
 General:
   --help                Show this help message.
@@ -118,6 +119,7 @@ paper_alpha="0"
 paper_splotch_alpha="0"
 paper_splotch_shade="0"
 paper_splotch_px="0"
+white_checker=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -247,6 +249,10 @@ while [[ $# -gt 0 ]]; do
         --paper-splotch-px)
             paper_splotch_px=${2:-}
             shift 2
+            ;;
+        --white-checker)
+            white_checker=1
+            shift
             ;;
         --help)
             usage
@@ -445,6 +451,9 @@ fi
 if [[ $paper_alpha != 0 || $paper_splotch_alpha != 0 || $paper_splotch_shade != 0 || $paper_splotch_px != 0 ]]; then
     transform_needed=1
 fi
+if [[ $white_checker -eq 1 ]]; then
+    transform_needed=1
+fi
 
 affine_check_enabled=0
 affine_tolerance_percent=1
@@ -470,24 +479,28 @@ if [[ $transform_needed -eq 1 ]]; then
     for ppm in "${ppm_targets[@]}"; do
         base_name=$(basename "$ppm")
         transformed_path="$work_dir/${base_name%.*}_transformed.ppm"
-        "$repo_root/test/ppm_transform" transform \
-            --input "$ppm" \
-            --output "$transformed_path" \
-            --scale-x "$scale_x" \
-            --scale-y "$scale_y" \
-            --rotate "$rotate_deg" \
-            --skew-x "$skew_x" \
-            --skew-y "$skew_y" \
-            --border-thickness "$border_thickness" \
-            --border-density "$border_density" \
-            --seed "$transform_seed" \
-            --ink-blot-radius "$ink_blot_radius" \
-            --ink-blot-color "$ink_blot_color" \
-            --paper-color "$paper_color" \
-            --paper-alpha "$paper_alpha" \
-            --paper-splotch-alpha "$paper_splotch_alpha" \
-            --paper-splotch-shade "$paper_splotch_shade" \
-            --paper-splotch-px "$paper_splotch_px"
+        transform_cmd=("$repo_root/test/ppm_transform" transform
+            --input "$ppm"
+            --output "$transformed_path"
+            --scale-x "$scale_x"
+            --scale-y "$scale_y"
+            --rotate "$rotate_deg"
+            --skew-x "$skew_x"
+            --skew-y "$skew_y"
+            --border-thickness "$border_thickness"
+            --border-density "$border_density"
+            --seed "$transform_seed"
+            --ink-blot-radius "$ink_blot_radius"
+            --ink-blot-color "$ink_blot_color"
+            --paper-color "$paper_color"
+            --paper-alpha "$paper_alpha"
+            --paper-splotch-alpha "$paper_splotch_alpha"
+            --paper-splotch-shade "$paper_splotch_shade"
+            --paper-splotch-px "$paper_splotch_px")
+        if [[ $white_checker -eq 1 ]]; then
+            transform_cmd+=(--white-checker)
+        fi
+        "${transform_cmd[@]}"
         transform_outputs+=("$transformed_path")
         idx=$((idx + 1))
     done

@@ -299,3 +299,27 @@ test_case 0071_decode_scale_2701 roundtrip "Fractional affine scan scale 2.701x"
 test_case 0072_decode_scale_4701 roundtrip "Fractional affine scan scale 4.701x" \
     --size 4096 --ecc 0.25 --width 620 --height 620 \
     --scale 4.701 --transform-seed 4701
+
+test_case 0073_tiny_palette_2_white_checker roundtrip "Two-color tiny page with diagonal white damage at 2.701x" \
+    --size 8 --ecc 0 --width 55 --height 55 \
+    --encode-opt "--no-filename" \
+    --encode-opt "--no-page-count" \
+    --palette "White Black" \
+    --payload-literal "makocode" \
+    --scale 2.701 --white-checker --transform-seed 2701
+
+test_case 0074_tiny_palette_4_white_checker roundtrip "Four-color tiny page with diagonal white damage at 2.701x" \
+    --size 8 --ecc 0 --width 55 --height 55 \
+    --encode-opt "--no-filename" \
+    --encode-opt "--no-page-count" \
+    --palette "White Cyan Magenta Yellow" \
+    --payload-literal "makocode" \
+    --scale 2.701 --white-checker --transform-seed 2701
+
+test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payload with diagonal white damage at 2.701x" \
+    --size 8 --ecc 0.25 --width 480 --height 480 \
+    --encode-opt "--no-filename" \
+    --encode-opt "--no-page-count" \
+    --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000" \
+    --payload-literal "makocode" \
+    --scale 2.701 --white-checker --transform-seed 2701
