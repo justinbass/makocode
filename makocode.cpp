@@ -9068,6 +9068,8 @@ namespace MetadataTile {
         double center_x;
         double center_y;
         double pitch_pixels; // pixels per module
+        double pitch_x_pixels;
+        double pitch_y_pixels;
         double angle_rad;
     };
 
@@ -9090,10 +9092,16 @@ namespace MetadataTile {
 
         double c = cos(affine.angle_rad);
         double s = sin(affine.angle_rad);
-        double vx_x = affine.pitch_pixels * c;
-        double vx_y = affine.pitch_pixels * s;
-        double vy_x = -affine.pitch_pixels * s;
-        double vy_y = affine.pitch_pixels * c;
+        double pitch_x = (affine.pitch_x_pixels > 0.0)
+                             ? affine.pitch_x_pixels
+                             : affine.pitch_pixels;
+        double pitch_y = (affine.pitch_y_pixels > 0.0)
+                             ? affine.pitch_y_pixels
+                             : affine.pitch_pixels;
+        double vx_x = pitch_x * c;
+        double vx_y = pitch_x * s;
+        double vy_x = -pitch_y * s;
+        double vy_y = pitch_y * c;
         double half = ((double)TILE_SIDE - 1.0) * 0.5;
 
         double tl_x = affine.center_x + vx_x * (-half) + vy_x * (-half);
@@ -9292,10 +9300,16 @@ namespace MetadataTile {
 
         double c = cos(affine.angle_rad);
         double s = sin(affine.angle_rad);
-        double vx_x = affine.pitch_pixels * c;
-        double vx_y = affine.pitch_pixels * s;
-        double vy_x = -affine.pitch_pixels * s;
-        double vy_y = affine.pitch_pixels * c;
+        double pitch_x = (affine.pitch_x_pixels > 0.0)
+                             ? affine.pitch_x_pixels
+                             : affine.pitch_pixels;
+        double pitch_y = (affine.pitch_y_pixels > 0.0)
+                             ? affine.pitch_y_pixels
+                             : affine.pitch_pixels;
+        double vx_x = pitch_x * c;
+        double vx_y = pitch_x * s;
+        double vy_x = -pitch_y * s;
+        double vy_y = pitch_y * c;
         double half = ((double)TILE_SIDE - 1.0) * 0.5;
 
         // Ensure the transformed tile stays within bounds (data region).
@@ -9676,12 +9690,16 @@ namespace MetadataTile {
             if (values.page_width_pixels == 0u || values.page_height_pixels == 0u) return false;
             double c = fabs(cos(affine.angle_rad));
             double s = fabs(sin(affine.angle_rad));
-            double predicted_width = affine.pitch_pixels *
-                                    ((double)values.page_width_pixels * c +
-                                     (double)values.page_height_pixels * s);
-            double predicted_height = affine.pitch_pixels *
-                                     ((double)values.page_width_pixels * s +
-                                      (double)values.page_height_pixels * c);
+            double pitch_x = (affine.pitch_x_pixels > 0.0)
+                                 ? affine.pitch_x_pixels
+                                 : affine.pitch_pixels;
+            double pitch_y = (affine.pitch_y_pixels > 0.0)
+                                 ? affine.pitch_y_pixels
+                                 : affine.pitch_pixels;
+            double predicted_width = (double)values.page_width_pixels * pitch_x * c +
+                                     (double)values.page_height_pixels * pitch_y * s;
+            double predicted_height = (double)values.page_width_pixels * pitch_x * s +
+                                      (double)values.page_height_pixels * pitch_y * c;
             double tolerance_fraction = compact_image_search ? 0.10 : 0.01;
             double width_tolerance = (double)width_pixels * tolerance_fraction;
             double height_tolerance = (double)height_pixels * tolerance_fraction;
@@ -9693,10 +9711,16 @@ namespace MetadataTile {
         auto could_match_tile_magic = [&](const AffineParams& affine) -> bool {
             double c = cos(affine.angle_rad);
             double s = sin(affine.angle_rad);
-            double vx_x = affine.pitch_pixels * c;
-            double vx_y = affine.pitch_pixels * s;
-            double vy_x = -affine.pitch_pixels * s;
-            double vy_y = affine.pitch_pixels * c;
+            double pitch_x = (affine.pitch_x_pixels > 0.0)
+                                 ? affine.pitch_x_pixels
+                                 : affine.pitch_pixels;
+            double pitch_y = (affine.pitch_y_pixels > 0.0)
+                                 ? affine.pitch_y_pixels
+                                 : affine.pitch_pixels;
+            double vx_x = pitch_x * c;
+            double vx_y = pitch_x * s;
+            double vy_x = -pitch_y * s;
+            double vy_y = pitch_y * c;
             double half = ((double)TILE_SIDE - 1.0) * 0.5;
             double corners_x[4] = {
                 affine.center_x - vx_x * half - vy_x * half,
@@ -9783,28 +9807,104 @@ namespace MetadataTile {
             return true;
         };
 
+        double image_aspect = (double)width_pixels / (double)height_pixels;
+        if (!compact_image_search && fabs(image_aspect - 1.0) > 0.02) {
+            double geometric_mean = sqrt((double)width_pixels * (double)height_pixels);
+            int logical_target = (int)floor(geometric_mean / 2.5 + 0.5);
+            for (int target_delta = 0; target_delta <= 6; ++target_delta) {
+                for (int target_direction = 0; target_direction < (target_delta == 0 ? 1 : 2); ++target_direction) {
+                    int target = logical_target + (target_direction == 0 ? target_delta : -target_delta);
+                    if (target < (int)TILE_SIDE || target >= (int)width_pixels || target >= (int)height_pixels) {
+                        continue;
+                    }
+                    double pitch_x = (double)width_pixels / (double)target;
+                    double pitch_y = (double)height_pixels / (double)target;
+                    double pitch = 0.5 * (pitch_x + pitch_y);
+                    if (pitch_x < 0.90 || pitch_y < 0.90) continue;
+                    int center_span_x = (int)clamp_double(pitch_x * 6.0, 16.0, 512.0);
+                    int center_span_y = (int)clamp_double(pitch_y * 6.0, 16.0, 512.0);
+                    int center_step_x = (int)(pitch_x * 0.5);
+                    int center_step_y = (int)(pitch_y * 0.5);
+                    if (center_step_x < 2) center_step_x = 2;
+                    if (center_step_y < 2) center_step_y = 2;
+                    int center_limit_x = (center_span_x / center_step_x) * center_step_x;
+                    int center_limit_y = (center_span_y / center_step_y) * center_step_y;
+                    int center_rings_x = center_limit_x / center_step_x;
+                    int center_rings_y = center_limit_y / center_step_y;
+                    int max_center_ring = center_rings_x > center_rings_y
+                                              ? center_rings_x
+                                              : center_rings_y;
+                    for (int ring = 0; ring <= max_center_ring; ++ring) {
+                        for (int dy_step = -center_rings_y; dy_step <= center_rings_y; ++dy_step) {
+                            for (int dx_step = -center_rings_x; dx_step <= center_rings_x; ++dx_step) {
+                                int abs_dx_step = dx_step < 0 ? -dx_step : dx_step;
+                                int abs_dy_step = dy_step < 0 ? -dy_step : dy_step;
+                                if ((abs_dx_step > abs_dy_step ? abs_dx_step : abs_dy_step) != ring) continue;
+                                AffineParams affine = {};
+                                affine.center_x = base_center_x + (double)(dx_step * center_step_x);
+                                affine.center_y = base_center_y + (double)(dy_step * center_step_y);
+                                affine.pitch_pixels = pitch;
+                                affine.pitch_x_pixels = pitch_x;
+                                affine.pitch_y_pixels = pitch_y;
+                                affine.angle_rad = 0.0;
+                                if (!could_match_tile_magic(affine)) continue;
+                                u32 header = 0u;
+                                bool inverted = false;
+                                double confidence = 0.0;
+                                if (!match_tile_header_affine(pixel_data_rgb,
+                                                              width_pixels,
+                                                              height_pixels,
+                                                              data_height_pixels,
+                                                              affine,
+                                                              header,
+                                                              inverted,
+                                                              confidence,
+                                                              true,
+                                                              true) ||
+                                    confidence < 0.80) {
+                                    continue;
+                                }
+                                Values candidate_values;
+                                ByteBuffer candidate_palette_text;
+                                if (!decode_tile_affine(pixel_data_rgb,
+                                                        width_pixels,
+                                                        height_pixels,
+                                                        data_height_pixels,
+                                                        affine,
+                                                        candidate_values,
+                                                        candidate_palette_text) ||
+                                    !affine_page_geometry_matches(candidate_values, affine)) {
+                                    continue;
+                                }
+                                out_values = candidate_values;
+                                byte_buffer_move(out_palette_text, candidate_palette_text);
+                                if (found_affine_out) *found_affine_out = affine;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Stage 1: find a header match (cheap), then refine and fully decode.
         // NOTE: `estimate_square_page_from_image()` is tuned for general pages and is not a reliable
         // predictor of metadata-tile pixels-per-module (e.g. it may prefer ~2x over ~3x).
-        // Use a broader pitch search window here.
-        // Keep the search broad enough for the distorted cases in the suite,
-        // but avoid the explosive Cartesian grid from the original values
-        // (96px span, 0.1deg angle, 0.1px pitch) which can take minutes.
-        // Heuristics:
-        //   - center search span scales with the guessed pitch but is capped;
-        //   - slightly coarser center/angle/pitch steps.
-        double pitch_min = 0.90;
-        double pitch_max = 4.20;
-        if (pitch_guess > 0.0) {
-            double lower = pitch_guess * 0.60;
-            double upper = pitch_guess * 2.10;
-            pitch_min = clamp_double(lower, 0.90, 4.20);
-            pitch_max = clamp_double(upper, pitch_min + 0.20, 4.20);
+        // Search every geometrically possible tile pitch. The image bounds provide
+        // the upper limit; the scale estimate only determines which candidates run first.
+        const double pitch_min = 0.90;
+        double pitch_max = ((double)(width_pixels < data_height_pixels
+                                         ? width_pixels
+                                         : data_height_pixels)) /
+                           ((double)TILE_SIDE - 1.0);
+        if (pitch_max < pitch_min) return false;
+        double pitch_anchor = pitch_guess;
+        if (!(pitch_anchor > 0.0)) {
+            pitch_anchor = pitch_min;
         }
-        const int kCenterSpan = compact_image_search
-                                    ? 32
-                                    : (int)clamp_double(pitch_guess * 16.0, 32.0, 64.0);
-        const int kCenterStepCoarse = compact_image_search ? 1 : 6;
+        pitch_anchor = clamp_double(pitch_anchor, pitch_min, pitch_max);
+        const double kPitchSearchRatio = 1.05;
+        const double kPitchSearchStep = 0.10;
         const double kAngleStepCoarse = compact_image_search ? 0.5 : 0.1;
         double angle_candidates[201];
         u32 angle_candidate_count = 0u;
@@ -9827,48 +9927,69 @@ namespace MetadataTile {
         int center_offset_x[4225];
         int center_offset_y[4225];
         u32 center_offset_count = 0u;
-        if (compact_image_search) {
-            for (int radius = 0; radius <= kCenterSpan; ++radius) {
-                for (int dy = -radius; dy <= radius; ++dy) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
-                        int abs_dx = dx < 0 ? -dx : dx;
-                        int abs_dy = dy < 0 ? -dy : dy;
-                        if ((abs_dx > abs_dy ? abs_dx : abs_dy) != radius) continue;
-                        center_offset_x[center_offset_count] = dx;
-                        center_offset_y[center_offset_count] = dy;
-                        ++center_offset_count;
-                    }
-                }
-            }
-        } else {
-            for (int dy = -kCenterSpan; dy <= kCenterSpan; dy += kCenterStepCoarse) {
-                for (int dx = -kCenterSpan; dx <= kCenterSpan; dx += kCenterStepCoarse) {
-                    center_offset_x[center_offset_count] = dx;
-                    center_offset_y[center_offset_count] = dy;
-                    ++center_offset_count;
-                }
-            }
-        }
-
-        
-
         bool have_best = false;
+        bool have_verified_candidate = false;
         double best_score = 1e30;
         AffineParams best_affine = {};
-        for (u32 center_index = 0u; center_index < center_offset_count; ++center_index) {
-                int dx = center_offset_x[center_index];
-                int dy = center_offset_y[center_index];
-                double cx = base_center_x + (double)dx;
-                double cy = base_center_y + (double)dy;
-                for (u32 angle_index = 0u; angle_index < angle_candidate_count; ++angle_index) {
-                    double angle = angle_candidates[angle_index];
-                    double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                    for (double pitch = pitch_min; pitch <= pitch_max + 1e-9; pitch += 0.10) {
-                        AffineParams affine;
+        Values verified_values;
+        ByteBuffer verified_palette_text;
+        AffineParams verified_affine = {};
+        for (int pitch_direction = 0; pitch_direction < 2 && !have_verified_candidate; ++pitch_direction) {
+            double pitch = pitch_direction == 0
+                               ? pitch_anchor
+                               : pitch_anchor / kPitchSearchRatio;
+            while ((pitch_direction == 0 ? pitch <= pitch_max + 1e-9
+                                         : pitch >= pitch_min - 1e-9) &&
+                   !have_verified_candidate) {
+                center_offset_count = 0u;
+                if (compact_image_search) {
+                    for (int radius = 0; radius <= 32; ++radius) {
+                        for (int dy = -radius; dy <= radius; ++dy) {
+                            for (int dx = -radius; dx <= radius; ++dx) {
+                                int abs_dx = dx < 0 ? -dx : dx;
+                                int abs_dy = dy < 0 ? -dy : dy;
+                                if ((abs_dx > abs_dy ? abs_dx : abs_dy) != radius) continue;
+                                center_offset_x[center_offset_count] = dx;
+                                center_offset_y[center_offset_count] = dy;
+                                ++center_offset_count;
+                            }
+                        }
+                    }
+                } else {
+                    int center_span = (int)clamp_double(pitch * 6.0, 16.0, 512.0);
+                    int center_step = (int)(pitch * 0.5);
+                    if (center_step < 2) center_step = 2;
+                    int first_offset = (center_span / center_step) * center_step;
+                    for (int dy = -first_offset; dy <= first_offset; dy += center_step) {
+                        for (int dx = -first_offset; dx <= first_offset; dx += center_step) {
+                            center_offset_x[center_offset_count] = dx;
+                            center_offset_y[center_offset_count] = dy;
+                            ++center_offset_count;
+                        }
+                    }
+                }
+                for (u32 center_index = 0u;
+                     center_index < center_offset_count && !have_verified_candidate;
+                     ++center_index) {
+                    int dx = center_offset_x[center_index];
+                    int dy = center_offset_y[center_index];
+                    double cx = base_center_x + (double)dx;
+                    double cy = base_center_y + (double)dy;
+                    for (u32 angle_index = 0u;
+                         angle_index < angle_candidate_count && !have_verified_candidate;
+                         ++angle_index) {
+                        double angle = angle_candidates[angle_index];
+                        double angle_rad = angle * (3.14159265358979323846 / 180.0);
+                        AffineParams affine = {};
                         affine.center_x = cx;
                         affine.center_y = cy;
                         affine.pitch_pixels = pitch;
+                        affine.pitch_x_pixels = pitch;
+                        affine.pitch_y_pixels = pitch;
                         affine.angle_rad = angle_rad;
+                        if (!could_match_tile_magic(affine)) {
+                            continue;
+                        }
                         u32 header = 0u;
                         bool inverted = false;
                         double confidence = 0.0;
@@ -9884,6 +10005,25 @@ namespace MetadataTile {
                         }
                         if (confidence < 0.55) {
                             continue;
+                        }
+                        if (!compact_image_search && confidence >= 0.80) {
+                            Values candidate_values;
+                            ByteBuffer candidate_palette_text;
+                            if (decode_tile_affine(pixel_data_rgb,
+                                                   width_pixels,
+                                                   height_pixels,
+                                                   data_height_pixels,
+                                                   affine,
+                                                   candidate_values,
+                                                   candidate_palette_text)) {
+                                verified_values = candidate_values;
+                                byte_buffer_move(verified_palette_text, candidate_palette_text);
+                                verified_affine = affine;
+                                best_affine = affine;
+                                have_best = true;
+                                have_verified_candidate = true;
+                                break;
+                            }
                         }
                         if (compact_image_search && confidence >= 0.80) {
                             Values candidate_values;
@@ -9907,7 +10047,7 @@ namespace MetadataTile {
                         }
                         double score = -confidence;
                         score += fabs(angle) * 0.01;
-                        score += fabs(pitch - pitch_guess) * 0.05;
+                        score += fabs(log(pitch / pitch_guess)) * 0.01;
                         score += (fabs((double)dx) + fabs((double)dy)) * 0.0005;
                         if (score < best_score) {
                             best_score = score;
@@ -9916,174 +10056,27 @@ namespace MetadataTile {
                         }
                     }
                 }
-        }
-
-
-        if (!have_best) {
-            // The broad search uses a 0.10-pixel pitch grid and a 6-pixel center grid.
-            // A near-native scan can land between both grids (for example, 1.05 pixels
-            // per module after a small rotation), leaving no valid header to refine.
-            // Retry that common scale range with subpixel centers, finer pitch steps, and
-            // a coarser angle sweep. The tile is placed near the page center, so search
-            // outward in rings to reach likely locations before the edge of the window.
-            const int kFineCenterRadiusHalfPixels = 32; // 16 pixels, in half-pixel steps
-            for (int ring = 0; ring <= kFineCenterRadiusHalfPixels; ++ring) {
-                for (int dy = -ring; dy <= ring; ++dy) {
-                    for (int dx = -ring; dx <= ring; ++dx) {
-                        int abs_dx = dx < 0 ? -dx : dx;
-                        int abs_dy = dy < 0 ? -dy : dy;
-                        if ((abs_dx > abs_dy ? abs_dx : abs_dy) != ring) {
-                            continue;
-                        }
-                        double cx = base_center_x + (double)dx * 0.5;
-                        double cy = base_center_y + (double)dy * 0.5;
-                        for (int angle_step = -20; angle_step <= 20; ++angle_step) {
-                            double angle = (double)angle_step * 0.25;
-                            double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                            for (int pitch_hundredths = 90; pitch_hundredths <= 130; ++pitch_hundredths) {
-                                double pitch = (double)pitch_hundredths * 0.01;
-                                AffineParams affine;
-                                affine.center_x = cx;
-                                affine.center_y = cy;
-                                affine.pitch_pixels = pitch;
-                                affine.angle_rad = angle_rad;
-                                if (!could_match_tile_magic(affine)) {
-                                    continue;
-                                }
-                                u32 header = 0u;
-                                bool inverted = false;
-                                double confidence = 0.0;
-                                bool fine_header_match = match_tile_header_affine(pixel_data_rgb,
-                                                                                   width_pixels,
-                                                                                   height_pixels,
-                                                                                   data_height_pixels,
-                                                                                   affine,
-                                                                                   header,
-                                                                                   inverted,
-                                                                                   confidence,
-                                                                                   true);
-                                if (!fine_header_match || confidence < 0.80) {
-                                    continue;
-                                }
-                                Values coarse_values;
-                                ByteBuffer coarse_palette_text;
-                                if (decode_tile_affine(pixel_data_rgb,
-                                                       width_pixels,
-                                                       height_pixels,
-                                                       data_height_pixels,
-                                                       affine,
-                                                       coarse_values,
-                                                       coarse_palette_text) &&
-                                    affine_page_geometry_matches(coarse_values, affine)) {
-                                    out_values = coarse_values;
-                                    byte_buffer_move(out_palette_text, coarse_palette_text);
-                                    if (found_affine_out) {
-                                        *found_affine_out = affine;
-                                    }
-
-                                    return true;
-                                }
-                                // Rank local header alignments first. Full payload decoding
-                                // includes RS and CRC checks, so run it only for the strongest
-                                // candidates instead of every point in the refinement grid.
-                                const u32 kPayloadCandidateLimit = 128u;
-                                AffineParams payload_candidates[kPayloadCandidateLimit];
-                                double payload_candidate_confidences[kPayloadCandidateLimit] = {};
-                                u32 payload_candidate_count = 0u;
-                                for (int center_y_tenths = -2; center_y_tenths <= 2; ++center_y_tenths) {
-                                    for (int center_x_tenths = -2; center_x_tenths <= 2; ++center_x_tenths) {
-                                        for (int angle_quarters = -4; angle_quarters <= 4; ++angle_quarters) {
-                                            double refined_angle = angle + (double)angle_quarters * 0.025;
-                                            double refined_angle_rad = refined_angle * (3.14159265358979323846 / 180.0);
-                                            for (int pitch_steps = -5; pitch_steps <= 5; ++pitch_steps) {
-                                                AffineParams refined;
-                                                refined.center_x = cx + (double)center_x_tenths * 0.1;
-                                                refined.center_y = cy + (double)center_y_tenths * 0.1;
-                                                refined.pitch_pixels = pitch + (double)pitch_steps * 0.002;
-                                                refined.angle_rad = refined_angle_rad;
-                                                u32 refined_header = 0u;
-                                                bool refined_inverted = false;
-                                                double candidate_confidence = 0.0;
-                                                bool refined_header_match = match_tile_header_affine(pixel_data_rgb,
-                                                                                                    width_pixels,
-                                                                                                    height_pixels,
-                                                                                                    data_height_pixels,
-                                                                                                    refined,
-                                                                                                    refined_header,
-                                                                                                    refined_inverted,
-                                                                                                    candidate_confidence,
-                                                                                                    true);
-                                                if (!refined_header_match) {
-                                                    continue;
-                                                }
-                                                if (refined_header != header) {
-                                                    continue;
-                                                }
-                                                bool candidate_palette_valid = (refined_header & 0x0Fu) >= 2u &&
-                                                                               (refined_header & 0x0Fu) <= MAX_CUSTOM_PALETTE_COLORS;
-                                                if (!candidate_palette_valid ||
-                                                    candidate_confidence + 0.05 < confidence) {
-                                                    continue;
-                                                }
-                                                u32 insert_index = 0u;
-                                                while (insert_index < payload_candidate_count &&
-                                                       payload_candidate_confidences[insert_index] >= candidate_confidence) {
-                                                    ++insert_index;
-                                                }
-                                                if (insert_index >= kPayloadCandidateLimit) {
-                                                    continue;
-                                                }
-                                                u32 shifted_count = payload_candidate_count;
-                                                if (shifted_count >= kPayloadCandidateLimit) {
-                                                    shifted_count = kPayloadCandidateLimit - 1u;
-                                                } else {
-                                                    ++payload_candidate_count;
-                                                }
-                                                while (shifted_count > insert_index) {
-                                                    payload_candidates[shifted_count] = payload_candidates[shifted_count - 1u];
-                                                    payload_candidate_confidences[shifted_count] = payload_candidate_confidences[shifted_count - 1u];
-                                                    --shifted_count;
-                                                }
-                                                payload_candidates[insert_index] = refined;
-                                                payload_candidate_confidences[insert_index] = candidate_confidence;
-                                            }
-                                        }
-                                    }
-                                }
-                                for (u32 candidate_index = 0u;
-                                     candidate_index < payload_candidate_count;
-                                     ++candidate_index) {
-                                    Values fine_values;
-                                    ByteBuffer fine_palette_text;
-                                    const AffineParams& candidate_affine = payload_candidates[candidate_index];
-                                    bool candidate_decoded = decode_tile_affine(pixel_data_rgb,
-                                                                                width_pixels,
-                                                                                height_pixels,
-                                                                                data_height_pixels,
-                                                                                candidate_affine,
-                                                                                fine_values,
-                                                                                fine_palette_text);
-                                    bool candidate_geometry = candidate_decoded &&
-                                                              affine_page_geometry_matches(fine_values,
-                                                                                           candidate_affine);
-                                    if (!candidate_geometry) {
-                                        continue;
-                                    }
-                                    out_values = fine_values;
-                                    byte_buffer_move(out_palette_text, fine_palette_text);
-                                    if (found_affine_out) {
-                                        *found_affine_out = candidate_affine;
-                                    }
-
-                                    return true;
-                                }
-                            }
-                        }
-                    }
+                if (pitch_direction == 0) {
+                    double fine_limit = pitch_anchor * 2.10;
+                    if (fine_limit > pitch_max) fine_limit = pitch_max;
+                    double next_pitch = (pitch < fine_limit - 1e-9)
+                                            ? pitch + kPitchSearchStep
+                                            : pitch * kPitchSearchRatio;
+                    if (!(next_pitch > pitch)) break;
+                    pitch = next_pitch;
+                } else {
+                    double fine_floor = pitch_anchor * 0.60;
+                    if (fine_floor < pitch_min) fine_floor = pitch_min;
+                    double next_pitch = (pitch > fine_floor + 1e-9)
+                                            ? pitch - kPitchSearchStep
+                                            : pitch / kPitchSearchRatio;
+                    if (!(next_pitch < pitch)) break;
+                    pitch = next_pitch;
                 }
             }
-
         }
+
+
         if (!have_best) {
             return false;
         }
@@ -10137,22 +10130,33 @@ namespace MetadataTile {
             
             return true;
         };
-        const int kRefineSpan = 6;
+        double refine_center_span = best_affine.pitch_pixels * 0.30;
+        if (refine_center_span < 6.0) refine_center_span = 6.0;
+        double refine_center_step = best_affine.pitch_pixels * 0.05;
+        if (refine_center_step < 1.0) refine_center_step = 1.0;
+        int refine_center_steps = (int)ceil(refine_center_span / refine_center_step);
         const double kRefineAngleSpan = 0.75;
-        const double kRefinePitchSpan = 0.25;
-        for (int dy = -kRefineSpan; dy <= kRefineSpan; ++dy) {
-            for (int dx = -kRefineSpan; dx <= kRefineSpan; ++dx) {
-                double cx = best_affine.center_x + (double)dx;
-                double cy = best_affine.center_y + (double)dy;
+        double refine_pitch_span = best_affine.pitch_pixels * 0.03;
+        if (refine_pitch_span < 0.25) refine_pitch_span = 0.25;
+        double refine_pitch_step = best_affine.pitch_pixels * 0.0005;
+        if (refine_pitch_step < 0.01) refine_pitch_step = 0.01;
+        for (int dy = -refine_center_steps; dy <= refine_center_steps; ++dy) {
+            for (int dx = -refine_center_steps; dx <= refine_center_steps; ++dx) {
+                double center_dx = (double)dx * refine_center_step;
+                double center_dy = (double)dy * refine_center_step;
+                double cx = best_affine.center_x + center_dx;
+                double cy = best_affine.center_y + center_dy;
                 double base_angle_deg = best_affine.angle_rad * (180.0 / 3.14159265358979323846);
                 for (double angle = base_angle_deg - kRefineAngleSpan; angle <= base_angle_deg + kRefineAngleSpan + 1e-9; angle += 0.05) {
                     double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                    for (double pitch = best_affine.pitch_pixels - kRefinePitchSpan; pitch <= best_affine.pitch_pixels + kRefinePitchSpan + 1e-9; pitch += 0.01) {
+                    for (double pitch = best_affine.pitch_pixels - refine_pitch_span; pitch <= best_affine.pitch_pixels + refine_pitch_span + 1e-9; pitch += refine_pitch_step) {
                         if (!(pitch > 0.0)) continue;
                         AffineParams affine;
                         affine.center_x = cx;
                         affine.center_y = cy;
                         affine.pitch_pixels = pitch;
+                        affine.pitch_x_pixels = pitch;
+                        affine.pitch_y_pixels = pitch;
                         affine.angle_rad = angle_rad;
                         if (!could_match_tile_magic(affine)) {
                             continue;
@@ -10175,7 +10179,7 @@ namespace MetadataTile {
                         double rank_score = -refined_confidence +
                                             fabs(angle - base_angle_deg) * 0.01 +
                                             fabs(pitch - best_affine.pitch_pixels) * 0.05 +
-                                            (fabs((double)dx) + fabs((double)dy)) * 0.0005;
+                                            (fabs(center_dx) + fabs(center_dy)) * 0.0005;
                         if (refine_payload_candidate_count < kRefinePayloadCandidateLimit) {
                             u32 insert_index = refine_payload_candidate_count++;
                             refine_payload_candidates[insert_index] = affine;
@@ -10221,24 +10225,26 @@ namespace MetadataTile {
         }
         // Preserve the exhaustive legacy path if ranking does not find a valid tile.
         // This keeps every previously searched alignment available as a fallback.
-        for (int dy = -kRefineSpan; dy <= kRefineSpan; ++dy) {
-            for (int dx = -kRefineSpan; dx <= kRefineSpan; ++dx) {
-                double cx = best_affine.center_x + (double)dx;
-                double cy = best_affine.center_y + (double)dy;
+        for (int dy = -refine_center_steps; dy <= refine_center_steps; ++dy) {
+            for (int dx = -refine_center_steps; dx <= refine_center_steps; ++dx) {
+                double cx = best_affine.center_x + (double)dx * refine_center_step;
+                double cy = best_affine.center_y + (double)dy * refine_center_step;
                 double base_angle_deg = best_affine.angle_rad *
                                         (180.0 / 3.14159265358979323846);
                 for (double angle = base_angle_deg - kRefineAngleSpan;
                      angle <= base_angle_deg + kRefineAngleSpan + 1e-9;
                      angle += 0.05) {
                     double angle_rad = angle * (3.14159265358979323846 / 180.0);
-                    for (double pitch = best_affine.pitch_pixels - kRefinePitchSpan;
-                         pitch <= best_affine.pitch_pixels + kRefinePitchSpan + 1e-9;
-                         pitch += 0.01) {
+                    for (double pitch = best_affine.pitch_pixels - refine_pitch_span;
+                         pitch <= best_affine.pitch_pixels + refine_pitch_span + 1e-9;
+                         pitch += refine_pitch_step) {
                         if (!(pitch > 0.0)) continue;
                         AffineParams affine;
                         affine.center_x = cx;
                         affine.center_y = cy;
                         affine.pitch_pixels = pitch;
+                        affine.pitch_x_pixels = pitch;
+                        affine.pitch_y_pixels = pitch;
                         affine.angle_rad = angle_rad;
                         if (try_refined_decode(affine)) {
 
@@ -10250,6 +10256,12 @@ namespace MetadataTile {
         }
 
 
+        if (have_verified_candidate) {
+            out_values = verified_values;
+            byte_buffer_move(out_palette_text, verified_palette_text);
+            if (found_affine_out) *found_affine_out = verified_affine;
+            return true;
+        }
         return false;
     }
 } // namespace MetadataTile
@@ -13872,24 +13884,15 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 attempt_downsample(target_w, target_w);
             }
         }
-        // Try simple downsample factors (integer and common fractional) when guessing fails to reveal metadata.
+        // Try a geometric downsample sweep when the affine tile search and logical-size
+        // estimate both fail. This keeps the legacy fallback scale-independent.
         if (!tile_available) {
-            const double factors[] = {1.75, 2.0, 2.25, 2.4, 2.5, 2.6, 2.75, 3.0};
-            bool factor_success = false;
-            for (u32 fx = 0u; fx < sizeof(factors) / sizeof(factors[0]); ++fx) {
-                for (u32 fy = 0u; fy < sizeof(factors) / sizeof(factors[0]); ++fy) {
-                    double factor_x = factors[fx];
-                    double factor_y = factors[fy];
-                    if (factor_x <= 1.0 || factor_y <= 1.0) continue;
-                    u32 target_w = (u32)floor(((double)base_width / factor_x) + 0.5);
-                    u32 target_h = (u32)floor(((double)base_height / factor_y) + 0.5);
-                    
-                    if (attempt_downsample(target_w, target_h)) {
-                        factor_success = true;
-                        break;
-                    }
-                }
-                if (factor_success) break;
+            double max_factor = ((double)(base_width < base_height ? base_width : base_height)) /
+                                (double)MetadataTile::TILE_SIDE;
+            for (double factor = 1.25; factor <= max_factor && !tile_available; factor *= 1.25) {
+                u32 target_w = (u32)floor(((double)base_width / factor) + 0.5);
+                u32 target_h = (u32)floor(((double)base_height / factor) + 0.5);
+                attempt_downsample(target_w, target_h);
             }
         }
         if (!tile_available && downsample_buffer_ready) {
@@ -15955,6 +15958,30 @@ struct RotationEstimateCandidate {
                                                              fabs(affine_scale_y - scale_yd) <= scale_yd * 0.05;
                                         if (tile_dx * tile_dx + tile_dy * tile_dy <= 144.0 &&
                                             angle_error <= 1.0 && scale_matches) {
+                                            double snapped_angle = floor(state.rotation_degrees_value * 2.0 + 0.5) * 0.5;
+                                            if (!state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+                                                fabs(state.rotation_degrees_value - snapped_angle) < 1e-9 &&
+                                                fabs(makocode::image::normalize_angle(affine_angle - snapped_angle)) < 0.05 &&
+                                                fabs(affine_scale_x - affine_scale_y) <=
+                                                    0.01 * ((affine_scale_x + affine_scale_y) * 0.5)) {
+                                                double radians = snapped_angle *
+                                                                 (3.14159265358979323846 / 180.0);
+                                                double c = cos(radians);
+                                                double s = sin(radians);
+                                                double rigid_scale = 0.5 * (affine_scale_x + affine_scale_y);
+                                                double center_x = ((double)logical_width - 1.0) * 0.5;
+                                                double center_y = ((double)data_height - 1.0) * 0.5;
+                                                fiducial_affine.tx +=
+                                                    (fiducial_affine.a00 - rigid_scale * c) * center_x +
+                                                    (fiducial_affine.a01 + rigid_scale * s) * center_y;
+                                                fiducial_affine.ty +=
+                                                    (fiducial_affine.a10 - rigid_scale * s) * center_x +
+                                                    (fiducial_affine.a11 - rigid_scale * c) * center_y;
+                                                fiducial_affine.a00 = rigid_scale * c;
+                                                fiducial_affine.a01 = -rigid_scale * s;
+                                                fiducial_affine.a10 = rigid_scale * s;
+                                                fiducial_affine.a11 = rigid_scale * c;
+                                            }
                                             state.affine_transform = fiducial_affine;
                                             state.has_affine_transform = true;
                                             recompute_skew_flags();

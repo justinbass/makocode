@@ -109,7 +109,7 @@ test_case 0025_ecc_multi_page_massive roundtrip "262 KiB ECC multi-page stress" 
 
 test_case 0026_multi_page_distorted roundtrip "Multi-page payload with scale and rotation distortions" \
     --size 32768 --ecc 0.5 --width 620 --height 620 --multi-page \
-    --scale 1.05 --rotate 1 --transform-seed 7331
+    --scale 2.10 --rotate 1 --transform-seed 7331
 
 test_case 0027_palette_base5_custom roundtrip "Custom palette/base-5 mode" \
     --size 16384 --ecc 0.25 --width 640 --height 640 \
@@ -287,3 +287,15 @@ test_case 0068_decode_parse_retry script "Generic decoder parse failure retries 
 
 test_case 0069_decode_scale_318 script "Decode a 55x55 page rendered at 3.18 pixels per module" \
     test_decode_scale_318.sh
+
+test_case 0070_decode_scale_2071 roundtrip "Fractional affine scan scale 2.071x" \
+    --size 4096 --ecc 0.25 --width 620 --height 620 \
+    --scale 2.071 --transform-seed 2071
+
+test_case 0071_decode_scale_2701 roundtrip "Fractional affine scan scale 2.701x" \
+    --size 4096 --ecc 0.25 --width 620 --height 620 \
+    --scale 2.701 --transform-seed 2701
+
+test_case 0072_decode_scale_4701 roundtrip "Fractional affine scan scale 4.701x" \
+    --size 4096 --ecc 0.25 --width 620 --height 620 \
+    --scale 4.701 --transform-seed 4701
