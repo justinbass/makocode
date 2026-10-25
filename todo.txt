@@ -40,3 +40,5 @@ Finalize
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones.
 - Reorganize tests logically from simple to complex, and document each one in full.
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs?
+- Makocode for ca cert install on Android phone (needs Android app)
+- Optional fiducial markings and center code, use known error position to correct in place. Data could simply be linear across the page...
