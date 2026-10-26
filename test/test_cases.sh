@@ -323,3 +323,6 @@ test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payloa
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
+
+test_case 0076_decode_affine_cell_sampling script "Affine retry sampling preserves translated cell coordinates" \
+    test_decode_affine_cell_sampling.sh

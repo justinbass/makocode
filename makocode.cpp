@@ -16980,10 +16980,26 @@ struct RotationEstimateCandidate {
                 cell_scale_y > 1.01 &&
                 analysis_width > 0u &&
                 analysis_height > 0u) {
-                double sample_center_x = (((double)logical_col + 0.5) * cell_scale_x) - 0.5 + warp_dx;
-                double sample_center_y = (((double)logical_row + 0.5) * cell_scale_y) - 0.5 + warp_dy;
-                double half_width = cell_scale_x * 0.4;
-                double half_height = cell_scale_y * 0.4;
+                double logical_center_x = (double)logical_col + 0.5;
+                double logical_center_y = (double)logical_row + 0.5;
+                double sample_center_x = (logical_center_x * cell_scale_x) - 0.5 + warp_dx;
+                double sample_center_y = (logical_center_y * cell_scale_y) - 0.5 + warp_dy;
+                double sample_width_scale = cell_scale_x;
+                double sample_height_scale = cell_scale_y;
+                if (state.has_affine_transform) {
+                    sample_center_x = state.affine_transform.a00 * logical_center_x +
+                                      state.affine_transform.a01 * logical_center_y +
+                                      state.affine_transform.tx + warp_dx;
+                    sample_center_y = state.affine_transform.a10 * logical_center_x +
+                                      state.affine_transform.a11 * logical_center_y +
+                                      state.affine_transform.ty + warp_dy;
+                    sample_width_scale = sqrt(state.affine_transform.a00 * state.affine_transform.a00 +
+                                              state.affine_transform.a10 * state.affine_transform.a10);
+                    sample_height_scale = sqrt(state.affine_transform.a01 * state.affine_transform.a01 +
+                                               state.affine_transform.a11 * state.affine_transform.a11);
+                }
+                double half_width = sample_width_scale * 0.4;
+                double half_height = sample_height_scale * 0.4;
                 double left = sample_center_x - half_width;
                 double right = sample_center_x + half_width;
                 double top = sample_center_y - half_height;
