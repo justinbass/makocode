@@ -15141,6 +15141,57 @@ struct RotationEstimateCandidate {
             state.has_affine_transform = true;
         }
     }
+    if (tile_affine_hint_available && state.has_affine_transform &&
+        !has_rotation && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        width < 400u && height < 400u &&
+        expected_width > 0u && expected_height > 0u &&
+        expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull &&
+        fabs(tile_affine_hint.angle_rad) < 0.01) {
+        u32 min_x = (u32)width;
+        u32 min_y = (u32)height;
+        u32 max_x = 0u;
+        u32 max_y = 0u;
+        bool have_nonwhite_pixel = false;
+        for (u32 y = 0u; y < (u32)height; ++y) {
+            for (u32 x = 0u; x < (u32)width; ++x) {
+                usize pixel = ((usize)y * (usize)width + (usize)x) * 3u;
+                if (pixel_data[pixel] == 255u &&
+                    pixel_data[pixel + 1u] == 255u &&
+                    pixel_data[pixel + 2u] == 255u) {
+                    continue;
+                }
+                if (x < min_x) min_x = x;
+                if (x > max_x) max_x = x;
+                if (y < min_y) min_y = y;
+                if (y > max_y) max_y = y;
+                have_nonwhite_pixel = true;
+            }
+        }
+        if (have_nonwhite_pixel && min_x > 0u && min_y > 0u &&
+            max_x + 1u < (u32)width && max_y + 1u < (u32)height) {
+            double bounds_scale_x = ((double)max_x - (double)min_x + 1.0) /
+                                    (double)expected_width;
+            double bounds_scale_y = ((double)max_y - (double)min_y + 1.0) /
+                                    (double)expected_height;
+            double bounds_scale = 0.5 * (bounds_scale_x + bounds_scale_y);
+            double scale_spread = (bounds_scale > 0.0)
+                                      ? fabs(bounds_scale_x - bounds_scale_y) / bounds_scale
+                                      : 1.0;
+            double tile_scale_error = (tile_scale > 0.0)
+                                          ? fabs(bounds_scale - tile_scale) / tile_scale
+                                          : 1.0;
+            if (bounds_scale_x > 1.005 && bounds_scale_y > 1.005 &&
+                scale_spread < 0.08 && tile_scale_error < 0.05) {
+                state.affine_transform.a00 = bounds_scale_x;
+                state.affine_transform.a01 = 0.0;
+                state.affine_transform.a10 = 0.0;
+                state.affine_transform.a11 = bounds_scale_y;
+                state.affine_transform.tx = (double)min_x - 0.5;
+                state.affine_transform.ty = (double)min_y - 0.5;
+                state.has_affine_transform = true;
+            }
+        }
+    }
     if (tile_affine_hint_available && tile_affine_hint_trusted && has_rotation &&
         !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
         expected_width > 0u && expected_height > 0u &&

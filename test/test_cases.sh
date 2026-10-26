@@ -326,3 +326,6 @@ test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payloa
 
 test_case 0076_decode_affine_cell_sampling script "Affine retry sampling preserves translated cell coordinates" \
     test_decode_affine_cell_sampling.sh
+
+test_case 0077_decode_small_scan script "A 137x132 scanned page preserves an eight-byte payload" \
+    test_decode_small_scan.sh
