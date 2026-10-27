@@ -14920,7 +14920,7 @@ struct RotationEstimateCandidate {
                                                            : 0.5 * (shear_values[shear_count / 2u - 1u] +
                                                                     shear_values[shear_count / 2u]);
                             double activation_threshold = rotation_consensus
-                                                             ? 6.0
+                                                             ? 5.0
                                                              : ((fabs(rotation_degrees_est) >= 0.1) ? 0.3 : 3.0);
                             if (fabs(skew_y_pixels_est) >= activation_threshold) {
                                 state.has_skew_y_pixels = true;
@@ -15151,23 +15151,61 @@ struct RotationEstimateCandidate {
         u32 min_y = (u32)height;
         u32 max_x = 0u;
         u32 max_y = 0u;
-        bool have_nonwhite_pixel = false;
+        u32 border_luminance_histogram[256] = {};
+        u32 border_pixel_count = 0u;
+        for (u32 y = 0u; y < (u32)height; ++y) {
+            for (u32 x = 0u; x < (u32)width; ++x) {
+                if (x != 0u && y != 0u && x + 1u != (u32)width && y + 1u != (u32)height) {
+                    continue;
+                }
+                usize pixel = ((usize)y * (usize)width + (usize)x) * 3u;
+                u32 luminance = (u32)(MetadataTile::rgb_luminance_u8(pixel_data[pixel],
+                                                                     pixel_data[pixel + 1u],
+                                                                     pixel_data[pixel + 2u]) + 0.5);
+                ++border_luminance_histogram[luminance];
+                ++border_pixel_count;
+            }
+        }
+        u32 border_target = border_pixel_count / 2u;
+        u32 border_background_luminance = 255u;
+        u32 border_accumulated = 0u;
+        for (u32 luminance = 0u; luminance <= 255u; ++luminance) {
+            border_accumulated += border_luminance_histogram[luminance];
+            if (border_accumulated > border_target) {
+                border_background_luminance = luminance;
+                break;
+            }
+        }
+        u32 dark_pixel_threshold = (border_background_luminance > 20u)
+                                       ? (border_background_luminance - 20u)
+                                       : 0u;
+        u32 row_dark_counts[400] = {};
+        u32 column_dark_counts[400] = {};
         for (u32 y = 0u; y < (u32)height; ++y) {
             for (u32 x = 0u; x < (u32)width; ++x) {
                 usize pixel = ((usize)y * (usize)width + (usize)x) * 3u;
-                if (pixel_data[pixel] == 255u &&
-                    pixel_data[pixel + 1u] == 255u &&
-                    pixel_data[pixel + 2u] == 255u) {
+                u32 luminance = (u32)(MetadataTile::rgb_luminance_u8(pixel_data[pixel],
+                                                                     pixel_data[pixel + 1u],
+                                                                     pixel_data[pixel + 2u]) + 0.5);
+                if (luminance >= dark_pixel_threshold) {
                     continue;
                 }
-                if (x < min_x) min_x = x;
-                if (x > max_x) max_x = x;
-                if (y < min_y) min_y = y;
-                if (y > max_y) max_y = y;
-                have_nonwhite_pixel = true;
+                ++row_dark_counts[y];
+                ++column_dark_counts[x];
             }
         }
-        if (have_nonwhite_pixel && min_x > 0u && min_y > 0u &&
+        const u32 minimum_line_support = 3u;
+        for (u32 x = 0u; x < (u32)width; ++x) {
+            if (column_dark_counts[x] < minimum_line_support) continue;
+            if (x < min_x) min_x = x;
+            if (x > max_x) max_x = x;
+        }
+        for (u32 y = 0u; y < (u32)height; ++y) {
+            if (row_dark_counts[y] < minimum_line_support) continue;
+            if (y < min_y) min_y = y;
+            if (y > max_y) max_y = y;
+        }
+        if (min_x < (u32)width && min_y < (u32)height && min_x > 0u && min_y > 0u &&
             max_x + 1u < (u32)width && max_y + 1u < (u32)height) {
             double bounds_scale_x = ((double)max_x - (double)min_x + 1.0) /
                                     (double)expected_width;
