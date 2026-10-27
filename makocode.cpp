@@ -15183,6 +15183,10 @@ struct RotationEstimateCandidate {
         u32 column_dark_counts[400] = {};
         for (u32 y = 0u; y < (u32)height; ++y) {
             for (u32 x = 0u; x < (u32)width; ++x) {
+                if (x == 0u || y == 0u || x + 1u == (u32)width ||
+                    y + 1u == (u32)height) {
+                    continue;
+                }
                 usize pixel = ((usize)y * (usize)width + (usize)x) * 3u;
                 u32 luminance = (u32)(MetadataTile::rgb_luminance_u8(pixel_data[pixel],
                                                                      pixel_data[pixel + 1u],

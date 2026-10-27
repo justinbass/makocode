@@ -329,3 +329,6 @@ test_case 0076_decode_affine_cell_sampling script "Affine retry sampling preserv
 
 test_case 0077_decode_small_scan script "Decodes grayscale affine bias in a 137x132 scan" \
     test_decode_small_scan.sh
+
+test_case 0078_decode_synthetic_scan_damage script "Generated blurred 4.5x scan remains decodable" \
+    test_decode_synthetic_scan_damage.sh
