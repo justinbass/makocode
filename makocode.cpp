@@ -15219,11 +15219,15 @@ struct RotationEstimateCandidate {
             double scale_spread = (bounds_scale > 0.0)
                                       ? fabs(bounds_scale_x - bounds_scale_y) / bounds_scale
                                       : 1.0;
-            double tile_scale_error = (tile_scale > 0.0)
-                                          ? fabs(bounds_scale - tile_scale) / tile_scale
-                                          : 1.0;
+            double tile_scale_error_x = (tile_scale > 0.0)
+                                            ? fabs(bounds_scale_x - tile_scale) / tile_scale
+                                            : 1.0;
+            double tile_scale_error_y = (tile_scale > 0.0)
+                                            ? fabs(bounds_scale_y - tile_scale) / tile_scale
+                                            : 1.0;
             if (bounds_scale_x > 1.005 && bounds_scale_y > 1.005 &&
-                scale_spread < 0.08 && tile_scale_error < 0.05) {
+                scale_spread < 0.08 &&
+                tile_scale_error_x < 0.03 && tile_scale_error_y < 0.03) {
                 state.affine_transform.a00 = bounds_scale_x;
                 state.affine_transform.a01 = 0.0;
                 state.affine_transform.a10 = 0.0;

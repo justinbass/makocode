@@ -14,6 +14,11 @@ if [[ ${1:-} == --label && -n ${2:-} ]]; then
     label=$2
     shift 2
 fi
+margin_noise=0
+if [[ ${1:-} == --margin-noise ]]; then
+    margin_noise=1
+    shift
+fi
 if [[ $# -ne 0 ]]; then
     echo 'test_decode_synthetic_scan_damage: unexpected arguments' >&2
     exit 2
@@ -26,12 +31,18 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/decoded_control" \
     "$work_dir/decoded_soft" "$work_dir/decoded_damage" \
     "$work_dir/tmp/makocode_probe_enc"
-printf makocode > "$work_dir/tmp/makocode_probe_enc/makocode.bin"
+payload_path=tmp/makocode_probe_enc/makocode.bin
+if [[ $margin_noise == 1 ]]; then
+    payload_path=payload.bin
+    printf 'scan-test' > "$work_dir/$payload_path"
+else
+    printf makocode > "$work_dir/$payload_path"
+fi
 
 (
     cd "$work_dir"
     "$makocode_bin" encode \
-        --input=tmp/makocode_probe_enc/makocode.bin \
+        "--input=$payload_path" \
         --ecc=0 --page-width=55 --page-height=55 \
         --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=synthetic > /dev/null
@@ -40,8 +51,10 @@ printf makocode > "$work_dir/tmp/makocode_probe_enc/makocode.bin"
 # Render a 2.24-pixel/module page with four-by-four subpixel coverage. Six
 # border marks prevent a dark-bounds override; three off-center ink pixels
 # affect the tile-derived affine sampler while leaving true centers readable.
+# --margin-noise instead adds an isolated mark outside the page, allowing the
+# dark-bounds override to mistake that mark for part of the page geometry.
 python3 - "$work_dir/encoded/synthetic.ppm" "$work_dir/damaged.ppm" \
-    "$work_dir/recovered.ppm" "$work_dir/soft.ppm" <<'PY'
+    "$work_dir/recovered.ppm" "$work_dir/soft.ppm" "$margin_noise" <<'PY'
 from pathlib import Path
 import math
 import sys
@@ -53,7 +66,8 @@ assert len(pixels) == 55 * 55 * 3
 modules = [int(sum(pixels[index:index + 3]) < 384)
            for index in range(0, len(pixels), 3)]
 width, height = 137, 132
-pitch, offset_x, offset_y = 2.24, 2.2, 3.5
+margin_noise = sys.argv[5] == '1'
+pitch, offset_x, offset_y = 2.24, 2.6 if margin_noise else 2.2, 3.5
 base = []
 for y in range(height):
     row = []
@@ -68,11 +82,18 @@ for y in range(height):
         row.append(round(230 - 200 * dark / 16))
     base.append(row)
 
-for x, y in ((0, 1), (0, 2), (0, 3), (1, 0), (2, 0), (3, 0)):
-    base[y][x] = 80
+if not margin_noise:
+    for x, y in ((0, 1), (0, 2), (0, 3), (1, 0), (2, 0), (3, 0)):
+        base[y][x] = 80
 damaged = [row.copy() for row in base]
-for x, y in ((6, 78), (6, 79), (7, 79)):
-    damaged[y][x] = 0
+if margin_noise:
+    assert offset_x + 55 * pitch < 133  # Mark lies outside the page.
+    for y in range(125, 128):
+        for x in range(133, 136):
+            damaged[y][x] = 80
+else:
+    for x, y in ((6, 78), (6, 79), (7, 79)):
+        damaged[y][x] = 0
 
 with Path(sys.argv[2]).open('w', encoding='ascii') as output:
     output.write(f'P3\n{width} {height}\n255\n')
@@ -102,19 +123,16 @@ PY
 
 "$makocode_bin" decode "--output-dir=$work_dir/decoded_control" \
     "$work_dir/recovered.ppm" >"$work_dir/control.log" 2>&1
-cmp --silent "$work_dir/tmp/makocode_probe_enc/makocode.bin" \
-    "$work_dir/decoded_control/tmp/makocode_probe_enc/makocode.bin"
+cmp --silent "$work_dir/$payload_path" "$work_dir/decoded_control/$payload_path"
 "$makocode_bin" decode "--output-dir=$work_dir/decoded_soft" \
     "$work_dir/soft.ppm" >"$work_dir/soft.log" 2>&1
-cmp --silent "$work_dir/tmp/makocode_probe_enc/makocode.bin" \
-    "$work_dir/decoded_soft/tmp/makocode_probe_enc/makocode.bin"
+cmp --silent "$work_dir/$payload_path" "$work_dir/decoded_soft/$payload_path"
 
 status=0
 "$makocode_bin" decode --debug "--output-dir=$work_dir/decoded_damage" \
     "$work_dir/damaged.ppm" >"$work_dir/damage.log" 2>&1 || status=$?
 if [[ $status -eq 0 ]]; then
-    cmp --silent "$work_dir/tmp/makocode_probe_enc/makocode.bin" \
-        "$work_dir/decoded_damage/tmp/makocode_probe_enc/makocode.bin"
+    cmp --silent "$work_dir/$payload_path" "$work_dir/decoded_damage/$payload_path"
     exit 0
 fi
 

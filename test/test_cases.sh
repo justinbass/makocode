@@ -332,3 +332,6 @@ test_case 0077_decode_small_scan script "Decodes grayscale affine bias in a 137x
 
 test_case 0078_decode_synthetic_scan_damage script "Generated blurred 4.5x scan remains decodable" \
     test_decode_synthetic_scan_damage.sh
+
+test_case 0079_decode_scan_margin_noise script "Generated scan margin noise still decodes" \
+    test_decode_synthetic_scan_damage.sh --margin-noise
