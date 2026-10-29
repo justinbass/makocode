@@ -566,6 +566,36 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet
           + (f"{every_copy['scale']:g}x" if every_copy else "none"))
 
 
+def crop_scan(scan_path, original_width, original_height, sheet_path):
+    if original_width <= 0 or original_height <= 0:
+        raise ValueError("original page width and height must be positive")
+
+    rows, samples, source_pixels = read_calibration_source(
+        sheet_path, original_width, original_height
+    )
+    scan_width, scan_height, scan_pixels = read_p3_ppm(scan_path)
+    transform = fit_scan_transform(
+        rows, samples, 55, 55, source_pixels,
+        scan_width, scan_height, scan_pixels,
+    )
+    print(
+        f"Bounds fit at {transform[4]:.3g}x, "
+        f"rotated {math.degrees(transform[5]):.2f} degrees"
+    )
+
+    output_dir = Path.cwd() / "calibration-crops" / scan_path.stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for sample in samples:
+        crop = map_sample_to_scan(
+            sample, transform, scan_width, scan_height
+        )
+        crop_path = output_dir / (
+            f"{sample['scale']:g}x-copy{sample['copy'] + 1:02d}.ppm"
+        )
+        write_sample_crop(crop_path, scan_width, scan_pixels, crop)
+    print(f"Wrote {len(samples)} crops to {output_dir}")
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -588,6 +618,16 @@ def parse_args(argv):
                                help="original calibration page height in pixels")
     decode_parser.add_argument("--sheet", type=Path, default=default_output,
                                help=f"original calibration sheet (default: {default_output})")
+
+    crop_parser = commands.add_parser("crop", help="crop calibration samples without decoding")
+    crop_parser.add_argument("scan", type=Path, metavar="SCAN.ppm",
+                             help="scanned calibration sheet to crop")
+    crop_parser.add_argument("--width", type=int, required=True,
+                             help="original calibration page width in pixels")
+    crop_parser.add_argument("--height", type=int, required=True,
+                             help="original calibration page height in pixels")
+    crop_parser.add_argument("--sheet", type=Path, default=default_output,
+                             help=f"original calibration sheet (default: {default_output})")
     return parser.parse_args(argv)
 
 
@@ -630,6 +670,10 @@ def main(argv=None):
     args = parse_args(argv)
     repo_root = Path(__file__).resolve().parent.parent
     makocode_bin = repo_root / "makocode"
+
+    if args.command == "crop":
+        crop_scan(args.scan, args.width, args.height, args.sheet)
+        return 0
 
     if not makocode_bin.is_file():
         raise ValueError(f"makocode executable not found at {makocode_bin}; build it first")
