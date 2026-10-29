@@ -207,8 +207,100 @@ def write_sample_crop(path, page_width, page_pixels, sample):
             write_p3_pixel_row(output, page_pixels[start:end])
 
 
-def fit_scan_transform(samples, scan_width, scan_height, scan_pixels):
-    """Fit a scale, rotation, and offset from the calibration grid's ink."""
+def read_calibration_source(sheet_path, page_width, page_height):
+    sheet_width, sheet_height, sheet_pixels = read_p3_ppm(sheet_path)
+    if (sheet_width, sheet_height) != (page_width, page_height):
+        raise ValueError(
+            f"calibration sheet dimensions are {sheet_width}x{sheet_height}; "
+            f"expected {page_width}x{page_height}"
+        )
+
+    rows, samples = make_rows(55, 55, page_width, page_height)
+    if not rows:
+        raise ValueError("original page dimensions are too small to contain a calibration sample")
+
+    source_sample = samples[0]
+    source_pixels = bytearray()
+    for y in range(source_sample["height_px"]):
+        start = ((source_sample["y"] + y) * sheet_width + source_sample["x"]) * 3
+        end = start + source_sample["width_px"] * 3
+        source_pixels.extend(sheet_pixels[start:end])
+    return rows, samples, source_pixels
+
+
+def fit_scan_transform(rows, samples, source_width, source_height, source_pixels,
+                       scan_width, scan_height, scan_pixels):
+    """Fit the transform by matching the expected and scanned ink moments."""
+    # Barcode cells are sparse and labels also contribute ink, so sample-box
+    # rectangles do not describe the page's actual dark-pixel distribution.
+    expected_x_hist = {}
+    expected_y_hist = {}
+
+    def expected_point(x, y):
+        x_bin = math.floor(x)
+        y_bin = math.floor(y)
+        expected_x_hist[x_bin] = expected_x_hist.get(x_bin, 0) + 1
+        expected_y_hist[y_bin] = expected_y_hist.get(y_bin, 0) + 1
+        return x, y
+
+    def moments(points):
+        count = 0
+        sum_x = sum_y = sum_xx = sum_yy = sum_xy = 0.0
+        for x, y in points:
+            count += 1
+            sum_x += x
+            sum_y += y
+            sum_xx += x * x
+            sum_yy += y * y
+            sum_xy += x * y
+        if count == 0:
+            return None
+        mean_x = sum_x / count
+        mean_y = sum_y / count
+        return (
+            count,
+            mean_x,
+            mean_y,
+            sum_xx / count - mean_x * mean_x,
+            sum_yy / count - mean_y * mean_y,
+            sum_xy / count - mean_x * mean_y,
+        )
+
+    def expected_ink_points():
+        for sample in samples:
+            for dy in range(sample["height_px"]):
+                source_y = dy * source_height // sample["height_px"]
+                for dx in range(sample["width_px"]):
+                    source_x = dx * source_width // sample["width_px"]
+                    offset = (source_y * source_width + source_x) * 3
+                    red, green, blue = source_pixels[offset:offset + 3]
+                    if (red * 299 + green * 587 + blue * 114) // 1000 <= 160:
+                        yield expected_point(
+                            sample["x"] + dx + 0.5,
+                            sample["y"] + dy + 0.5,
+                        )
+
+        for row in rows:
+            label_y = row["y"] + (row["height_px"] - LABEL_HEIGHT) // 2
+            for glyph_row in range(7):
+                for char_index, char in enumerate(row["label"]):
+                    char_x = MARGIN + char_index * 6 * LABEL_SCALE
+                    for glyph_x, bit in enumerate(FONT[char][glyph_row]):
+                        if bit == "1":
+                            for dy in range(LABEL_SCALE):
+                                for dx in range(LABEL_SCALE):
+                                    yield expected_point(
+                                        char_x + glyph_x * LABEL_SCALE + dx + 0.5,
+                                        label_y + glyph_row * LABEL_SCALE + dy + 0.5,
+                                    )
+
+    expected_ink = moments(expected_ink_points())
+    if expected_ink is None:
+        raise ValueError("could not find ink in the generated calibration samples")
+    _, expected_ink_x, expected_ink_y, _, _, _ = expected_ink
+
+    # The sample bounds provide a stable large-scale orientation and size
+    # estimate. Use the actual ink profiles below only to refine translation.
     expected_weight = sum(sample["width_px"] * sample["height_px"] for sample in samples)
     expected_x = sum(
         sample["width_px"] * sample["height_px"]
@@ -220,7 +312,6 @@ def fit_scan_transform(samples, scan_width, scan_height, scan_pixels):
         * (sample["y"] + sample["height_px"] / 2)
         for sample in samples
     ) / expected_weight
-
     expected_xx = expected_yy = expected_xy = 0.0
     for sample in samples:
         width = sample["width_px"]
@@ -238,31 +329,20 @@ def fit_scan_transform(samples, scan_width, scan_height, scan_pixels):
     # Sample at most about 1.5 million scan points. Ink is dark while paper
     # texture and scanner background are much lighter.
     step = max(1, (max(scan_width, scan_height) + 1499) // 1500)
-    ink_count = 0
-    observed_x = observed_y = 0.0
-    observed_xx = observed_yy = observed_xy = 0.0
-    for y in range(step // 2, scan_height, step):
-        for x in range(step // 2, scan_width, step):
-            offset = (y * scan_width + x) * 3
-            red = scan_pixels[offset]
-            green = scan_pixels[offset + 1]
-            blue = scan_pixels[offset + 2]
-            if (red * 299 + green * 587 + blue * 114) // 1000 > 160:
-                continue
-            ink_count += 1
-            observed_x += x + 0.5
-            observed_y += y + 0.5
-            observed_xx += (x + 0.5) ** 2
-            observed_yy += (y + 0.5) ** 2
-            observed_xy += (x + 0.5) * (y + 0.5)
+    def observed_ink_points():
+        for y in range(step // 2, scan_height, step):
+            for x in range(step // 2, scan_width, step):
+                offset = (y * scan_width + x) * 3
+                red = scan_pixels[offset]
+                green = scan_pixels[offset + 1]
+                blue = scan_pixels[offset + 2]
+                if (red * 299 + green * 587 + blue * 114) // 1000 <= 160:
+                    yield x + 0.5, y + 0.5
 
-    if ink_count < 100:
+    observed = moments(observed_ink_points())
+    if observed is None or observed[0] < 100:
         raise ValueError("could not find the calibration marks in the scanned image")
-    observed_x /= ink_count
-    observed_y /= ink_count
-    observed_xx = observed_xx / ink_count - observed_x * observed_x
-    observed_yy = observed_yy / ink_count - observed_y * observed_y
-    observed_xy = observed_xy / ink_count - observed_x * observed_y
+    _, observed_x, observed_y, observed_xx, observed_yy, observed_xy = observed
 
     def principal_axis(xx, yy, xy):
         return 0.5 * math.atan2(2 * xy, xx - yy)
@@ -287,7 +367,45 @@ def fit_scan_transform(samples, scan_width, scan_height, scan_pixels):
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("could not determine the calibration grid scale")
 
-    return expected_x, expected_y, observed_x, observed_y, scale, angle
+    # Refine the translation by aligning the expected row and column ink
+    # profiles with the scanned profiles. This corrects centroid bias from
+    # print density, paper marks, and scan thresholding.
+    max_shift = max(128, round(max(expected_x_hist) * 0.1))
+    min_expected_x = min(expected_x_hist) - max_shift
+    max_expected_x = max(expected_x_hist) + max_shift
+    min_expected_y = min(expected_y_hist) - max_shift
+    max_expected_y = max(expected_y_hist) + max_shift
+    observed_x_hist = {}
+    observed_y_hist = {}
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    for scan_x, scan_y in observed_ink_points():
+        dx = (scan_x - observed_x) / scale
+        dy = (scan_y - observed_y) / scale
+        page_x = cosine * dx + sine * dy + expected_x
+        page_y = -sine * dx + cosine * dy + expected_y
+        if not (min_expected_x <= page_x <= max_expected_x
+                and min_expected_y <= page_y <= max_expected_y):
+            continue
+        x_bin = math.floor(page_x)
+        y_bin = math.floor(page_y)
+        observed_x_hist[x_bin] = observed_x_hist.get(x_bin, 0) + 1
+        observed_y_hist[y_bin] = observed_y_hist.get(y_bin, 0) + 1
+
+    def robust_bounds(hist):
+        threshold = max(1, max(hist.values()) * 0.001)
+        positions = [position for position, count in hist.items()
+                     if count >= threshold]
+        return min(positions), max(positions)
+
+    expected_y_bounds = robust_bounds(expected_y_hist)
+    observed_y_bounds = robust_bounds(observed_y_hist)
+    y_shift = ((observed_y_bounds[0] + observed_y_bounds[1])
+               - (expected_y_bounds[0] + expected_y_bounds[1])) / 2
+    observed_x -= round(scale * sine * y_shift)
+    observed_y += round(scale * cosine * y_shift)
+
+    return expected_x, expected_ink_y, observed_x, observed_y, scale, angle
 
 
 def map_sample_to_scan(sample, transform, scan_width, scan_height):
@@ -320,23 +438,25 @@ def map_sample_to_scan(sample, transform, scan_width, scan_height):
     }
 
 
-def analyze_scan(makocode_bin, scan_path, original_width, original_height):
+def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet_path):
     page_width, page_height, page_pixels = read_p3_ppm(scan_path)
-    rows, samples = make_rows(55, 55, original_width, original_height)
-    if not rows:
-        raise ValueError("original page dimensions are too small to contain a calibration sample")
-
-    transform = fit_scan_transform(samples, page_width, page_height, page_pixels)
-    print(
-        f"Detected calibration grid at {transform[4]:.3g}x, "
-        f"rotated {math.degrees(transform[5]):.2f} degrees.",
-        file=sys.stderr,
-        flush=True,
+    rows, samples, source_pixels = read_calibration_source(
+        sheet_path, original_width, original_height
     )
-
-    total_samples = len(samples)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
         work_dir = Path(temporary_directory)
+        transform = fit_scan_transform(
+            rows, samples, 55, 55, source_pixels,
+            page_width, page_height, page_pixels,
+        )
+        print(
+            f"Detected calibration grid at {transform[4]:.3g}x, "
+            f"rotated {math.degrees(transform[5]):.2f} degrees.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        total_samples = len(samples)
         decoded_samples = {}
 
         def decode_sample(original_sample, status):
@@ -383,9 +503,28 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height):
                 first_success_row = row_index - 1
 
         results = []
+        if first_success_row is None:
+            print(
+                "No first-copy probe decoded; checking the other copies in each row...",
+                file=sys.stderr,
+                flush=True,
+            )
+            for row_index, row in enumerate(rows):
+                row_samples = [samples[index] for index in row["sample_indexes"]]
+                for original_sample in row_samples[1:]:
+                    if decode_sample(
+                        original_sample,
+                        f"Probe row {row_index + 1}/{len(rows)}",
+                    ):
+                        first_success_row = row_index
+                        break
+                if first_success_row is not None:
+                    break
+                results.append((row, 0, len(row_samples)))
+
         if first_success_row is not None:
             print(
-                f"First-copy boundary begins at {rows[first_success_row]['scale']:g}x; "
+                f"First successful sample is at {rows[first_success_row]['scale']:g}x; "
                 "checking every copy from there upward.",
                 file=sys.stderr,
                 flush=True,
@@ -447,6 +586,8 @@ def parse_args(argv):
                                help="original calibration page width in pixels")
     decode_parser.add_argument("--height", type=int, required=True,
                                help="original calibration page height in pixels")
+    decode_parser.add_argument("--sheet", type=Path, default=default_output,
+                               help=f"original calibration sheet (default: {default_output})")
     return parser.parse_args(argv)
 
 
@@ -496,7 +637,7 @@ def main(argv=None):
     if args.command == "decode":
         if args.width <= 0 or args.height <= 0:
             raise ValueError("original page width and height must be positive")
-        analyze_scan(makocode_bin, args.scan, args.width, args.height)
+        analyze_scan(makocode_bin, args.scan, args.width, args.height, args.sheet)
         return 0
 
     if args.width <= 0 or args.height <= 0:
