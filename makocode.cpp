@@ -3926,14 +3926,10 @@ static void LenEnc_SetPrices(CLenEnc *p, UInt32 posState, UInt32 numSymbols, UIn
   UInt32 i = 0;
   for (i = 0; i < kLenNumLowSymbols; i++)
   {
-    if (i >= numSymbols)
-      return;
     prices[i] = a0 + RcTree_GetPrice(p->low + (posState << kLenNumLowBits), kLenNumLowBits, i, ProbPrices);
   }
   for (; i < kLenNumLowSymbols + kLenNumMidSymbols; i++)
   {
-    if (i >= numSymbols)
-      return;
     prices[i] = b0 + RcTree_GetPrice(p->mid + (posState << kLenNumMidBits), kLenNumMidBits, i - kLenNumLowSymbols, ProbPrices);
   }
   for (; i < numSymbols; i++)
@@ -4895,7 +4891,7 @@ static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, Bool useLimits, UInt32 maxPackSize
 
 #define kBigHashDicLimit ((UInt32)1 << 24)
 
-static SRes LzmaEnc_Alloc(CLzmaEnc *p, UInt32 keepWindowSize, ISzAlloc *alloc, ISzAlloc *allocBig)
+static SRes LzmaEnc_Alloc(CLzmaEnc *p, ISzAlloc *alloc, ISzAlloc *allocBig)
 {
   UInt32 beforeSize = kNumOpts;
   if (!RangeEnc_Alloc(&p->rc, alloc))
@@ -4918,8 +4914,6 @@ static SRes LzmaEnc_Alloc(CLzmaEnc *p, UInt32 keepWindowSize, ISzAlloc *alloc, I
 
   p->matchFinderBase.bigHash = (p->dictSize > kBigHashDicLimit);
 
-  if (beforeSize + p->dictSize < keepWindowSize)
-    beforeSize = keepWindowSize - p->dictSize;
 
   {
     if (!MatchFinder_Create(&p->matchFinderBase, p->dictSize, beforeSize, p->numFastBytes, LZMA_MATCH_LEN_MAX, allocBig))
@@ -5000,13 +4994,13 @@ void LzmaEnc_InitPrices(CLzmaEnc *p)
   LenPriceEnc_UpdateTables(&p->repLenEnc, 1 << p->pb, p->ProbPrices);
 }
 
-static SRes LzmaEnc_AllocAndInit(CLzmaEnc *p, UInt32 keepWindowSize, ISzAlloc *alloc, ISzAlloc *allocBig)
+static SRes LzmaEnc_AllocAndInit(CLzmaEnc *p, ISzAlloc *alloc, ISzAlloc *allocBig)
 {
   p->distTableSize = 54;
 
   p->finished = False;
   p->result = SZ_OK;
-  RINOK(LzmaEnc_Alloc(p, keepWindowSize, alloc, allocBig));
+  RINOK(LzmaEnc_Alloc(p, alloc, allocBig));
   LzmaEnc_Init(p);
   LzmaEnc_InitPrices(p);
   p->nowPos64 = 0;
@@ -5019,7 +5013,7 @@ static SRes LzmaEnc_Prepare(CLzmaEncHandle pp, ISeqInStream *inStream, ISeqOutSt
   CLzmaEnc *p = (CLzmaEnc *)pp;
   p->inStream = inStream;
   p->rc.outStream = outStream;
-  return LzmaEnc_AllocAndInit(p, 0, alloc, allocBig);
+  return LzmaEnc_AllocAndInit(p, alloc, allocBig);
 }
 
 static void LzmaEnc_SetInputBuf(CLzmaEnc *p, const Byte *src, SizeT srcLen)
@@ -5094,11 +5088,6 @@ SRes LzmaEnc_WriteProperties(CLzmaEncHandle pp, Byte *props, SizeT *size)
     if (dictSize <= ((UInt32)2 << i))
     {
       dictSize = (2 << i);
-      break;
-    }
-    if (dictSize <= ((UInt32)3 << i))
-    {
-      dictSize = (3 << i);
       break;
     }
   }
@@ -6165,9 +6154,6 @@ static bool chacha20_poly1305_encrypt(const u8* key,
         return false;
     }
     ciphertext.size = plaintext_length;
-    if (plaintext_length > 0u && !ciphertext.data) {
-        return false;
-    }
     u8 initial_block[64];
     chacha20_block(key, nonce, 0u, initial_block);
     if (plaintext_length > 0u) {
@@ -6401,9 +6387,6 @@ static DecryptStatus decrypt_payload_buffer(const u8* data,
     }
     const u8* salt = data + 20u;
     const u8* nonce = data + 36u;
-    if (data_length < ENCRYPTION_HEADER_BYTES + ENCRYPTION_TAG_BYTES) {
-        return DecryptStatus_FormatError;
-    }
     usize cipher_bytes = data_length - ENCRYPTION_HEADER_BYTES - ENCRYPTION_TAG_BYTES;
     if ((u64)cipher_bytes != plain_bytes) {
         return DecryptStatus_FormatError;
@@ -6440,13 +6423,6 @@ static DecryptStatus decrypt_payload_buffer(const u8* data,
         if (auth_failed) {
             return DecryptStatus_AuthFailed;
         }
-        return DecryptStatus_FormatError;
-    }
-    if ((u64)plaintext.size != plain_bytes) {
-        for (u32 i = 0u; i < 32u; ++i) {
-            key[i] = 0u;
-        }
-        plaintext.release();
         return DecryptStatus_FormatError;
     }
     for (u32 i = 0u; i < 32u; ++i) {
@@ -6665,42 +6641,20 @@ static bool lzma_compress(const u8* input, usize length, ByteBuffer& output) {
     }
     baseline += length;
     if (USIZE_MAX_VALUE - baseline < extra) {
-        baseline = USIZE_MAX_VALUE;
-    } else {
-        baseline += extra;
+        return false;
     }
-    if (baseline < header + 1024u) {
-        baseline = header + 1024u;
-    }
+    baseline += extra;
     if (!output.ensure(baseline)) {
         return false;
     }
     size_t props_size = LZMA_PROPS_SIZE;
     u8 props[LZMA_PROPS_SIZE];
     while (true) {
-        if (output.capacity < header + 1u) {
-            if (!output.ensure(header + 1u)) {
-                return false;
-            }
-        }
-        if (output.capacity < header) {
-            return false;
-        }
         usize avail_usize = output.capacity - header;
         if (avail_usize > (usize)SIZE_MAX) {
             return false;
         }
         size_t available = (size_t)avail_usize;
-        if (available == 0u) {
-            usize grow = output.capacity + 1024u;
-            if (grow <= output.capacity || grow > USIZE_MAX_VALUE) {
-                grow = USIZE_MAX_VALUE;
-            }
-            if (!output.ensure(grow)) {
-                return false;
-            }
-            continue;
-        }
         size_t dest_len = available;
         size_t src_len = (size_t)length;
         props_size = LZMA_PROPS_SIZE;
@@ -6721,23 +6675,11 @@ static bool lzma_compress(const u8* input, usize length, ByteBuffer& output) {
         if (status != SZ_ERROR_OUTPUT_EOF) {
             return false;
         }
-        usize new_capacity = output.capacity ? (output.capacity * 2u) : (header + 1024u);
-        if (new_capacity <= output.capacity || new_capacity > USIZE_MAX_VALUE) {
-            if (output.capacity >= USIZE_MAX_VALUE) {
-                return false;
-            }
-            usize delta = (output.capacity / 2u) + 1024u;
-            if (USIZE_MAX_VALUE - output.capacity < delta) {
-                new_capacity = USIZE_MAX_VALUE;
-            } else {
-                new_capacity = output.capacity + delta;
-            }
-        }
+        usize new_capacity = output.capacity * 2u;
         if (!output.reserve(new_capacity)) {
             return false;
         }
     }
-    return false;
 }
 
 static bool lzma_decompress(const u8* input,
@@ -10534,14 +10476,8 @@ static bool compute_footer_layout(u32 page_width_pixels,
     }
     layout.footer_height_pixels = (u32)footer_height;
     layout.data_height_pixels = page_height_pixels - layout.footer_height_pixels;
-    if (layout.data_height_pixels == 0u) {
-        return false;
-    }
     if (layout.has_text) {
         layout.text_top_row = layout.data_height_pixels;
-        if ((u64)layout.text_top_row + (u64)layout.glyph_height_pixels > page_height_pixels) {
-            return false;
-        }
     } else {
         layout.text_top_row = 0u;
     }
@@ -10805,9 +10741,6 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
             ++cursor;
         }
         usize token_length = cursor - start;
-        if (token_length == 0u) {
-            continue;
-        }
         if (count >= MAX_CUSTOM_PALETTE_COLORS) {
             console_write(2, prefix);
             console_line(2, ": --palette supports at most 16 colors");
@@ -10831,13 +10764,6 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
     }
     for (u32 i = 0u; i < count; ++i) {
         for (u32 j = i + 1u; j < count; ++j) {
-            bool both_named = (token_ids[i] != NAMED_COLOR_INVALID) &&
-                               (token_ids[j] != NAMED_COLOR_INVALID);
-            if (both_named && token_ids[i] == token_ids[j]) {
-                console_write(2, prefix);
-                console_line(2, ": --palette cannot repeat colors");
-                return false;
-            }
             if (palette_colors_equal(token_colors[i], token_colors[j])) {
                 console_write(2, prefix);
                 console_line(2, ": --palette cannot repeat colors");
@@ -11503,7 +11429,6 @@ static bool write_buffer_to_file(const char* path,
 }
 
 
-static const u32 MAX_FIDUCIAL_SUBGRID_ENTRIES = 1024u;
 
 struct PpmParserState {
     const u8* data;
@@ -11554,14 +11479,8 @@ struct PpmParserState {
     u64 skew_src_width_value;
     bool has_skew_src_height;
     u64 skew_src_height_value;
-    bool has_skew_margin_x;
-    double skew_margin_x_value;
-    bool has_skew_x_pixels;
     bool has_skew_y_pixels;
-    double skew_x_pixels_value;
     double skew_y_pixels_value;
-    bool has_skew_bottom_x;
-    double skew_bottom_x_value;
     bool has_fiducial_size;
     u64 fiducial_size_value;
     bool has_fiducial_columns;
@@ -11570,14 +11489,6 @@ struct PpmParserState {
     u64 fiducial_rows_value;
     bool has_fiducial_margin;
     u64 fiducial_margin_value;
-    bool has_fiducial_col_offsets;
-    u32 fiducial_col_offset_count;
-    u64 fiducial_col_offsets[MAX_FIDUCIAL_SUBGRID_ENTRIES];
-    bool has_fiducial_row_offsets;
-    u32 fiducial_row_offset_count;
-    u64 fiducial_row_offsets[MAX_FIDUCIAL_SUBGRID_ENTRIES];
-    bool has_tile_pitch;
-    double tile_pitch_value;
 
     PpmParserState()
         : data(0),
@@ -11627,14 +11538,8 @@ struct PpmParserState {
           skew_src_width_value(0u),
           has_skew_src_height(false),
           skew_src_height_value(0u),
-          has_skew_margin_x(false),
-          skew_margin_x_value(0.0),
-          has_skew_x_pixels(false),
           has_skew_y_pixels(false),
-          skew_x_pixels_value(0.0),
           skew_y_pixels_value(0.0),
-          has_skew_bottom_x(false),
-          skew_bottom_x_value(0.0),
           has_fiducial_size(false),
           fiducial_size_value(0u),
           has_fiducial_columns(false),
@@ -11642,18 +11547,8 @@ struct PpmParserState {
           has_fiducial_rows(false),
           fiducial_rows_value(0u),
           has_fiducial_margin(false),
-          fiducial_margin_value(0u),
-          has_fiducial_col_offsets(false),
-          fiducial_col_offset_count(0u),
-          has_fiducial_row_offsets(false),
-          fiducial_row_offset_count(0u) {
-        has_tile_pitch = false;
-        tile_pitch_value = 0.0;
+          fiducial_margin_value(0u) {
         palette_text[0] = '\0';
-        for (u32 i = 0u; i < MAX_FIDUCIAL_SUBGRID_ENTRIES; ++i) {
-            fiducial_col_offsets[i] = 0u;
-            fiducial_row_offsets[i] = 0u;
-        }
     }
 };
 
@@ -12098,10 +11993,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     };
 
     auto logical_column_value = [&](u32 col_index) -> double {
-        if (state.has_fiducial_col_offsets &&
-            state.fiducial_col_offset_count > col_index) {
-            return (double)state.fiducial_col_offsets[col_index];
-        }
         if (fiducial_columns <= 1u) {
             return (double)expected_width * 0.5;
         }
@@ -12109,10 +12000,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         return t * (double)expected_width;
     };
     auto logical_row_value = [&](u32 row_index) -> double {
-        if (state.has_fiducial_row_offsets &&
-            state.fiducial_row_offset_count > row_index) {
-            return (double)state.fiducial_row_offsets[row_index];
-        }
         if (fiducial_rows <= 1u) {
             return (double)expected_height * 0.5;
         }
@@ -12121,18 +12008,8 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     };
     const double integer_snap_tolerance = 0.12;
 
-    double logical_span_x = (fiducial_columns > 1u)
-                                ? (logical_column_value(fiducial_columns - 1u) - logical_column_value(0u))
-                                : (double)expected_width;
-    double logical_span_y = (fiducial_rows > 1u)
-                                ? (logical_row_value(fiducial_rows - 1u) - logical_row_value(0u))
-                                : (double)expected_height;
-    if (logical_span_x <= 0.0) {
-        logical_span_x = (double)expected_width;
-    }
-    if (logical_span_y <= 0.0) {
-        logical_span_y = (double)expected_height;
-    }
+    double logical_span_x = (double)expected_width;
+    double logical_span_y = (double)expected_height;
 
     for (u32 row = 0u; row < fiducial_rows; ++row) {
         double logical_y = logical_row_value(row);
@@ -12146,18 +12023,10 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         }
     }
     for (u32 row = 0u; row < fiducial_rows; ++row) {
-        if (row_bias_count[row] > 0.0) {
-            row_bias_y[row] /= row_bias_count[row];
-        } else {
-            row_bias_y[row] = 0.0;
-        }
+        row_bias_y[row] /= row_bias_count[row];
     }
     for (u32 col = 0u; col < fiducial_columns; ++col) {
-        if (column_bias_count[col] > 0.0) {
-            column_bias_x[col] /= column_bias_count[col];
-        } else {
-            column_bias_x[col] = 0.0;
-        }
+        column_bias_x[col] /= column_bias_count[col];
     }
 
     double sum_logical_x = 0.0;
@@ -12216,17 +12085,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     }
     double rotation_radians = atan2(b, a);
     double rotation_degrees = rotation_radians * (180.0 / 3.14159265358979323846);
-    double scale_hint = 1.0;
-    if (expected_width && expected_height) {
-        double hint_x = (double)image_width / (double)expected_width;
-        double hint_y = (double)image_height / (double)expected_height;
-        if (hint_x > 0.0 && hint_y > 0.0) {
-            scale_hint = (hint_x + hint_y) * 0.5;
-        }
-    }
-    if (scale_hint <= 0.0) {
-        scale_hint = 1.0;
-    }
     double sin_sum = 0.0;
     double sin_weight = 0.0;
     if (fiducial_rows >= 2u) {
@@ -12849,9 +12707,6 @@ static bool sample_fiducial_centers(const u8* pixel_data,
         search_radius_d = 6.0;
     }
     u32 search_radius = (u32)(search_radius_d + 0.5);
-    if (search_radius < 6u) {
-        search_radius = 6u;
-    }
     double inv_radius_sq = 1.0 / ((double)search_radius * (double)search_radius + 1.0);
     u64 pixel_count = width * height;
     u64 total_bytes = pixel_count * 3u;
@@ -14073,18 +13928,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             buffer[(usize)i * 3u + 2u] = v;
         }
     };
-    bool has_custom_palette_text = (tile_palette_text.size > 0u) || state.has_palette_text;
-    bool force_monochrome = false;
-    if (tile_available && tile_values.palette_count <= 2u) {
-        force_monochrome = true;
-    } else if (!tile_available && !has_custom_palette_text) {
-        // Default palette is White/Black when no metadata or stripe is present.
-        force_monochrome = true;
-    }
+    bool force_monochrome = tile_values.palette_count <= 2u;
     if (force_monochrome && pixel_data && width > 0u && height > 0u) {
         bool retain_affine_source = tile_available &&
                                     tile_values.palette_count == 2u &&
-                                    !state.has_skew_x_pixels &&
                                     !state.has_skew_y_pixels &&
                                     state.has_ecc_flag && state.ecc_flag_value &&
                                     state.has_ecc_block_data && state.has_ecc_parity &&
@@ -14183,25 +14030,18 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     bool has_skew = false;
     u64 skew_src_width = 0u;
     u64 skew_src_height = 0u;
-    double skew_margin = 0.0;
-    double skew_top = 0.0;
-    double skew_bottom = 0.0;
     auto recompute_skew_flags = [&]() {
         bool active = !state.has_affine_transform &&
                       state.has_skew_src_width &&
                       state.has_skew_src_height &&
-                      ((state.has_skew_margin_x && state.has_skew_x_pixels) || state.has_skew_y_pixels);
+                      state.has_skew_y_pixels;
         skew_src_width = active ? state.skew_src_width_value : 0u;
         skew_src_height = active ? state.skew_src_height_value : 0u;
-        skew_margin = active ? state.skew_margin_x_value : 0.0;
-        skew_top = active ? state.skew_x_pixels_value : 0.0;
-        skew_bottom = active && state.has_skew_bottom_x ? state.skew_bottom_x_value : 0.0;
         if (active) {
             if (skew_src_width == 0u || skew_src_height == 0u) {
                 active = false;
             }
-            if (active && fabs(skew_top) < 2.0 && fabs(skew_bottom) < 2.0 &&
-                (!state.has_skew_y_pixels || fabs(state.skew_y_pixels_value) < 0.5)) {
+            if (active && fabs(state.skew_y_pixels_value) < 0.5) {
                 active = false;
             }
         }
@@ -14280,36 +14120,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         expected_height = state.page_height_pixels_value;
         height_known = true;
     }
-	    if (!width_known && !height_known) {
-	        u64 inferred_width = 0u;
-	        u64 inferred_height = 0u;
-	        if (state.has_fiducial_col_offsets && state.fiducial_col_offset_count >= 2u) {
-	            u64 last = state.fiducial_col_offsets[state.fiducial_col_offset_count - 1u];
-	            if (last) {
-	                inferred_width = last;
-	            }
-	        }
-	        if (state.has_fiducial_row_offsets && state.fiducial_row_offset_count >= 2u) {
-	            u64 last = state.fiducial_row_offsets[state.fiducial_row_offset_count - 1u];
-	            if (last) {
-	                inferred_height = last;
-	                if (state.has_footer_rows && state.footer_rows_value) {
-	                    inferred_height += state.footer_rows_value;
-	                }
-	            }
-	        }
-	        if (inferred_width && inferred_height) {
-	            expected_width = inferred_width;
-	            expected_height = inferred_height;
-	            width_known = true;
-	            height_known = true;
-	            state.has_page_width_pixels = true;
-	            state.page_width_pixels_value = inferred_width;
-	            state.has_page_height_pixels = true;
-	            state.page_height_pixels_value = inferred_height;
-	            
-	        }
-	    }
 	    if (!width_known && !height_known) {
 	        u64 guessed = estimate_square_page_from_image(width, height);
 	        if (guessed) {
@@ -15104,7 +14914,7 @@ struct RotationEstimateCandidate {
     bool scan_border_refined = false;
     double scan_ink_floor = 0.0;
     if (tile_affine_hint_available && !state.has_affine_transform &&
-        !has_rotation && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        !has_rotation && !state.has_skew_y_pixels &&
         width < 400u && height < 400u &&
         expected_width > 0u && expected_height > 0u &&
         expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull &&
@@ -15144,7 +14954,7 @@ struct RotationEstimateCandidate {
         }
     }
     if (tile_affine_hint_available && state.has_affine_transform &&
-        !has_rotation && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        !has_rotation && !state.has_skew_y_pixels &&
         width < 400u && height < 400u &&
         expected_width > 0u && expected_height > 0u &&
         expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull &&
@@ -15345,7 +15155,7 @@ struct RotationEstimateCandidate {
         }
     }
     if (tile_affine_hint_available && tile_affine_hint_trusted && has_rotation &&
-        !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        !state.has_skew_y_pixels &&
         expected_width > 0u && expected_height > 0u &&
         tile_scale > 1.005 && tile_scale <= 1.25 &&
         fabs(independent_rotation) >= 0.25 && fabs(independent_rotation) < 5.0 &&
@@ -15428,21 +15238,6 @@ struct RotationEstimateCandidate {
     u64 analysis_width = has_rotation ? (u64)rotation_width : width;
     u64 analysis_height = has_rotation ? (u64)rotation_height : height;
     
-    if (!fiducial_rotation_detected &&
-        state.has_tile_pitch && state.tile_pitch_value > 0.0 &&
-        expected_width > 0u && expected_height > 0u) {
-        double fx = state.tile_pitch_value;
-        double fy = state.tile_pitch_value;
-        double rx = floor(fx + 0.5);
-        double ry = floor(fy + 0.5);
-        if (fabs(fx - rx) < 0.02) fx = rx;
-        if (fabs(fy - ry) < 0.02) fy = ry;
-        scale_x = fx;
-        scale_y = fy;
-        analysis_width = (u64)((double)expected_width * scale_x + 0.5);
-        analysis_height = (u64)((double)expected_height * scale_y + 0.5);
-        
-    }
     
     if (!has_rotation && has_skew) {
         analysis_width = skew_src_width;
@@ -15575,7 +15370,7 @@ struct RotationEstimateCandidate {
             scale_y = (double)detected_y;
         }
     }
-    bool skip_integer_validation = state.has_tile_pitch || state.has_affine_transform;
+    bool skip_integer_validation = state.has_affine_transform;
     if (!has_rotation && !has_skew && scale_x_integer && scale_y_integer && !skip_integer_validation) {
         if (!validate_integer_scale(pixel_data, width, height, scale_x_int, scale_y_int, detection_color_mode, &active_mapping)) {
             scale_x = 1.0;
@@ -15960,19 +15755,12 @@ struct RotationEstimateCandidate {
                             double sample_x = ((logical_x + 0.5) * scale_xd) - 0.5;
                             double sample_y = ((logical_y + 0.5) * scale_yd) - 0.5;
                             if (has_skew) {
-                                double normalized_row = (skew_src_height > 1u)
-                                                            ? (sample_y / (double)(skew_src_height - 1u))
-                                                            : 0.0;
-                                double row_shift = state.has_skew_x_pixels
-                                                       ? (skew_top * (1.0 - normalized_row) + skew_bottom * normalized_row)
-                                                       : 0.0;
                                 double normalized_col = (skew_src_width > 1u)
                                                             ? (sample_x / (double)(skew_src_width - 1u))
                                                             : 0.0;
                                 double col_shift = state.has_skew_y_pixels
                                                        ? (state.skew_y_pixels_value * normalized_col)
                                                        : 0.0;
-                                sample_x += state.has_skew_margin_x ? skew_margin + row_shift : row_shift;
                                 sample_y += col_shift;
                             }
                             if (has_rotation) {
@@ -15996,9 +15784,6 @@ struct RotationEstimateCandidate {
                             search_radius_d = 6.0;
                         }
                         u32 search_radius = (u32)(search_radius_d + 0.5);
-                        if (search_radius < 6u) {
-                            search_radius = 6u;
-                        }
                         double inv_radius_sq = 1.0 / ((double)search_radius * (double)search_radius + 1.0);
                         MetadataTile::Placement metadata_tile = MetadataTile::compute_tile_placement((u32)logical_width, (u32)data_height);
                         for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
@@ -16266,7 +16051,7 @@ struct RotationEstimateCandidate {
                                         if (tile_dx * tile_dx + tile_dy * tile_dy <= 144.0 &&
                                             angle_error <= 1.0 && scale_matches) {
                                             double snapped_angle = floor(state.rotation_degrees_value * 2.0 + 0.5) * 0.5;
-                                            if (!state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+                                            if (!state.has_skew_y_pixels &&
                                                 fabs(state.rotation_degrees_value - snapped_angle) < 1e-9 &&
                                                 fabs(makocode::image::normalize_angle(affine_angle - snapped_angle)) < 0.05 &&
                                                 fabs(affine_scale_x - affine_scale_y) <=
@@ -16458,9 +16243,6 @@ struct RotationEstimateCandidate {
                                 fiducial_storage.column_weights[col_index] = avg_width;
                                 total_phys_width += avg_width;
                             }
-                            if (total_phys_width <= 0.0) {
-                                total_phys_width = (double)sub_cols;
-                            }
 
                             double total_phys_height = 0.0;
                             for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
@@ -16470,9 +16252,6 @@ struct RotationEstimateCandidate {
                                 }
                                 fiducial_storage.row_weights[row_index] = avg_height;
                                 total_phys_height += avg_height;
-                            }
-                            if (total_phys_height <= 0.0) {
-                                total_phys_height = (double)sub_rows;
                             }
 
                             fiducial_storage.column_offsets[0] = 0u;
@@ -16493,9 +16272,6 @@ struct RotationEstimateCandidate {
                                 fiducial_storage.column_offsets[col_index + 1u] = target;
                                 assigned_columns = target;
                             }
-                            if (fiducial_storage.column_offsets[sub_cols] != logical_width) {
-                                fiducial_storage.column_offsets[sub_cols] = logical_width;
-                            }
 
                             fiducial_storage.row_offsets[0] = 0u;
                             double height_accum = 0.0;
@@ -16515,58 +16291,7 @@ struct RotationEstimateCandidate {
                                 fiducial_storage.row_offsets[row_index + 1u] = target;
                                 assigned_rows = target;
                             }
-                            if (fiducial_storage.row_offsets[sub_rows] != logical_height) {
-                                fiducial_storage.row_offsets[sub_rows] = logical_height;
-                            }
 
-                            if (state.has_fiducial_col_offsets &&
-                                state.fiducial_col_offset_count == (u32)(sub_cols + 1u)) {
-                                bool valid = true;
-                                for (u32 i = 0u; i <= sub_cols; ++i) {
-                                    u64 value = state.fiducial_col_offsets[i];
-                                    if (i == 0u) {
-                                        if (value != 0u) {
-                                            valid = false;
-                                            break;
-                                        }
-                                    } else {
-                                        u64 prev = state.fiducial_col_offsets[i - 1u];
-                                        if (value <= prev || value > logical_width) {
-                                            valid = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (valid) {
-                                    for (u32 i = 0u; i <= sub_cols; ++i) {
-                                        fiducial_storage.column_offsets[i] = state.fiducial_col_offsets[i];
-                                    }
-                                }
-                            }
-                            if (state.has_fiducial_row_offsets &&
-                                state.fiducial_row_offset_count == (u32)(sub_rows + 1u)) {
-                                bool valid = true;
-                                for (u32 i = 0u; i <= sub_rows; ++i) {
-                                    u64 value = state.fiducial_row_offsets[i];
-                                    if (i == 0u) {
-                                        if (value != 0u) {
-                                            valid = false;
-                                            break;
-                                        }
-                                    } else {
-                                        u64 prev = state.fiducial_row_offsets[i - 1u];
-                                        if (value <= prev || value > logical_height) {
-                                            valid = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (valid) {
-                                    for (u32 i = 0u; i <= sub_rows; ++i) {
-                                        fiducial_storage.row_offsets[i] = state.fiducial_row_offsets[i];
-                                    }
-                                }
-                            }
 
                             for (u32 row_index = 0u; row_index < sub_rows; ++row_index) {
                                 for (u32 col_index = 0u; col_index < sub_cols; ++col_index) {
@@ -16636,7 +16361,7 @@ struct RotationEstimateCandidate {
                                      : (const u8*)0;
     usize reservation_size = reservation_mask ? fiducial_mask.size : 0u;
     if (tile_affine_hint_available && tile_affine_hint_trusted &&
-        state.has_rotation_degrees && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        state.has_rotation_degrees && !state.has_skew_y_pixels &&
         state.has_page_width_pixels && state.has_page_height_pixels &&
         logical_width > 1u && logical_height > 1u && data_height > 1u &&
         logical_width <= 0xFFFFFFFFull && logical_height <= 0xFFFFFFFFull &&
@@ -16781,7 +16506,7 @@ struct RotationEstimateCandidate {
     makocode::ByteBuffer affine_reconstructed_pixels;
     if (!use_custom_palette && color_mode == 1u && samples_per_pixel == 1u &&
         state.has_affine_transform && state.has_ecc_flag && state.ecc_flag_value &&
-        !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
+        !state.has_skew_y_pixels &&
         state.has_ecc_block_data && state.has_ecc_parity && state.has_ecc_block_count &&
         state.has_ecc_original_bytes && logical_width > 1u && logical_height > 1u &&
         width > logical_width && height > logical_height && affine_source_pixels.data) {
@@ -17396,19 +17121,12 @@ struct RotationEstimateCandidate {
                 double local_sample_col = sample_col;
                 double local_sample_row = sample_row;
                 if (has_skew) {
-                    double normalized_row = (skew_src_height > 1u)
-                                                ? (local_sample_row / (double)(skew_src_height - 1u))
-                                                : 0.0;
-                    double row_shift = state.has_skew_x_pixels
-                                           ? (skew_top * (1.0 - normalized_row) + skew_bottom * normalized_row)
-                                           : 0.0;
                     double normalized_col = (skew_src_width > 1u)
                                                 ? (local_sample_col / (double)(skew_src_width - 1u))
                                                 : 0.0;
                     double col_shift = state.has_skew_y_pixels
                                            ? (state.skew_y_pixels_value * normalized_col)
                                            : 0.0;
-                    local_sample_col += state.has_skew_margin_x ? (skew_margin + row_shift) : row_shift;
                     local_sample_row += col_shift;
                 }
                 double dx = local_sample_col - rotation_center_x;
@@ -17451,15 +17169,11 @@ struct RotationEstimateCandidate {
                 double max_col = (analysis_width > 0u) ? (double)(analysis_width - 1u) : 0.0;
                 if (sample_row > max_row) sample_row = max_row;
                 if (sample_col > max_col) sample_col = max_col;
-                double normalized_row = (skew_src_height > 1u) ? (sample_row / (double)(skew_src_height - 1u)) : 0.0;
-                double row_shift = state.has_skew_x_pixels
-                                       ? (skew_top * (1.0 - normalized_row) + skew_bottom * normalized_row)
-                                       : 0.0;
                 double normalized_col = (skew_src_width > 1u) ? (sample_col / (double)(skew_src_width - 1u)) : 0.0;
                 double col_shift = state.has_skew_y_pixels
                                        ? (state.skew_y_pixels_value * normalized_col)
                                        : 0.0;
-                double dest_x = sample_col + (state.has_skew_margin_x ? (skew_margin + row_shift) : row_shift);
+                double dest_x = sample_col;
                 double dest_y = sample_row + col_shift + 0.5;
                 if (dest_x < 0.0) dest_x = 0.0;
                 if (dest_y < 0.0) dest_y = 0.0;
@@ -17957,46 +17671,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_fiducial_margin = true;
         dest.fiducial_margin_value = src.fiducial_margin_value;
     }
-    if (src.has_fiducial_col_offsets) {
-        if (src.fiducial_col_offset_count > MAX_FIDUCIAL_SUBGRID_ENTRIES) {
-            return false;
-        }
-        if (dest.has_fiducial_col_offsets) {
-            if (dest.fiducial_col_offset_count != src.fiducial_col_offset_count) {
-                return false;
-            }
-            for (u32 i = 0u; i < src.fiducial_col_offset_count; ++i) {
-                if (dest.fiducial_col_offsets[i] != src.fiducial_col_offsets[i]) {
-                    return false;
-                }
-            }
-        }
-        dest.has_fiducial_col_offsets = true;
-        dest.fiducial_col_offset_count = src.fiducial_col_offset_count;
-        for (u32 i = 0u; i < src.fiducial_col_offset_count; ++i) {
-            dest.fiducial_col_offsets[i] = src.fiducial_col_offsets[i];
-        }
-    }
-    if (src.has_fiducial_row_offsets) {
-        if (src.fiducial_row_offset_count > MAX_FIDUCIAL_SUBGRID_ENTRIES) {
-            return false;
-        }
-        if (dest.has_fiducial_row_offsets) {
-            if (dest.fiducial_row_offset_count != src.fiducial_row_offset_count) {
-                return false;
-            }
-            for (u32 i = 0u; i < src.fiducial_row_offset_count; ++i) {
-                if (dest.fiducial_row_offsets[i] != src.fiducial_row_offsets[i]) {
-                    return false;
-                }
-            }
-        }
-        dest.has_fiducial_row_offsets = true;
-        dest.fiducial_row_offset_count = src.fiducial_row_offset_count;
-        for (u32 i = 0u; i < src.fiducial_row_offset_count; ++i) {
-            dest.fiducial_row_offsets[i] = src.fiducial_row_offsets[i];
-        }
-    }
     if (src.has_page_width_pixels) {
         if (dest.has_page_width_pixels && dest.page_width_pixels_value != src.page_width_pixels_value) {
             return false;
@@ -18236,23 +17910,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         return false;
     }
     u32 draw_height = (grid_height_limit > 0u && grid_height_limit < height_px) ? grid_height_limit : height_px;
-    state.has_fiducial_size = true;
-    state.fiducial_size_value = marker_size;
-    state.has_fiducial_columns = true;
-    state.fiducial_columns_value = grid_columns;
-    state.has_fiducial_rows = true;
-    state.fiducial_rows_value = grid_rows;
-    state.has_fiducial_margin = true;
-    state.fiducial_margin_value = margin_pixels;
-
-    u64 logical_width = width;
-    u64 logical_height = (u64)draw_height;
-    // When clipping is requested, treat the clipped height as pure data area (no footer).
-    u64 footer_rows_value = 0u;
-    if (grid_height_limit == 0u && state.has_footer_rows && state.footer_rows_value <= logical_height) {
-        footer_rows_value = state.footer_rows_value;
-    }
-    u64 data_height = (logical_height >= footer_rows_value) ? (logical_height - footer_rows_value) : logical_height;
+    u64 data_height = (u64)draw_height;
     MetadataTile::Placement metadata_tile = MetadataTile::compute_tile_placement(width_px, (u32)data_height);
     auto marker_overlaps_metadata = [&](int x0, int y0, u32 size) -> bool {
         if (!metadata_tile.valid) return false;
@@ -18265,8 +17923,6 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         return x0 < (int)tx1 && x1 > (int)tx0 && y0 < (int)ty1 && y1 > (int)ty0;
     };
 
-    u32 sub_cols = (grid_columns > 0u) ? (grid_columns - 1u) : 0u;
-    u32 sub_rows = (grid_rows > 0u) ? (grid_rows - 1u) : 0u;
 
     double min_x = (margin_pixels < width_px) ? (double)margin_pixels : 0.0;
     double max_x = (width_px > margin_pixels) ? (double)(width_px - 1u - margin_pixels)
@@ -18279,123 +17935,6 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     }
     if (max_y < min_y) {
         max_y = min_y;
-    }
-    if (sub_cols > 0u && (sub_cols + 1u) <= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
-        double* column_centers = (double*)((grid_columns > 0u) ? malloc((usize)grid_columns * sizeof(double)) : 0);
-        double* column_weights = (double*)malloc((usize)sub_cols * sizeof(double));
-        if (column_centers && column_weights) {
-            for (u32 col_index = 0u; col_index < grid_columns; ++col_index) {
-                if (grid_columns == 1u) {
-                    column_centers[col_index] = (min_x + max_x) * 0.5;
-                } else {
-                    double t = (double)col_index / (double)(grid_columns - 1u);
-                    column_centers[col_index] = min_x + (max_x - min_x) * t;
-                }
-            }
-            for (u32 i = 0u; i < sub_cols; ++i) {
-                double span = column_centers[i + 1u] - column_centers[i];
-                if (span <= 0.0) {
-                    span = 1.0;
-                }
-                column_weights[i] = span;
-            }
-            double total_phys_width = 0.0;
-            for (u32 i = 0u; i < sub_cols; ++i) {
-                total_phys_width += column_weights[i];
-            }
-            if (total_phys_width <= 0.0) {
-                total_phys_width = (double)sub_cols;
-            }
-            double width_scale = (double)logical_width / total_phys_width;
-            u64 assigned = 0u;
-            state.has_fiducial_col_offsets = true;
-            state.fiducial_col_offset_count = sub_cols + 1u;
-            state.fiducial_col_offsets[0u] = 0u;
-            for (u32 i = 0u; i < sub_cols; ++i) {
-                double scaled = column_weights[i] * width_scale;
-                double accum = (double)assigned + scaled;
-                u64 target = (u64)(accum + 0.5);
-                if (target <= assigned) {
-                    target = assigned + 1u;
-                }
-                if ((i + 1u) == sub_cols || target > logical_width) {
-                    target = logical_width;
-                }
-                state.fiducial_col_offsets[i + 1u] = target;
-                assigned = target;
-            }
-        } else {
-            state.has_fiducial_col_offsets = false;
-            state.fiducial_col_offset_count = 0u;
-        }
-        if (column_centers) {
-            free(column_centers);
-        }
-        if (column_weights) {
-            free(column_weights);
-        }
-    } else {
-        state.has_fiducial_col_offsets = false;
-        state.fiducial_col_offset_count = 0u;
-    }
-
-    if (sub_rows > 0u && (sub_rows + 1u) <= MAX_FIDUCIAL_SUBGRID_ENTRIES) {
-        double* row_centers = (double*)((grid_rows > 0u) ? malloc((usize)grid_rows * sizeof(double)) : 0);
-        double* row_weights = (double*)malloc((usize)sub_rows * sizeof(double));
-        if (row_centers && row_weights) {
-            for (u32 row_index = 0u; row_index < grid_rows; ++row_index) {
-                if (grid_rows == 1u) {
-                    row_centers[row_index] = (min_y + max_y) * 0.5;
-                } else {
-                    double t = (double)row_index / (double)(grid_rows - 1u);
-                    row_centers[row_index] = min_y + (max_y - min_y) * t;
-                }
-            }
-            for (u32 i = 0u; i < sub_rows; ++i) {
-                double span = row_centers[i + 1u] - row_centers[i];
-                if (span <= 0.0) {
-                    span = 1.0;
-                }
-                row_weights[i] = span;
-            }
-            double total_phys_height = 0.0;
-            for (u32 i = 0u; i < sub_rows; ++i) {
-                total_phys_height += row_weights[i];
-            }
-            if (total_phys_height <= 0.0) {
-                total_phys_height = (double)sub_rows;
-            }
-            double height_scale = (double)data_height / total_phys_height;
-            u64 assigned_rows = 0u;
-            state.has_fiducial_row_offsets = true;
-            state.fiducial_row_offset_count = sub_rows + 1u;
-            state.fiducial_row_offsets[0u] = 0u;
-            for (u32 i = 0u; i < sub_rows; ++i) {
-                double scaled = row_weights[i] * height_scale;
-                double accum = (double)assigned_rows + scaled;
-                u64 target = (u64)(accum + 0.5);
-                if (target <= assigned_rows) {
-                    target = assigned_rows + 1u;
-                }
-                if ((i + 1u) == sub_rows || target > data_height) {
-                    target = data_height;
-                }
-                state.fiducial_row_offsets[i + 1u] = target;
-                assigned_rows = target;
-            }
-        } else {
-            state.has_fiducial_row_offsets = false;
-            state.fiducial_row_offset_count = 0u;
-        }
-        if (row_centers) {
-            free(row_centers);
-        }
-        if (row_weights) {
-            free(row_weights);
-        }
-    } else {
-        state.has_fiducial_row_offsets = false;
-        state.fiducial_row_offset_count = 0u;
     }
     for (u32 grid_row = 0u; grid_row < grid_rows; ++grid_row) {
         double t_y = (grid_rows == 1u) ? 0.5 : ((double)grid_row / (double)(grid_rows - 1u));
@@ -18557,18 +18096,12 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
         return false;
     }
     u32 fiducial_marker_size = g_fiducial_defaults.marker_size_pixels;
-    if (fiducial_marker_size == 0u) {
-        fiducial_marker_size = 1u;
-    }
     u32 fiducial_spacing = g_fiducial_defaults.spacing_pixels;
-    if (fiducial_spacing == 0u) {
-        fiducial_spacing = fiducial_marker_size;
-    }
     u32 fiducial_margin = g_fiducial_defaults.margin_pixels;
     double min_x = (fiducial_margin < width_pixels) ? (double)fiducial_margin : 0.0;
     double max_x = (width_pixels > fiducial_margin)
                        ? (double)(width_pixels - 1u - fiducial_margin)
-                       : (width_pixels ? (double)(width_pixels - 1u) : 0.0);
+                       : (double)(width_pixels - 1u);
     if (max_x < min_x) {
         max_x = min_x;
     }
@@ -18579,7 +18112,7 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     double min_y = (fiducial_margin < grid_height) ? (double)fiducial_margin : 0.0;
     double max_y = (grid_height > fiducial_margin)
                        ? (double)(grid_height - 1u - fiducial_margin)
-                       : (grid_height ? (double)(grid_height - 1u) : 0.0);
+                       : (double)(grid_height - 1u);
     if (max_y < min_y) {
         max_y = min_y;
     }
@@ -18589,32 +18122,14 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     u32 fiducial_columns = 1u;
     if (fiducial_spacing > 0u && available_width > 0.0) {
         double span = available_width / (double)fiducial_spacing;
-        if (span < 0.0) {
-            span = 0.0;
-        }
         u64 additional = (u64)span;
-        if (additional > 0xFFFFFFFFull - 1ull) {
-            additional = 0xFFFFFFFFull - 1ull;
-        }
         fiducial_columns = (u32)(additional + 1ull);
-    }
-    if (fiducial_columns == 0u) {
-        fiducial_columns = 1u;
     }
     u32 fiducial_rows = 1u;
     if (fiducial_spacing > 0u && available_height > 0.0) {
         double span = available_height / (double)fiducial_spacing;
-        if (span < 0.0) {
-            span = 0.0;
-        }
         u64 additional = (u64)span;
-        if (additional > 0xFFFFFFFFull - 1ull) {
-            additional = 0xFFFFFFFFull - 1ull;
-        }
         fiducial_rows = (u32)(additional + 1ull);
-    }
-    if (fiducial_rows == 0u) {
-        fiducial_rows = 1u;
     }
     if (fiducial_columns > 1u) {
         double span = (double)fiducial_spacing * (double)(fiducial_columns - 1u);
@@ -18698,29 +18213,23 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
         }
     }
     u32 marker_size = g_fiducial_defaults.marker_size_pixels;
-    if (marker_size == 0u) {
-        return true;
-    }
     u32 draw_height = height_pixels;
     if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
         draw_height = data_height_pixels;
     }
     u32 spacing = g_fiducial_defaults.spacing_pixels;
-    if (spacing == 0u) {
-        spacing = marker_size;
-    }
     u32 margin = g_fiducial_defaults.margin_pixels;
     double min_x = (margin < width_pixels) ? (double)margin : 0.0;
     double max_x = (width_pixels > margin)
                        ? (double)(width_pixels - 1u - margin)
-                       : (width_pixels ? (double)(width_pixels - 1u) : 0.0);
+                       : (double)(width_pixels - 1u);
     if (max_x < min_x) {
         max_x = min_x;
     }
     double min_y = (margin < draw_height) ? (double)margin : 0.0;
     double max_y = (draw_height > margin)
                        ? (double)(draw_height - 1u - margin)
-                       : (draw_height ? (double)(draw_height - 1u) : 0.0);
+                       : (double)(draw_height - 1u);
     if (max_y < min_y) {
         max_y = min_y;
     }
@@ -18729,32 +18238,14 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
     u32 fiducial_columns = 1u;
     if (spacing > 0u && available_width > 0.0) {
         double span = available_width / (double)spacing;
-        if (span < 0.0) {
-            span = 0.0;
-        }
         u64 additional = (u64)span;
-        if (additional > 0xFFFFFFFFull - 1ull) {
-            additional = 0xFFFFFFFFull - 1ull;
-        }
         fiducial_columns = (u32)(additional + 1ull);
-    }
-    if (fiducial_columns == 0u) {
-        fiducial_columns = 1u;
     }
     u32 fiducial_rows = 1u;
     if (spacing > 0u && available_height > 0.0) {
         double span = available_height / (double)spacing;
-        if (span < 0.0) {
-            span = 0.0;
-        }
         u64 additional = (u64)span;
-        if (additional > 0xFFFFFFFFull - 1ull) {
-            additional = 0xFFFFFFFFull - 1ull;
-        }
         fiducial_rows = (u32)(additional + 1ull);
-    }
-    if (fiducial_rows == 0u) {
-        fiducial_rows = 1u;
     }
     if (fiducial_columns > 1u) {
         double span = (double)spacing * (double)(fiducial_columns - 1u);
@@ -18771,9 +18262,6 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
             --fiducial_rows;
             span = (double)spacing * (double)(fiducial_rows - 1u);
         }
-    }
-    if (fiducial_columns == 0u || fiducial_rows == 0u || marker_size == 0u) {
-        return true;
     }
     for (u32 grid_row = 0u; grid_row < fiducial_rows; ++grid_row) {
         double t_y = (fiducial_rows == 1u) ? 0.5 : ((double)grid_row / (double)(fiducial_rows - 1u));
@@ -18836,14 +18324,8 @@ static bool compute_fiducial_reservation(u32 width_pixels,
         if (placement.valid) {
             for (u32 dy = 0u; dy < MetadataTile::TILE_SIDE; ++dy) {
                 u32 y = placement.y0 + dy;
-                if (y >= data_height_pixels) {
-                    continue;
-                }
                 for (u32 dx = 0u; dx < MetadataTile::TILE_SIDE; ++dx) {
                     u32 x = placement.x0 + dx;
-                    if (x >= width_pixels) {
-                        continue;
-                    }
                     usize mask_index = (usize)y * (usize)width_pixels + (usize)x;
                     bool counted = true;
                     if (mask_out && mask_out->size) {
@@ -19446,11 +18928,6 @@ static bool process_fiducial_option(int arg_count,
                 console_line(2, ": --fiducials accepts at most three numeric values");
                 return false;
             }
-            if (i < segment_start) {
-                console_write(2, command_name);
-                console_line(2, ": --fiducials parsing failure");
-                return false;
-            }
             usize segment_length = i - segment_start;
             if (segment_length == 0u) {
                 console_write(2, command_name);
@@ -19915,9 +19392,6 @@ static const char* find_last_path_component(const char* path) {
         }
         ++cursor;
     }
-    if (component >= end) {
-        return component;
-    }
     return component;
 }
 
@@ -19962,9 +19436,6 @@ static bool normalize_store_path(const char* source,
             ++index;
         }
         usize segment_length = index - start;
-        if (segment_length == 0u) {
-            continue;
-        }
         if (segment_length == 1u && scratch.data[start] == '.') {
             continue;
         }
@@ -20154,9 +19625,6 @@ static bool archive_collect_directory(const char* fs_path,
     struct dirent* entry = 0;
     while ((entry = readdir(dir)) != (struct dirent*)0) {
         const char* name = entry->d_name;
-        if (!name) {
-            continue;
-        }
         if (name[0] == '.' &&
             (name[1] == '\0' ||
              (name[1] == '.' && name[2] == '\0'))) {
@@ -20297,7 +19765,6 @@ static bool ensure_directory_tree(const char* path) {
             const char* partial = (const char*)temp.data;
             if (partial[0] != 0) {
                 if (!ensure_directory_exists(partial)) {
-                    temp.data[i] = saved;
                     return false;
                 }
             }
@@ -20681,9 +20148,6 @@ static usize footer_compute_page_text_length(const PageFooterConfig& footer,
     usize length = 0u;
     bool need_separator = false;
     if (footer.has_title && footer.title_text && footer.title_length) {
-        if (need_separator) {
-            length += 3u; // " | "
-        }
         length += footer.title_length;
         need_separator = true;
     }
@@ -20744,11 +20208,6 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
     usize cursor = 0u;
     bool need_separator = false;
     if (footer.has_title && footer.title_text && footer.title_length) {
-        if (need_separator) {
-            buffer.data[cursor++] = ' ';
-            buffer.data[cursor++] = '|';
-            buffer.data[cursor++] = ' ';
-        }
         for (usize i = 0u; i < footer.title_length; ++i) {
             buffer.data[cursor++] = (u8)footer.title_text[i];
         }
@@ -21579,21 +21038,6 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: payload is empty, ECC fill calculation unnecessary");
             return 0;
         }
-        u16 frame_block_data = 0u;
-        u16 frame_parity = 0u;
-        u64 frame_block_count = 0u;
-        u64 frame_payload_bits = 0u;
-        u64 frame_bits = 0u;
-        if (!compute_frame_statistics(payload_bytes,
-                                      ecc_redundancy,
-                                      frame_block_data,
-                                      frame_parity,
-                                      frame_block_count,
-                                      frame_payload_bits,
-                                      frame_bits)) {
-            console_line(2, "encode: could not compute frame size for ECC fill calculation");
-            return 1;
-        }
         double best_ratio = -1.0;
         u16 best_block_data = 0u;
         u16 best_parity = 0u;
@@ -21961,12 +21405,7 @@ struct OverlayIgnoreColorList {
 // page onto the overlay before we build masks or gather bits.
 static void overlay_apply_base_layout(const OverlayPage& base, OverlayPage& overlay) {
     overlay.footer_rows = base.footer_rows;
-    if (overlay.footer_rows > overlay.height) {
-        overlay.footer_rows = overlay.height;
-    }
-    overlay.data_height = (overlay.height >= overlay.footer_rows)
-                              ? (overlay.height - overlay.footer_rows)
-                              : overlay.height;
+    overlay.data_height = overlay.height - overlay.footer_rows;
     if (base.metadata.has_footer_rows) {
         overlay.metadata.has_footer_rows = true;
         overlay.metadata.footer_rows_value = base.metadata.footer_rows_value;
@@ -22020,9 +21459,6 @@ static bool parse_overlay_ignore_colors(const char* text,
                                         usize length,
                                         OverlayIgnoreColorList& list) {
     list.count = 0u;
-    if (!text || length == 0u) {
-        return true;
-    }
     usize cursor = 0u;
     while (cursor < length) {
         while (cursor < length && overlay_ignore_char_is_delimiter(text[cursor])) {
@@ -22036,9 +21472,6 @@ static bool parse_overlay_ignore_colors(const char* text,
             ++cursor;
         }
         usize token_length = cursor - start;
-        if (token_length == 0u) {
-            continue;
-        }
         if (list.count >= MAX_OVERLAY_IGNORE_COLORS) {
             console_line(2, "overlay: --ignore-colors supports at most 64 entries");
             return false;
@@ -22073,10 +21506,6 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
     page.data_height = 0u;
     page.footer_rows = 0u;
     page.color_mode = 1u;
-    if (!path) {
-        console_line(2, "overlay: missing file path");
-        return false;
-    }
     if (!read_entire_file(path, page.original)) {
         console_write(2, "overlay: failed to read ");
         console_line(2, path);
@@ -22122,16 +21551,6 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
         !ascii_to_u64(token, token_length, &max_value) ||
         max_value != 255u) {
         console_write(2, "overlay: unsupported max pixel value in ");
-        console_line(2, path);
-        return false;
-    }
-    if (width_value == 0u || height_value == 0u) {
-        console_write(2, "overlay: zero dimension in ");
-        console_line(2, path);
-        return false;
-    }
-    if (width_value > (u64)USIZE_MAX_VALUE || height_value > (u64)USIZE_MAX_VALUE) {
-        console_write(2, "overlay: dimensions overflow in ");
         console_line(2, path);
         return false;
     }
@@ -22181,14 +21600,8 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
         }
         footer_rows = (u32)page.metadata.footer_rows_value;
     }
-    if (footer_rows > page.height) {
-        footer_rows = page.height;
-    }
     page.footer_rows = footer_rows;
     page.data_height = page.height - footer_rows;
-    if (page.data_height > page.height) {
-        page.data_height = page.height;
-    }
     page.color_mode = 1u;
     if (page.metadata.has_palette_base) {
         const u64 palette_base = page.metadata.palette_base_value;
@@ -22226,9 +21639,6 @@ static bool build_overlay_mask(const OverlayPage& page,
                                u64& reserved_pixels) {
     reserved_pixels = 0u;
     mask_out.release();
-    if (page.width == 0u || page.height == 0u) {
-        return false;
-    }
     u64 total_pixels = (u64)page.width * (u64)page.height;
     if (!mask_out.ensure((usize)total_pixels)) {
         return false;
@@ -22280,19 +21690,13 @@ static bool build_overlay_mask(const OverlayPage& page,
     if (columns == 0u || rows == 0u) {
         u32 spacing = g_fiducial_defaults.spacing_pixels;
         if (spacing == 0u) {
-            spacing = marker_size ? marker_size : 1u;
+            spacing = marker_size;
         }
         if (columns == 0u) {
             columns = 1u;
             if (spacing > 0u && available_width > 0.0) {
                 double span = available_width / (double)spacing;
-                if (span < 0.0) {
-                    span = 0.0;
-                }
                 u64 additional = (u64)span;
-                if (additional > 0xFFFFFFFFull - 1ull) {
-                    additional = 0xFFFFFFFFull - 1ull;
-                }
                 columns = (u32)(additional + 1ull);
             }
         }
@@ -22300,21 +21704,9 @@ static bool build_overlay_mask(const OverlayPage& page,
             rows = 1u;
             if (spacing > 0u && available_height > 0.0) {
                 double span = available_height / (double)spacing;
-                if (span < 0.0) {
-                    span = 0.0;
-                }
                 u64 additional = (u64)span;
-                if (additional > 0xFFFFFFFFull - 1ull) {
-                    additional = 0xFFFFFFFFull - 1ull;
-                }
                 rows = (u32)(additional + 1ull);
             }
-        }
-        if (columns == 0u) {
-            columns = 1u;
-        }
-        if (rows == 0u) {
-            rows = 1u;
         }
     }
     for (u32 grid_row = 0u; grid_row < rows; ++grid_row) {
@@ -22380,20 +21772,8 @@ static bool gather_overlay_bits(const OverlayPage& page,
                                 u64& bit_count) {
     bit_count = 0u;
     bits_out.release();
-    if (!page.pixels.data || page.pixels.size == 0u) {
-        return false;
-    }
-    if (page.width == 0u || page.height == 0u) {
-        return false;
-    }
-    if (mask.size && mask.size != (usize)page.width * (usize)page.height) {
-        return false;
-    }
     u8 sample_bits = bits_per_sample(page.color_mode);
     u8 samples_per_pixel = color_mode_samples_per_pixel(page.color_mode);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return false;
-    }
     makocode::BitWriter writer;
     for (u32 row = 0u; row < page.data_height; ++row) {
         for (u32 column = 0u; column < page.width; ++column) {
@@ -22406,13 +21786,8 @@ static bool gather_overlay_bits(const OverlayPage& page,
                 continue;
             }
             usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
-            if ((pixel_index + 2u) >= page.pixels.size) {
-                return false;
-            }
             u32 samples[3] = {0u, 0u, 0u};
-            if (!map_rgb_to_samples(page.color_mode, page.pixels.data + pixel_index, samples)) {
-                return false;
-            }
+            map_rgb_to_samples(page.color_mode, page.pixels.data + pixel_index, samples);
             for (u8 sample_idx = 0u; sample_idx < samples_per_pixel; ++sample_idx) {
                 if (!writer.write_bits(samples[sample_idx], sample_bits)) {
                     return false;
@@ -22443,20 +21818,8 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
                                OverlayPage& page,
                                const OverlayPage* overlay_page,
                                const OverlayIgnoreColorList* ignore_list) {
-    if (!page.pixels.data || page.pixels.size == 0u) {
-        return false;
-    }
-    if (page.width == 0u || page.height == 0u) {
-        return false;
-    }
-    if (mask.size && mask.size != (usize)page.width * (usize)page.height) {
-        return false;
-    }
     u8 sample_bits = bits_per_sample(page.color_mode);
     u8 samples_per_pixel = color_mode_samples_per_pixel(page.color_mode);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return false;
-    }
     const u8* bit_data = bits.data;
     usize bit_data_size = bits.size;
     makocode::ByteBuffer rotated;
@@ -22473,11 +21836,6 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
         bit_data_size = rotated.size;
     }
     const bool filter_overlay_colors = (ignore_list && overlay_page && overlay_page->pixels.data);
-    if (filter_overlay_colors) {
-        if (overlay_page->width != page.width || overlay_page->height != page.height) {
-            return false;
-        }
-    }
     u64 cursor = 0u;
     for (u32 row = 0u; row < page.data_height; ++row) {
         for (u32 column = 0u; column < page.width; ++column) {
@@ -22493,9 +21851,6 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
             bool skip_overlay_pixel = false;
             if (filter_overlay_colors) {
                 usize overlay_index = (((usize)row * (usize)overlay_page->width) + (usize)column) * 3u;
-                if ((overlay_index + 2u) >= overlay_page->pixels.size) {
-                    return false;
-                }
                 u8 overlay_r = overlay_page->pixels.data[overlay_index + 0u];
                 u8 overlay_g = overlay_page->pixels.data[overlay_index + 1u];
                 u8 overlay_b = overlay_page->pixels.data[overlay_index + 2u];
@@ -22521,9 +21876,7 @@ static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
                 samples[sample_idx] = value;
             }
             u8 rgb[3];
-            if (!map_samples_to_rgb(page.color_mode, samples, rgb)) {
-                return false;
-            }
+            map_samples_to_rgb(page.color_mode, samples, rgb);
             usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
             if ((pixel_index + 2u) >= page.pixels.size) {
                 return false;
@@ -22611,9 +21964,6 @@ static void raw_overlay_tracker_init(const OverlayPage& base_page,
         return;
     }
     u64 block_total_symbols = block_data_symbols + parity_symbols;
-    if (block_total_symbols == 0u) {
-        return;
-    }
     u64 encoded_block_bytes = 0u;
     if (block_total_symbols > (U64_MAX_VALUE / block_count)) {
         return;
@@ -22657,9 +22007,6 @@ static void raw_overlay_tracker_init(const OverlayPage& base_page,
     tracker.counts.size = counter_bytes;
     for (usize i = 0u; i < counter_bytes; ++i) {
         tracker.counts.data[i] = 0u;
-    }
-    if (encoded_block_bytes == 0u) {
-        return;
     }
     if (encoded_block_bytes > (U64_MAX_VALUE / (u64)sizeof(usize))) {
         return;
@@ -22728,9 +22075,6 @@ static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracke
     if (byte_end > tracker.rs_region_end) {
         byte_end = tracker.rs_region_end;
     }
-    if (byte_start >= byte_end) {
-        return true;
-    }
     u32* counts = (u32*)tracker.counts.data;
     const usize* shuffle_ptr = tracker.shuffle_map.data
                                    ? (const usize*)tracker.shuffle_map.data
@@ -22780,9 +22124,6 @@ static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracke
         }
         u64 original_index = shuffle_ptr ? (u64)shuffle_ptr[(usize)relative] : relative;
         u64 block_index = original_index / tracker.block_total_symbols;
-        if (block_index >= tracker.block_count) {
-            continue;
-        }
         usize counter_index = (usize)block_index;
         if (counter_index >= (tracker.counts.size / sizeof(u32))) {
             continue;
@@ -22873,12 +22214,6 @@ static bool count_overlay_pixel_candidates(const OverlayPage& base_page,
         return false;
     }
     u32 apply_height = base_page.data_height;
-    if (overlay_page.data_height < apply_height) {
-        apply_height = overlay_page.data_height;
-    }
-    if (apply_height > base_page.height) {
-        apply_height = base_page.height;
-    }
     if (apply_height == 0u) {
         return true;
     }
@@ -22898,10 +22233,6 @@ static bool count_overlay_pixel_candidates(const OverlayPage& base_page,
                 continue;
             }
             usize byte_index = pixel_index * 3u;
-            if (byte_index + 2u >= base_page.pixels.size ||
-                byte_index + 2u >= overlay_page.pixels.size) {
-                return false;
-            }
             if (ignore_list) {
                 u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
                 u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
@@ -22940,12 +22271,6 @@ static bool count_overlay_byte_candidates(const OverlayPage& base_page,
         return false;
     }
     u32 apply_height = base_page.data_height;
-    if (overlay_page.data_height < apply_height) {
-        apply_height = overlay_page.data_height;
-    }
-    if (apply_height > base_page.height) {
-        apply_height = base_page.height;
-    }
     if (apply_height == 0u) {
         return true;
     }
@@ -22953,13 +22278,7 @@ static bool count_overlay_byte_candidates(const OverlayPage& base_page,
     const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
     u8 sample_bits = bits_per_sample(base_page.color_mode);
     u8 samples_per_pixel = color_mode_samples_per_pixel(base_page.color_mode);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return false;
-    }
     u64 bits_per_pixel = (u64)sample_bits * (u64)samples_per_pixel;
-    if (bits_per_pixel == 0u) {
-        return false;
-    }
     u64 bit_count = 0u;
     for (u32 row = 0u; row < (u32)apply_height; ++row) {
         for (u32 column = 0u; column < base_page.width; ++column) {
@@ -22975,10 +22294,6 @@ static bool count_overlay_byte_candidates(const OverlayPage& base_page,
                 continue;
             }
             usize byte_index = pixel_index * 3u;
-            if (byte_index + 2u >= base_page.pixels.size ||
-                byte_index + 2u >= overlay_page.pixels.size) {
-                return false;
-            }
             if (ignore_list) {
                 u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
                 u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
@@ -22987,11 +22302,7 @@ static bool count_overlay_byte_candidates(const OverlayPage& base_page,
                     continue;
                 }
             }
-            if (bit_count > (U64_MAX_VALUE - bits_per_pixel)) {
-                bit_count = U64_MAX_VALUE;
-            } else {
-                bit_count += bits_per_pixel;
-            }
+            bit_count += bits_per_pixel;
         }
     }
     if (bit_count == 0u) {
@@ -23034,12 +22345,6 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
         return false;
     }
     u32 apply_height = base_page.data_height;
-    if (overlay_page.data_height < apply_height) {
-        apply_height = overlay_page.data_height;
-    }
-    if (apply_height > base_page.height) {
-        apply_height = base_page.height;
-    }
     if (apply_height == 0u) {
         return true;
     }
@@ -23047,9 +22352,6 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
     const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
     u8 sample_bits = bits_per_sample(base_page.color_mode);
     u8 samples_per_pixel = color_mode_samples_per_pixel(base_page.color_mode);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return false;
-    }
     u64 bits_per_pixel = (u64)sample_bits * (u64)samples_per_pixel;
     struct RawOverlayPixelCandidate {
         u64 bit_start;
@@ -23081,10 +22383,6 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
                 continue;
             }
             usize byte_index = pixel_index * 3u;
-            if (byte_index + 2u >= base_page.pixels.size ||
-                byte_index + 2u >= overlay_page.pixels.size) {
-                return false;
-            }
             if (ignore_list) {
                 u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
                 u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
@@ -23122,9 +22420,6 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
         if (requested > cap) {
             numerator = cap;
             denominator = (u64)candidate_count;
-            if (numerator == 0u) {
-                numerator = 1u;
-            }
         }
     }
     u64 accumulator = 0u;
@@ -23137,10 +22432,6 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
         accumulator -= denominator;
         usize pixel_index = candidate.pixel_index;
         usize byte_index = pixel_index * 3u;
-        if (byte_index + 2u >= base_page.pixels.size ||
-            byte_index + 2u >= overlay_page.pixels.size) {
-            return false;
-        }
         bool changed = false;
         if (base_page.pixels.data[byte_index + 0u] != overlay_page.pixels.data[byte_index + 0u] ||
             base_page.pixels.data[byte_index + 1u] != overlay_page.pixels.data[byte_index + 1u] ||
@@ -23168,13 +22459,7 @@ static bool serialize_overlay_page(const OverlayPage& page,
     if (!ppm_write_dimensions((u64)page.width, (u64)page.height, output)) {
         return false;
     }
-    if (!page.pixels.data) {
-        return false;
-    }
     usize total_pixels = (usize)page.width * (usize)page.height;
-    if (page.pixels.size < total_pixels * 3u) {
-        return false;
-    }
     for (usize index = 0u; index < total_pixels; ++index) {
         const u8* rgb = page.pixels.data + index * 3u;
         for (u8 channel = 0u; channel < 3u; ++channel) {
@@ -23959,7 +23244,6 @@ retry_decode:
         makocode::BitWriter frame_aggregator;
         frame_aggregator.reset();
         bool aggregate_initialized = false;
-        bool enforce_page_index = true;
         u64 expected_page_index = 1u;
         for (usize file_index = 0u; file_index < file_count; ++file_index) {
             makocode::ByteBuffer ppm_stream;
@@ -24036,23 +23320,17 @@ retry_decode:
                 page_state.has_page_index = true;
                 page_state.page_index_value = expected_page_index;
             }
-            if (enforce_page_index) {
-                if (page_state.has_page_index) {
-                    if (page_state.page_index_value != expected_page_index) {
-                        char expected_buffer[32];
-                        char actual_buffer[32];
-                        u64_to_ascii(expected_page_index, expected_buffer, sizeof(expected_buffer));
-                        u64_to_ascii(page_state.page_index_value, actual_buffer, sizeof(actual_buffer));
-                        console_write(2, "decode: unexpected page order (expected: ");
-                        console_write(2, expected_buffer);
-                        console_write(2, ", actual: ");
-                        console_write(2, actual_buffer);
-                        console_line(2, ")");
-                        return 1;
-                    }
-                } else {
-                    enforce_page_index = false;
-                }
+            if (page_state.page_index_value != expected_page_index) {
+                char expected_buffer[32];
+                char actual_buffer[32];
+                u64_to_ascii(expected_page_index, expected_buffer, sizeof(expected_buffer));
+                u64_to_ascii(page_state.page_index_value, actual_buffer, sizeof(actual_buffer));
+                console_write(2, "decode: unexpected page order (expected: ");
+                console_write(2, expected_buffer);
+                console_write(2, ", actual: ");
+                console_write(2, actual_buffer);
+                console_line(2, ")");
+                return 1;
             }
             u64 effective_bits = page_bit_count;
             if (page_state.has_page_bits && page_state.page_bits_value <= effective_bits) {
@@ -24068,14 +23346,6 @@ retry_decode:
             aggregate_state.page_count_value == 0u ||
             aggregate_state.page_count_value < file_count) {
             aggregate_state.has_page_count = false;
-        }
-        if (aggregate_state.has_page_count) {
-            u64 advertised_pages = aggregate_state.page_count_value;
-            if (file_count > advertised_pages) {
-                console_line(2, "decode: page count metadata mismatch");
-                return 1;
-            }
-            
         }
         const u8* frame_data = frame_aggregator.data();
         u64 frame_bit_total = frame_aggregator.bit_size();
@@ -24197,9 +23467,6 @@ retry_decode:
     }
     if (decoder.password_attempt_made() && decoder.password_was_ignored()) {
         console_line(2, "decode: warning: payload was not encrypted; password ignored");
-    }
-    if (decoder.ecc_correction_failed()) {
-        console_line(2, "decode: warning: payload may contain uncorrected errors");
     }
     const makocode::EccDecodeStats& ecc_stats = decoder.ecc_statistics();
     if (ecc_stats.total_parity_symbols > 0u) {
