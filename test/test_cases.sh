@@ -335,3 +335,6 @@ test_case 0078_decode_synthetic_scan_damage script "Generated blurred 4.5x scan 
 
 test_case 0079_decode_scan_margin_noise script "Generated scan margin noise still decodes" \
     test_decode_synthetic_scan_damage.sh --margin-noise
+
+test_case 0080_decode_scan_off_center_noise script "Recoverable scan with off-center specks must decode" \
+    test_decode_synthetic_scan_damage.sh --off-center-noise

@@ -15,8 +15,13 @@ if [[ ${1:-} == --label && -n ${2:-} ]]; then
     shift 2
 fi
 margin_noise=0
+off_center_noise=0
 if [[ ${1:-} == --margin-noise ]]; then
     margin_noise=1
+    shift
+fi
+if [[ ${1:-} == --off-center-noise ]]; then
+    off_center_noise=1
     shift
 fi
 if [[ $# -ne 0 ]]; then
@@ -54,9 +59,10 @@ fi
 # --margin-noise instead adds an isolated mark outside the page, allowing the
 # dark-bounds override to mistake that mark for part of the page geometry.
 python3 - "$work_dir/encoded/synthetic.ppm" "$work_dir/damaged.ppm" \
-    "$work_dir/recovered.ppm" "$work_dir/soft.ppm" "$margin_noise" <<'PY'
+    "$work_dir/recovered.ppm" "$work_dir/soft.ppm" "$margin_noise" "$off_center_noise" <<'PY'
 from pathlib import Path
 import math
+import random
 import sys
 
 source = Path(sys.argv[1]).read_text().split()
@@ -95,6 +101,19 @@ else:
     for x, y in ((6, 78), (6, 79), (7, 79)):
         damaged[y][x] = 0
 
+# Reproducible scan specks outside every known cell center. The assertion
+# below independently checks that the encoded module values survive.
+if sys.argv[6] == '1':
+    damaged = [row.copy() for row in base]
+    centers = {(round((x + 0.5) * pitch + offset_x - 0.5),
+                round((y + 0.5) * pitch + offset_y - 0.5))
+               for y in range(55) for x in range(55)}
+    rng = random.Random(0)
+    for y in range(height):
+        for x in range(width):
+            if (x, y) not in centers and rng.random() < 0.03:
+                damaged[y][x] = 0
+
 with Path(sys.argv[2]).open('w', encoding='ascii') as output:
     output.write(f'P3\n{width} {height}\n255\n')
     for row in damaged:
@@ -129,7 +148,11 @@ cmp --silent "$work_dir/$payload_path" "$work_dir/decoded_control/$payload_path"
 cmp --silent "$work_dir/$payload_path" "$work_dir/decoded_soft/$payload_path"
 
 status=0
-"$makocode_bin" decode --debug "--output-dir=$work_dir/decoded_damage" \
+debug_option=--debug
+if [[ $off_center_noise == 1 ]]; then
+    debug_option=
+fi
+"$makocode_bin" decode ${debug_option:+"$debug_option"} "--output-dir=$work_dir/decoded_damage" \
     "$work_dir/damaged.ppm" >"$work_dir/damage.log" 2>&1 || status=$?
 if [[ $status -eq 0 ]]; then
     cmp --silent "$work_dir/$payload_path" "$work_dir/decoded_damage/$payload_path"
@@ -140,6 +163,17 @@ if [[ $(grep -Fxc 'decode: parse failure; retrying without fiducial subgrid' \
              "$work_dir/damage.log") -ne 1 ||
       $(grep -Fxc 'decode: parse failure' "$work_dir/damage.log") -ne 1 ]]; then
     cat "$work_dir/damage.log" >&2
+    exit 1
+fi
+if [[ $off_center_noise == 1 ]]; then
+    printf '%s\n' 'decode: parse failure; retrying without fiducial subgrid' \
+        'decode: parse failure' > "$work_dir/expected.log"
+    cmp "$work_dir/expected.log" "$work_dir/damage.log"
+    cat "$work_dir/damage.log" >&2
+    "${CXX:-g++}" -std=c++17 -O2 \
+        "$script_dir/test_scan_sampling_failure_probe.cpp" -o "$work_dir/sampling_probe"
+    "$work_dir/sampling_probe" "$work_dir/encoded/synthetic.ppm" "$work_dir/damaged.ppm"
+    echo "recoverable synthetic scan failed (exit $status); artifacts: $work_dir" >&2
     exit 1
 fi
 "${CXX:-g++}" -std=c++17 -O2 \

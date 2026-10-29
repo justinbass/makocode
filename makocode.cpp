@@ -15101,6 +15101,8 @@ struct RotationEstimateCandidate {
     double independent_rotation = auto_candidate.valid ? auto_candidate.angle_deg
                                   : (fiducial_candidate.valid ? fiducial_candidate.angle_deg : 0.0);
     double tile_scale = tile_affine_hint.pitch_pixels;
+    bool scan_border_refined = false;
+    double scan_ink_floor = 0.0;
     if (tile_affine_hint_available && !state.has_affine_transform &&
         !has_rotation && !state.has_skew_x_pixels && !state.has_skew_y_pixels &&
         width < 400u && height < 400u &&
@@ -15209,6 +15211,7 @@ struct RotationEstimateCandidate {
             if (y < min_y) min_y = y;
             if (y > max_y) max_y = y;
         }
+        bool bounds_refined = false;
         if (min_x < (u32)width && min_y < (u32)height && min_x > 0u && min_y > 0u &&
             max_x + 1u < (u32)width && max_y + 1u < (u32)height) {
             double bounds_scale_x = ((double)max_x - (double)min_x + 1.0) /
@@ -15235,6 +15238,109 @@ struct RotationEstimateCandidate {
                 state.affine_transform.tx = (double)min_x - 0.5;
                 state.affine_transform.ty = (double)min_y - 0.5;
                 state.has_affine_transform = true;
+                bounds_refined = true;
+            }
+        }
+        // Margin ink can invalidate the page bounds. Refine the remaining
+        // tile-derived estimate against the decoded metadata template instead
+        // of propagating a small pitch error across the payload.
+        if (!bounds_refined && tile_available &&
+            tile_scale > 1.5 && tile_scale < 4.20 &&
+            fabs(state.affine_transform.a01) < 0.001 &&
+            fabs(state.affine_transform.a10) < 0.001) {
+            u32 logical_data_height = (u32)expected_height;
+            if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
+                logical_data_height -= (u32)state.footer_rows_value;
+            }
+            MetadataTile::Placement placement = MetadataTile::compute_tile_placement(
+                (u32)expected_width, logical_data_height);
+            makocode::ByteBuffer tile_template;
+            if (placement.valid && MetadataTile::build_tile_bits(tile_values, tile_template)) {
+                double hole_start = (MetadataTile::TILE_SIDE - MetadataTile::TILE_HOLE_SIDE) / 2u;
+                double hole_end = hole_start + MetadataTile::TILE_HOLE_SIDE;
+                u32 luminance_histogram[256] = {};
+                for (usize pixel = 0u; pixel < (usize)width * (usize)height; ++pixel) {
+                    u32 luminance = (u32)(MetadataTile::rgb_luminance_u8(
+                        pixel_data[pixel * 3u], pixel_data[pixel * 3u + 1u], pixel_data[pixel * 3u + 2u]) + 0.5);
+                    ++luminance_histogram[luminance];
+                }
+                double ink_luminance = 0.0, paper_luminance = 255.0;
+                u64 accumulated = 0u;
+                for (u32 luminance = 0u; luminance < 256u; ++luminance) {
+                    accumulated += luminance_histogram[luminance];
+                    if (accumulated <= width * height / 10u) ink_luminance = luminance;
+                    if (accumulated <= width * height * 9u / 10u) paper_luminance = luminance;
+                }
+                double contrast = paper_luminance - ink_luminance;
+                double error_limit = contrast * 0.2;
+                double tile_x = (double)placement.x0 + MetadataTile::TILE_SIDE * 0.5;
+                double tile_y = (double)placement.y0 + MetadataTile::TILE_SIDE * 0.5;
+                double fitted[4] = {state.affine_transform.a00,
+                                    state.affine_transform.a11,
+                                    state.affine_transform.a00 * tile_x + state.affine_transform.tx,
+                                    state.affine_transform.a11 * tile_y + state.affine_transform.ty};
+                double best_score = -1.0e30;
+                for (u32 level = 0u; level < 6u; ++level) {
+                    double factor = 1.0 / (double)(1u << level);
+                    for (u32 sweep = 0u; sweep < 6u; ++sweep) {
+                        for (u32 parameter = 0u; parameter < 4u; ++parameter) {
+                            double origin = fitted[parameter];
+                            double step = (parameter < 2u ? 0.02 : 0.25) * factor;
+                            for (int delta = -2; delta <= 2; ++delta) {
+                                double candidate[4] = {fitted[0], fitted[1], fitted[2], fitted[3]};
+                                candidate[parameter] = origin + (double)delta * step;
+                                double count = 0.0, error_sum = 0.0;
+                                for (u32 y = 0u; y < (u32)height; ++y) {
+                                    double top = ((double)y - 0.5 - candidate[3]) / candidate[1] +
+                                                 MetadataTile::TILE_SIDE * 0.5;
+                                    double bottom = top + 1.0 / candidate[1];
+                                    if (top < 0.0 || bottom >= MetadataTile::TILE_SIDE) continue;
+                                    for (u32 x = 0u; x < (u32)width; ++x) {
+                                        double left = ((double)x - 0.5 - candidate[2]) / candidate[0] +
+                                                      MetadataTile::TILE_SIDE * 0.5;
+                                        double right = left + 1.0 / candidate[0];
+                                        if (left < 0.0 || right >= MetadataTile::TILE_SIDE) continue;
+                                        if (right > hole_start && left < hole_end &&
+                                            bottom > hole_start && top < hole_end) continue;
+                                        // Integrate known modules over the pixel footprint.
+                                        double q = 0.0;
+                                        for (u32 row = (u32)top; row <= (u32)bottom; ++row) {
+                                            double dy = (bottom < (double)row + 1.0 ? bottom : (double)row + 1.0) -
+                                                        (top > (double)row ? top : (double)row);
+                                            for (u32 col = (u32)left; col <= (u32)right; ++col) {
+                                                double dx = (right < (double)col + 1.0 ? right : (double)col + 1.0) -
+                                                            (left > (double)col ? left : (double)col);
+                                                if (tile_template.data[(usize)row * MetadataTile::TILE_SIDE + col]) {
+                                                    q += dx * dy;
+                                                }
+                                            }
+                                        }
+                                        q *= candidate[0] * candidate[1];
+                                        usize pixel = ((usize)y * (usize)width + x) * 3u;
+                                        double luminance = MetadataTile::rgb_luminance_u8(
+                                            pixel_data[pixel], pixel_data[pixel + 1u], pixel_data[pixel + 2u]);
+                                        ++count;
+                                        double error = fabs(luminance - (paper_luminance - contrast * q));
+                                        // Limit isolated ink specks' influence on the fit.
+                                        error_sum += error <= error_limit ? error * error
+                                                     : error_limit * (2.0 * error - error_limit);
+                                    }
+                                }
+                                double score = count >= 32.0 ? -error_sum / count : -1.0e30;
+                                if (score > best_score) {
+                                    best_score = score;
+                                    for (u32 i = 0u; i < 4u; ++i) fitted[i] = candidate[i];
+                                }
+                            }
+                        }
+                    }
+                }
+                state.affine_transform.a00 = fitted[0];
+                state.affine_transform.a11 = fitted[1];
+                state.affine_transform.tx = fitted[2] - fitted[0] * tile_x;
+                state.affine_transform.ty = fitted[3] - fitted[1] * tile_y;
+                scan_border_refined = true;
+                scan_ink_floor = ink_luminance - contrast * 0.1;
             }
         }
     }
@@ -17225,19 +17331,51 @@ struct RotationEstimateCandidate {
                 double max_sample_y = (height > 0u) ? (double)(height - 1u) : 0.0;
                 if (sample_x > max_sample_x) sample_x = max_sample_x;
                 if (sample_y > max_sample_y) sample_y = max_sample_y;
+                const u8* affine_pixels = affine_source_pixels.data
+                                              ? affine_source_pixels.data
+                                              : pixel_data;
                 unsigned x0 = (unsigned)floor(sample_x);
                 unsigned y0 = (unsigned)floor(sample_y);
+                // A refined scan center can be readable even when neighboring
+                // edge pixels contain ink specks. Preserve that center sample.
+                if (scan_border_refined) {
+                    x0 = (unsigned)(sample_x + 0.5);
+                    y0 = (unsigned)(sample_y + 0.5);
+                    usize nearest = ((usize)y0 * (usize)width + x0) * 3u;
+                    if (MetadataTile::rgb_luminance_u8(affine_pixels[nearest],
+                                                       affine_pixels[nearest + 1u],
+                                                       affine_pixels[nearest + 2u]) < scan_ink_floor) {
+                        // Reject a speck darker than the measured ink range.
+                        double best_distance = 1.0e30;
+                        u32 left = (u32)floor(sample_x), top = (u32)floor(sample_y);
+                        for (u32 y = top; y <= top + 1u && y < height; ++y) {
+                            for (u32 x = left; x <= left + 1u && x < width; ++x) {
+                                usize pixel = ((usize)y * (usize)width + x) * 3u;
+                                double luminance = MetadataTile::rgb_luminance_u8(
+                                    affine_pixels[pixel], affine_pixels[pixel + 1u], affine_pixels[pixel + 2u]);
+                                double dx = (double)x - sample_x, dy = (double)y - sample_y;
+                                double distance = dx * dx + dy * dy;
+                                if (luminance >= scan_ink_floor && distance < best_distance) {
+                                    best_distance = distance;
+                                    x0 = x;
+                                    y0 = y;
+                                }
+                            }
+                        }
+                    }
+                }
                 unsigned x1 = (x0 + 1u < width) ? (x0 + 1u) : x0;
                 unsigned y1 = (y0 + 1u < height) ? (y0 + 1u) : y0;
+                if (scan_border_refined) {
+                    x1 = x0;
+                    y1 = y0;
+                }
                 double fx = sample_x - (double)x0;
                 double fy = sample_y - (double)y0;
                 usize idx00 = ((usize)y0 * (usize)width + (usize)x0) * 3u;
                 usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
                 usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;
                 usize idx11 = ((usize)y1 * (usize)width + (usize)x1) * 3u;
-                const u8* affine_pixels = affine_source_pixels.data
-                                              ? affine_source_pixels.data
-                                              : pixel_data;
                 for (u32 channel = 0u; channel < 3u; ++channel) {
                     double v00 = (double)affine_pixels[idx00 + channel];
                     double v10 = (double)affine_pixels[idx10 + channel];
