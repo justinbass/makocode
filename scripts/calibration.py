@@ -367,62 +367,123 @@ def fit_scan_transform(rows, samples, source_width, source_height, source_pixels
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("could not determine the calibration grid scale")
 
-    # Refine the translation by aligning the expected row and column ink
-    # profiles with the scanned profiles. This corrects centroid bias from
-    # print density, paper marks, and scan thresholding.
-    max_shift = max(128, round(max(expected_x_hist) * 0.1))
-    min_expected_x = min(expected_x_hist) - max_shift
-    max_expected_x = max(expected_x_hist) + max_shift
-    min_expected_y = min(expected_y_hist) - max_shift
-    max_expected_y = max(expected_y_hist) + max_shift
-    observed_x_hist = {}
-    observed_y_hist = {}
-    cosine = math.cos(angle)
-    sine = math.sin(angle)
-    for scan_x, scan_y in observed_ink_points():
-        dx = (scan_x - observed_x) / scale
-        dy = (scan_y - observed_y) / scale
-        page_x = cosine * dx + sine * dy + expected_x
-        page_y = -sine * dx + cosine * dy + expected_y
-        if not (min_expected_x <= page_x <= max_expected_x
-                and min_expected_y <= page_y <= max_expected_y):
-            continue
-        x_bin = math.floor(page_x)
-        y_bin = math.floor(page_y)
-        observed_x_hist[x_bin] = observed_x_hist.get(x_bin, 0) + 1
-        observed_y_hist[y_bin] = observed_y_hist.get(y_bin, 0) + 1
+    # The ink distribution can bias the covariance angle differently at each
+    # scan resolution. Estimate rotation from the page's repeated horizontal
+    # and vertical structure instead.
+    model_left = min(MARGIN, min(sample["x"] for sample in samples))
+    model_right = max(sample["x"] + sample["width_px"] for sample in samples)
+    model_top = min(row["y"] for row in rows)
+    model_bottom = max(row["y"] + row["height_px"] for row in rows)
+    margin = max(20, round(scale * max(model_right - model_left,
+                                      model_bottom - model_top) * 0.05))
+    initial_cosine = math.cos(angle)
+    initial_sine = math.sin(angle)
+    projected_corners = []
+    for page_x in (model_left, model_right):
+        for page_y in (model_top, model_bottom):
+            dx = page_x - expected_x
+            dy = page_y - expected_y
+            projected_corners.append((
+                scale * (initial_cosine * dx - initial_sine * dy) + observed_x,
+                scale * (initial_sine * dx + initial_cosine * dy) + observed_y,
+            ))
+    left = min(point[0] for point in projected_corners) - margin
+    right = max(point[0] for point in projected_corners) + margin
+    top = min(point[1] for point in projected_corners) - margin
+    bottom = max(point[1] for point in projected_corners) + margin
+    grid_points = [
+        (x, y) for x, y in observed_ink_points()
+        if left <= x <= right and top <= y <= bottom
+    ]
+    if len(grid_points) < 100:
+        raise ValueError("could not find the calibration grid structure in the scanned image")
 
+    angle_center = angle
+    best_angle = angle
+    best_score = -1
+    for tenth_degree in range(-40, 41):
+        candidate = angle_center + math.radians(tenth_degree / 10)
+        candidate_cosine = math.cos(candidate)
+        candidate_sine = math.sin(candidate)
+        x_projection = {}
+        y_projection = {}
+        for x, y in grid_points:
+            x_bin = round(candidate_cosine * x + candidate_sine * y)
+            y_bin = round(-candidate_sine * x + candidate_cosine * y)
+            x_projection[x_bin] = x_projection.get(x_bin, 0) + 1
+            y_projection[y_bin] = y_projection.get(y_bin, 0) + 1
+        score = (sum(count * count for count in x_projection.values())
+                 + sum(count * count for count in y_projection.values()))
+        if score > best_score:
+            best_angle = candidate
+            best_score = score
+    angle = best_angle
+
+    # Estimate independent axis scales and translation from the grid bounds.
+    # Moment scales expand with dark-ink thickness, which shifts samples far
+    # from the grid center, especially at high scan resolutions.
     def robust_bounds(hist):
-        threshold = max(1, max(hist.values()) * 0.001)
+        threshold = max(1, max(hist.values()) * 0.01)
         positions = [position for position, count in hist.items()
                      if count >= threshold]
         return min(positions), max(positions)
 
+    expected_x_bounds = robust_bounds(expected_x_hist)
     expected_y_bounds = robust_bounds(expected_y_hist)
+    observed_x_hist = {}
+    observed_y_hist = {}
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    for scan_x, scan_y in grid_points:
+        x_bin = round(cosine * scan_x + sine * scan_y)
+        y_bin = round(-sine * scan_x + cosine * scan_y)
+        observed_x_hist[x_bin] = observed_x_hist.get(x_bin, 0) + 1
+        observed_y_hist[y_bin] = observed_y_hist.get(y_bin, 0) + 1
+
+    observed_x_bounds = robust_bounds(observed_x_hist)
     observed_y_bounds = robust_bounds(observed_y_hist)
-    y_shift = ((observed_y_bounds[0] + observed_y_bounds[1])
-               - (expected_y_bounds[0] + expected_y_bounds[1])) / 2
-    observed_x -= round(scale * sine * y_shift)
-    observed_y += round(scale * cosine * y_shift)
+    scale_x = ((observed_x_bounds[1] - observed_x_bounds[0])
+               / (expected_x_bounds[1] - expected_x_bounds[0]))
+    scale_y = ((observed_y_bounds[1] - observed_y_bounds[0])
+               / (expected_y_bounds[1] - expected_y_bounds[0]))
+    if (not math.isfinite(scale_x) or not math.isfinite(scale_y)
+            or scale_x <= 0 or scale_y <= 0):
+        raise ValueError("could not determine the calibration grid bounds")
 
-    return expected_x, expected_ink_y, observed_x, observed_y, scale, angle
+    expected_x = (expected_x_bounds[0] + expected_x_bounds[1]) / 2
+    expected_y = (expected_y_bounds[0] + expected_y_bounds[1]) / 2
+    observed_axis_x = (observed_x_bounds[0] + observed_x_bounds[1]) / 2
+    observed_axis_y = (observed_y_bounds[0] + observed_y_bounds[1]) / 2
+    observed_x = cosine * observed_axis_x - sine * observed_axis_y
+    observed_y = sine * observed_axis_x + cosine * observed_axis_y
+    reported_scale = math.sqrt(scale_x * scale_y)
+
+    return (expected_x, expected_y, observed_x, observed_y, reported_scale,
+            angle, scale_x, scale_y)
 
 
-def map_sample_to_scan(sample, transform, scan_width, scan_height):
-    expected_x, expected_y, observed_x, observed_y, scale, angle = transform
+def map_sample_to_scan(sample, transform, scan_width, scan_height, offset=(0, 0)):
+    (expected_x, expected_y, observed_x, observed_y, scale, angle,
+     scale_x, scale_y) = transform
     cosine = math.cos(angle)
     sine = math.sin(angle)
     page_x = sample["x"] + sample["width_px"] / 2 - expected_x
     page_y = sample["y"] + sample["height_px"] / 2 - expected_y
-    center_x = scale * (cosine * page_x - sine * page_y) + observed_x
-    center_y = scale * (sine * page_x + cosine * page_y) + observed_y
-    crop_width = scale * (
-        abs(cosine) * sample["width_px"] + abs(sine) * sample["height_px"]
+    center_x = (cosine * scale_x * page_x
+                - sine * scale_y * page_y + observed_x + offset[0])
+    center_y = (sine * scale_x * page_x
+                + cosine * scale_y * page_y + observed_y + offset[1])
+    crop_width = (
+        abs(cosine) * scale_x * sample["width_px"]
+        + abs(sine) * scale_y * sample["height_px"]
     )
-    crop_height = scale * (
-        abs(sine) * sample["width_px"] + abs(cosine) * sample["height_px"]
+    crop_height = (
+        abs(sine) * scale_x * sample["width_px"]
+        + abs(cosine) * scale_y * sample["height_px"]
     )
-    padding = max(2, round(scale * 2 + max(crop_width, crop_height) * 0.015))
+    # Keep a small scan edge around the sample. Padding proportional to the
+    # sample size can capture neighboring rows on this tightly packed sheet.
+    padding = max(2, round(scale * 1.5))
     left = max(0, math.floor(center_x - crop_width / 2) - padding)
     top = max(0, math.floor(center_y - crop_height / 2) - padding)
     right = min(scan_width, math.ceil(center_x + crop_width / 2) + padding)
@@ -438,6 +499,76 @@ def map_sample_to_scan(sample, transform, scan_width, scan_height):
     }
 
 
+def fit_sample_row_offsets(rows, samples, transform, source_width, source_height,
+                           source_pixels, scan_width, scan_height, scan_pixels):
+    """Measure small row placement errors against the known sample bitmap."""
+    expected_x, expected_y, observed_x, observed_y, scale, angle, scale_x, scale_y = transform
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    template = []
+    for source_y in range(source_height):
+        for source_x in range(source_width):
+            offset = (source_y * source_width + source_x) * 3
+            red, green, blue = source_pixels[offset:offset + 3]
+            if (red * 299 + green * 587 + blue * 114) // 1000 <= 160:
+                template.append((source_x + 0.5, source_y + 0.5))
+
+    def score_offset(sample, shift_x, shift_y):
+        score = 0
+        for source_x, source_y in template:
+            page_x = sample["x"] + source_x * sample["width_px"] / source_width
+            page_y = sample["y"] + source_y * sample["height_px"] / source_height
+            dx = page_x - expected_x
+            dy = page_y - expected_y
+            scan_x = (cosine * scale_x * dx - sine * scale_y * dy
+                      + observed_x + shift_x)
+            scan_y = (sine * scale_x * dx + cosine * scale_y * dy
+                      + observed_y + shift_y)
+            pixel_x = math.floor(scan_x)
+            pixel_y = math.floor(scan_y)
+            if not (0 <= pixel_x < scan_width and 0 <= pixel_y < scan_height):
+                continue
+            offset = (pixel_y * scan_width + pixel_x) * 3
+            red, green, blue = scan_pixels[offset:offset + 3]
+            luma = (red * 299 + green * 587 + blue * 114) // 1000
+            score += 128 - luma
+        return score
+
+    offsets = {}
+    for row_index, row in enumerate(rows):
+        sample = samples[row["sample_indexes"][0]]
+        # Keep the search inside the row's own barcode and clear of its label
+        # and neighboring rows. The page fit supplies the location; matching
+        # only corrects the remaining small scan-placement error.
+        radius_x = max(2, min(20, round(scale_x * LABEL_GAP * 0.8)))
+        if row_index + 1 < len(rows):
+            next_sample = samples[rows[row_index + 1]["sample_indexes"][0]]
+            row_spacing = (next_sample["y"] - sample["y"]) * scale_y
+        else:
+            row_spacing = (sample["height_px"] + PADDING) * scale_y
+        radius_y = max(4, min(40, round(row_spacing * 0.4)))
+        coarse_step = max(1, round(scale * 2))
+
+        best_x = best_y = 0
+        best_score = score_offset(sample, 0, 0)
+        for shift_y in range(-radius_y, radius_y + 1, coarse_step):
+            for shift_x in range(-radius_x, radius_x + 1, coarse_step):
+                score = score_offset(sample, shift_x, shift_y)
+                if score > best_score:
+                    best_x, best_y, best_score = shift_x, shift_y, score
+
+        coarse_x, coarse_y = best_x, best_y
+        for shift_y in range(coarse_y - coarse_step, coarse_y + coarse_step + 1):
+            for shift_x in range(coarse_x - coarse_step, coarse_x + coarse_step + 1):
+                if abs(shift_x) > radius_x or abs(shift_y) > radius_y:
+                    continue
+                score = score_offset(sample, shift_x, shift_y)
+                if score > best_score:
+                    best_x, best_y, best_score = shift_x, shift_y, score
+        offsets[row["index"]] = (best_x, best_y)
+    return offsets
+
+
 def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet_path):
     page_width, page_height, page_pixels = read_p3_ppm(scan_path)
     rows, samples, source_pixels = read_calibration_source(
@@ -449,6 +580,15 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet
             rows, samples, 55, 55, source_pixels,
             page_width, page_height, page_pixels,
         )
+        row_offsets = fit_sample_row_offsets(
+            rows, samples, transform, 55, 55, source_pixels,
+            page_width, page_height, page_pixels,
+        )
+        sample_row_index = {
+            sample_index: row["index"]
+            for row in rows
+            for sample_index in row["sample_indexes"]
+        }
         print(
             f"Detected calibration grid at {transform[4]:.3g}x, "
             f"rotated {math.degrees(transform[5]):.2f} degrees.",
@@ -466,7 +606,8 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet
             decode_dir = sample_dir / "decoded"
             decode_dir.mkdir()
             sample = map_sample_to_scan(
-                original_sample, transform, page_width, page_height
+                original_sample, transform, page_width, page_height,
+                row_offsets[sample_row_index[original_sample["index"]]],
             )
             write_sample_crop(crop_path, page_width, page_pixels, sample)
 
@@ -578,16 +719,32 @@ def crop_scan(scan_path, original_width, original_height, sheet_path):
         rows, samples, 55, 55, source_pixels,
         scan_width, scan_height, scan_pixels,
     )
+    row_offsets = fit_sample_row_offsets(
+        rows, samples, transform, 55, 55, source_pixels,
+        scan_width, scan_height, scan_pixels,
+    )
+    sample_row_index = {
+        sample_index: row["index"]
+        for row in rows
+        for sample_index in row["sample_indexes"]
+    }
     print(
         f"Bounds fit at {transform[4]:.3g}x, "
         f"rotated {math.degrees(transform[5]):.2f} degrees"
     )
+    adjustments = ", ".join(
+        f"{row['label']} {row_offsets[row['index']][0]:+d},"
+        f"{row_offsets[row['index']][1]:+d}"
+        for row in rows
+    )
+    print(f"Row position adjustments in scan pixels (x,y): {adjustments}")
 
     output_dir = Path.cwd() / "calibration-crops" / scan_path.stem
     output_dir.mkdir(parents=True, exist_ok=True)
     for sample in samples:
         crop = map_sample_to_scan(
-            sample, transform, scan_width, scan_height
+            sample, transform, scan_width, scan_height,
+            row_offsets[sample_row_index[sample["index"]]],
         )
         crop_path = output_dir / (
             f"{sample['scale']:g}x-copy{sample['copy'] + 1:02d}.ppm"
