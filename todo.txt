@@ -3,9 +3,15 @@ Tests
   - I ran 'make -j coverage', review the output. My goal is to get to 100% CC by either removing dead untested code, or adding tests if the code is business valuable. A previous task found that it was 50/50 between delete/cover. We'll go through one by one, from end to beginning so that deletions don't change the line numbers. Give me literally the last block, and tell me if you think it's delete (slop) or cover (business valuable). If it's cover, you need to suggest a specific test implementation. If it's delete, you'll clip it out, clean it up including fixing compiler/test warnings, run 'make -j test' until it succeeds.
   - add the test but only test the new test, not the full suite, then proceed to the previous code block.
   - proceed to the previous code block then
+  - TODO
+    - Remove v1 metadata tile decoding and its version-specific constants; update affected tests. Remove the payload’s duplicate schema version; update encoding and decoding. Change to only V1.
+    - The direct decoder checks CRC failure twice. The first condition is redundant; the second rejects the same case regardless of Reed–Solomon status. [verified: makocode.cpp (makocode.cpp:8557)]
+    - The v1 and v2 header repetition constants are both 5, so the version-dependent choice currently has no effect. [verified: makocode.cpp (makocode.cpp:7904)]
+    - Direct and affine tile decoders repeat header and payload parsing. They also differ: the direct decoder accepts a CRC-valid payload after Reed–Solomon failure; the affine decoder requires both to pass. Consolidation needs care. [verified: direct (makocode.cpp:8551), affine (makocode.cpp:9187)]
+    - I also found an explicitly retained exhaustive search fallback. It is reachable, so it is not dead code; whether its cost is justified needs measurement. [verified: makocode.cpp (makocode.cpp:9806)]
 - Run 10 'make coverage' runs, figure out how to cover all random pathways.
 - Wavy distortion test
-- Page height or width too small for title or metadata, fails to encode
+- Page height or width too small for title or metadata, fails to encode. Could metadata tile and fiducial markings be known-position damage written to a barcode, so they become optional?
 - All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
 - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Remove entire page test, with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
@@ -41,6 +47,7 @@ Finalize
 - Much better documentation, or a spec
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones.
 - Reorganize tests logically from simple to complex, and document each one in full.
+- Move all Python and other support code to C++
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs?
 - Makocode for ca cert install on Android phone (needs Android app)
 - Optional fiducial markings and center code, use known error position to correct in place. Data could simply be linear across the page...
