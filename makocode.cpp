@@ -15966,6 +15966,10 @@ struct RotationEstimateCandidate {
                 !state.has_affine_transform ||
                 (fabs(state.affine_transform.a01) <= 0.01 * cell_scale_x &&
                  fabs(state.affine_transform.a10) <= 0.01 * cell_scale_y);
+            bool nearest_affine_sample = state.has_affine_transform &&
+                                         axis_aligned_affine &&
+                                         cell_scale_x > 1.01 && cell_scale_x <= 2.1 &&
+                                         cell_scale_y > 1.01 && cell_scale_y <= 2.1;
             if ((sample_scaled_cells || use_custom_palette || alternating_white_damage) &&
                 !has_rotation &&
                 !has_skew &&
@@ -16154,15 +16158,22 @@ struct RotationEstimateCandidate {
                             }
                         }
                     }
+                } else if (nearest_affine_sample) {
+                    x0 = (unsigned)(sample_x + 0.5);
+                    y0 = (unsigned)(sample_y + 0.5);
                 }
                 unsigned x1 = (x0 + 1u < width) ? (x0 + 1u) : x0;
                 unsigned y1 = (y0 + 1u < height) ? (y0 + 1u) : y0;
-                if (scan_border_refined) {
+                if (scan_border_refined || nearest_affine_sample) {
                     x1 = x0;
                     y1 = y0;
                 }
-                double fx = sample_x - (double)x0;
-                double fy = sample_y - (double)y0;
+                double fx = (scan_border_refined || nearest_affine_sample)
+                                ? 0.0
+                                : sample_x - (double)x0;
+                double fy = (scan_border_refined || nearest_affine_sample)
+                                ? 0.0
+                                : sample_y - (double)y0;
                 usize idx00 = ((usize)y0 * (usize)width + (usize)x0) * 3u;
                 usize idx10 = ((usize)y0 * (usize)width + (usize)x1) * 3u;
                 usize idx01 = ((usize)y1 * (usize)width + (usize)x0) * 3u;

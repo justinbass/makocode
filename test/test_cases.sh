@@ -339,5 +339,5 @@ test_case 0079_decode_scan_margin_noise script "Generated scan margin noise stil
 test_case 0080_decode_scan_off_center_noise script "Recoverable scan with off-center specks must decode" \
     test_decode_synthetic_scan_damage.sh --off-center-noise
 
-test_case 0081_decode_short_length_header script "Decode a scan with a damaged frame-length bit" \
+test_case 0081_decode_short_length_header script "Decode low-resolution affine scans and recover a damaged frame-length bit" \
     test_decode_short_length_header.sh
