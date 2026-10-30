@@ -21651,6 +21651,8 @@ static int command_decode(int arg_count, char** args) {
     }
     makocode::ByteBuffer bitstream;
     u64 bit_count = 0u;
+    makocode::ByteBuffer frame_bits_for_length_recovery;
+    u64 frame_bit_count_for_length_recovery = 0u;
     PpmParserState aggregate_state;
     bool have_metadata = false;
     bool force_disable_subgrid = false;
@@ -21679,6 +21681,8 @@ static int command_decode(int arg_count, char** args) {
         }
     }
 retry_decode:
+    frame_bits_for_length_recovery.release();
+    frame_bit_count_for_length_recovery = 0u;
     if (debug_requested && debug_fiducial_csv.size > debug_fiducial_header_size) {
         debug_fiducial_csv.size = debug_fiducial_header_size;
         if (!write_bytes_to_file((const char*)debug_fiducial_path.data,
@@ -21771,6 +21775,10 @@ retry_decode:
             }
             console_line(2, "decode: failed to extract payload bits");
             return 1;
+        }
+        if (single_state.has_ecc_flag && !single_state.ecc_flag_value) {
+            byte_buffer_move(frame_bits_for_length_recovery, frame_bits);
+            frame_bit_count_for_length_recovery = frame_bit_count;
         }
         aggregate_state = single_state;
         have_metadata = true;
@@ -21893,6 +21901,10 @@ retry_decode:
             console_line(2, "decode: failed to extract payload bits");
             return 1;
         }
+        if (aggregate_state.has_ecc_flag && !aggregate_state.ecc_flag_value) {
+            byte_buffer_move(frame_bits_for_length_recovery, frame_aggregator.buffer);
+            frame_bit_count_for_length_recovery = frame_bit_total;
+        }
         have_metadata = true;
 
     }
@@ -21970,25 +21982,150 @@ retry_decode:
             console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
             return 1;
         }
-        if (!decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
-            console_line(2, "decode: parse failure; retrying without fiducial subgrid");
-            force_disable_subgrid = true;
-            retried_subgrid = true;
-            goto retry_decode;
+        bool frame_length_recovered = false;
+        if (!decoder.ecc_correction_failed() &&
+            !have_password &&
+            aggregate_state.has_ecc_flag &&
+            !aggregate_state.ecc_flag_value &&
+            frame_bits_for_length_recovery.data &&
+            frame_bit_count_for_length_recovery > 64u) {
+            makocode::BitReader length_reader;
+            length_reader.reset(frame_bits_for_length_recovery.data,
+                                frame_bit_count_for_length_recovery);
+            u64 observed_bits = length_reader.read_bits(64u);
+            u64 available_bits = frame_bit_count_for_length_recovery - 64u;
+            makocode::ByteBuffer recovered_stream;
+            u64 recovered_bits = 0u;
+            u32 valid_candidates = 0u;
+            for (u32 header_bit = 0u; header_bit < 64u; ++header_bit) {
+                u64 candidate_bits = observed_bits ^ (1ull << header_bit);
+                if (candidate_bits == 0u ||
+                    (candidate_bits & 7u) != 0u ||
+                    candidate_bits > available_bits) {
+                    continue;
+                }
+                u8& candidate_header_byte =
+                    frame_bits_for_length_recovery.data[header_bit >> 3u];
+                candidate_header_byte ^= (u8)(1u << (header_bit & 7u));
+                makocode::ByteBuffer candidate_stream;
+                u64 candidate_stream_bits = 0u;
+                bool candidate_extracted = frame_bits_to_payload(
+                    frame_bits_for_length_recovery.data,
+                    frame_bit_count_for_length_recovery,
+                    aggregate_state,
+                    candidate_stream,
+                    candidate_stream_bits);
+                candidate_header_byte ^= (u8)(1u << (header_bit & 7u));
+                if (!candidate_extracted || candidate_stream_bits != candidate_bits) {
+                    continue;
+                }
+                makocode::ByteBuffer candidate_input;
+                if (!candidate_input.ensure(candidate_stream.size)) {
+                    continue;
+                }
+                candidate_input.size = candidate_stream.size;
+                for (usize i = 0u; i < candidate_stream.size; ++i) {
+                    candidate_input.data[i] = candidate_stream.data[i];
+                }
+                makocode::DecoderContext candidate_decoder;
+                if (!candidate_decoder.parse(candidate_input.data,
+                                             candidate_stream_bits,
+                                             (const char*)0,
+                                             0u)) {
+                    continue;
+                }
+                const makocode::ByteBuffer& archive = candidate_decoder.payload;
+                bool archive_valid = archive.data && archive.size >= ARCHIVE_HEADER_SIZE;
+                for (usize i = 0u; archive_valid && i < ARCHIVE_MAGIC_SIZE; ++i) {
+                    if (archive.data[i] != (u8)ARCHIVE_MAGIC[i]) {
+                        archive_valid = false;
+                    }
+                }
+                usize archive_cursor = ARCHIVE_HEADER_SIZE;
+                u32 archive_entries = archive_valid
+                                          ? read_le_u32(archive.data + ARCHIVE_MAGIC_SIZE)
+                                          : 0u;
+                for (u32 entry_index = 0u;
+                     archive_valid && entry_index < archive_entries;
+                     ++entry_index) {
+                    if (archive_cursor >= archive.size ||
+                        archive.size - archive_cursor < 5u) {
+                        archive_valid = false;
+                        break;
+                    }
+                    u8 entry_type = archive.data[archive_cursor++];
+                    u32 path_length = read_le_u32(archive.data + archive_cursor);
+                    archive_cursor += 4u;
+                    if (path_length == 0u ||
+                        (usize)path_length > archive.size - archive_cursor ||
+                        !is_safe_archive_path(
+                            (const char*)(archive.data + archive_cursor),
+                            path_length)) {
+                        archive_valid = false;
+                        break;
+                    }
+                    archive_cursor += (usize)path_length;
+                    if (entry_type == 0u) {
+                        if (archive.size - archive_cursor < 8u) {
+                            archive_valid = false;
+                            break;
+                        }
+                        u64 file_size = read_le_u64(archive.data + archive_cursor);
+                        archive_cursor += 8u;
+                        if (file_size > (u64)(archive.size - archive_cursor)) {
+                            archive_valid = false;
+                            break;
+                        }
+                        archive_cursor += (usize)file_size;
+                    } else if (entry_type != 1u) {
+                        archive_valid = false;
+                    }
+                }
+                if (archive_valid && archive_cursor != archive.size) {
+                    archive_valid = false;
+                }
+                if (archive_valid) {
+                    ++valid_candidates;
+                    if (valid_candidates == 1u) {
+                        byte_buffer_move(recovered_stream, candidate_stream);
+                        recovered_bits = candidate_stream_bits;
+                    }
+                }
+            }
+            if (valid_candidates == 1u) {
+                byte_buffer_move(bitstream, recovered_stream);
+                bit_count = recovered_bits;
+                frame_length_recovered = decoder.parse(bitstream.data,
+                                                       bit_count,
+                                                       password_ptr,
+                                                       password_length);
+                if (frame_length_recovered) {
+                    console_line(2, "decode: recovered frame length from a one-bit header correction");
+                }
+            }
         }
-        if (decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
-            console_line(2, "decode: ECC could not repair the payload; retrying without fiducial subgrid");
-            force_disable_subgrid = true;
-            retried_subgrid = true;
-            goto retry_decode;
+        if (!frame_length_recovered) {
+            if (!decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
+                console_line(2, "decode: parse failure; retrying without fiducial subgrid");
+                force_disable_subgrid = true;
+                retried_subgrid = true;
+                goto retry_decode;
+            }
+            if (decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
+                console_line(2, "decode: ECC could not repair the payload; retrying without fiducial subgrid");
+                force_disable_subgrid = true;
+                retried_subgrid = true;
+                goto retry_decode;
+            }
+            if (decoder.ecc_correction_failed()) {
+                console_line(2, "decode: ECC could not repair the payload");
+            } else {
+                console_line(2, "decode: parse failure");
+            }
+            return 1;
         }
-        if (decoder.ecc_correction_failed()) {
-            console_line(2, "decode: ECC could not repair the payload");
-        } else {
-            console_line(2, "decode: parse failure");
-        }
-        return 1;
     }
+    frame_bits_for_length_recovery.release();
     if (decoder.password_attempt_made() && decoder.password_was_ignored()) {
         console_line(2, "decode: warning: payload was not encrypted; password ignored");
     }
