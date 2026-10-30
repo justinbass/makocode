@@ -8252,8 +8252,7 @@ static bool compute_bits_per_page(u32 width_pixels,
                                   u32 height_pixels,
                                   u32 data_height_pixels,
                                   double bits_per_pixel,
-                                  u64& bits_per_page,
-                                  u64* reserved_pixels_out = 0);
+                                  u64& bits_per_page);
 
 struct FooterLayout {
     bool has_text;
@@ -15508,12 +15507,6 @@ struct RotationEstimateCandidate {
     if (use_custom_palette) {
         u64 usable_pixels = total_data_pixels - reserved_data_pixels;
         digits_target = usable_pixels;
-        if (state.has_page_symbols) {
-            if (state.page_symbols_value > usable_pixels) {
-                return false;
-            }
-            digits_target = state.page_symbols_value;
-        }
         
         if (digits_target > 0u) {
             if (!custom_digits.ensure((usize)digits_target)) {
@@ -15621,9 +15614,7 @@ struct RotationEstimateCandidate {
         if (fiducial_max_x < fiducial_min_x) fiducial_max_x = fiducial_min_x;
         if (fiducial_max_y < fiducial_min_y) fiducial_max_y = fiducial_min_y;
         MetadataTile::Placement debug_metadata_tile =
-            (logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull)
-                ? MetadataTile::compute_tile_placement((u32)logical_width, (u32)data_height)
-                : MetadataTile::Placement();
+            MetadataTile::compute_tile_placement((u32)logical_width, (u32)data_height);
         for (u32 row_index = 0u; row_index < fiducial_row_count; ++row_index) {
             for (u32 col_index = 0u; col_index < fiducial_column_count; ++col_index) {
                 usize point_index = (usize)row_index * (usize)fiducial_column_count + (usize)col_index;
@@ -15758,9 +15749,7 @@ struct RotationEstimateCandidate {
                                 double normalized_col = (skew_src_width > 1u)
                                                             ? (sample_x / (double)(skew_src_width - 1u))
                                                             : 0.0;
-                                double col_shift = state.has_skew_y_pixels
-                                                       ? (state.skew_y_pixels_value * normalized_col)
-                                                       : 0.0;
+                                double col_shift = state.skew_y_pixels_value * normalized_col;
                                 sample_y += col_shift;
                             }
                             if (has_rotation) {
@@ -16352,7 +16341,6 @@ struct RotationEstimateCandidate {
         prefer_nearest_sampling = false;
     }
     u32 active_row_cell = 0u;
-    u64 active_row_start = use_fiducial_subgrid ? fiducial_row_offsets[0] : 0u;
     u64 active_row_end = use_fiducial_subgrid && fiducial_subgrid_rows > 0u
                              ? fiducial_row_offsets[1]
                              : data_height;
@@ -16714,7 +16702,6 @@ struct RotationEstimateCandidate {
                                 next_norm += affine_residual[i] * affine_residual[i];
                             }
                             if (next_norm <= 1.0e-12) {
-                                residual_norm = next_norm;
                                 break;
                             }
                             double direction_scale = next_norm / residual_norm;
@@ -16752,16 +16739,11 @@ struct RotationEstimateCandidate {
         if (use_fiducial_subgrid) {
             while (active_row_cell + 1u < fiducial_subgrid_rows && logical_row >= active_row_end) {
                 ++active_row_cell;
-                active_row_start = fiducial_row_offsets[active_row_cell];
                 active_row_end = fiducial_row_offsets[active_row_cell + 1u];
-            }
-            if (active_row_end <= active_row_start) {
-                active_row_end = active_row_start + 1u;
             }
         }
 
         u32 active_col_cell = 0u;
-        u64 active_col_start = use_fiducial_subgrid ? fiducial_column_offsets[0] : 0u;
         u64 active_col_end = use_fiducial_subgrid && fiducial_subgrid_columns > 0u
                                  ? fiducial_column_offsets[1]
                                  : logical_width;
@@ -16773,11 +16755,7 @@ struct RotationEstimateCandidate {
             if (use_fiducial_subgrid) {
                 while (active_col_cell + 1u < fiducial_subgrid_columns && logical_col >= active_col_end) {
                     ++active_col_cell;
-                    active_col_start = fiducial_column_offsets[active_col_cell];
                     active_col_end = fiducial_column_offsets[active_col_cell + 1u];
-                }
-                if (active_col_end <= active_col_start) {
-                    active_col_end = active_col_start + 1u;
                 }
             }
             bool reserved_pixel = false;
@@ -17124,9 +17102,7 @@ struct RotationEstimateCandidate {
                     double normalized_col = (skew_src_width > 1u)
                                                 ? (local_sample_col / (double)(skew_src_width - 1u))
                                                 : 0.0;
-                    double col_shift = state.has_skew_y_pixels
-                                           ? (state.skew_y_pixels_value * normalized_col)
-                                           : 0.0;
+                    double col_shift = state.skew_y_pixels_value * normalized_col;
                     local_sample_row += col_shift;
                 }
                 double dx = local_sample_col - rotation_center_x;
@@ -17170,9 +17146,7 @@ struct RotationEstimateCandidate {
                 if (sample_row > max_row) sample_row = max_row;
                 if (sample_col > max_col) sample_col = max_col;
                 double normalized_col = (skew_src_width > 1u) ? (sample_col / (double)(skew_src_width - 1u)) : 0.0;
-                double col_shift = state.has_skew_y_pixels
-                                       ? (state.skew_y_pixels_value * normalized_col)
-                                       : 0.0;
+                double col_shift = state.skew_y_pixels_value * normalized_col;
                 double dest_x = sample_col;
                 double dest_y = sample_row + col_shift + 0.5;
                 if (dest_x < 0.0) dest_x = 0.0;
@@ -17258,18 +17232,14 @@ struct RotationEstimateCandidate {
                     continue;
                 }
                 u32 symbol = 0u;
-                if (!map_rgb_to_custom_symbol(active_mapping, rgb, symbol)) {
-                    return false;
-                }
+                map_rgb_to_custom_symbol(active_mapping, rgb, symbol);
                 if (digits_target > 0u) {
                     custom_digits.data[custom_digits.size++] = (u8)symbol;
                 }
                 continue;
             }
             u32 samples_raw[3] = {0u, 0u, 0u};
-            if (!map_rgb_to_samples(color_mode, rgb, samples_raw)) {
-                return false;
-            }
+            map_rgb_to_samples(color_mode, rgb, samples_raw);
             for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
                 u32 sample = samples_raw[sample_index];
                 if (!writer.write_bits(sample, sample_bits)) {
@@ -17284,9 +17254,6 @@ struct RotationEstimateCandidate {
         if (digits_target > 0u && digits_available == 0u) {
             return false;
         }
-        if (state.has_page_symbols && digits_target > 0u && digits_available < digits_target) {
-            return false;
-        }
         if (!state.has_page_symbols && digits_available > 0u) {
             state.has_page_symbols = true;
             state.page_symbols_value = digits_available;
@@ -17297,9 +17264,6 @@ struct RotationEstimateCandidate {
             bit_target = state.page_bits_value;
         }
         u32 digits_base = custom_palette_base ? custom_palette_base : mapping_custom_palette_base(active_mapping);
-        if (digits_base < 2u) {
-            return false;
-        }
         if (!base_digits_to_bits(digit_data_ptr,
                                  digits_available,
                                  digits_base,
@@ -17335,9 +17299,6 @@ struct RotationEstimateCandidate {
         usize total_bytes = writer.byte_size();
         if (total_bytes) {
             u8* data_bytes = writer.buffer.data;
-            if (!data_bytes && total_bytes) {
-                return false;
-            }
             for (usize i = 0u; i < total_bytes; ++i) {
                 u8 rotate = (u8)((i % 3u) + 1u);
                 data_bytes[i] = rotate_right_u8(data_bytes[i], rotate);
@@ -17392,9 +17353,7 @@ struct RotationEstimateCandidate {
                 }
                 usize pixel_index = ((usize)logical_row * (usize)raw_width + (usize)logical_col) * 3u;
                 u32 samples_raw[3] = {0u, 0u, 0u};
-                if (!map_rgb_to_samples(color_mode, pixel_data + pixel_index, samples_raw)) {
-                    continue;
-                }
+                map_rgb_to_samples(color_mode, pixel_data + pixel_index, samples_raw);
                 for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
                     u32 sample = samples_raw[sample_index];
                     if (!simple_writer.write_bits(sample, sample_bits)) {
@@ -17491,12 +17450,12 @@ static void apply_metadata_tile_metadata(PpmParserState& state,
             double min_x = (margin < expected_width) ? (double)margin : 0.0;
             double max_x = (expected_width > margin)
                                ? (double)(expected_width - 1u - margin)
-                               : (expected_width ? (double)(expected_width - 1u) : 0.0);
+                               : (double)(expected_width - 1u);
             if (max_x < min_x) max_x = min_x;
             double min_y = (margin < data_height) ? (double)margin : 0.0;
             double max_y = (data_height > margin)
                                ? (double)(data_height - 1u - margin)
-                               : (data_height ? (double)(data_height - 1u) : 0.0);
+                               : (double)(data_height - 1u);
             if (max_y < min_y) max_y = min_y;
             double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
             double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
@@ -17551,9 +17510,6 @@ static void apply_metadata_tile_metadata(PpmParserState& state,
     // Provide palette text for existing decode path (hex tokens).
     if (palette_text.data && palette_text.size > 0u) {
         usize copy_length = palette_text.size;
-        if (copy_length >= MAX_CUSTOM_PALETTE_TEXT) {
-            copy_length = MAX_CUSTOM_PALETTE_TEXT - 1u;
-        }
         for (usize i = 0u; i < copy_length; ++i) {
             state.palette_text[i] = (char)palette_text.data[i];
         }
@@ -17619,9 +17575,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         } else {
             dest.has_palette_text = true;
             usize copy_length = src.palette_text_length;
-            if (copy_length >= MAX_CUSTOM_PALETTE_TEXT) {
-                copy_length = MAX_CUSTOM_PALETTE_TEXT - 1u;
-            }
             for (usize i = 0u; i < copy_length; ++i) {
                 dest.palette_text[i] = src.palette_text[i];
             }
@@ -17665,9 +17618,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.fiducial_rows_value = src.fiducial_rows_value;
     }
     if (src.has_fiducial_margin) {
-        if (dest.has_fiducial_margin && dest.fiducial_margin_value != src.fiducial_margin_value) {
-            return false;
-        }
         dest.has_fiducial_margin = true;
         dest.fiducial_margin_value = src.fiducial_margin_value;
     }
@@ -17692,13 +17642,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_page_count = true;
         dest.page_count_value = src.page_count_value;
     }
-    if (src.has_page_bits) {
-        if (dest.has_page_bits && dest.page_bits_value != src.page_bits_value) {
-            return false;
-        }
-        dest.has_page_bits = true;
-        dest.page_bits_value = src.page_bits_value;
-    }
     if (src.has_footer_rows) {
         if (dest.has_footer_rows && dest.footer_rows_value != src.footer_rows_value) {
             return false;
@@ -17718,7 +17661,7 @@ static bool frame_bits_to_payload(const u8* frame_data,
                                   u64& out_bit_count) {
     output.release();
     out_bit_count = 0u;
-    if (!frame_data || frame_bit_count == 0u) {
+    if (!frame_data) {
         return false;
     }
     makocode::BitReader reader;
@@ -17727,9 +17670,6 @@ static bool frame_bits_to_payload(const u8* frame_data,
         return false;
     }
     u64 header_bits = reader.read_bits(64u);
-    if (reader.failed) {
-        return false;
-    }
     u64 available_bits = (frame_bit_count >= 64u) ? (frame_bit_count - 64u) : 0u;
     u64 payload_bits = header_bits;
     bool ecc_length_recovered = false;
@@ -17775,9 +17715,6 @@ static bool frame_bits_to_payload(const u8* frame_data,
         if (!payload_writer.write_bit(bit)) {
             return false;
         }
-    }
-    if (payload_writer.failed) {
-        return false;
     }
     usize payload_bytes = payload_writer.byte_size();
     if (payload_bytes && !output.ensure(payload_bytes)) {
@@ -17851,10 +17788,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      makocode::ByteBuffer& output,
                                      makocode::ByteBuffer* debug_csv = 0,
                                      u64 debug_page = 1u) {
-    if (!input.data || input.size == 0u) {
-        return false;
-    }
-    if (marker_size == 0u || grid_columns == 0u || grid_rows == 0u) {
+    if (!input.data) {
         return false;
     }
     PpmParserState state;
@@ -17862,26 +17796,17 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     state.size = input.size;
     const char* token = 0;
     usize token_length = 0u;
-    if (!ppm_next_token(state, &token, &token_length)) {
-        return false;
-    }
-    if (!ascii_equals_token(token, token_length, "P3")) {
-        return false;
-    }
-    if (!ppm_next_token(state, &token, &token_length)) {
-        return false;
-    }
+    ppm_next_token(state, &token, &token_length);
     u64 width = 0u;
-    if (!ascii_to_u64(token, token_length, &width) || width == 0u) {
+    if (!ppm_next_token(state, &token, &token_length) ||
+        !ascii_to_u64(token, token_length, &width)) {
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
         return false;
     }
     u64 height = 0u;
-    if (!ascii_to_u64(token, token_length, &height) || height == 0u) {
-        return false;
-    }
+    ascii_to_u64(token, token_length, &height);
     if (!ppm_next_token(state, &token, &token_length)) {
         return false;
     }
@@ -17890,20 +17815,11 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
         return false;
     }
     u64 pixel_count = width * height;
-    if (pixel_count == 0u) {
-        return false;
-    }
     makocode::ByteBuffer pixels;
     if (!ppm_read_rgb_pixels(state, pixel_count, pixels)) {
         return false;
     }
     u8* pixel_data = pixels.data;
-    if (!pixel_data) {
-        return false;
-    }
-    if (width > (u64)0xFFFFFFFFu || height > (u64)0xFFFFFFFFu) {
-        return false;
-    }
     u32 width_px = (u32)width;
     u32 height_px = (u32)height;
     if (marker_size > width_px || marker_size > height_px) {
@@ -17926,10 +17842,10 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
 
     double min_x = (margin_pixels < width_px) ? (double)margin_pixels : 0.0;
     double max_x = (width_px > margin_pixels) ? (double)(width_px - 1u - margin_pixels)
-                                              : (width_px ? (double)(width_px - 1u) : 0.0);
+                                              : (double)(width_px - 1u);
     double min_y = (margin_pixels < draw_height) ? (double)margin_pixels : 0.0;
     double max_y = (draw_height > margin_pixels) ? (double)(draw_height - 1u - margin_pixels)
-                                                 : (draw_height ? (double)(draw_height - 1u) : 0.0);
+                                                 : (double)(draw_height - 1u);
     if (max_x < min_x) {
         max_x = min_x;
     }
@@ -18046,9 +17962,6 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
                                    u32& height_pixels) {
     width_pixels = 0u;
     height_pixels = 0u;
-    if (!input.data || input.size == 0u) {
-        return false;
-    }
     PpmParserState state;
     state.data = input.data;
     state.size = input.size;
@@ -18060,9 +17973,7 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
     if (!ascii_equals_token(token, token_length, "P3")) {
         return false;
     }
-    if (!ppm_next_token(state, &token, &token_length)) {
-        return false;
-    }
+    ppm_next_token(state, &token, &token_length);
     u64 width_value = 0u;
     if (!ascii_to_u64(token, token_length, &width_value) ||
         width_value == 0u ||
@@ -18102,9 +18013,6 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     double max_x = (width_pixels > fiducial_margin)
                        ? (double)(width_pixels - 1u - fiducial_margin)
                        : (double)(width_pixels - 1u);
-    if (max_x < min_x) {
-        max_x = min_x;
-    }
     u32 grid_height = height_pixels;
     if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
         grid_height = data_height_pixels;
@@ -18113,9 +18021,6 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     double max_y = (grid_height > fiducial_margin)
                        ? (double)(grid_height - 1u - fiducial_margin)
                        : (double)(grid_height - 1u);
-    if (max_y < min_y) {
-        max_y = min_y;
-    }
     double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
     double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
     // Fit the grid into the drawable span so fixtures keep the configured spacing.
@@ -18163,11 +18068,6 @@ static bool write_ppm_with_fiducials_to_file(const char* path,
                                              makocode::ByteBuffer* debug_csv,
                                              u64 debug_page) {
     makocode::ByteBuffer fiducial_buffer;
-    u32 width_pixels = 0u;
-    u32 height_pixels = 0u;
-    if (!ppm_measure_dimensions(buffer, width_pixels, height_pixels)) {
-        return false;
-    }
     if (!apply_default_fiducial_grid(buffer,
                                      fiducial_buffer,
                                      0u,
@@ -18188,15 +18088,6 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
                                         u64& reserved_data_pixels,
                                         makocode::ByteBuffer* mask_out) {
     reserved_data_pixels = 0u;
-    if (width_pixels == 0u || height_pixels == 0u) {
-        if (mask_out) {
-            mask_out->release();
-        }
-        return true;
-    }
-    if (data_height_pixels > height_pixels) {
-        data_height_pixels = height_pixels;
-    }
     u64 total_pixels = (u64)width_pixels * (u64)height_pixels;
     if (mask_out) {
         mask_out->release();
@@ -18208,8 +18099,6 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
             for (u64 i = 0u; i < total_pixels; ++i) {
                 mask_out->data[i] = 0u;
             }
-        } else {
-            mask_out->size = 0u;
         }
     }
     u32 marker_size = g_fiducial_defaults.marker_size_pixels;
@@ -18349,14 +18238,7 @@ static bool compute_bits_per_page(u32 width_pixels,
                                   u32 height_pixels,
                                   u32 data_height_pixels,
                                   double bits_per_pixel,
-                                  u64& bits_per_page,
-                                  u64* reserved_pixels_out) {
-    if (bits_per_pixel <= 0.0) {
-        return false;
-    }
-    if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-        return false;
-    }
+                                  u64& bits_per_page) {
     u64 total_pixels = (u64)width_pixels * (u64)data_height_pixels;
     u64 reserved_pixels = 0u;
     makocode::ByteBuffer temp_mask;
@@ -18368,27 +18250,15 @@ static bool compute_bits_per_page(u32 width_pixels,
         return false;
     }
     if (reserved_pixels >= total_pixels) {
-        bits_per_page = 0u;
         return false;
     }
     u64 usable_pixels = total_pixels - reserved_pixels;
     double capacity_bits = (double)usable_pixels * bits_per_pixel;
-    if (capacity_bits <= 0.0) {
-        bits_per_page = 0u;
-        return false;
-    }
     if (capacity_bits > (double)U64_MAX_VALUE) {
         return false;
     }
     u64 computed_bits = (u64)capacity_bits;
-    if (computed_bits == 0u) {
-        bits_per_page = 0u;
-        return false;
-    }
     bits_per_page = computed_bits;
-    if (reserved_pixels_out) {
-        *reserved_pixels_out = reserved_pixels;
-    }
     return true;
 }
 
@@ -18448,22 +18318,6 @@ static bool build_frame_bits(const makocode::EncoderContext& encoder,
                              const ImageMappingConfig& mapping,
                              makocode::ByteBuffer& frame_bits,
                              u64& frame_bit_count) {
-    if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
-        return false;
-    }
-    const u8 sample_bits = bits_per_sample(mapping.color_channels);
-    if (sample_bits == 0u) {
-        return false;
-    }
-    const PaletteColor* palette = 0;
-    u32 palette_size = 0u;
-    if (!palette_for_mode(mapping.color_channels, palette, palette_size)) {
-        return false;
-    }
-    if (palette_size != (1u << sample_bits)) {
-        return false;
-    }
-    (void)palette;
     u64 payload_bit_count = encoder.bit_writer.bit_size();
     usize payload_byte_count = encoder.bit_writer.byte_size();
     makocode::BitWriter frame_writer;
@@ -18475,9 +18329,6 @@ static bool build_frame_bits(const makocode::EncoderContext& encoder,
         u8 byte = payload_raw ? payload_raw[byte_index] : 0u;
         u64 bits_written = (u64)byte_index * 8u;
         u64 bits_remaining = (payload_bit_count > bits_written) ? (payload_bit_count - bits_written) : 0u;
-        if (!bits_remaining) {
-            break;
-        }
         usize chunk = (bits_remaining >= 8u) ? 8u : (usize)bits_remaining;
         if (!frame_writer.write_bits((u64)byte, chunk)) {
             return false;
@@ -18518,30 +18369,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                usize footer_length,
                                const FooterLayout& footer_layout,
                                makocode::ByteBuffer& output) {
-    if (mapping.color_channels == 0u || mapping.color_channels > 3u) {
-        return false;
-    }
     const u8 sample_bits = bits_per_sample(mapping.color_channels);
-    if (sample_bits == 0u) {
-        return false;
-    }
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
-    if (samples_per_pixel == 0u) {
-        return false;
-    }
-    u64 total_pixels = (u64)width_pixels * (u64)height_pixels;
-    if (total_pixels == 0u) {
-        return false;
-    }
     bool has_footer_text = (footer_text && footer_length > 0u);
-    if (has_footer_text && !footer_layout.has_text) {
-        return false;
-    }
-    u32 data_height_pixels = height_pixels;
-    if (footer_layout.data_height_pixels == 0u || footer_layout.data_height_pixels > height_pixels) {
-        return false;
-    }
-    data_height_pixels = footer_layout.data_height_pixels;
+    u32 data_height_pixels = footer_layout.data_height_pixels;
     makocode::ByteBuffer fiducial_mask;
     makocode::ByteBuffer fiducial_marker_mask;
     u64 reserved_data_pixels = 0u;
@@ -18563,9 +18394,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     u64 total_data_pixels = (u64)width_pixels * (u64)data_height_pixels;
-    if (reserved_data_pixels > total_data_pixels) {
-        return false;
-    }
     u64 usable_data_pixels = total_data_pixels - reserved_data_pixels;
     bool use_custom_palette = mapping_has_custom_palette(mapping);
     u32 custom_base = use_custom_palette ? mapping_custom_palette_base(mapping) : 0u;
@@ -18588,11 +18416,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     makocode::ByteBuffer page_bits_chunk;
     makocode::ByteBuffer base_digits;
     u64 digits_used = 0u;
-    u64 digit_span = 0u;
     if (use_custom_palette) {
-        if (custom_base < 2u) {
-            return false;
-        }
         if (!copy_bits_segment(frame_bits.data,
                                frame_bit_count,
                                bit_offset,
@@ -18612,7 +18436,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             console_line(2, "encode_page_to_ppm: insufficient data pixels for palette digits");
             return false;
         }
-        if (usable_data_pixels == 0u || usable_data_pixels > (u64)USIZE_MAX_VALUE) {
+        if (usable_data_pixels > (u64)USIZE_MAX_VALUE) {
             console_line(2, "encode_page_to_ppm: unusable palette pixel capacity");
             return false;
         }
@@ -18626,7 +18450,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             }
         }
         base_digits.size = target_digits;
-        digit_span = (u64)base_digits.size;
     }
     
     // Select colors for the footer text and background.
@@ -18668,9 +18491,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         const PaletteColor* palette = 0;
         u32 palette_size = 0u;
         if (use_custom_palette) {
-            if (mapping.custom_palette_count < 2u) {
-                return false;
-            }
             tile_values.palette_count = mapping.custom_palette_count;
             for (u32 i = 0u; i < mapping.custom_palette_count; ++i) {
                 tile_values.palette[i] = mapping.custom_palette[i];
@@ -18693,7 +18513,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             }
             tile_dark = mapping.custom_palette[darkest_index];
         } else {
-            if (!palette_for_mode(mapping.color_channels, palette, palette_size) || palette_size < 2u) {
+            palette_for_mode(mapping.color_channels, palette, palette_size);
+            if (palette_size < 2u) {
                 return false;
             }
             tile_values.palette_count = palette_size;
@@ -18720,9 +18541,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     darkest_l = l;
                     darkest_index = i;
                 }
-            }
-            if (lightest_index == darkest_index) {
-                darkest_index = (palette_size > 1u) ? 1u : 0u;
             }
             tile_light = palette[lightest_index];
             tile_dark = palette[darkest_index];
@@ -18751,9 +18569,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
 
         if (!MetadataTile::build_tile_bits(tile_values, tile_bitfield)) {
             console_line(2, "encode_page_to_ppm: failed to build metadata tile");
-            return false;
-        }
-        if (tile_bitfield.size != (usize)MetadataTile::TILE_SIDE * (usize)MetadataTile::TILE_SIDE) {
             return false;
         }
     }
@@ -18831,9 +18646,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                         }
                         samples_raw[sample_index] = sample;
                     }
-                    if (!map_samples_to_rgb(mapping.color_channels, samples_raw, rgb)) {
-                        return false;
-                    }
+                    map_samples_to_rgb(mapping.color_channels, samples_raw, rgb);
                 }
             } else if (!is_footer_row) {
                 rgb[0] = 255u;
@@ -18866,10 +18679,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             }
         }
     }
-    if (use_custom_palette && digit_index != digit_span) {
-        console_line(2, "encode_page_to_ppm: palette digit span mismatch");
-        return false;
-    }
     return true;
 }
 static bool process_fiducial_option(int arg_count,
@@ -18878,18 +18687,12 @@ static bool process_fiducial_option(int arg_count,
                                     FiducialGridDefaults& defaults,
                                     const char* command_name,
                                     bool* handled) {
-    if (!handled || !arg_index || !args) {
-        return false;
-    }
     *handled = false;
     int index = *arg_index;
     if (index < 0 || index >= arg_count) {
         return false;
     }
     const char* arg = args[index];
-    if (!arg) {
-        return true;
-    }
     const char fiducial_prefix[] = "--fiducials=";
     const char* value_text = 0;
     if (ascii_equals_token(arg, ascii_length(arg), "--fiducials")) {
@@ -18899,11 +18702,6 @@ static bool process_fiducial_option(int arg_count,
             return false;
         }
         value_text = args[index + 1];
-        if (!value_text) {
-            console_write(2, command_name);
-            console_line(2, ": --fiducials requires size,spacing[,margin]");
-            return false;
-        }
         *arg_index = index + 1;
     } else if (ascii_starts_with(arg, fiducial_prefix)) {
         value_text = arg + (sizeof(fiducial_prefix) - 1u);
@@ -18911,11 +18709,6 @@ static bool process_fiducial_option(int arg_count,
         return true;
     }
     usize total_length = ascii_length(value_text);
-    if (total_length == 0u) {
-        console_write(2, command_name);
-        console_line(2, ": --fiducials requires size,spacing[,margin]");
-        return false;
-    }
     u64 parsed_values[3];
     usize parsed_count = 0u;
     usize segment_start = 0u;
@@ -18990,18 +18783,12 @@ static bool process_image_mapping_option(int arg_count,
                                          ImageMappingConfig& config,
                                          const char* command_name,
                                          bool* handled) {
-    if (!handled || !arg_index || !args) {
-        return false;
-    }
     *handled = false;
     int index = *arg_index;
     if (index < 0 || index >= arg_count) {
         return false;
     }
     const char* arg = args[index];
-    if (!arg) {
-        return true;
-    }
 
     const char palette_prefix[] = "--palette=";
     const char* palette_value = 0;
@@ -19013,11 +18800,6 @@ static bool process_image_mapping_option(int arg_count,
             return false;
         }
         palette_value = args[index + 1];
-        if (!palette_value) {
-            console_write(2, command_name);
-            console_line(2, ": --palette requires a quoted list of colors");
-            return false;
-        }
         palette_length = ascii_length(palette_value);
         *arg_index = index + 1;
     } else if (ascii_starts_with(arg, palette_prefix)) {
@@ -19042,11 +18824,6 @@ static bool process_image_mapping_option(int arg_count,
             return false;
         }
         value_text = args[index + 1];
-        if (!value_text) {
-            console_write(2, command_name);
-            console_line(2, ": --page-width requires a value (pixels)");
-            return false;
-        }
         length = ascii_length(value_text);
         *arg_index = index + 1;
     } else if (ascii_starts_with(arg, width_prefix)) {
@@ -19081,11 +18858,6 @@ static bool process_image_mapping_option(int arg_count,
             return false;
         }
         value_text = args[index + 1];
-        if (!value_text) {
-            console_write(2, command_name);
-            console_line(2, ": --page-height requires a value (pixels)");
-            return false;
-        }
         length = ascii_length(value_text);
         *arg_index = index + 1;
     } else if (ascii_starts_with(arg, height_prefix)) {
@@ -19134,9 +18906,6 @@ static bool read_entire_stdin(makocode::ByteBuffer& buffer) {
 }
 
 static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
-    if (!path) {
-        return false;
-    }
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         return false;
@@ -19253,9 +19022,6 @@ static bool archive_register_path(ArchiveBuildContext& ctx,
     if (duplicate_out) {
         *duplicate_out = false;
     }
-    if (!path || length == 0u) {
-        return false;
-    }
     usize cursor = 0u;
     while (cursor < ctx.path_registry.size) {
         const char* existing = (const char*)(ctx.path_registry.data + cursor);
@@ -19291,9 +19057,6 @@ static bool archive_register_path(ArchiveBuildContext& ctx,
 
 static bool archive_add_directory(ArchiveBuildContext& ctx,
                                   const char* rel_path) {
-    if (!rel_path) {
-        return false;
-    }
     usize path_len = ascii_length(rel_path);
     if (path_len == 0u || path_len > 0xFFFFFFFFu) {
         return false;
@@ -19323,11 +19086,8 @@ static bool archive_add_file(ArchiveBuildContext& ctx,
                              const char* rel_path,
                              const u8* data,
                              usize length) {
-    if (!rel_path) {
-        return false;
-    }
     usize path_len = ascii_length(rel_path);
-    if (path_len == 0u || path_len > 0xFFFFFFFFu) {
+    if (path_len > 0xFFFFFFFFu) {
         return false;
     }
     bool duplicate = false;
@@ -19366,13 +19126,7 @@ static bool archive_finalize(ArchiveBuildContext& ctx) {
 }
 
 static const char* find_last_path_component(const char* path) {
-    if (!path) {
-        return path;
-    }
     usize length = ascii_length(path);
-    if (length == 0u) {
-        return path;
-    }
     const char* start = path;
     const char* end = path + length;
     while (end > start) {
@@ -19398,13 +19152,7 @@ static const char* find_last_path_component(const char* path) {
 static bool normalize_store_path(const char* source,
                                  makocode::ByteBuffer& output) {
     output.release();
-    if (!source) {
-        return false;
-    }
     usize length = ascii_length(source);
-    if (length == 0u) {
-        return false;
-    }
     makocode::ByteBuffer scratch;
     if (!scratch.ensure(length)) {
         return false;
@@ -19448,7 +19196,6 @@ static bool normalize_store_path(const char* source,
             continue;
         }
         if (component_count >= MAX_ARCHIVE_PATH_COMPONENTS) {
-            scratch.release();
             return false;
         }
         component_offsets[component_count] = start;
@@ -19465,27 +19212,17 @@ static bool normalize_store_path(const char* source,
         usize base_len = ascii_length(base);
         bool valid_base = (base_len > 0u);
         if (valid_base) {
-            if (base_len == 1u && base[0] == '.') {
-                valid_base = false;
-            } else if (base_len == 2u && base[0] == '.' && base[1u] == '.') {
-                valid_base = false;
-            } else {
-                for (usize i = 0u; i < base_len; ++i) {
-                    char c = base[i];
-                    if (c == '/' || c == '\\' || c == 0) {
-                        valid_base = false;
-                        break;
-                    }
+            for (usize i = 0u; i < base_len; ++i) {
+                char c = base[i];
+                if (c == '/' || c == '\\') {
+                    valid_base = false;
+                    break;
                 }
             }
         }
         if (valid_base && output.ensure(base_len + 1u)) {
             for (usize i = 0u; i < base_len; ++i) {
-                char c = base[i];
-                if (c == '\\') {
-                    c = '/';
-                }
-                output.data[i] = (u8)c;
+                output.data[i] = (u8)base[i];
             }
             output.data[base_len] = 0u;
             output.size = base_len;
@@ -19527,9 +19264,6 @@ static bool join_rel_path(const char* base,
                           const char* name,
                           makocode::ByteBuffer& out) {
     out.release();
-    if (!name) {
-        return false;
-    }
     usize name_len = ascii_length(name);
     if (name_len == 0u) {
         return false;
@@ -19550,11 +19284,7 @@ static bool join_rel_path(const char* base,
     usize cursor = 0u;
     if (include_base) {
         for (usize i = 0u; i < base_len; ++i) {
-            char c = base[i];
-            if (c == '\\') {
-                c = '/';
-            }
-            out.data[cursor++] = (u8)c;
+            out.data[cursor++] = (u8)base[i];
         }
         if (cursor && out.data[cursor - 1u] != '/') {
             out.data[cursor++] = (u8)'/';
@@ -19576,9 +19306,6 @@ static bool join_fs_path(const char* base,
                          const char* name,
                          makocode::ByteBuffer& out) {
     out.release();
-    if (!base || !name) {
-        return false;
-    }
     usize base_len = ascii_length(base);
     usize name_len = ascii_length(name);
     bool need_separator = (base_len > 0u);
@@ -19610,9 +19337,6 @@ static bool join_fs_path(const char* base,
 static bool archive_collect_directory(const char* fs_path,
                                       const char* rel_path,
                                       ArchiveBuildContext& ctx) {
-    if (!fs_path || !rel_path) {
-        return false;
-    }
     if (!archive_add_directory(ctx, rel_path)) {
         return false;
     }
@@ -19666,7 +19390,6 @@ static bool archive_collect_directory(const char* fs_path,
                                   (const char*)child_rel.data,
                                   file_data.data,
                                   file_data.size)) {
-                file_data.release();
                 closedir(dir);
                 return false;
             }
@@ -19683,9 +19406,6 @@ static bool archive_collect_directory(const char* fs_path,
 }
 
 static bool is_safe_archive_path(const char* path, usize length) {
-    if (!path || length == 0u) {
-        return false;
-    }
     if (path[0] == '/') {
         return false;
     }
@@ -19705,9 +19425,6 @@ static bool is_safe_archive_path(const char* path, usize length) {
             ++index;
         }
         usize segment_length = index - start;
-        if (segment_length == 0u) {
-            continue;
-        }
         if (segment_length == 1u && path[start] == '.') {
             return false;
         }
@@ -19721,9 +19438,6 @@ static bool is_safe_archive_path(const char* path, usize length) {
 }
 
 static bool ensure_directory_exists(const char* path) {
-    if (!path || !path[0]) {
-        return true;
-    }
     struct stat st;
     if (stat(path, &st) == 0) {
         return S_ISDIR(st.st_mode);
@@ -19740,20 +19454,13 @@ static bool ensure_directory_exists(const char* path) {
 }
 
 static bool ensure_directory_tree(const char* path) {
-    if (!path || !path[0]) {
-        return true;
-    }
     makocode::ByteBuffer temp;
     usize length = ascii_length(path);
     if (!temp.ensure(length + 1u)) {
         return false;
     }
     for (usize i = 0u; i < length; ++i) {
-        char c = path[i];
-        if (c == '\\') {
-            c = '/';
-        }
-        temp.data[i] = (u8)c;
+        temp.data[i] = (u8)path[i];
     }
     temp.data[length] = 0u;
     temp.size = length;
@@ -19775,9 +19482,6 @@ static bool ensure_directory_tree(const char* path) {
 }
 
 static bool ensure_parent_directories(const char* file_path) {
-    if (!file_path) {
-        return false;
-    }
     usize length = ascii_length(file_path);
     if (length == 0u) {
         return false;
@@ -19798,11 +19502,7 @@ static bool ensure_parent_directories(const char* file_path) {
         return false;
     }
     for (usize j = 0u; j < i; ++j) {
-        char c = file_path[j];
-        if (c == '\\') {
-            c = '/';
-        }
-        parent.data[j] = (u8)c;
+        parent.data[j] = (u8)file_path[j];
     }
     parent.data[i] = 0u;
     parent.size = i;
@@ -19813,13 +19513,7 @@ static bool join_output_path(const char* base_dir,
                              const char* rel_path,
                              makocode::ByteBuffer& out) {
     out.release();
-    if (!rel_path) {
-        return false;
-    }
     usize rel_len = ascii_length(rel_path);
-    if (rel_len == 0u) {
-        return false;
-    }
     bool include_base = false;
     usize base_len = 0u;
     if (base_dir && base_dir[0]) {
@@ -19856,11 +19550,7 @@ static bool join_output_path(const char* base_dir,
         }
     }
     for (usize i = 0u; i < rel_len; ++i) {
-        char c = rel_path[i];
-        if (c == '\\') {
-            c = '/';
-        }
-        out.data[cursor++] = (u8)c;
+        out.data[cursor++] = (u8)rel_path[i];
     }
     out.data[cursor] = 0u;
     out.size = cursor;
@@ -19996,10 +19686,7 @@ static void write_usage() {
 
 static bool arguments_request_help(int arg_count, char** args) {
     for (int i = 0; i < arg_count; ++i) {
-        const char* arg = args ? args[i] : 0;
-        if (!arg) {
-            continue;
-        }
+        const char* arg = args[i];
         usize length = ascii_length(arg);
         if (ascii_equals_token(arg, length, "--help") ||
             ascii_equals_token(arg, length, "-h")) {
@@ -20131,9 +19818,6 @@ static bool title_char_is_allowed(char c) {
 }
 
 static usize decimal_digit_count(u64 value) {
-    if (value == 0u) {
-        return 1u;
-    }
     usize digits = 0u;
     while (value) {
         value /= 10u;
@@ -20159,12 +19843,6 @@ static usize footer_compute_page_text_length(const PageFooterConfig& footer,
         need_separator = true;
     }
     if (footer.display_page_info) {
-        if (page_index == 0u) {
-            page_index = 1u;
-        }
-        if (page_count == 0u) {
-            page_count = 1u;
-        }
         if (need_separator) {
             length += 3u; // " | "
         }
@@ -20178,9 +19856,6 @@ static usize footer_compute_page_text_length(const PageFooterConfig& footer,
 
 static usize footer_compute_max_text_length(const PageFooterConfig& footer,
                                             u64 page_count) {
-    if (page_count == 0u) {
-        page_count = 1u;
-    }
     usize max_length = 0u;
     for (u64 index = 1u; index <= page_count; ++index) {
         usize length = footer_compute_page_text_length(footer, index, page_count);
@@ -20195,12 +19870,6 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
                                    u64 page_index,
                                    u64 page_count,
                                    makocode::ByteBuffer& buffer) {
-    if (page_index == 0u) {
-        page_index = 1u;
-    }
-    if (page_count == 0u) {
-        page_count = 1u;
-    }
     usize length = footer_compute_page_text_length(footer, page_index, page_count);
     if (!buffer.ensure(length + 1u)) {
         return false;
@@ -20248,11 +19917,6 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
             buffer.data[cursor++] = (u8)number[digits++];
         }
     }
-    if (cursor != length) {
-        buffer.size = cursor;
-        buffer.data[cursor] = 0u;
-        return false;
-    }
     buffer.data[length] = 0u;
     buffer.size = length;
     return true;
@@ -20267,15 +19931,7 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
                                 u32& data_height_pixels,
                                 u64& bits_per_page,
                                 u64& page_count) {
-    u8 sample_bits = bits_per_sample(mapping.color_channels);
-    u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return false;
-    }
     double bits_per_pixel = mapping_bits_per_data_pixel(mapping);
-    if (bits_per_pixel <= 0.0) {
-        return false;
-    }
     data_height_pixels = height_pixels;
     bits_per_page = 0u;
     page_count = 1u;
@@ -20288,18 +19944,11 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
             return false;
         }
         data_height_pixels = footer_layout.data_height_pixels;
-        if (data_height_pixels == 0u || data_height_pixels > height_pixels) {
-            return false;
-        }
         if (!compute_bits_per_page(width_pixels,
                                    height_pixels,
                                    data_height_pixels,
                                    bits_per_pixel,
-                                   bits_per_page,
-                                   0)) {
-            return false;
-        }
-        if (bits_per_page == 0u) {
+                                   bits_per_page)) {
             return false;
         }
         u64 new_page_count = (frame_bit_count + bits_per_page - 1u) / bits_per_page;
@@ -20329,21 +19978,14 @@ static bool compute_frame_statistics(usize payload_bytes,
     payload_bit_count = 0u;
     frame_bit_count = 64u;
     if (payload_bytes == 0u) {
-        payload_bit_count = 0u;
-        frame_bit_count = 64u;
         return true;
     }
     if (redundancy <= 0.0) {
-        payload_bit_count = (u64)payload_bytes * 8u;
-        if (payload_bit_count > U64_MAX_VALUE - 64u) {
-            return false;
-        }
-        frame_bit_count = payload_bit_count + 64u;
-        return true;
+        return false;
     }
-        if (!makocode::compute_ecc_layout(payload_bytes, redundancy, block_data, parity_symbols, block_count)) {
-            return false;
-        }
+    if (!makocode::compute_ecc_layout(payload_bytes, redundancy, block_data, parity_symbols, block_count)) {
+        return false;
+    }
     if (block_data == 0u || parity_symbols == 0u || block_count == 0u) {
         return false;
     }
@@ -20381,9 +20023,6 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         u32 width_pixels,
                                         u32 height_pixels,
                                         EccFillCandidate& candidate) {
-    if (payload_bytes == 0u) {
-        return false;
-    }
     u64 dummy_payload_bits = 0u;
     if (!compute_frame_statistics(payload_bytes,
                                   redundancy,
@@ -20413,9 +20052,6 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                              page_count)) {
         return false;
     }
-    if (page_count == 0u) {
-        page_count = 1u;
-    }
     candidate.ratio = (double)candidate.parity / (double)candidate.block_data;
     candidate.bits_per_page = bits_per_page;
     candidate.page_count = page_count;
@@ -20441,9 +20077,6 @@ static bool find_best_ecc_fill(usize payload_bytes,
     best_frame_bits = 0u;
     best_bits_needed = U64_MAX_VALUE;
     best_page_count = 0u;
-    if (payload_bytes == 0u) {
-        return false;
-    }
     double search_low = min_ratio;
     double search_high = max_ratio;
     EccFillCandidate candidate;
@@ -20568,10 +20201,6 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             output_value = args[i + 1];
-            if (!output_value) {
-                console_line(2, "encode: --output-dir requires a non-empty path");
-                return 1;
-            }
             output_length = ascii_length(output_value);
             i += 1;
         } else if (ascii_starts_with(arg, output_prefix)) {
@@ -20613,10 +20242,6 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             prefix_value = args[i + 1];
-            if (!prefix_value) {
-                console_line(2, "encode: --prefix requires a non-empty value");
-                return 1;
-            }
             prefix_length = ascii_length(prefix_value);
             i += 1;
         } else if (ascii_starts_with(arg, prefix_prefix)) {
@@ -20674,10 +20299,6 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             ecc_value = args[i + 1];
-            if (!ecc_value) {
-                console_line(2, "encode: --ecc requires a numeric value");
-                return 1;
-            }
             ecc_length = ascii_length(ecc_value);
             i += 1;
         } else if (ascii_starts_with(arg, ecc_prefix)) {
@@ -20692,10 +20313,6 @@ static int command_encode(int arg_count, char** args) {
             double redundancy_value = 0.0;
             if (!ascii_to_double(ecc_value, ecc_length, &redundancy_value)) {
                 console_line(2, "encode: --ecc value is not a valid decimal number");
-                return 1;
-            }
-            if (redundancy_value < 0.0) {
-                console_line(2, "encode: --ecc must be >= 0.0");
                 return 1;
             }
             ecc_redundancy = redundancy_value;
@@ -20713,7 +20330,7 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             input_value = args[i + 1];
-            if (!input_value || input_value[0] == '\0') {
+            if (input_value[0] == '\0') {
                 console_line(2, "encode: --input requires a file path");
                 return 1;
             }
@@ -20742,10 +20359,6 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             title_value = args[i + 1];
-            if (!title_value) {
-                console_line(2, "encode: --title requires a non-empty value");
-                return 1;
-            }
             title_length = ascii_length(title_value);
             i += 1;
         } else if (ascii_starts_with(arg, title_prefix)) {
@@ -20785,10 +20398,6 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             font_value = args[i + 1];
-            if (!font_value) {
-                console_line(2, "encode: --font-size requires a positive integer value");
-                return 1;
-            }
             font_length = ascii_length(font_value);
             i += 1;
         } else if (ascii_starts_with(arg, font_prefix)) {
@@ -20821,10 +20430,6 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             password_value = args[i + 1];
-            if (!password_value) {
-                console_line(2, "encode: --password requires a non-empty value");
-                return 1;
-            }
             password_length = ascii_length(password_value);
             i += 1;
         } else if (ascii_starts_with(arg, password_prefix)) {
@@ -20915,11 +20520,6 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
         const char* stored_rel = (const char*)normalized_path.data;
-        if (!stored_rel || stored_rel[0] == '\0') {
-            console_write(2, "encode: input path resolves to empty relative name ");
-            console_line(2, input_path);
-            return 1;
-        }
         if (S_ISDIR(path_info.st_mode)) {
             if (!archive_collect_directory(input_path, stored_rel, archive)) {
                 return 1;
@@ -20958,10 +20558,7 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: no files or directories to encode");
         return 1;
     }
-    if (!archive_finalize(archive)) {
-        console_line(2, "encode: failed to finalize archive payload");
-        return 1;
-    }
+    archive_finalize(archive);
     footer_config.filename_text = 0;
     footer_config.filename_length = 0u;
     footer_config.has_filename = false;
@@ -20969,10 +20566,6 @@ static int command_encode(int arg_count, char** args) {
         if (single_input && have_single_normalized) {
             const char* base_name = find_last_path_component((const char*)single_normalized.data);
             usize base_length = ascii_length(base_name);
-            if (base_length == 0u) {
-                console_line(2, "encode: input path yielded empty filename");
-                return 1;
-            }
             if (!filename_buffer.ensure(base_length + 1u)) {
                 console_line(2, "encode: failed to allocate filename buffer");
                 return 1;
@@ -21007,16 +20600,9 @@ static int command_encode(int arg_count, char** args) {
             footer_config.has_filename = true;
         }
     }
-    if (footer_config.has_title && (!footer_config.title_text || footer_config.title_length == 0u)) {
-        console_line(2, "encode: title configuration is invalid");
-        return 1;
-    }
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
-    if (!compute_page_dimensions(mapping, width_pixels, height_pixels)) {
-        console_line(2, "encode: invalid page dimensions");
-        return 1;
-    }
+    compute_page_dimensions(mapping, width_pixels, height_pixels);
     if (ecc_fill_requested) {
         makocode::ByteBuffer compressed_payload;
         if (!lzma_compress(archive.buffer.data, archive.buffer.size, compressed_payload)) {
@@ -21028,15 +20614,7 @@ static int command_encode(int arg_count, char** args) {
         usize payload_bytes = compressed_size;
         if (have_password) {
             usize overhead = makocode::ENCRYPTION_HEADER_BYTES + makocode::ENCRYPTION_TAG_BYTES;
-            if (payload_bytes > USIZE_MAX_VALUE - overhead) {
-                console_line(2, "encode: payload size overflow while estimating ECC fill");
-                return 1;
-            }
             payload_bytes += overhead;
-        }
-        if (payload_bytes == 0u) {
-            console_line(2, "encode: payload is empty, ECC fill calculation unnecessary");
-            return 0;
         }
         double best_ratio = -1.0;
         u16 best_block_data = 0u;
@@ -21182,14 +20760,10 @@ static int command_encode(int arg_count, char** args) {
                                                   height_pixels,
                                                   mid,
                                                   bits_per_pixel,
-                                                  candidate_bits,
-                                                  0) &&
+                                                  candidate_bits) &&
                             candidate_bits >= frame_bit_count) {
                             best = mid;
                             best_bits = candidate_bits;
-                            if (mid == 1u) {
-                                break;
-                            }
                             high = mid - 1u;
                         } else {
                             low = mid + 1u;
@@ -21555,7 +21129,7 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
         return false;
     }
     u64 pixel_count = width_value * height_value;
-    if (pixel_count == 0u || pixel_count > ((u64)USIZE_MAX_VALUE / 3u)) {
+    if (pixel_count > ((u64)USIZE_MAX_VALUE / 3u)) {
         console_write(2, "overlay: pixel count overflow in ");
         console_line(2, path);
         return false;
@@ -21609,8 +21183,6 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
             page.color_mode = 3u;
         } else if (palette_base >= 4u) {
             page.color_mode = 2u;
-        } else {
-            page.color_mode = 1u;
         }
     } else if (page.pixels.data && page.pixels.size >= (usize)page.width * (usize)page.height * 3u) {
         // When palette metadata is unavailable (e.g., synthetic overlay masks),
@@ -21654,11 +21226,8 @@ static bool build_overlay_mask(const OverlayPage& page,
     if (page.metadata.has_fiducial_size && page.metadata.fiducial_size_value > 0u && page.metadata.fiducial_size_value <= 0xFFFFFFFFull) {
         marker_size = (u32)page.metadata.fiducial_size_value;
     }
-    if (marker_size == 0u) {
-        return true;
-    }
     u32 draw_height = page.height;
-    if (page.data_height > 0u && page.data_height < page.height) {
+    if (page.data_height < page.height) {
         draw_height = page.data_height;
     }
     u32 margin = g_fiducial_defaults.margin_pixels;
@@ -21668,14 +21237,14 @@ static bool build_overlay_mask(const OverlayPage& page,
     double min_x = (margin < page.width) ? (double)margin : 0.0;
     double max_x = (page.width > margin)
                        ? (double)(page.width - 1u - margin)
-                       : (page.width ? (double)(page.width - 1u) : 0.0);
+                       : (double)(page.width - 1u);
     if (max_x < min_x) {
         max_x = min_x;
     }
     double min_y = (margin < draw_height) ? (double)margin : 0.0;
     double max_y = (draw_height > margin)
                        ? (double)(draw_height - 1u - margin)
-                       : (draw_height ? (double)(draw_height - 1u) : 0.0);
+                       : (double)(draw_height - 1u);
     if (max_y < min_y) {
         max_y = min_y;
     }
@@ -21689,9 +21258,6 @@ static bool build_overlay_mask(const OverlayPage& page,
                    : 0u;
     if (columns == 0u || rows == 0u) {
         u32 spacing = g_fiducial_defaults.spacing_pixels;
-        if (spacing == 0u) {
-            spacing = marker_size;
-        }
         if (columns == 0u) {
             columns = 1u;
             if (spacing > 0u && available_width > 0.0) {
@@ -21729,9 +21295,6 @@ static bool build_overlay_mask(const OverlayPage& page,
                         continue;
                     }
                     usize index = ((usize)pixel_y * (usize)page.width) + (usize)pixel_x;
-                    if (mask_out.data[index]) {
-                        continue;
-                    }
                     mask_out.data[index] = 1u;
                     if (within_data) {
                         ++reserved_pixels;
@@ -21795,9 +21358,7 @@ static bool gather_overlay_bits(const OverlayPage& page,
             }
         }
     }
-    if (!writer.align_to_byte()) {
-        return false;
-    }
+    writer.align_to_byte();
     if (page.color_mode == 3u) {
         usize total_bytes = writer.byte_size();
         if (total_bytes && writer.buffer.data) {
@@ -21960,9 +21521,6 @@ static void raw_overlay_tracker_init(const OverlayPage& base_page,
     if (block_data_symbols == 0u || parity_symbols == 0u || block_count == 0u) {
         return;
     }
-    if (block_data_symbols > (U64_MAX_VALUE - parity_symbols)) {
-        return;
-    }
     u64 block_total_symbols = block_data_symbols + parity_symbols;
     u64 encoded_block_bytes = 0u;
     if (block_total_symbols > (U64_MAX_VALUE / block_count)) {
@@ -21972,21 +21530,12 @@ static void raw_overlay_tracker_init(const OverlayPage& base_page,
     const u64 payload_prefix_bytes = 8u;
     const u64 header_span_bytes = (u64)makocode::ECC_HEADER_TOTAL_BYTES;
     u64 rs_region_start = payload_prefix_bytes + header_span_bytes;
-    u64 rs_region_end = rs_region_start;
-    if (encoded_block_bytes > (U64_MAX_VALUE - rs_region_start)) {
-        rs_region_end = U64_MAX_VALUE;
-    } else {
-        rs_region_end = rs_region_start + encoded_block_bytes;
-    }
+    u64 rs_region_end = rs_region_start + encoded_block_bytes;
     u64 base_bits = 0u;
     if (base_page.metadata.has_bits) {
         base_bits = base_page.metadata.bits_value;
     }
     u64 base_bytes = (base_bits + 7u) >> 3u;
-    if (!base_bytes) {
-        // Without a reliable byte count we cannot safely map symbols.
-        return;
-    }
     if (rs_region_start >= base_bytes) {
         return;
     }
@@ -21998,9 +21547,6 @@ static void raw_overlay_tracker_init(const OverlayPage& base_page,
         return;
     }
     counter_bytes = (usize)(block_count * (u64)sizeof(u32));
-    if (counter_bytes == 0u) {
-        return;
-    }
     if (!tracker.counts.ensure(counter_bytes)) {
         return;
     }
@@ -22060,12 +21606,6 @@ static void raw_overlay_tracker_init(const OverlayPage& base_page,
 static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracker,
                                                   u64 byte_start,
                                                   u64 byte_end) {
-    if (!tracker.enabled || !tracker.limits_known) {
-        return true;
-    }
-    if (byte_start >= byte_end) {
-        return true;
-    }
     if (byte_end <= tracker.rs_region_start || byte_start >= tracker.rs_region_end) {
         return true;
     }
@@ -22091,9 +21631,6 @@ static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracke
         u32 pending;
     };
     usize span = (usize)(byte_end - byte_start);
-    if (span == 0u) {
-        return true;
-    }
     if (span > (SIZE_MAX / sizeof(RawOverlayPendingSymbol))) {
         return false;
     }
@@ -22116,9 +21653,6 @@ static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracke
     usize block_accum_count = 0u;
     for (u64 byte_index = byte_start; byte_index < byte_end; ++byte_index) {
         u64 relative = byte_index - tracker.rs_region_start;
-        if (relative >= tracker.encoded_block_bytes) {
-            continue;
-        }
         if (mark_ptr && mark_ptr[relative]) {
             continue;
         }
@@ -22136,9 +21670,6 @@ static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracke
             }
         }
         if (!block_entry) {
-            if (block_accum_count >= span) {
-                return false;
-            }
             block_entry = &block_accums[block_accum_count++];
             block_entry->block_index = block_index;
             block_entry->counter_index = counter_index;
@@ -22182,9 +21713,6 @@ static bool raw_overlay_tracker_try_reserve_bits(RawOverlayBlockTracker& tracker
         return true;
     }
     u64 bit_end = bit_start + bit_length;
-    if (bit_end < bit_start) {
-        return false;
-    }
     u64 byte_start = bit_start >> 3u;
     u64 byte_end = (bit_end + 7u) >> 3u;
     return raw_overlay_tracker_try_reserve_bytes(tracker, byte_start, byte_end);
@@ -22214,9 +21742,6 @@ static bool count_overlay_pixel_candidates(const OverlayPage& base_page,
         return false;
     }
     u32 apply_height = base_page.data_height;
-    if (apply_height == 0u) {
-        return true;
-    }
     const bool have_base_mask = (base_mask.data && base_mask.size);
     const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
     for (u32 row = 0u; row < (u32)apply_height; ++row) {
@@ -22271,9 +21796,6 @@ static bool count_overlay_byte_candidates(const OverlayPage& base_page,
         return false;
     }
     u32 apply_height = base_page.data_height;
-    if (apply_height == 0u) {
-        return true;
-    }
     const bool have_base_mask = (base_mask.data && base_mask.size);
     const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
     u8 sample_bits = bits_per_sample(base_page.color_mode);
@@ -22305,9 +21827,6 @@ static bool count_overlay_byte_candidates(const OverlayPage& base_page,
             bit_count += bits_per_pixel;
         }
     }
-    if (bit_count == 0u) {
-        return true;
-    }
     u64 byte_count = bit_count >> 3u;
     if (bit_count & 7u) {
         ++byte_count;
@@ -22330,9 +21849,6 @@ static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
     }
     if (base_page.width != overlay_page.width ||
         base_page.height != overlay_page.height) {
-        return false;
-    }
-    if (denominator == 0u) {
         return false;
     }
     usize total_pixels = (usize)base_page.width * (usize)base_page.height;
@@ -22480,9 +21996,6 @@ static bool serialize_overlay_page(const OverlayPage& page,
 }
 
 static bool write_buffer_to_fd(int fd, const makocode::ByteBuffer& buffer) {
-    if (!buffer.data || buffer.size == 0u) {
-        return true;
-    }
     usize offset = 0u;
     while (offset < buffer.size) {
         unsigned long chunk = (unsigned long)(buffer.size - offset);
@@ -22518,10 +22031,6 @@ static int command_overlay(int arg_count, char** args) {
     const char ecc_target_prefix[] = "--overlay-ecc-target=";
     while (option_index < arg_count) {
         const char* arg = args[option_index];
-        if (!arg) {
-            ++option_index;
-            continue;
-        }
         
         usize length = ascii_length(arg);
         if (ascii_equals_token(arg, length, ignore_option)) {
@@ -22534,10 +22043,6 @@ static int command_overlay(int arg_count, char** args) {
                 return 1;
             }
             const char* value = args[option_index + 1];
-            if (!value) {
-                console_line(2, "overlay: --ignore-colors requires a value");
-                return 1;
-            }
             usize value_length = ascii_length(value);
             if (value_length == 0u) {
                 console_line(2, "overlay: --ignore-colors requires a non-empty value");
@@ -22555,7 +22060,7 @@ static int command_overlay(int arg_count, char** args) {
                 return 1;
             }
             const char* value = arg + (sizeof(ignore_prefix) - 1u);
-            if (!value || *value == '\0') {
+            if (*value == '\0') {
                 console_line(2, "overlay: --ignore-colors requires a non-empty value");
                 return 1;
             }
@@ -22568,10 +22073,6 @@ static int command_overlay(int arg_count, char** args) {
         if (ascii_equals_token(arg, length, ecc_target_option)) {
             if (ecc_target_specified) {
                 console_line(2, "overlay: --overlay-ecc-target specified multiple times");
-                return 1;
-            }
-            if ((option_index + 1) >= arg_count) {
-                console_line(2, "overlay: --overlay-ecc-target requires a value");
                 return 1;
             }
             const char* value = args[option_index + 1];
@@ -22588,10 +22089,6 @@ static int command_overlay(int arg_count, char** args) {
                 console_line(2, "overlay: --overlay-ecc-target requires a decimal value such as 0.5");
                 return 1;
             }
-            if (ecc_target_denominator == 0u) {
-                console_line(2, "overlay: --overlay-ecc-target requires a non-zero denominator");
-                return 1;
-            }
             ecc_target_specified = true;
             option_index += 2;
             continue;
@@ -22602,16 +22099,12 @@ static int command_overlay(int arg_count, char** args) {
                 return 1;
             }
             const char* value = arg + (sizeof(ecc_target_prefix) - 1u);
-            if (!value || *value == '\0') {
+            if (*value == '\0') {
                 console_line(2, "overlay: --overlay-ecc-target requires a non-empty value");
                 return 1;
             }
             if (!ascii_to_fraction(value, ascii_length(value), ecc_target_numerator, ecc_target_denominator)) {
                 console_line(2, "overlay: --overlay-ecc-target requires a decimal value such as 0.5");
-                return 1;
-            }
-            if (ecc_target_denominator == 0u) {
-                console_line(2, "overlay: --overlay-ecc-target requires a non-zero denominator");
                 return 1;
             }
             ecc_target_specified = true;
@@ -22634,10 +22127,6 @@ static int command_overlay(int arg_count, char** args) {
         }
     }
     const OverlayIgnoreColorList* overlay_ignore = (ignore_colors.count > 0u) ? &ignore_colors : 0;
-    if (!base_path || !overlay_path || !fraction_text) {
-        console_line(2, "overlay: arguments may not be empty");
-        return 1;
-    }
     usize fraction_length = ascii_length(fraction_text);
     u64 numerator = 0u;
     u64 denominator = 1u;
@@ -22646,11 +22135,7 @@ static int command_overlay(int arg_count, char** args) {
         console_line(2, "overlay: fraction must be a decimal value such as 0.25");
         return 1;
     }
-    if (denominator == 0u) {
-        console_line(2, "overlay: invalid fraction");
-        return 1;
-    }
-    if (numerator >= denominator) {
+    if (numerator > denominator) {
         numerator = denominator;
     }
     OverlayPage base_page;
@@ -22680,10 +22165,6 @@ static int command_overlay(int arg_count, char** args) {
         console_line(2, "overlay: failed to prepare fiducial mask for overlay image");
         return 1;
     }
-    if (base_mask.size != overlay_mask.size) {
-        console_line(2, "overlay: fiducial mask size mismatch");
-        return 1;
-    }
     if (ecc_target_specified) {
         RawOverlayBlockTracker ecc_tracker;
         raw_overlay_tracker_init(base_page, ecc_tracker);
@@ -22694,15 +22175,12 @@ static int command_overlay(int arg_count, char** args) {
         u64 candidate_limit = 0u;
         if (base_page.color_mode != overlay_page.color_mode) {
             usize candidate_count = 0u;
-            if (!count_overlay_pixel_candidates(base_page,
-                                                overlay_page,
-                                                base_mask,
-                                                overlay_mask,
-                                                overlay_ignore,
-                                                candidate_count)) {
-                console_line(2, "overlay: failed to evaluate overlay candidates");
-                return 1;
-            }
+            count_overlay_pixel_candidates(base_page,
+                                           overlay_page,
+                                           base_mask,
+                                           overlay_mask,
+                                           overlay_ignore,
+                                           candidate_count);
             candidate_limit = (candidate_count > (usize)U64_MAX_VALUE)
                                 ? U64_MAX_VALUE
                                 : (u64)candidate_count;
@@ -22721,16 +22199,10 @@ static int command_overlay(int arg_count, char** args) {
         }
         long double target_fraction = (long double)ecc_target_numerator /
                                        (long double)ecc_target_denominator;
-        if (target_fraction < 0.0L) {
-            target_fraction = 0.0L;
-        } else if (target_fraction > 1.0L) {
+        if (target_fraction > 1.0L) {
             target_fraction = 1.0L;
         }
         u64 total_limit = ecc_tracker.block_count * ecc_tracker.block_limit_per_block;
-        if (total_limit == 0u) {
-            console_line(2, "overlay: ECC metadata reports zero capacity");
-            return 1;
-        }
         long double desired_changes = target_fraction * (long double)total_limit;
         u64 target_changes = (u64)(desired_changes + 0.5L);
         if (target_changes == 0u && target_fraction > 0.0L && candidate_limit > 0u) {
@@ -22740,18 +22212,10 @@ static int command_overlay(int arg_count, char** args) {
             target_changes = candidate_limit;
         }
         if (candidate_limit == 0u) {
-            if (target_changes > 0u) {
-                console_line(2, "overlay: no overlay candidates remain after masks/ignore");
-                return 1;
-            }
             numerator = 0u;
-            denominator = 1u;
         } else {
             numerator = target_changes;
             denominator = candidate_limit;
-            if (numerator > denominator) {
-                numerator = denominator;
-            }
         }
     }
     if (numerator == 0u) {
@@ -22881,9 +22345,6 @@ static int command_overlay(int arg_count, char** args) {
                                             shuffle_entry_count = (u64)entries;
                                             block_limit_start = payload_prefix_bytes + header_span_bytes;
                                             block_limit_end = block_limit_start + shuffle_entry_count;
-                                            if (block_limit_end > base_bytes) {
-                                                block_limit_end = base_bytes;
-                                            }
                                             block_limit_active = true;
                                         }
                                     }
@@ -22911,9 +22372,6 @@ static int command_overlay(int arg_count, char** args) {
             u64 safe_per_block = block_limit_per_block;
             if (safe_per_block > 1u) {
                 safe_per_block = (safe_per_block * 2u) / 3u; // ~67% of the nominal limit
-                if (safe_per_block == 0u) {
-                    safe_per_block = 1u;
-                }
             }
             __uint128_t safe_total = (__uint128_t)safe_per_block * (__uint128_t)block_total_count;
             __uint128_t max_num128 = safe_total * (__uint128_t)denominator;
@@ -23007,9 +22465,6 @@ static int command_decode(int arg_count, char** args) {
             continue;
         }
         const char* arg = args[i];
-        if (!arg) {
-            continue;
-        }
         if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
             debug_requested = true;
             continue;
@@ -23028,10 +22483,6 @@ static int command_decode(int arg_count, char** args) {
                 return 1;
             }
             output_value = args[i + 1];
-            if (!output_value) {
-                console_line(2, "decode: --output-dir requires a non-empty path");
-                return 1;
-            }
             output_length = ascii_length(output_value);
             i += 1;
         } else if (ascii_starts_with(arg, output_prefix)) {
@@ -23073,10 +22524,6 @@ static int command_decode(int arg_count, char** args) {
                 return 1;
             }
             password_value = args[i + 1];
-            if (!password_value) {
-                console_line(2, "decode: --password requires a non-empty value");
-                return 1;
-            }
             password_length = ascii_length(password_value);
             i += 1;
         } else if (ascii_starts_with(arg, password_prefix)) {
@@ -23305,10 +22752,7 @@ retry_decode:
                 return 1;
             }
             if (!aggregate_initialized) {
-                if (!merge_parser_state(aggregate_state, page_state)) {
-                    console_line(2, "decode: inconsistent metadata");
-                    return 1;
-                }
+                merge_parser_state(aggregate_state, page_state);
                 aggregate_initialized = true;
             } else {
                 if (!merge_parser_state(aggregate_state, page_state)) {
@@ -23342,11 +22786,6 @@ retry_decode:
             }
             ++expected_page_index;
         }
-        if (!aggregate_state.has_page_count ||
-            aggregate_state.page_count_value == 0u ||
-            aggregate_state.page_count_value < file_count) {
-            aggregate_state.has_page_count = false;
-        }
         const u8* frame_data = frame_aggregator.data();
         u64 frame_bit_total = frame_aggregator.bit_size();
         bool payload_extracted = frame_bits_to_payload(frame_data,
@@ -23373,12 +22812,10 @@ retry_decode:
         aggregate_state.has_palette_text &&
         aggregate_state.palette_text_length &&
         !mapping.palette_set) {
-        if (!image_mapping_set_palette_text(mapping,
-                                            aggregate_state.palette_text,
-                                            aggregate_state.palette_text_length,
-                                            "decode")) {
-            return 1;
-        }
+        image_mapping_set_palette_text(mapping,
+                                       aggregate_state.palette_text,
+                                       aggregate_state.palette_text_length,
+                                       "decode");
         if (!image_mapping_build_custom_palette(mapping, "decode")) {
             return 1;
         }

@@ -524,28 +524,6 @@ static int compute_metadata_guard(int width,
     *y0 = cy - half;
     *x1 = *x0 + side;
     *y1 = *y0 + side;
-    if (*x0 < 0) {
-        int delta = -*x0;
-        *x0 = 0;
-        *x1 += delta;
-    }
-    if (*y0 < 0) {
-        int delta = -*y0;
-        *y0 = 0;
-        *y1 += delta;
-    }
-    if (*x1 > width) {
-        int delta = *x1 - width;
-        *x1 = width;
-        *x0 -= delta;
-        if (*x0 < 0) *x0 = 0;
-    }
-    if (*y1 > usable_height) {
-        int delta = *y1 - usable_height;
-        *y1 = usable_height;
-        *y0 -= delta;
-        if (*y0 < 0) *y0 = 0;
-    }
     return (*x1 > *x0) && (*y1 > *y0);
 }
 
@@ -611,12 +589,10 @@ static void apply_paper_tint_in_place(IntVec* pixels,
     // No splotch field: apply uniform tint/shade.
     if (splotch_px <= 0) {
         double alpha = paper_alpha;
-        double shade = 1.0;
         for (size_t i = 0; i + 2 < pixels->size; i += 3) {
             for (int c = 0; c < 3; c++) {
                 double v = pixels->data[i + (size_t)c];
                 double mixed = v * (1.0 - alpha) + (double)paper_rgb[c] * alpha;
-                mixed *= shade;
                 pixels->data[i + (size_t)c] = clamp_u8((int)llround(mixed));
             }
         }

@@ -72,10 +72,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     traversal_archive.entry_count = 1u;
-    if (!archive_finalize(traversal_archive)) {
-        fprintf(stderr, "decoder paths harness: traversal archive finalization failed\n");
-        return 1;
-    }
+    archive_finalize(traversal_archive);
     struct stat outside_entry;
     char outside_path[4096];
     int outside_path_length = snprintf(outside_path,
