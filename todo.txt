@@ -27,6 +27,7 @@ Features
  - What if white/black or light/dark are inverted for the metadata?
 - SVG for overlay, so it scales? Overlay picture across multiple images, so they can be lined up as a block like a mosaic?
 - Given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
+- Decode to stdout only: Filename1\r---\rContents1\r...
 
 Finalize
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
