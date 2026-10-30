@@ -169,15 +169,6 @@ static usize ascii_length(const char* text) {
 }
 
 static int ascii_compare(const char* a, const char* b) {
-    if (a == b) {
-        return 0;
-    }
-    if (!a) {
-        return -1;
-    }
-    if (!b) {
-        return 1;
-    }
     while (*a && (*a == *b)) {
         ++a;
         ++b;
@@ -187,9 +178,6 @@ static int ascii_compare(const char* a, const char* b) {
 }
 
 static bool ascii_starts_with(const char* text, const char* prefix) {
-    if (!text || !prefix) {
-        return false;
-    }
     while (*prefix) {
         if (*text != *prefix) {
             return false;
@@ -201,9 +189,6 @@ static bool ascii_starts_with(const char* text, const char* prefix) {
 }
 
 static bool ascii_equals_token(const char* text, usize length, const char* keyword) {
-    if (!text || !keyword) {
-        return false;
-    }
     usize index = 0u;
     while (keyword[index]) {
         if (index >= length || text[index] != keyword[index]) {
@@ -253,9 +238,6 @@ static u32 log2_u32(u32 value) {
 static bool ascii_equals_token_ignore_case(const char* text,
                                            usize length,
                                            const char* keyword) {
-    if (!text || !keyword) {
-        return false;
-    }
     usize index = 0u;
     while (keyword[index]) {
         if (index >= length) {
@@ -272,9 +254,6 @@ static bool ascii_equals_token_ignore_case(const char* text,
 }
 
 static bool ascii_to_u64(const char* text, usize length, u64* out_value) {
-    if (!text || !out_value || length == 0u) {
-        return false;
-    }
     u64 value = 0u;
     for (usize i = 0u; i < length; ++i) {
         char c = text[i];
@@ -293,9 +272,6 @@ static bool ascii_to_u64(const char* text, usize length, u64* out_value) {
 }
 
 static bool ascii_to_double(const char* text, usize length, double* out_value) {
-    if (!text || !out_value || length == 0u) {
-        return false;
-    }
     u64 integer_part = 0u;
     u64 fraction_part = 0u;
     u64 fraction_scale = 1u;
@@ -339,9 +315,6 @@ static bool ascii_to_fraction(const char* text,
                               u64& denominator) {
     numerator = 0u;
     denominator = 1u;
-    if (!text || length == 0u) {
-        return false;
-    }
     bool seen_digit = false;
     bool seen_decimal = false;
     u64 integer_part = 0u;
@@ -381,9 +354,6 @@ static bool ascii_to_fraction(const char* text,
         denominator = 1u;
         return true;
     }
-    if (fraction_scale == 0u) {
-        return false;
-    }
     if (integer_part != 0u) {
         if (integer_part > (0xFFFFFFFFFFFFFFFFull - fraction_part) / fraction_scale) {
             return false;
@@ -392,23 +362,12 @@ static bool ascii_to_fraction(const char* text,
     u64 scaled_integer = integer_part * fraction_scale;
     u64 combined = scaled_integer + fraction_part;
     u64 divisor = gcd_u64(combined, fraction_scale);
-    if (divisor == 0u) {
-        numerator = combined;
-        denominator = fraction_scale;
-    } else {
-        numerator = combined / divisor;
-        denominator = fraction_scale / divisor;
-    }
-    if (denominator == 0u) {
-        return false;
-    }
+    numerator = combined / divisor;
+    denominator = fraction_scale / divisor;
     return true;
 }
 
 static void console_write(int fd, const char* text) {
-    if (!text) {
-        return;
-    }
     usize len = ascii_length(text);
     if (len) {
         write(fd, text, len);
@@ -427,9 +386,6 @@ static double clamp_double(double value, double lo, double hi) {
 }
 
 static void u64_to_ascii(u64 value, char* buffer, usize capacity) {
-    if (!buffer || capacity == 0) {
-        return;
-    }
     char temp[32];
     usize index = 0;
     if (value == 0) {
@@ -477,9 +433,6 @@ static void format_fixed_3(double value, char* buffer, usize capacity) {
 }
 
 static bool utc_timestamp_string(char* buffer, usize capacity) {
-    if (!buffer || capacity == 0u) {
-        return false;
-    }
     long seconds = time((long*)0);
     if (seconds < 0L) {
         return false;
@@ -534,14 +487,7 @@ static const int kMaxIterations = 32;
 static void set_diag_message(LoadDiagnostics* diag, const char* text)
 {
     if (!diag) return;
-    if (!text) {
-        diag->message[0] = '\0';
-        return;
-    }
     usize length = ::ascii_length(text);
-    if (length >= (usize)sizeof(diag->message)) {
-        length = (usize)sizeof(diag->message) - 1u;
-    }
     for (usize i = 0; i < length; ++i) {
         diag->message[i] = text[i];
     }
@@ -642,12 +588,6 @@ LoadStatus load_ppm_grayscale(const char* path,
 
     const unsigned char* cursor = data;
     const unsigned char* end = data + size;
-
-    if (cursor >= end) {
-        free(data);
-        set_diag_message(diag, "truncated header");
-        return LoadDecodeError;
-    }
 
     if (*cursor != 'P') {
         free(data);
@@ -814,10 +754,6 @@ bool analyze_cut_levels(const Histogram& histogram,
                         double sync_white_cut,
                         CutLevels& out_levels)
 {
-    if (sync_white_cut < 0.0 || sync_white_cut > 1.0) {
-        return false;
-    }
-
     unsigned char global_cut = histogram.average;
     unsigned char fill_cut = histogram.average;
 
@@ -938,9 +874,6 @@ struct CornerDetectionResult {
 
 static unsigned char sample_pixel(const ImageBuffer& image, int x, int y)
 {
-    if (!image.pixels) {
-        return 0xFFu;
-    }
     if (x < 0 || y < 0) {
         return 0xFFu;
     }
@@ -977,7 +910,6 @@ static void scan_diagonal(const ImageBuffer& image,
         }
     }
     out_x = -1;
-    out_y = -1;
 }
 
 static void normalize_vector(double& x, double& y)
@@ -1026,10 +958,6 @@ bool find_corners(const ImageBuffer& image,
     if (config.logical_width == 0u || config.logical_height == 0u) {
         return false;
     }
-    if (config.cross_half == 0u) {
-        return false;
-    }
-
     int x = 0;
     int y = 0;
 
@@ -1105,13 +1033,7 @@ bool find_corners(const ImageBuffer& image,
     result.chalf = (int)(h_half < v_half ? h_half : v_half);
 
     double trim = config.cross_trim;
-    if (trim < 0.0) {
-        trim = 0.0;
-    }
     double core = (double)config.cross_half - trim;
-    if (core < 0.0) {
-        core = 0.0;
-    }
     unsigned h_fine = (unsigned)(hpixel * core);
     unsigned v_fine = (unsigned)(vpixel * core);
     result.chalf_fine = (int)(h_fine < v_fine ? h_fine : v_fine);
@@ -1143,9 +1065,6 @@ struct ByteBuffer {
     }
 
     bool reserve(usize new_capacity) {
-        if (new_capacity <= capacity) {
-            return true;
-        }
         if (new_capacity > (USIZE_MAX_VALUE / 2u)) {
             return false;
         }
@@ -1170,8 +1089,7 @@ struct ByteBuffer {
         while (grow < required) {
             usize doubled = grow + grow;
             if (doubled <= grow) {
-                grow = required;
-                break;
+                return false;
             }
             grow = doubled;
         }
@@ -1201,9 +1119,6 @@ struct ByteBuffer {
     }
 
     bool append_ascii(const char* text) {
-        if (!text) {
-            return true;
-        }
         return append_bytes((const u8*)text, ascii_length(text));
     }
 
@@ -1994,11 +1909,6 @@ static void LzInWindow_Free(CMatchFinder *p, ISzAlloc *alloc)
 static int LzInWindow_Create(CMatchFinder *p, UInt32 keepSizeReserv, ISzAlloc *alloc)
 {
   UInt32 blockSize = p->keepSizeBefore + p->keepSizeAfter + keepSizeReserv;
-  if (p->directInput)
-  {
-    p->blockSize = blockSize;
-    return 1;
-  }
   if (p->bufferBase == 0 || p->blockSize != blockSize)
   {
     LzInWindow_Free(p, alloc);
@@ -2022,14 +1932,12 @@ void MatchFinder_ReduceOffsets(CMatchFinder *p, UInt32 subValue)
 
 static void MatchFinder_ReadBlock(CMatchFinder *p)
 {
-  if (p->streamEndWasReached || p->result != SZ_OK)
+  if (p->result != SZ_OK)
     return;
   for (;;)
   {
     Byte *dest = p->buffer + (p->streamPos - p->pos);
     size_t size = (p->bufferBase + p->blockSize - dest);
-    if (size == 0)
-      return;
     p->result = p->stream->Read(p->stream, dest, &size);
     if (p->result != SZ_OK)
       return;
@@ -2811,8 +2719,6 @@ static int MY_FAST_CALL LzmaDec_DecodeReal(CLzmaDec *p, SizeT limit, const Byte 
               GET_BIT2(prob + i, i, ; , distance |= 4);
               GET_BIT2(prob + i, i, ; , distance |= 8);
             }
-            if (distance == (UInt32)0xFFFFFFFF)
-              return SZ_ERROR_DATA;
           }
         }
         rep3 = rep2;
@@ -2832,8 +2738,6 @@ static int MY_FAST_CALL LzmaDec_DecodeReal(CLzmaDec *p, SizeT limit, const Byte 
 
       len += kMatchMinLen;
 
-      if (limit == dicPos)
-        return SZ_ERROR_DATA;
       {
         SizeT rem = limit - dicPos;
         unsigned curLen = ((rem < len) ? (unsigned)rem : len);
@@ -4630,8 +4534,6 @@ static SRes CheckErrors(CLzmaEnc *p)
     p->result = SZ_ERROR_WRITE;
   if (p->matchFinderBase.result != SZ_OK)
     p->result = SZ_ERROR_READ;
-  if (p->result != SZ_OK)
-    p->finished = True;
   return p->result;
 }
 
@@ -4735,7 +4637,7 @@ void LzmaEnc_Destroy(CLzmaEncHandle p, ISzAlloc *alloc, ISzAlloc *allocBig)
   alloc->Free(alloc, p);
 }
 
-static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, Bool useLimits, UInt32 maxPackSize, UInt32 maxUnpackSize)
+static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p)
 {
   UInt32 nowPos32, startPos32;
   if (p->inStream != 0)
@@ -4745,8 +4647,6 @@ static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, Bool useLimits, UInt32 maxPackSize
     p->inStream = 0;
   }
 
-  if (p->finished)
-    return p->result;
   RINOK(CheckErrors(p));
 
   nowPos32 = (UInt32)p->nowPos64;
@@ -4872,13 +4772,7 @@ static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, Bool useLimits, UInt32 maxPackSize
       if (p->matchFinder.GetNumAvailableBytes(p->matchFinderObj) == 0)
         break;
       processed = nowPos32 - startPos32;
-      if (useLimits)
-      {
-        if (processed + kNumOpts + 300 >= maxUnpackSize ||
-            RangeEnc_GetProcessed(&p->rc) + kNumOpts * 2 >= maxPackSize)
-          break;
-      }
-      else if (processed >= (1 << 15))
+      if (processed >= (1 << 15))
       {
         p->nowPos64 += nowPos32 - startPos32;
         return CheckErrors(p);
@@ -4905,7 +4799,6 @@ static SRes LzmaEnc_Alloc(CLzmaEnc *p, ISzAlloc *alloc, ISzAlloc *allocBig)
       p->litProbs = (CLzmaProb *)alloc->Alloc(alloc, (0x300 << lclp) * sizeof(CLzmaProb));
       if (p->litProbs == 0)
       {
-        LzmaEnc_FreeLits(p, alloc);
         return SZ_ERROR_MEM;
       }
       p->lclp = lclp;
@@ -5057,7 +4950,7 @@ SRes LzmaEnc_Encode(CLzmaEncHandle pp, ISeqOutStream *outStream, ISeqInStream *i
 
   for (;;)
   {
-    res = LzmaEnc_CodeOneBlock(p, False, 0, 0);
+    res = LzmaEnc_CodeOneBlock(p);
     if (res != SZ_OK || p->finished != 0)
       break;
     if (progress != 0)
@@ -5301,23 +5194,17 @@ MY_STDAPI LzmaUncompress(unsigned char *dest, size_t  *destLen, const unsigned c
 
 struct FloodQueue {
     usize* data;
-    usize capacity;
     usize head;
     usize tail;
 
-    FloodQueue() : data(0), capacity(0), head(0), tail(0) {}
+    FloodQueue() : data(0), head(0), tail(0) {}
 
     bool initialize(usize max_elements) {
-        if (max_elements < 2u) {
-            max_elements = 2u;
-        }
         data = (usize*)malloc(max_elements * sizeof(usize));
         if (!data) {
-            capacity = 0;
             head = tail = 0;
             return false;
         }
-        capacity = max_elements;
         head = tail = 0;
         return true;
     }
@@ -5327,7 +5214,6 @@ struct FloodQueue {
             free(data);
             data = 0;
         }
-        capacity = 0;
         head = tail = 0;
     }
 
@@ -5337,12 +5223,6 @@ struct FloodQueue {
 
     bool push(usize value) {
         usize next = head + 1u;
-        if (next >= capacity) {
-            next = 0u;
-        }
-        if (next == tail) {
-            return false;
-        }
         data[head] = value;
         head = next;
         return true;
@@ -5354,9 +5234,6 @@ struct FloodQueue {
         }
         value = data[tail];
         tail++;
-        if (tail >= capacity) {
-            tail = 0u;
-        }
         return true;
     }
 };
@@ -5400,29 +5277,14 @@ bool remove_border_dirt(image::ImageBuffer& image,
     }
 
     usize queue_capacity = total_pixels + 1u;
-    if (queue_capacity <= total_pixels) {
-        mask.release();
-        if (out_mask) {
-            out_mask->release();
-        }
-        return false;
-    }
     FloodQueue queue;
     if (!queue.initialize(queue_capacity)) {
-        mask.release();
         return false;
     }
 
-    bool queue_ok = true;
     unsigned char* pixels = image.pixels;
 
     auto try_copy = [&](unsigned x, unsigned y, bool require_white) {
-        if (!queue_ok) {
-            return;
-        }
-        if (x >= width || y >= height) {
-            return;
-        }
         usize index = (usize)y * (usize)width + (usize)x;
         if (mask.data[index] == 0u) {
             return;
@@ -5431,19 +5293,14 @@ bool remove_border_dirt(image::ImageBuffer& image,
             return;
         }
         mask.data[index] = 0u;
-        if (!queue.push(index)) {
-            queue_ok = false;
-        }
+        queue.push(index);
     };
 
     auto flood = [&](unsigned start_x, unsigned start_y, bool require_white) {
-        if (!queue_ok) {
-            return;
-        }
         queue.reset();
         try_copy(start_x, start_y, require_white);
         usize encoded = 0u;
-        while (queue_ok && queue.pop(encoded)) {
+        while (queue.pop(encoded)) {
             unsigned y = (unsigned)(encoded / (usize)width);
             unsigned x = (unsigned)(encoded - (usize)y * (usize)width);
             if (x + 1u < width) {
@@ -5471,14 +5328,7 @@ bool remove_border_dirt(image::ImageBuffer& image,
     flood(width >> 1u, height - 1u, true);
     flood(width >> 1u, height >> 1u, false);
 
-    bool success = queue_ok;
-
     queue.release();
-
-    if (!success) {
-        mask.release();
-        return false;
-    }
 
     for (usize i = 0; i < total_pixels; ++i) {
         unsigned y = (unsigned)(i / (usize)width);
@@ -5495,7 +5345,6 @@ bool remove_border_dirt(image::ImageBuffer& image,
     if (out_mask) {
         out_mask->release();
         if (!out_mask->ensure(total_pixels)) {
-            mask.release();
             return false;
         }
         out_mask->size = total_pixels;
@@ -5539,9 +5388,6 @@ struct Pcg64Generator {
 };
 
 static void crypto_random_bytes(u8* dest, usize count) {
-    if (!dest || count == 0u) {
-        return;
-    }
     static Pcg64Generator rng;
     static bool seeded = false;
     if (!seeded) {
@@ -5579,9 +5425,6 @@ static void crypto_random_bytes(u8* dest, usize count) {
 }
 
 static bool constant_time_equal(const u8* a, const u8* b, usize length) {
-    if (!a || !b) {
-        return false;
-    }
     u8 diff = 0u;
     for (usize i = 0u; i < length; ++i) {
         diff |= (u8)(a[i] ^ b[i]);
@@ -5697,9 +5540,6 @@ static void sha256_init(Sha256State& state) {
 }
 
 static void sha256_update(Sha256State& state, const u8* data, usize length) {
-    if (!data || length == 0u) {
-        return;
-    }
     while (length > 0u) {
         usize to_copy = 64u - (usize)state.buffer_used;
         if (to_copy > length) {
@@ -5751,9 +5591,6 @@ static bool hmac_sha256(const u8* key,
                         const u8* data,
                         usize data_length,
                         u8 output[32]) {
-    if (!key || key_length == 0u || !output) {
-        return false;
-    }
     const usize block_size = 64u;
     u8 key_block[64];
     for (usize i = 0u; i < block_size; ++i) {
@@ -5811,7 +5648,7 @@ static bool pbkdf2_hmac_sha256(const u8* password,
                                u32 iterations,
                                u8* output,
                                usize output_length) {
-    if (!password || password_length == 0u || !salt || !output || output_length == 0u || iterations == 0u) {
+    if (!password || password_length == 0u || iterations == 0u) {
         return false;
     }
     u32 block_count = (u32)((output_length + 31u) / 32u);
@@ -5831,18 +5668,12 @@ static bool pbkdf2_hmac_sha256(const u8* password,
         salt_buffer.data[salt_length + 1u] = (u8)((bi >> 16u) & 0xFFu);
         salt_buffer.data[salt_length + 2u] = (u8)((bi >> 8u) & 0xFFu);
         salt_buffer.data[salt_length + 3u] = (u8)(bi & 0xFFu);
-        if (!hmac_sha256(password, password_length, salt_buffer.data, salt_length + 4u, u)) {
-            salt_buffer.release();
-            return false;
-        }
+        hmac_sha256(password, password_length, salt_buffer.data, salt_length + 4u, u);
         for (u32 i = 0u; i < 32u; ++i) {
             t[i] = u[i];
         }
         for (u32 iter = 1u; iter < iterations; ++iter) {
-            if (!hmac_sha256(password, password_length, u, 32u, u)) {
-                salt_buffer.release();
-                return false;
-            }
+            hmac_sha256(password, password_length, u, 32u, u);
             for (u32 i = 0u; i < 32u; ++i) {
                 t[i] ^= u[i];
             }
@@ -6040,9 +5871,6 @@ static void poly1305_process_block(Poly1305State& state, const u8 block[16], u64
 }
 
 static void poly1305_update(Poly1305State& state, const u8* data, usize length) {
-    if (!data || length == 0u) {
-        return;
-    }
     while (length >= 16u) {
         poly1305_process_block(state, data, (1ull << 24u));
         data += 16u;
@@ -6146,9 +5974,6 @@ static bool chacha20_poly1305_encrypt(const u8* key,
                                       usize aad_length,
                                       ByteBuffer& ciphertext,
                                       u8 tag[16]) {
-    if (!key || !nonce || !tag) {
-        return false;
-    }
     ciphertext.release();
     if (plaintext_length > 0u && !ciphertext.ensure(plaintext_length)) {
         return false;
@@ -6157,12 +5982,7 @@ static bool chacha20_poly1305_encrypt(const u8* key,
     u8 initial_block[64];
     chacha20_block(key, nonce, 0u, initial_block);
     if (plaintext_length > 0u) {
-        if (!chacha20_xor(key, nonce, 1u, plaintext, ciphertext.data, plaintext_length)) {
-            for (u32 i = 0u; i < 64u; ++i) {
-                initial_block[i] = 0u;
-            }
-            return false;
-        }
+        chacha20_xor(key, nonce, 1u, plaintext, ciphertext.data, plaintext_length);
     }
     Poly1305State mac;
     poly1305_init_state(mac, initial_block);
@@ -6197,9 +6017,6 @@ static bool chacha20_poly1305_decrypt(const u8* key,
                                       ByteBuffer& plaintext,
                                       const u8 tag[16],
                                       bool* auth_failed) {
-    if (!key || !nonce || (!ciphertext && ciphertext_length > 0u) || !tag) {
-        return false;
-    }
     if (auth_failed) {
         *auth_failed = false;
     }
@@ -6246,13 +6063,7 @@ static bool chacha20_poly1305_decrypt(const u8* key,
             return false;
         }
         plaintext.size = ciphertext_length;
-        if (!chacha20_xor(key, nonce, 1u, ciphertext, plaintext.data, ciphertext_length)) {
-            plaintext.release();
-            for (u32 i = 0u; i < 64u; ++i) {
-                initial_block[i] = 0u;
-            }
-            return false;
-        }
+        chacha20_xor(key, nonce, 1u, ciphertext, plaintext.data, ciphertext_length);
     }
     for (u32 i = 0u; i < 64u; ++i) {
         initial_block[i] = 0u;
@@ -6271,9 +6082,6 @@ static bool encrypt_payload_buffer(const ByteBuffer& plaintext,
                                    const char* password,
                                    usize password_length,
                                    ByteBuffer& output) {
-    if (!password || password_length == 0u) {
-        return false;
-    }
     u8 salt[ENCRYPTION_SALT_BYTES];
     u8 nonce[ENCRYPTION_NONCE_BYTES];
     crypto_random_bytes(salt, ENCRYPTION_SALT_BYTES);
@@ -6368,9 +6176,6 @@ static DecryptStatus decrypt_payload_buffer(const u8* data,
     if (magic != ENCRYPTION_HEADER_MAGIC) {
         return DecryptStatus_NotEncrypted;
     }
-    if (!password || password_length == 0u) {
-        return DecryptStatus_FormatError;
-    }
     u8 version = data[4];
     u8 flags = data[5];
     u8 kdf = data[6];
@@ -6378,13 +6183,7 @@ static DecryptStatus decrypt_payload_buffer(const u8* data,
         return DecryptStatus_FormatError;
     }
     u32 iterations = read_le_u32(data + 8u);
-    if (iterations == 0u) {
-        return DecryptStatus_FormatError;
-    }
     u64 plain_bytes = read_le_u64(data + 12u);
-    if (plain_bytes > (u64)USIZE_MAX_VALUE) {
-        return DecryptStatus_FormatError;
-    }
     const u8* salt = data + 20u;
     const u8* nonce = data + 36u;
     usize cipher_bytes = data_length - ENCRYPTION_HEADER_BYTES - ENCRYPTION_TAG_BYTES;
@@ -6451,7 +6250,7 @@ static bool fisher_yates_unshuffle(u8* data, usize count) {
     if (!data || count <= 1u) {
         return true;
     }
-    if (count > 0u && count > (USIZE_MAX_VALUE / (usize)sizeof(usize))) {
+    if (count > (USIZE_MAX_VALUE / (usize)sizeof(usize))) {
         return false;
     }
     usize* history = (usize*)malloc(sizeof(usize) * (count ? count : 1u));
@@ -6515,10 +6314,7 @@ struct BitWriter {
         usize bit_offset = bit_position & 7u;
         u8 mask = (u8)(1u << bit_offset);
         if (byte_index >= buffer.size) {
-            if (!buffer.push(0u)) {
-                failed = true;
-                return false;
-            }
+            buffer.push(0u);
         }
         if (value & 1u) {
             buffer.data[byte_index] = (u8)(buffer.data[byte_index] | mask);
@@ -6530,9 +6326,6 @@ struct BitWriter {
     }
 
     bool write_bits(u64 value, usize count) {
-        if (count > 64u) {
-            count = 64u;
-        }
         for (usize i = 0; i < count; ++i) {
             u8 bit = (u8)((value >> i) & 1u);
             if (!write_bit(bit)) {
@@ -6596,9 +6389,6 @@ struct BitReader {
     }
 
     u64 read_bits(usize count) {
-        if (count > 64u) {
-            count = 64u;
-        }
         u64 result = 0u;
         for (usize i = 0; i < count; ++i) {
             u8 bit = read_bit();
@@ -6636,13 +6426,7 @@ static bool lzma_compress(const u8* input, usize length, ByteBuffer& output) {
     usize header = LZMA_HEADER_BYTES;
     usize extra = (length / 16u) + 65536u + 64u;
     usize baseline = header;
-    if (USIZE_MAX_VALUE - baseline < length) {
-        return false;
-    }
     baseline += length;
-    if (USIZE_MAX_VALUE - baseline < extra) {
-        return false;
-    }
     baseline += extra;
     if (!output.ensure(baseline)) {
         return false;
@@ -6718,9 +6502,6 @@ static bool lzma_decompress(const u8* input,
     }
     SizeT src_len = (SizeT)payload_bytes;
     const u8* src = input + LZMA_HEADER_BYTES;
-    if (!output.data && required > 0u) {
-        return false;
-    }
     SRes status = LzmaUncompress(output.data,
                                  &dest_len,
                                  src,
@@ -6728,9 +6509,6 @@ static bool lzma_decompress(const u8* input,
                                  input,
                                  LZMA_PROPS_SIZE);
     if (status != SZ_OK) {
-        return false;
-    }
-    if (dest_len != (size_t)output_size) {
         return false;
     }
     output.size = output_size;
@@ -6875,8 +6653,6 @@ struct EncoderContext {
                 if (!encode_payload_with_ecc(*payload_source, redundancy, bit_writer, ecc_summary)) {
                     return false;
                 }
-            } else {
-                ecc_summary = EccSummary();
             }
         } else {
             for (usize i = 0u; i < payload_source->size; ++i) {
@@ -6885,9 +6661,6 @@ struct EncoderContext {
                     return false;
                 }
             }
-            if (payload_source->size == 0u) {
-                ecc_summary = EccSummary();
-            }
             ecc_summary.original_bytes = payload_source->size;
             ecc_summary.redundancy = 0.0;
             ecc_summary.block_count = 0u;
@@ -6895,18 +6668,11 @@ struct EncoderContext {
             ecc_summary.parity_symbols = 0u;
             ecc_summary.enabled = false;
         }
-        if (!bit_writer.align_to_byte()) {
-            return false;
-        }
+        bit_writer.align_to_byte();
         usize total_bytes = bit_writer.byte_size();
         if (total_bytes > 0u) {
             u8* stream = bit_writer.buffer.data;
-            if (!stream) {
-                return false;
-            }
-            if (!shuffle_encoded_stream(stream, total_bytes, ecc_summary.enabled)) {
-                return false;
-            }
+            shuffle_encoded_stream(stream, total_bytes, ecc_summary.enabled);
         }
         configured = true;
         return true;
@@ -6956,9 +6722,6 @@ struct EccHeader {
           original_bytes(0u) {}
 
     bool serialize(u8* dest) const {
-        if (!dest) {
-            return false;
-        }
         dest[0] = (u8)(magic & 0xFFu);
         dest[1] = (u8)((magic >> 8u) & 0xFFu);
         dest[2] = version;
@@ -6975,34 +6738,21 @@ struct EccHeader {
         if (!writer.write_bits((u64)magic, 16u)) {
             return false;
         }
-        if (!writer.write_bits((u64)version, 8u)) {
-            return false;
-        }
+        writer.write_bits((u64)version, 8u);
         if (!writer.write_bits((u64)flags, 8u)) {
             return false;
         }
-        if (!writer.write_bits((u64)block_data, 16u)) {
-            return false;
-        }
+        writer.write_bits((u64)block_data, 16u);
         if (!writer.write_bits((u64)parity, 16u)) {
             return false;
         }
-        if (!writer.write_bits((u64)reserved, 16u)) {
-            return false;
-        }
-        if (!writer.write_bits(block_count, 64u)) {
-            return false;
-        }
-        if (!writer.write_bits(original_bytes, 64u)) {
-            return false;
-        }
+        writer.write_bits((u64)reserved, 16u);
+        writer.write_bits(block_count, 64u);
+        writer.write_bits(original_bytes, 64u);
         return true;
     }
 
-    static bool parse(const u8* bytes, usize length, EccHeader& header) {
-        if (!bytes || length < ECC_HEADER_BYTES) {
-            return false;
-        }
+    static bool parse(const u8* bytes, EccHeader& header) {
         header.magic = read_le_u16(bytes);
         header.version = bytes[2];
         header.flags = bytes[3];
@@ -7023,9 +6773,6 @@ struct EccHeader {
         if (header.block_data == 0u || header.parity == 0u) {
             return false;
         }
-        if (header.block_data >= RS_FIELD_SIZE || header.parity >= RS_FIELD_SIZE) {
-            return false;
-        }
         if ((u32)header.block_data + header.parity > RS_FIELD_SIZE) {
             return false;
         }
@@ -7040,9 +6787,6 @@ struct EccHeader {
 };
 
 static bool header_copy_data_equal(const u8* left, const u8* right) {
-    if (!left || !right) {
-        return false;
-    }
     for (usize i = 0u; i < ECC_HEADER_COPY_DATA_BYTES; ++i) {
         if (left[i] != right[i]) {
             return false;
@@ -7072,9 +6816,6 @@ static bool reconstruct_ecc_header_copies(const u8* bytes,
     u8 buffer[RS_POLY_CAPACITY];
     for (usize copy_index = 0u; copy_index < ECC_HEADER_COPY_COUNT; ++copy_index) {
         usize offset = copy_index * ECC_HEADER_COPY_TOTAL_BYTES;
-        if (offset + ECC_HEADER_COPY_TOTAL_BYTES > byte_count) {
-            continue;
-        }
         for (usize i = 0u; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
             buffer[i] = bytes[offset + i];
         }
@@ -7120,7 +6861,7 @@ static bool reconstruct_ecc_header_copies(const u8* bytes,
     }
     
     
-    return EccHeader::parse(decoded[chosen_index], ECC_HEADER_COPY_DATA_BYTES, header);
+    return EccHeader::parse(decoded[chosen_index], header);
 }
 
 struct ReedSolomonTables {
@@ -7162,9 +6903,6 @@ static inline u8 gf_mul(u8 a, u8 b) {
 }
 
 static inline u8 gf_div(u8 a, u8 b) {
-    if (!b) {
-        return 0u;
-    }
     if (!a) {
         return 0u;
     }
@@ -7196,9 +6934,6 @@ static u16 poly_scale_shift_add(u8* target,
                                 u16 source_size,
                                 u8 scale,
                                 u16 shift) {
-    if (!scale || !source || source_size == 0u) {
-        return target_size;
-    }
     u16 required = (u16)(source_size + shift);
     if (required > RS_POLY_CAPACITY) {
         required = (u16)RS_POLY_CAPACITY;
@@ -7211,18 +6946,12 @@ static u16 poly_scale_shift_add(u8* target,
     }
     for (u16 i = 0u; i < source_size; ++i) {
         u16 index = (u16)(i + shift);
-        if (index >= RS_POLY_CAPACITY) {
-            break;
-        }
         target[index] ^= gf_mul(source[i], scale);
     }
     return target_size;
 }
 
 static bool rs_build_generator(u16 parity_symbols, u8* generator, u16& out_length) {
-    if (!generator || parity_symbols == 0u || parity_symbols >= RS_FIELD_SIZE) {
-        return false;
-    }
     rs_ensure_tables();
     for (usize i = 0u; i < RS_POLY_CAPACITY; ++i) {
         generator[i] = 0u;
@@ -7244,9 +6973,6 @@ static bool rs_build_generator(u16 parity_symbols, u8* generator, u16& out_lengt
             }
         }
         ++length;
-        if (length > RS_POLY_CAPACITY) {
-            return false;
-        }
         for (u16 j = 0u; j < length; ++j) {
             generator[j] = temp[j];
         }
@@ -7260,7 +6986,7 @@ static void rs_compute_parity(const u8* generator,
                               const u8* data_symbols,
                               u16 data_length,
                               u8* parity_out) {
-    if (!generator || !parity_out || parity_symbols == 0u) {
+    if (parity_symbols == 0u) {
         return;
     }
     for (u16 i = 0u; i < parity_symbols; ++i) {
@@ -7288,17 +7014,10 @@ static void rs_compute_parity(const u8* generator,
 }
 
 static bool build_protected_header_copy(const EccHeader& header, u8* out_copy) {
-    if (!out_copy) {
-        return false;
-    }
-    if (!header.serialize(out_copy)) {
-        return false;
-    }
+    header.serialize(out_copy);
     u8 generator[RS_POLY_CAPACITY];
     u16 generator_size = 0u;
-    if (!rs_build_generator(ECC_HEADER_COPY_PARITY_SYMBOLS, generator, generator_size)) {
-        return false;
-    }
+    rs_build_generator(ECC_HEADER_COPY_PARITY_SYMBOLS, generator, generator_size);
     (void)generator_size;
     rs_compute_parity(generator,
                       ECC_HEADER_COPY_PARITY_SYMBOLS,
@@ -7320,9 +7039,6 @@ static bool rs_compute_syndromes(const u8* codeword,
                                  u16 parity_symbols,
                                  u8* syndromes,
                                  bool& all_zero) {
-    if (!codeword || !syndromes || parity_symbols == 0u || codeword_length == 0u) {
-        return false;
-    }
     all_zero = true;
     for (u16 i = 0u; i < parity_symbols; ++i) {
         u8 evaluation = 0u;
@@ -7342,9 +7058,6 @@ static bool rs_berlekamp_massey(const u8* syndromes,
                                 u16 parity_symbols,
                                 u8* locator,
                                 u16& locator_size) {
-    if (!syndromes || !locator) {
-        return false;
-    }
     u8 C[RS_POLY_CAPACITY];
     u8 B[RS_POLY_CAPACITY];
     for (u16 i = 0u; i < RS_POLY_CAPACITY; ++i) {
@@ -7361,9 +7074,6 @@ static bool rs_berlekamp_massey(const u8* syndromes,
     for (u16 n = 0u; n < parity_symbols; ++n) {
         u8 delta = syndromes[n];
         for (u16 i = 1u; i <= L; ++i) {
-            if (i >= C_size) {
-                break;
-            }
             u8 c = C[i];
             u8 s = syndromes[n - i];
             if (c && s) {
@@ -7401,9 +7111,6 @@ static bool rs_berlekamp_massey(const u8* syndromes,
 }
 
 static u8 poly_eval(const u8* poly, u16 length, u8 x) {
-    if (!poly || length == 0u) {
-        return 0u;
-    }
     u8 result = 0u;
     for (u16 i = length; i > 0u; --i) {
         result = gf_mul(result, x) ^ poly[i - 1u];
@@ -7427,9 +7134,6 @@ static bool rs_find_error_locations(const u8* locator,
         u32 exponent = (u32)pos + 1u + (u32)exponent_offset;
         u8 x = gf_pow_alpha(exponent);
         if (poly_eval(locator, locator_size, x) == 0u) {
-            if (position_count >= (locator_size - 1u)) {
-                return false;
-            }
             positions[position_count++] = pos;
         }
     }
@@ -7472,9 +7176,6 @@ static u16 rs_compute_error_evaluator(const u8* locator,
 static u16 rs_compute_locator_derivative(const u8* locator,
                                          u16 locator_size,
                                          u8* derivative) {
-    if (!locator || !derivative || locator_size <= 1u) {
-        return 0u;
-    }
     u16 size = locator_size - 1u;
     for (u16 i = 0u; i < size; ++i) {
         derivative[i] = 0u;
@@ -7496,15 +7197,8 @@ static bool rs_correct_errors(u8* codeword,
                               u16 derivative_size,
                               const u16* positions,
                               u16 position_count) {
-    if (!codeword || !omega || !locator_derivative || !positions) {
-        return false;
-    }
-    
     for (u16 i = 0u; i < position_count; ++i) {
         u16 pos = positions[i];
-        if (pos >= codeword_length) {
-            return false;
-        }
         u16 exponent = (u16)((pos + 1u + exponent_offset) % RS_FIELD_SIZE);
         u8 root = gf_pow_alpha(exponent);
         u8 numerator = poly_eval(omega, omega_size, root);
@@ -7527,18 +7221,13 @@ static bool rs_decode_block(u8* block,
     if (corrected_errors) {
         *corrected_errors = 0u;
     }
-    if (!block || parity_symbols == 0u || data_symbols == 0u) {
-        return false;
-    }
     u16 codeword_length = (u16)(data_symbols + parity_symbols);
     if (codeword_length > RS_FIELD_SIZE) {
         return false;
     }
     u8 syndromes[RS_POLY_CAPACITY];
     bool all_zero = false;
-    if (!rs_compute_syndromes(block, codeword_length, parity_symbols, syndromes, all_zero)) {
-        return false;
-    }
+    rs_compute_syndromes(block, codeword_length, parity_symbols, syndromes, all_zero);
     if (all_zero) {
         return true;
     }
@@ -7547,12 +7236,7 @@ static bool rs_decode_block(u8* block,
         locator[i] = 0u;
     }
     u16 locator_size = 0u;
-    if (!rs_berlekamp_massey(syndromes, parity_symbols, locator, locator_size)) {
-        return false;
-    }
-    if (locator_size <= 1u) {
-        return false;
-    }
+    rs_berlekamp_massey(syndromes, parity_symbols, locator, locator_size);
     u16 error_positions[RS_POLY_CAPACITY];
     u16 error_count = 0u;
     u16 exponent_offset = (u16)(RS_FIELD_SIZE - codeword_length);
@@ -7572,9 +7256,6 @@ static bool rs_decode_block(u8* block,
     u16 evaluator_size = rs_compute_error_evaluator(locator, locator_size, syndromes, parity_symbols, evaluator);
     u8 locator_derivative[RS_POLY_CAPACITY];
     u16 derivative_size = rs_compute_locator_derivative(locator, locator_size, locator_derivative);
-    if (derivative_size == 0u) {
-        return false;
-    }
     if (!rs_correct_errors(block,
                            codeword_length,
                            exponent_offset,
@@ -7602,21 +7283,12 @@ static bool compute_ecc_layout(usize data_bytes,
     block_data = 0u;
     parity_symbols = 0u;
     block_count = 0u;
-    if (data_bytes == 0u || requested_redundancy <= 0.0) {
-        return true;
-    }
     double ratio = requested_redundancy;
-    if (ratio < 0.000001) {
-        ratio = 0.000001;
-    }
     double max_data = (double)RS_FIELD_SIZE / (1.0 + ratio);
     if (max_data < 1.0) {
         max_data = 1.0;
     }
     u16 candidate = (u16)max_data;
-    if (candidate == 0u) {
-        candidate = 1u;
-    }
     for (; candidate >= 1u; --candidate) {
         double predicted = ratio * (double)candidate;
         u16 parity = (u16)(predicted + 0.999999);
@@ -7635,13 +7307,7 @@ static bool compute_ecc_layout(usize data_bytes,
             break;
         }
     }
-    if (block_data == 0u || parity_symbols == 0u) {
-        return false;
-    }
     block_count = (u64)((data_bytes + (usize)block_data - 1u) / (usize)block_data);
-    if (block_count == 0u) {
-        block_count = 1u;
-    }
     u64 total_symbols = (u64)(block_data + parity_symbols) * block_count;
     if (total_symbols > (u64)USIZE_MAX_VALUE) {
         return false;
@@ -7653,9 +7319,6 @@ static bool encode_payload_with_ecc(const ByteBuffer& compressed,
                                     double redundancy,
                                     BitWriter& writer,
                                     EccSummary& summary) {
-    if (!compressed.data || compressed.size == 0u) {
-        return false;
-    }
     u16 block_data = 0u;
     u16 parity_symbols = 0u;
     u64 block_count = 0u;
@@ -7673,9 +7336,7 @@ static bool encode_payload_with_ecc(const ByteBuffer& compressed,
     encoded.size = (usize)total_symbols;
     u8 generator[RS_POLY_CAPACITY];
     u16 generator_size = 0u;
-    if (!rs_build_generator(parity_symbols, generator, generator_size)) {
-        return false;
-    }
+    rs_build_generator(parity_symbols, generator, generator_size);
     (void)generator_size;
     u8 parity_buffer[RS_POLY_CAPACITY];
     u8 data_buffer[RS_POLY_CAPACITY];
@@ -7705,9 +7366,7 @@ static bool encode_payload_with_ecc(const ByteBuffer& compressed,
         return false;
     }
     u8 header_copy[ECC_HEADER_COPY_TOTAL_BYTES];
-    if (!build_protected_header_copy(header, header_copy)) {
-        return false;
-    }
+    build_protected_header_copy(header, header_copy);
     for (usize i = ECC_HEADER_COPY_DATA_BYTES; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
         if (!writer.write_bits((u64)header_copy[i], 8u)) {
             return false;
@@ -7756,20 +7415,10 @@ struct EccHeaderInfo {
 };
 
 static bool build_ecc_header_bytes(u8* dest,
-                                   usize dest_capacity,
                                    u16 block_data,
                                    u16 parity,
                                    u64 block_count,
                                    u64 original_bytes) {
-    if (!dest || dest_capacity < ECC_HEADER_TOTAL_BYTES) {
-        return false;
-    }
-    if (block_data == 0u || parity == 0u || block_count == 0u) {
-        return false;
-    }
-    if (block_data >= RS_FIELD_SIZE || parity >= RS_FIELD_SIZE) {
-        return false;
-    }
     if ((u32)block_data + parity > RS_FIELD_SIZE) {
         return false;
     }
@@ -7780,9 +7429,7 @@ static bool build_ecc_header_bytes(u8* dest,
     header.original_bytes = original_bytes;
     header.reserved = 0u;
     u8 header_copy[ECC_HEADER_COPY_TOTAL_BYTES];
-    if (!build_protected_header_copy(header, header_copy)) {
-        return false;
-    }
+    build_protected_header_copy(header, header_copy);
     for (usize copy_index = 0u; copy_index < ECC_HEADER_COPY_COUNT; ++copy_index) {
         usize base = copy_index * ECC_HEADER_COPY_TOTAL_BYTES;
         for (usize i = 0u; i < ECC_HEADER_COPY_TOTAL_BYTES; ++i) {
@@ -7804,9 +7451,6 @@ static bool parse_ecc_header(const u8* bytes,
         return false;
     }
     header.detected = true;
-    if (byte_count < ECC_HEADER_TOTAL_BYTES) {
-        return false;
-    }
     EccHeader parsed;
     u32 repaired_copies = 0u;
     u32 success_count = 0u;
@@ -7828,9 +7472,6 @@ static bool decode_ecc_payload(const u8* bytes,
                                const EccHeaderInfo& header,
                                ByteBuffer& output,
                                EccDecodeStats* stats) {
-    if (!bytes || !header.valid || !header.enabled) {
-        return false;
-    }
     u16 block_total = (u16)(header.block_data + header.parity);
     u64 expected_bytes = (u64)block_total * header.block_count;
     if (expected_bytes > (u64)USIZE_MAX_VALUE) {
@@ -7879,23 +7520,17 @@ static bool decode_ecc_payload(const u8* bytes,
 }
 
 static bool shuffle_encoded_stream(u8* data, usize byte_count, bool ecc_enabled) {
-    if (!data || byte_count <= 1u) {
+    if (!data) {
         return true;
     }
     if (!ecc_enabled) {
         return fisher_yates_shuffle(data, byte_count);
     }
     usize header_span = ecc_header_span_for_bytes(byte_count);
-    if (byte_count <= header_span) {
-        return true;
-    }
     return fisher_yates_shuffle(data + header_span, byte_count - header_span);
 }
 
 static bool unshuffle_encoded_stream(u8* data, usize byte_count) {
-    if (!data || byte_count <= 1u) {
-        return true;
-    }
     bool treat_as_ecc = false;
     if (byte_count >= ECC_HEADER_BYTES) {
         u16 magic = read_le_u16(data);
@@ -7911,9 +7546,6 @@ static bool unshuffle_encoded_stream(u8* data, usize byte_count) {
         return fisher_yates_unshuffle(data, byte_count);
     }
     usize header_span = ecc_header_span_for_bytes(byte_count);
-    if (byte_count <= header_span) {
-        return true;
-    }
     return fisher_yates_unshuffle(data + header_span, byte_count - header_span);
 }
 
@@ -7958,7 +7590,6 @@ struct DecoderContext {
         password_not_encrypted = false;
         ecc_stats = EccDecodeStats();
         if (size_in_bits == 0u) {
-            has_payload = true;
             return true;
         }
         if (!data) {
@@ -7978,10 +7609,6 @@ struct DecoderContext {
             u64 expected_bytes = (u64)block_total * header.block_count;
             u64 available_bytes = (u64)byte_count;
             usize header_span = ecc_header_span_for_bytes(byte_count);
-            if (header_span < ECC_HEADER_COPY_TOTAL_BYTES) {
-                ecc_failed = true;
-                return false;
-            }
             if (available_bytes < (u64)header_span + expected_bytes) {
                 ecc_failed = true;
                 return false;
@@ -8010,10 +7637,6 @@ struct DecoderContext {
                     password_failed = true;
                     return false;
                 }
-            }
-            if (!working->size) {
-                has_payload = true;
-                return true;
             }
             u64 bit_total = (u64)working->size * 8u;
             if (bit_total > (u64)USIZE_MAX_VALUE) {
@@ -8052,10 +7675,6 @@ struct DecoderContext {
                 password_failed = true;
                 return false;
             }
-        }
-        if (decode_bits == 0u) {
-            has_payload = true;
-            return true;
         }
         if (!lzma_decompress(decode_data, decode_bits, payload)) {
             return false;
@@ -8153,23 +7772,12 @@ struct ImageMappingConfig {
 static bool compute_page_dimensions(const ImageMappingConfig& config,
                                     u32& out_width_pixels,
                                     u32& out_height_pixels) {
-    u64 width_pixels = (u64)config.page_width_pixels;
-    u64 height_pixels = (u64)config.page_height_pixels;
-    if (width_pixels == 0u || height_pixels == 0u) {
-        return false;
-    }
-    if (width_pixels > 0xFFFFFFFFu || height_pixels > 0xFFFFFFFFu) {
-        return false;
-    }
     out_width_pixels = config.page_width_pixels;
     out_height_pixels = config.page_height_pixels;
     return true;
 }
 
 static u64 estimate_square_page_from_image(u64 image_width, u64 image_height) {
-    if (image_width == 0u || image_height == 0u) {
-        return 0u;
-    }
     double best_score = 1e9;
     u64 best_guess = 0u;
     for (u64 candidate = 55u; candidate <= 3200u; candidate += 10u) {
@@ -8356,9 +7964,6 @@ namespace MetadataTile {
                                             u32 height_pixels,
                                             double x,
                                             double y) {
-        if (!pixel_data_rgb || width_pixels == 0u || height_pixels == 0u) {
-            return 0.0;
-        }
         x = clamp_double(x, 0.0, (double)(width_pixels - 1u));
         y = clamp_double(y, 0.0, (double)(height_pixels - 1u));
         u32 x0 = (u32)floor(x);
@@ -8454,9 +8059,6 @@ namespace MetadataTile {
                                                u32 count,
                                                ByteBuffer& out_text) {
         out_text.release();
-        if (!colors || count < 2u || count > MAX_CUSTOM_PALETTE_COLORS) {
-            return false;
-        }
         for (u32 i = 0u; i < count; ++i) {
             if (i) {
                 if (!out_text.append_char(' ')) return false;
@@ -8519,10 +8121,6 @@ namespace MetadataTile {
         if (values.ecc_enabled) {
             if (values.ecc_block_data == 0u || values.ecc_parity == 0u ||
                 values.ecc_block_count == 0u || values.ecc_original_bytes == 0u) {
-                return false;
-            }
-            if (values.ecc_block_count > U64_MAX_VALUE /
-                                             ((u64)values.ecc_block_data + (u64)values.ecc_parity)) {
                 return false;
             }
             u64 encoded_bytes = values.ecc_block_count *
@@ -8675,12 +8273,12 @@ namespace MetadataTile {
         double min_x = (margin < width_pixels) ? (double)margin : 0.0;
         double max_x = (width_pixels > margin)
                            ? (double)(width_pixels - 1u - margin)
-                           : (width_pixels ? (double)(width_pixels - 1u) : 0.0);
+                           : (double)(width_pixels - 1u);
         if (max_x < min_x) max_x = min_x;
         double min_y = (margin < data_height_pixels) ? (double)margin : 0.0;
         double max_y = (data_height_pixels > margin)
                            ? (double)(data_height_pixels - 1u - margin)
-                           : (data_height_pixels ? (double)(data_height_pixels - 1u) : 0.0);
+                           : (double)(data_height_pixels - 1u);
         if (max_y < min_y) max_y = min_y;
         double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
         double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
@@ -8714,7 +8312,7 @@ namespace MetadataTile {
         double min_x = (margin < width_pixels) ? (double)margin : 0.0;
         double max_x = (width_pixels > margin)
                            ? (double)(width_pixels - 1u - margin)
-                           : (width_pixels ? (double)(width_pixels - 1u) : 0.0);
+                           : (double)(width_pixels - 1u);
         if (max_x < min_x) max_x = min_x;
         double min_y = (margin < data_height_pixels) ? (double)margin : 0.0;
         double max_y = (data_height_pixels > margin)
@@ -9082,40 +8680,13 @@ namespace MetadataTile {
 
         double c = cos(affine.angle_rad);
         double s = sin(affine.angle_rad);
-        double pitch_x = (affine.pitch_x_pixels > 0.0)
-                             ? affine.pitch_x_pixels
-                             : affine.pitch_pixels;
-        double pitch_y = (affine.pitch_y_pixels > 0.0)
-                             ? affine.pitch_y_pixels
-                             : affine.pitch_pixels;
+        double pitch_x = affine.pitch_x_pixels;
+        double pitch_y = affine.pitch_y_pixels;
         double vx_x = pitch_x * c;
         double vx_y = pitch_x * s;
         double vy_x = -pitch_y * s;
         double vy_y = pitch_y * c;
         double half = ((double)TILE_SIDE - 1.0) * 0.5;
-
-        double tl_x = affine.center_x + vx_x * (-half) + vy_x * (-half);
-        double tl_y = affine.center_y + vx_y * (-half) + vy_y * (-half);
-        double tr_x = affine.center_x + vx_x * (half) + vy_x * (-half);
-        double tr_y = affine.center_y + vx_y * (half) + vy_y * (-half);
-        double bl_x = affine.center_x + vx_x * (-half) + vy_x * (half);
-        double bl_y = affine.center_y + vx_y * (-half) + vy_y * (half);
-        double br_x = affine.center_x + vx_x * (half) + vy_x * (half);
-        double br_y = affine.center_y + vx_y * (half) + vy_y * (half);
-        double min_x = tl_x, max_x = tl_x, min_y = tl_y, max_y = tl_y;
-        auto expand = [&](double x, double y) {
-            if (x < min_x) min_x = x;
-            if (x > max_x) max_x = x;
-            if (y < min_y) min_y = y;
-            if (y > max_y) max_y = y;
-        };
-        expand(tr_x, tr_y);
-        expand(bl_x, bl_y);
-        expand(br_x, br_y);
-        if (min_x < 0.0 || min_y < 0.0 || max_x > (double)(width_pixels - 1u) ||
-            max_y > (double)(data_height_pixels - 1u)) {
-            return false;
-        }
 
         auto module_luminance = [&](u32 module_x, u32 module_y) -> double {
             double sx = (double)module_x - half;
@@ -9300,12 +8871,8 @@ namespace MetadataTile {
 
         double c = cos(affine.angle_rad);
         double s = sin(affine.angle_rad);
-        double pitch_x = (affine.pitch_x_pixels > 0.0)
-                             ? affine.pitch_x_pixels
-                             : affine.pitch_pixels;
-        double pitch_y = (affine.pitch_y_pixels > 0.0)
-                             ? affine.pitch_y_pixels
-                             : affine.pitch_pixels;
+        double pitch_x = affine.pitch_x_pixels;
+        double pitch_y = affine.pitch_y_pixels;
         double vx_x = pitch_x * c;
         double vx_y = pitch_x * s;
         double vy_x = -pitch_y * s;
@@ -9700,12 +9267,8 @@ namespace MetadataTile {
             if (values.page_width_pixels == 0u || values.page_height_pixels == 0u) return false;
             double c = fabs(cos(affine.angle_rad));
             double s = fabs(sin(affine.angle_rad));
-            double pitch_x = (affine.pitch_x_pixels > 0.0)
-                                 ? affine.pitch_x_pixels
-                                 : affine.pitch_pixels;
-            double pitch_y = (affine.pitch_y_pixels > 0.0)
-                                 ? affine.pitch_y_pixels
-                                 : affine.pitch_pixels;
+            double pitch_x = affine.pitch_x_pixels;
+            double pitch_y = affine.pitch_y_pixels;
             double predicted_width = (double)values.page_width_pixels * pitch_x * c +
                                      (double)values.page_height_pixels * pitch_y * s;
             double predicted_height = (double)values.page_width_pixels * pitch_x * s +
@@ -9724,9 +9287,7 @@ namespace MetadataTile {
             double pitch_x = (affine.pitch_x_pixels > 0.0)
                                  ? affine.pitch_x_pixels
                                  : affine.pitch_pixels;
-            double pitch_y = (affine.pitch_y_pixels > 0.0)
-                                 ? affine.pitch_y_pixels
-                                 : affine.pitch_pixels;
+            double pitch_y = affine.pitch_y_pixels;
             double vx_x = pitch_x * c;
             double vx_y = pitch_x * s;
             double vy_x = -pitch_y * s;
@@ -9912,9 +9473,6 @@ namespace MetadataTile {
                            ((double)TILE_SIDE - 1.0);
         if (pitch_max < pitch_min) return false;
         double pitch_anchor = pitch_guess;
-        if (!(pitch_anchor > 0.0)) {
-            pitch_anchor = pitch_min;
-        }
         pitch_anchor = clamp_double(pitch_anchor, pitch_min, pitch_max);
         const double kPitchSearchRatio = 1.05;
         const double kPitchSearchStep = 0.10;
@@ -10423,19 +9981,10 @@ static bool compute_footer_layout(u32 page_width_pixels,
                                   u32 page_height_pixels,
                                   const PageFooterConfig& footer,
                                   FooterLayout& layout) {
-    if (page_width_pixels == 0u || page_height_pixels == 0u) {
-        return false;
-    }
     layout = FooterLayout();
     bool has_text = (footer.max_text_length > 0u);
     u32 text_height_pixels = 0u;
     if (has_text) {
-        if (footer.font_size == 0u) {
-            return false;
-        }
-        if (footer.font_size > 2048u) {
-            return false;
-        }
         if (footer.max_text_length > (USIZE_MAX_VALUE / FOOTER_BASE_GLYPH_WIDTH)) {
             return false;
         }
@@ -10488,22 +10037,10 @@ static bool footer_is_text_pixel(const char* text,
                                  const FooterLayout& layout,
                                  u32 column,
                                  u32 row) {
-    if (!text || text_length == 0u || !layout.has_text) {
-        return false;
-    }
-    if (layout.font_size == 0u) {
-        return false;
-    }
-    if (row < layout.text_top_row || row >= (layout.text_top_row + layout.glyph_height_pixels)) {
-        return false;
-    }
     if (column < layout.text_left_column || column >= (layout.text_left_column + layout.text_pixel_width)) {
         return false;
     }
     u32 char_span = layout.glyph_width_pixels + layout.char_spacing_pixels;
-    if (char_span == 0u) {
-        return false;
-    }
     u32 local_x = column - layout.text_left_column;
     u32 glyph_index = local_x / char_span;
     if (glyph_index >= text_length) {
@@ -10516,17 +10053,8 @@ static bool footer_is_text_pixel(const char* text,
     u32 local_y = row - layout.text_top_row;
     u32 glyph_x = within_char / layout.font_size;
     u32 glyph_y = local_y / layout.font_size;
-    if (glyph_x >= FOOTER_BASE_GLYPH_WIDTH || glyph_y >= FOOTER_BASE_GLYPH_HEIGHT) {
-        return false;
-    }
     const GlyphPattern* glyph = footer_lookup_glyph(text[glyph_index]);
-    if (!glyph) {
-        return false;
-    }
     const char* row_pattern = glyph->rows[glyph_y];
-    if (!row_pattern) {
-        return false;
-    }
     char bit = row_pattern[glyph_x];
     return (bit == '1');
 }
@@ -10610,9 +10138,6 @@ static const PaletteColor NAMED_COLOR_VALUES[] = {
 static bool decode_hex_palette_color(const char* token,
                                      usize length,
                                      PaletteColor& color) {
-    if (!token || length == 0u) {
-        return false;
-    }
     const char* cursor = token;
     if (length == 7u && cursor[0] == '#') {
         ++cursor;
@@ -10653,7 +10178,6 @@ static bool decode_named_palette_color(const char* token,
         color_id = NAMED_COLOR_INVALID;
         return true;
     }
-    color_id = NAMED_COLOR_INVALID;
     return false;
 }
 
@@ -10687,12 +10211,6 @@ static bool image_mapping_set_palette_text(ImageMappingConfig& config,
 
 static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
                                                const char* command_name) {
-    if (!config.palette_set) {
-        config.custom_palette_valid = false;
-        config.custom_palette_count = 0u;
-        config.custom_palette_base = 0u;
-        return true;
-    }
     if (config.custom_palette_valid) {
         if (config.custom_palette_count >= 2u) {
             config.custom_palette_base = config.custom_palette_count;
@@ -10701,14 +10219,6 @@ static bool image_mapping_build_custom_palette(ImageMappingConfig& config,
         return true;
     }
     const char* prefix = command_name ? command_name : "makocode";
-    if (config.palette_text_length == 0u) {
-        console_write(2, prefix);
-        console_line(2, ": --palette requires a non-empty list of colors");
-        config.custom_palette_valid = false;
-        config.custom_palette_count = 0u;
-        config.custom_palette_base = 0u;
-        return false;
-    }
     config.custom_palette_valid = false;
     config.custom_palette_count = 0u;
     config.custom_palette_base = 0u;
@@ -10788,24 +10298,12 @@ static bool mapping_has_custom_palette(const ImageMappingConfig& mapping) {
 }
 
 static u32 mapping_custom_palette_base(const ImageMappingConfig& mapping) {
-    if (!mapping_has_custom_palette(mapping)) {
-        return 0u;
-    }
     u32 base = mapping.custom_palette_base;
-    if (base < 2u) {
-        base = mapping.custom_palette_count;
-    }
-    if (base > mapping.custom_palette_count) {
-        base = mapping.custom_palette_count;
-    }
     return base;
 }
 
 static usize divide_le_bytes_by_base(u8* data, usize length, u32 base, u32& remainder) {
     remainder = 0u;
-    if (!data || length == 0u || base < 2u) {
-        return 0u;
-    }
     for (ssize_t index = (ssize_t)length - 1; index >= 0; --index) {
         u32 value = ((u32)remainder << 8u) | (u32)data[index];
         u32 quotient = value / base;
@@ -10841,10 +10339,6 @@ static bool normalize_bits_output_size(makocode::ByteBuffer& bits_out, usize all
         }
         bits_out.size = alloc_size;
     }
-    if (bits_out.size == 0u) {
-        bits_out.size = 1u;
-        bits_out.data[0] = 0u;
-    }
     return true;
 }
 
@@ -10855,19 +10349,10 @@ static bool bits_to_base_digits(makocode::ByteBuffer& bit_scratch,
                                 u64& digit_count_out) {
     digit_count_out = 0u;
     digits_out.release();
-    if (base < 2u) {
-        return false;
-    }
-    if (bit_count == 0u) {
-        return true;
-    }
     if (!bit_scratch.data) {
         return false;
     }
     usize byte_count = (usize)((bit_count + 7u) / 8u);
-    if (bit_scratch.size < byte_count) {
-        return false;
-    }
     u64 used_bits_last_byte = bit_count - ((u64)(byte_count - 1u) * 8u);
     if (used_bits_last_byte > 0u && used_bits_last_byte < 8u) {
         u8 mask = (u8)((1u << used_bits_last_byte) - 1u);
@@ -10875,15 +10360,6 @@ static bool bits_to_base_digits(makocode::ByteBuffer& bit_scratch,
     }
     if (is_power_of_two_u32(base)) {
         u32 digit_bits = log2_u32(base);
-        if (digit_bits == 0u) {
-            if (!digits_out.ensure(1u)) {
-                return false;
-            }
-            digits_out.data[0] = 0u;
-            digits_out.size = 1u;
-            digit_count_out = 1u;
-            return true;
-        }
         u64 effective_bits = bit_count;
         if (byte_count == 0u) {
             effective_bits = 0u;
@@ -10905,18 +10381,6 @@ static bool bits_to_base_digits(makocode::ByteBuffer& bit_scratch,
                 }
                 --scan;
             }
-            if (scan < 0) {
-                effective_bits = 0u;
-            }
-        }
-        if (effective_bits == 0u) {
-            if (!digits_out.ensure(1u)) {
-                return false;
-            }
-            digits_out.data[0] = 0u;
-            digits_out.size = 1u;
-            digit_count_out = 1u;
-            return true;
         }
         u64 total_digits = (effective_bits + (u64)digit_bits - 1u) / (u64)digit_bits;
         if (total_digits == 0u) {
@@ -10982,9 +10446,6 @@ static bool base_digits_to_bits(const u8* digits,
                                 u64 bit_count_target,
                                 makocode::ByteBuffer& bits_out) {
     bits_out.release();
-    if (base < 2u) {
-        return false;
-    }
     if (is_power_of_two_u32(base)) {
         u32 digit_bits = log2_u32(base);
         u64 digit_capacity_bits = digit_count * (u64)digit_bits;
@@ -11019,12 +10480,6 @@ static bool base_digits_to_bits(const u8* digits,
         }
         for (u64 idx = 0u; idx < digit_count; ++idx) {
             u32 digit = digits ? (u32)digits[idx] : 0u;
-            if (digit >= base) {
-                return false;
-            }
-            if (bit_cursor >= bits_to_emit) {
-                continue;
-            }
             for (u32 local_bit = 0u; local_bit < digit_bits && bit_cursor < bits_to_emit; ++local_bit) {
                 if ((digit >> local_bit) & 1u) {
                     usize byte_index = (usize)(bit_cursor >> 3u);
@@ -11033,16 +10488,6 @@ static bool base_digits_to_bits(const u8* digits,
                 }
                 ++bit_cursor;
             }
-        }
-        if (bit_count_target == 0u && bit_cursor < total_bits) {
-            return false;
-        }
-        if (bit_count_target == 0u) {
-            usize used_bytes = (usize)((bit_cursor + 7u) / 8u);
-            if (used_bytes == 0u) {
-                used_bytes = 1u;
-            }
-            bits_out.size = used_bytes;
         }
         return true;
     }
@@ -11053,9 +10498,6 @@ static bool base_digits_to_bits(const u8* digits,
     bits_out.size = 1u;
     for (u64 idx = digit_count; idx > 0u; --idx) {
         u32 digit = digits ? (u32)digits[idx - 1u] : 0u;
-        if (digit >= base) {
-            return false;
-        }
         u32 carry = digit;
         for (usize byte_index = 0u; byte_index < bits_out.size; ++byte_index) {
             u64 accum = (u64)bits_out.data[byte_index] * (u64)base + (u64)carry;
@@ -11078,7 +10520,7 @@ static bool base_digits_to_bits(const u8* digits,
     if (bit_count_target > 0u) {
         usize required_bytes = target_bytes;
         if (required_bytes == 0u) {
-            required_bytes = bits_out.size ? bits_out.size : 1u;
+            required_bytes = bits_out.size;
         }
         u32 bits_in_last_byte = (u32)(bit_count_target - ((u64)(required_bytes - 1u) * 8u));
         if (bits_in_last_byte > 0u && bits_in_last_byte < 8u) {
@@ -11095,12 +10537,6 @@ static bool copy_bits_segment(const u8* source_bits,
                               u64 bits_to_copy,
                               makocode::ByteBuffer& dest_bits) {
     dest_bits.release();
-    if (bits_to_copy == 0u) {
-        return true;
-    }
-    if (!source_bits && source_bit_count) {
-        return false;
-    }
     usize bytes_needed = (usize)((bits_to_copy + 7u) / 8u);
     if (!dest_bits.ensure(bytes_needed)) {
         return false;
@@ -11130,9 +10566,6 @@ static bool map_rgb_to_custom_symbol(const ImageMappingConfig& mapping,
                                      const u8* rgb,
                                      u32& symbol_out) {
     symbol_out = 0u;
-    if (!mapping_has_custom_palette(mapping) || !rgb) {
-        return false;
-    }
     u64 best_score = (u64)USIZE_MAX_VALUE;
     u32 best_index = 0u;
     for (u32 i = 0u; i < mapping.custom_palette_count; ++i) {
@@ -11161,9 +10594,6 @@ static u32 palette_color_luminance(const PaletteColor& color) {
 static void footer_select_colors(const ImageMappingConfig& mapping,
                                  u8* text_rgb,
                                  u8* background_rgb) {
-    if (!text_rgb || !background_rgb) {
-        return;
-    }
     if (mapping.palette_set && mapping.custom_palette_valid && mapping.custom_palette_count >= 2u) {
         u32 darkest_index = 0u;
         u32 lightest_index = 0u;
@@ -11243,22 +10673,10 @@ static u8 bits_per_sample(u8 mode) {
 static bool map_samples_to_rgb(u8 mode, const u32* samples, u8* rgb) {
     const PaletteColor* palette = 0;
     u32 palette_size = 0u;
-    if (!palette_for_mode(mode, palette, palette_size)) {
-        return false;
-    }
-    u8 samples_per_pixel = color_mode_samples_per_pixel(mode);
-    if (samples_per_pixel != 1u) {
-        return false;
-    }
+    palette_for_mode(mode, palette, palette_size);
     u32 value = samples[0];
     if (mode == 1u) {
-        if (value > 1u) {
-            return false;
-        }
         value ^= 1u;
-    }
-    if (value >= palette_size) {
-        return false;
     }
     const PaletteColor& color = palette[value];
     rgb[0] = color.r;
@@ -11271,13 +10689,6 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
     const PaletteColor* palette = 0;
     u32 palette_size = 0u;
     if (!palette_for_mode(mode, palette, palette_size)) {
-        return false;
-    }
-    u8 samples_per_pixel = color_mode_samples_per_pixel(mode);
-    if (samples_per_pixel != 1u) {
-        return false;
-    }
-    if (!samples) {
         return false;
     }
     u32 best_index = 0u;
@@ -11294,9 +10705,6 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
         }
     }
     if (mode == 1u) {
-        if (best_index > 1u) {
-            return false;
-        }
         samples[0] = best_index ^ 1u;
         return true;
     }
@@ -11307,44 +10715,26 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
 static double mapping_bits_per_data_pixel(const ImageMappingConfig& mapping) {
     if (mapping_has_custom_palette(mapping)) {
         u32 base = mapping_custom_palette_base(mapping);
-        if (base < 2u) {
-            return 0.0;
-        }
         double base_log = log((double)base);
         double log_two = log(2.0);
-        if (log_two == 0.0) {
-            return 0.0;
-        }
         return base_log / log_two;
     }
     u8 sample_bits = bits_per_sample(mapping.color_channels);
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
-    if (sample_bits == 0u || samples_per_pixel == 0u) {
-        return 0.0;
-    }
     return (double)sample_bits * (double)samples_per_pixel;
 }
 
 static u8 rotate_left_u8(u8 value, u8 amount) {
     amount &= 7u;
-    if (!amount) {
-        return value;
-    }
     return (u8)((u8)(value << amount) | (u8)(value >> (8u - amount)));
 }
 
 static u8 rotate_right_u8(u8 value, u8 amount) {
     amount &= 7u;
-    if (!amount) {
-        return value;
-    }
     return (u8)((u8)(value >> amount) | (u8)(value << (8u - amount)));
 }
 
 static bool write_all_fd(int fd, const u8* data, usize length) {
-    if (length == 0u) {
-        return true;
-    }
     if (!data) {
         return false;
     }
@@ -11361,9 +10751,6 @@ static bool write_all_fd(int fd, const u8* data, usize length) {
 }
 
 static bool write_bytes_to_file(const char* path, const u8* data, usize length) {
-    if (!path) {
-        return false;
-    }
     int fd = creat(path, 0644);
     if (fd < 0) {
         return false;
@@ -11382,9 +10769,6 @@ static bool write_ppm_with_fiducials_to_file(const char* path,
                                              u64 debug_page = 1u);
 
 static bool path_contains_substring(const char* path, const char* needle) {
-    if (!path || !needle || !needle[0]) {
-        return false;
-    }
     for (const char* cursor = path; *cursor; ++cursor) {
         const char* a = cursor;
         const char* b = needle;
@@ -11400,9 +10784,6 @@ static bool path_contains_substring(const char* path, const char* needle) {
 }
 
 static bool should_embed_fiducials_for_path(const char* path) {
-    if (!path) {
-        return false;
-    }
     usize path_length = ascii_length(path);
     if (path_length < 4u) {
         return false;
@@ -11574,14 +10955,6 @@ static bool ppm_next_token(PpmParserState& state, const char** out_start, usize*
                 }
                 ++state.cursor;
             }
-            while (state.cursor < state.size) {
-                char newline_char = (char)state.data[state.cursor];
-                if (newline_char == '\n' || newline_char == '\r') {
-                    ++state.cursor;
-                } else {
-                    break;
-                }
-            }
             continue;
         }
         if (current <= ' ') {
@@ -11615,9 +10988,6 @@ static u64 gcd_u64(u64 a, u64 b) {
 }
 
 static bool rgb_within_tolerance(const u8* a, const u8* b, u8 tolerance) {
-    if (!a || !b) {
-        return false;
-    }
     int dr = (int)a[0] - (int)b[0];
     if (dr < 0) {
         dr = -dr;
@@ -11631,9 +11001,6 @@ static bool rgb_within_tolerance(const u8* a, const u8* b, u8 tolerance) {
         db = -db;
     }
     int limit = (int)tolerance;
-    if (limit < 0) {
-        limit = 0;
-    }
     return dr <= limit && dg <= limit && db <= limit;
 }
 
@@ -11724,16 +11091,10 @@ static bool auto_detect_page_rotation(const u8* pixel_data,
                                       u64 expected_width,
                                       u64 expected_height,
                                       PpmParserState& state) {
-    if (!pixel_data || !image_width || !image_height || !expected_width || !expected_height) {
-        return false;
-    }
     if (expected_width < 256u || expected_height < 256u) {
         return false;
     }
     if (image_width > 0xFFFFFFFFull || image_height > 0xFFFFFFFFull) {
-        return false;
-    }
-    if (expected_width > 0xFFFFFFFFull || expected_height > 0xFFFFFFFFull) {
         return false;
     }
     u64 pixel_count = image_width * image_height;
@@ -11760,17 +11121,10 @@ static bool auto_detect_page_rotation(const u8* pixel_data,
     makocode::image::Histogram histogram;
     makocode::image::compute_histogram(gray, histogram);
     makocode::image::CutLevels levels;
-    if (!makocode::image::analyze_cut_levels(histogram, 0.80, levels)) {
-        makocode::image::release(gray);
-        return false;
-    }
+    (void)makocode::image::analyze_cut_levels(histogram, 0.80, levels);
     makocode::image::CornerDetectionConfig config;
     config.logical_width = (u32)expected_width;
     config.logical_height = (u32)expected_height;
-    if (config.logical_width == 0u || config.logical_height == 0u) {
-        makocode::image::release(gray);
-        return false;
-    }
     if (config.logical_width > 64u && config.logical_height > 64u) {
         config.cross_half = 5u;
         config.cross_trim = 0.5;
@@ -11825,9 +11179,6 @@ static bool estimate_rotation_from_gradients(const u8* pixel_data,
                                              double fiducial_margin,
                                              double& out_degrees,
                                              double& out_scale) {
-    if (!pixel_data || width < 4u || height < 4u || !expected_width || !expected_height) {
-        return false;
-    }
     double scale_x_est = (double)width / (double)expected_width;
     double scale_y_est = (double)height / (double)expected_height;
     double scale_est = (scale_x_est + scale_y_est) * 0.5;
@@ -11846,9 +11197,6 @@ static bool estimate_rotation_from_gradients(const u8* pixel_data,
         return false;
     }
     int sample_step = (int)(scale_est >= 1.0 ? scale_est : 1.0);
-    if (sample_step < 1) {
-        sample_step = 1;
-    }
     const int bins = 181;
     double histogram[bins];
     for (int i = 0; i < bins; ++i) {
@@ -11878,12 +11226,6 @@ static bool estimate_rotation_from_gradients(const u8* pixel_data,
                 theta_line -= 180.0;
             }
             int bin = (int)floor(theta_line + 90.0 + 0.5);
-            if (bin < 0) {
-                bin = 0;
-            }
-            if (bin >= bins) {
-                bin = bins - 1;
-            }
             histogram[bin] += magnitude;
         }
     }
@@ -11905,15 +11247,9 @@ static bool estimate_rotation_from_gradients(const u8* pixel_data,
     double sin_a = sin(radians);
     double rotated_w = fabs((double)expected_width * cos_a) + fabs((double)expected_height * sin_a);
     double rotated_h = fabs((double)expected_width * sin_a) + fabs((double)expected_height * cos_a);
-    if (rotated_w <= 0.0 || rotated_h <= 0.0) {
-        return false;
-    }
     double scale_w = (double)width / rotated_w;
     double scale_h = (double)height / rotated_h;
     double uniform_scale = (scale_w + scale_h) * 0.5;
-    if (uniform_scale <= 0.0) {
-        return false;
-    }
     out_degrees = rotation_degrees;
     out_scale = uniform_scale;
     return true;
@@ -11943,9 +11279,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     }
     (void)fiducial_margin;
     u64 point_count = (u64)fiducial_columns * (u64)fiducial_rows;
-    if (point_count == 0u) {
-        return false;
-    }
     if (out_affine) {
         *out_affine = AffineTransform();
     }
@@ -12216,12 +11549,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     double axis_sin_y = axis_cos_x;
 
     auto compute_axis_scale = [&](bool horizontal) -> double {
-        if (horizontal && fiducial_columns < 2u) {
-            return 0.0;
-        }
-        if (!horizontal && fiducial_rows < 2u) {
-            return 0.0;
-        }
         double axis_cos = horizontal ? axis_cos_x : axis_cos_y;
         double axis_sin = horizontal ? axis_sin_x : axis_sin_y;
         double base_logical = horizontal ? logical_column_value(0u) : logical_row_value(0u);
@@ -12277,9 +11604,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     double dim_scale_x = (double)image_width / (double)expected_width;
     double dim_scale_y = (double)image_height / (double)expected_height;
     auto prefer_dimension_scale = [](double candidate, double direct) -> double {
-        if (!(direct > 0.0)) {
-            return candidate;
-        }
         if (candidate <= 0.0) {
             return direct;
         }
@@ -12354,16 +11678,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     // If metadata tile provided an affine pitch, force scale to that pitch (pixels per module).
     // Defer calling until analysis_width/height exist.
     
-    if (scale_x <= 0.0 && scale_y <= 0.0) {
-        free_bias_buffers();
-        return false;
-    }
-    if (scale_x <= 0.0 && scale_y > 0.0) {
-        scale_x = scale_y;
-    }
-    if (scale_y <= 0.0 && scale_x > 0.0) {
-        scale_y = scale_x;
-    }
     
     double computed_width = scale_x * (double)expected_width;
     double computed_height = scale_y * (double)expected_height;
@@ -12380,10 +11694,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         if (rounded_ratio_y >= 1.0 && fabs(scale_ratio_y - rounded_ratio_y) < integer_snap_tolerance) {
             computed_height = rounded_ratio_y * (double)expected_height;
         }
-    }
-    if (computed_width <= 0.0 || computed_height <= 0.0) {
-        free_bias_buffers();
-        return false;
     }
     u64 rotation_width = (u64)(computed_width + 0.5);
     u64 rotation_height = (u64)(computed_height + 0.5);
@@ -12518,14 +11828,10 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                 robust_inlier_count = 0u;
                 for (u32 row = 0u; row < fiducial_rows; ++row) {
                     double t_y = (fiducial_rows <= 1u) ? 0.5 : ((double)row / (double)(fiducial_rows - 1u));
-                    double logical_y = refine_affine_fit
-                                           ? rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y)
-                                           : logical_row_value(row);
+                    double logical_y = rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y);
                     for (u32 col = 0u; col < fiducial_columns; ++col) {
                         double t_x = (fiducial_columns <= 1u) ? 0.5 : ((double)col / (double)(fiducial_columns - 1u));
-                        double logical_x = refine_affine_fit
-                                               ? rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x)
-                                               : logical_column_value(col);
+                        double logical_x = rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x);
                         usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
                         double residual_x = centers_x[idx] - (a00 * logical_x + a01 * logical_y + tx);
                         double residual_y = centers_y[idx] - (a10 * logical_x + a11 * logical_y + ty);
@@ -12602,9 +11908,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                                                                     rotation_degrees,
                                                                     (unsigned)image_width,
                                                                     (unsigned)image_height);
-            if (rotation_margin < 0.0) {
-                rotation_margin = 0.0;
-            }
         }
     }
 
@@ -12702,9 +12005,6 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     // Keep the fiducial search radius tight so nearby dark structures (e.g., metadata tile)
     // do not bias the fiducial center estimate.
     double search_radius_d = fiducial_size_pixels * 1.5 + 4.0 * scale_est;
-    if (search_radius_d < 6.0) {
-        search_radius_d = 6.0;
-    }
     u32 search_radius = (u32)(search_radius_d + 0.5);
     double inv_radius_sq = 1.0 / ((double)search_radius * (double)search_radius + 1.0);
     u64 pixel_count = width * height;
@@ -12957,9 +12257,6 @@ static bool sample_fiducial_centers(const u8* pixel_data,
 }
 
 static u64 detect_horizontal_scale_similarity(const u8* pixels, u64 width, u64 height) {
-    if (!pixels || width == 0u || height == 0u) {
-        return 1u;
-    }
     u64 row_limit = (height < 256u) ? height : 256u;
     u64 scale = 0u;
     for (u64 row = 0u; row < row_limit; ++row) {
@@ -12983,22 +12280,16 @@ static u64 detect_horizontal_scale_similarity(const u8* pixels, u64 width, u64 h
             return 1u;
         }
     }
-    if (!scale || scale > width || scale == width) {
+    if (scale == width) {
         return 1u;
     }
     if ((width % scale) != 0u) {
         scale = gcd_u64(scale, width);
-        if (!scale || (width % scale) != 0u) {
-            return 1u;
-        }
     }
-    return scale ? scale : 1u;
+    return scale;
 }
 
 static u64 detect_vertical_scale_similarity(const u8* pixels, u64 width, u64 height) {
-    if (!pixels || width == 0u || height == 0u) {
-        return 1u;
-    }
     u64 column_limit = (width < 256u) ? width : 256u;
     u64 row_limit = (height < 256u) ? height : 256u;
     u64 scale = 0u;
@@ -13022,7 +12313,7 @@ static u64 detect_vertical_scale_similarity(const u8* pixels, u64 width, u64 hei
             return 1u;
         }
     }
-    if (!scale || scale > height || scale == height) {
+    if (scale == height) {
         return 1u;
     }
     if ((height % scale) != 0u) {
@@ -13031,21 +12322,16 @@ static u64 detect_vertical_scale_similarity(const u8* pixels, u64 width, u64 hei
             return 1u;
         }
     }
-    return scale ? scale : 1u;
+    return scale;
 }
 
 static bool map_rgb_to_detection_sample(u8 color_mode,
                                         const ImageMappingConfig* mapping,
                                         const u8* rgb,
                                         u32* sample_out) {
-    if (!rgb || !sample_out) {
-        return false;
-    }
     if (mapping && mapping_has_custom_palette(*mapping)) {
         u32 symbol = 0u;
-        if (!map_rgb_to_custom_symbol(*mapping, rgb, symbol)) {
-            return false;
-        }
+        map_rgb_to_custom_symbol(*mapping, rgb, symbol);
         *sample_out = symbol;
         return true;
     }
@@ -13057,34 +12343,18 @@ static u64 detect_horizontal_scale_palette(const u8* pixels,
                                            u64 height,
                                            u8 color_mode,
                                            const ImageMappingConfig* mapping) {
-    if (!pixels || width < 2u || height == 0u) {
-        return 1u;
-    }
-    u8 effective_color_mode = color_mode;
-    if (mapping && mapping_has_custom_palette(*mapping)) {
-        effective_color_mode = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
-    }
-    if (effective_color_mode == 0u || effective_color_mode > 3u) {
-        return 1u;
-    }
     u64 row_limit = (height < 256u) ? height : 256u;
     u64 scale = 0u;
     u64 run_support = 0u;
     for (u64 row = 0u; row < row_limit; ++row) {
         const u8* row_ptr = pixels + (row * width * 3u);
         u32 prev_sample = 0u;
-        if (!map_rgb_to_detection_sample(color_mode, mapping, row_ptr, &prev_sample)) {
-            continue;
-        }
+        map_rgb_to_detection_sample(color_mode, mapping, row_ptr, &prev_sample);
         u64 run_length = 1u;
-        bool row_ok = true;
         for (u64 col = 1u; col < width; ++col) {
             const u8* pixel_ptr = row_ptr + col * 3u;
             u32 current_sample = 0u;
-            if (!map_rgb_to_detection_sample(color_mode, mapping, pixel_ptr, &current_sample)) {
-                row_ok = false;
-                break;
-            }
+            map_rgb_to_detection_sample(color_mode, mapping, pixel_ptr, &current_sample);
             if (current_sample == prev_sample) {
                 ++run_length;
                 continue;
@@ -13099,9 +12369,6 @@ static u64 detect_horizontal_scale_palette(const u8* pixels,
             prev_sample = current_sample;
             run_length = 1u;
         }
-        if (!row_ok) {
-            continue;
-        }
         if (run_length > 1u && run_length < width) {
             scale = scale ? gcd_u64(scale, run_length) : run_length;
             ++run_support;
@@ -13114,7 +12381,7 @@ static u64 detect_horizontal_scale_palette(const u8* pixels,
         if ((width % scale) != 0u) {
             scale = gcd_u64(scale, width);
         }
-        if (scale > 1u && (width % scale) == 0u) {
+        if (scale > 1u) {
             return scale;
         }
     }
@@ -13126,16 +12393,6 @@ static u64 detect_vertical_scale_palette(const u8* pixels,
                                          u64 height,
                                          u8 color_mode,
                                          const ImageMappingConfig* mapping) {
-    if (!pixels || width == 0u || height < 2u) {
-        return 1u;
-    }
-    u8 effective_color_mode = color_mode;
-    if (mapping && mapping_has_custom_palette(*mapping)) {
-        effective_color_mode = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
-    }
-    if (effective_color_mode == 0u || effective_color_mode > 3u) {
-        return 1u;
-    }
     u64 column_limit = (width < 256u) ? width : 256u;
     u64 row_limit = (height < 256u) ? height : 256u;
     u64 scale = 0u;
@@ -13143,18 +12400,12 @@ static u64 detect_vertical_scale_palette(const u8* pixels,
     for (u64 col = 0u; col < column_limit; ++col) {
         u32 prev_sample = 0u;
         const u8* first_pixel = pixels + (col * 3u);
-        if (!map_rgb_to_detection_sample(color_mode, mapping, first_pixel, &prev_sample)) {
-            continue;
-        }
+        map_rgb_to_detection_sample(color_mode, mapping, first_pixel, &prev_sample);
         u64 run_length = 1u;
-        bool column_ok = true;
         for (u64 row = 1u; row < row_limit; ++row) {
             const u8* pixel_ptr = pixels + ((row * width + col) * 3u);
             u32 current_sample = 0u;
-            if (!map_rgb_to_detection_sample(color_mode, mapping, pixel_ptr, &current_sample)) {
-                column_ok = false;
-                break;
-            }
+            map_rgb_to_detection_sample(color_mode, mapping, pixel_ptr, &current_sample);
             if (current_sample == prev_sample) {
                 ++run_length;
                 continue;
@@ -13168,9 +12419,6 @@ static u64 detect_vertical_scale_palette(const u8* pixels,
             }
             prev_sample = current_sample;
             run_length = 1u;
-        }
-        if (!column_ok) {
-            continue;
         }
         if (run_length > 1u && run_length < height) {
             scale = scale ? gcd_u64(scale, run_length) : run_length;
@@ -13196,9 +12444,6 @@ static u64 detect_horizontal_scale(const u8* pixels,
                                    u64 height,
                                    u8 color_mode,
                                    const ImageMappingConfig* mapping) {
-    if (!pixels || width == 0u || height == 0u) {
-        return 1u;
-    }
     u64 palette_scale = detect_horizontal_scale_palette(pixels, width, height, color_mode, mapping);
     if (palette_scale > 1u) {
         return palette_scale;
@@ -13211,9 +12456,6 @@ static u64 detect_vertical_scale(const u8* pixels,
                                  u64 height,
                                  u8 color_mode,
                                  const ImageMappingConfig* mapping) {
-    if (!pixels || width == 0u || height == 0u) {
-        return 1u;
-    }
     u64 palette_scale = detect_vertical_scale_palette(pixels, width, height, color_mode, mapping);
     if (palette_scale > 1u) {
         return palette_scale;
@@ -13228,23 +12470,10 @@ static bool validate_integer_scale(const u8* pixels,
                                    u64 scale_y,
                                    u8 color_mode,
                                    const ImageMappingConfig* mapping) {
-    if (!pixels || width == 0u || height == 0u) {
-        return false;
-    }
     if (scale_x <= 1u && scale_y <= 1u) {
         return true;
     }
-    if (scale_x == 0u || scale_y == 0u) {
-        return false;
-    }
     if ((width % scale_x) != 0u || (height % scale_y) != 0u) {
-        return false;
-    }
-    u8 effective_color_mode = color_mode;
-    if (mapping && mapping_has_custom_palette(*mapping)) {
-        effective_color_mode = CUSTOM_PALETTE_SYNTHETIC_COLOR_MODE;
-    }
-    if (effective_color_mode == 0u || effective_color_mode > 3u) {
         return false;
     }
     u64 logical_width = width / scale_x;
@@ -13255,21 +12484,14 @@ static bool validate_integer_scale(const u8* pixels,
             u64 base_col = logical_col * scale_x;
             const u8* origin = pixels + ((base_row * width) + base_col) * 3u;
             u32 reference_sample = 0u;
-            if (!map_rgb_to_detection_sample(color_mode, mapping, origin, &reference_sample)) {
-                return false;
-            }
+            map_rgb_to_detection_sample(color_mode, mapping, origin, &reference_sample);
             for (u64 dy = 0u; dy < scale_y; ++dy) {
                 u64 row_index = base_row + dy;
-                if (row_index >= height) {
-                    return false;
-                }
                 const u8* row_ptr = pixels + ((row_index * width) + base_col) * 3u;
                 for (u64 dx = 0u; dx < scale_x; ++dx) {
                     const u8* sample = row_ptr + dx * 3u;
                     u32 sample_value = 0u;
-                    if (!map_rgb_to_detection_sample(color_mode, mapping, sample, &sample_value)) {
-                        return false;
-                    }
+                    map_rgb_to_detection_sample(color_mode, mapping, sample, &sample_value);
                     if (sample_value != reference_sample) {
                         return false;
                     }
@@ -13337,9 +12559,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return false;
     }
     u64 raw_pixel_count = width * height;
-    if (raw_pixel_count == 0u) {
-        return false;
-    }
     makocode::ByteBuffer pixel_buffer;
     bool pixels_read = ppm_read_rgb_pixels(state, raw_pixel_count, pixel_buffer);
 
@@ -13348,9 +12567,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return false;
     }
     u8* pixel_data = pixel_buffer.data;
-    if (!pixel_data) {
-        return false;
-    }
     if (raw_pixel_count <= 262144u) {
         u8 first_r = pixel_data[0u];
         u8 first_g = pixel_data[1u];
@@ -13402,15 +12618,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     auto metadata_tile_plausible = [&](const MetadataTile::Values& values,
                                        u32 canvas_w,
                                        u32 canvas_h) -> bool {
-        if (canvas_w == 0u || canvas_h == 0u) {
-            return false;
-        }
         u64 area = (u64)canvas_w * (u64)canvas_h;
         // Payload bits should never exceed a reasonable multiple of the image area.
         if (values.page_bits == 0u || values.page_bits > area * 64u) {
-            return false;
-        }
-        if (values.page_count == 0u || values.page_index == 0u || values.page_index > values.page_count) {
             return false;
         }
         if (values.footer_rows > canvas_h) {
@@ -13419,9 +12629,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return true;
     };
     u32 footer_rows_hint = state.has_footer_rows ? (u32)state.footer_rows_value : 0u;
-    if (footer_rows_hint > (u32)height) {
-        footer_rows_hint = 0u;
-    }
     u32 data_height_hint = (footer_rows_hint > 0u && footer_rows_hint < (u32)height) ? ((u32)height - footer_rows_hint) : (u32)height;
     MetadataTile::AffineParams tile_affine_hint = {};
     bool tile_affine_hint_available = false;
@@ -13434,9 +12641,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 data_height_test -= fallback_offsets[i];
             }
             MetadataTile::Placement placement = MetadataTile::compute_tile_placement((u32)width, data_height_test);
-            if (!placement.valid) {
-                continue;
-            }
             if (MetadataTile::decode_tile(pixel_data,
                                           (u32)width,
                                           (u32)height,
@@ -13549,9 +12753,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             }
             MetadataTile::Placement placement = MetadataTile::compute_tile_placement(target_size,
                                                                                        target_size);
-            if (!placement.valid) {
-                continue;
-            }
             for (int dy = -12; dy <= 12 && !tile_available; ++dy) {
                 for (int dx = -12; dx <= 12 && !tile_available; ++dx) {
                     int tile_x = (int)placement.x0 + dx;
@@ -13781,13 +12982,13 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             binarize_downsampled(downsampled_pixels.data, target_w, target_h);
             return true;
         };
-        auto attempt_downsample = [&](u32 target_w, u32 target_h) -> bool {
+        auto attempt_downsample = [&](u32 target_w, u32 target_h) -> void {
             if (target_w < MetadataTile::TILE_SIDE || target_h < MetadataTile::TILE_SIDE) {
-                return false;
+                return;
             }
             if (!fill_downsample(target_w, target_h)) {
 
-                return false;
+                return;
             }
             downsample_buffer_ready = true;
             downsample_buffer_w = target_w;
@@ -13808,25 +13009,15 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 downsample_buffer_h = target_h;
             }
             if (try_decode_shifted_tile(downsampled_pixels.data, target_w, target_h)) {
-                pixel_data = downsampled_pixels.data;
-                width = target_w;
-                height = target_h;
-                data_height_hint = target_h;
                 tile_available = true;
                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
-
-                return true;
             }
-
-            return false;
         };
         if (logical_guess > 0u && logical_guess < base_width && logical_guess < base_height) {
             u32 target_w = (u32)logical_guess;
             u32 target_h = (u32)logical_guess;
             if (target_w >= MetadataTile::TILE_SIDE && target_h >= MetadataTile::TILE_SIDE) {
-                if (attempt_downsample(target_w, target_h)) {
-                    
-                }
+                attempt_downsample(target_w, target_h);
             }
         }
         // Sweep around the best logical guess to catch non-integer scale factors (e.g., 3.03x upscales)
@@ -13873,9 +13064,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             pixel_data = pixel_buffer.data;
             width = base_width;
             height = base_height;
-            data_height_hint = (u32)((state.has_footer_rows && state.footer_rows_value < base_height)
-                                         ? (base_height - state.footer_rows_value)
-                                         : base_height);
         }
     }
 
@@ -13978,9 +13166,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             rotation_margin = (state.has_rotation_margin && state.rotation_margin_value > 0.0)
                                   ? state.rotation_margin_value
                                   : 4.0;
-            if (rotation_margin < 0.0) {
-                rotation_margin = 0.0;
-            }
             rotation_radians = 0.0;
             rotation_cos = 1.0;
             rotation_sin = 0.0;
@@ -13993,9 +13178,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         rotation_width = (unsigned)state.rotation_width_value;
         rotation_height = (unsigned)state.rotation_height_value;
         rotation_margin = state.has_rotation_margin ? state.rotation_margin_value : 4.0;
-        if (rotation_margin < 0.0) {
-            rotation_margin = 0.0;
-        }
         rotation_radians = state.rotation_degrees_value * (3.14159265358979323846 / 180.0);
         rotation_cos = cos(rotation_radians);
         rotation_sin = sin(rotation_radians);
@@ -14031,15 +13213,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     u64 skew_src_height = 0u;
     auto recompute_skew_flags = [&]() {
         bool active = !state.has_affine_transform &&
-                      state.has_skew_src_width &&
-                      state.has_skew_src_height &&
                       state.has_skew_y_pixels;
         skew_src_width = active ? state.skew_src_width_value : 0u;
         skew_src_height = active ? state.skew_src_height_value : 0u;
         if (active) {
-            if (skew_src_width == 0u || skew_src_height == 0u) {
-                active = false;
-            }
             if (active && fabs(state.skew_y_pixels_value) < 0.5) {
                 active = false;
             }
@@ -14053,12 +13230,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             return false;
         }
     } else if (state.has_palette_text && state.palette_text_length) {
-        if (!image_mapping_set_palette_text(active_mapping,
-                                            state.palette_text,
-                                            state.palette_text_length,
-                                            "decode")) {
-            return false;
-        }
+        image_mapping_set_palette_text(active_mapping,
+                                       state.palette_text,
+                                       state.palette_text_length,
+                                       "decode");
         if (!image_mapping_build_custom_palette(active_mapping, "decode")) {
             return false;
         }
@@ -14087,14 +13262,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             active_mapping.color_channels = 2u;
             active_mapping.custom_palette_valid = false;
         } else if (palette_matches(PALETTE_RGB_CMY_WB, (u32)(sizeof(PALETTE_RGB_CMY_WB) / sizeof(PALETTE_RGB_CMY_WB[0])))) {
-            active_mapping.color_channels = 3u;
             active_mapping.custom_palette_valid = false;
         }
     }
     u8 detection_color_mode = active_mapping.color_channels;
-    if (detection_color_mode == 0u || detection_color_mode > 3u) {
-        detection_color_mode = 1u;
-    }
     double scale_x = 1.0;
     double scale_y = 1.0;
     bool scale_x_integer = true;
@@ -14182,14 +13353,8 @@ struct RotationEstimateCandidate {
     auto clamp_candidate_scale = [&](RotationEstimateCandidate& candidate,
                                      u64 expected_width_px,
                                      u64 expected_height_px) {
-        if (!candidate.valid || expected_width_px == 0u || expected_height_px == 0u) {
-            return;
-        }
         double sx = (double)candidate.width / (double)expected_width_px;
         double sy = (double)candidate.height / (double)expected_height_px;
-        if (!(sx > 0.0) || !(sy > 0.0)) {
-            return;
-        }
         double diff = fabs(sx - sy);
         double worst = (sx > sy) ? sx : sy;
         if (worst > 0.0) {
@@ -14222,19 +13387,10 @@ struct RotationEstimateCandidate {
     };
 
     auto apply_rotation_candidate = [&](const RotationEstimateCandidate& candidate_raw) -> bool {
-        if (!candidate_raw.valid) {
-            return false;
-        }
         RotationEstimateCandidate candidate = candidate_raw;
         // Keep scales coherent before committing.
         if (width_known && height_known) {
             clamp_candidate_scale(candidate, expected_width, expected_height);
-            if (!candidate.valid) {
-                return false;
-            }
-        }
-        if (!candidate.valid) {
-            return false;
         }
         state.has_rotation_degrees = true;
         state.rotation_degrees_value = candidate.angle_deg;
@@ -14625,9 +13781,6 @@ struct RotationEstimateCandidate {
                             rotation_degrees_est,
                             (unsigned)width,
                             (unsigned)sample_height);
-                        if (rotation_margin_est < 0.0) {
-                            rotation_margin_est = 0.0;
-                        }
                     }
                 }
                 if (rotation_success && expected_width && expected_height) {
@@ -14635,9 +13788,6 @@ struct RotationEstimateCandidate {
                     double scale_y_est = (double)rotation_height_est / (double)expected_height;
                     double scale_avg = (scale_x_est + scale_y_est) * 0.5;
                     u64 scale_int = (u64)floor(scale_avg + 0.5);
-                    if (scale_int < 1u) {
-                        scale_int = 1u;
-                    }
                     double scale_diff = fabs(scale_avg - (double)scale_int);
                     if (fabs(rotation_degrees_est) < 0.05 && scale_diff < 0.12) {
                         rotation_width_est = expected_width * scale_int;
@@ -14647,9 +13797,6 @@ struct RotationEstimateCandidate {
                                                                                    rotation_degrees_est,
                                                                                    (unsigned)width,
                                                                                    (unsigned)height);
-                        if (rotation_margin_est < 0.0) {
-                            rotation_margin_est = 0.0;
-                        }
                     }
                 }
                 // Fiducial sampling excludes footer rows, but rotation geometry describes
@@ -14667,9 +13814,6 @@ struct RotationEstimateCandidate {
                             rotation_degrees_est,
                             (unsigned)width,
                             (unsigned)height);
-                        if (rotation_margin_est < 0.0) {
-                            rotation_margin_est = 0.0;
-                        }
                     }
                 }
                 if (rotation_success) {
@@ -14696,9 +13840,6 @@ struct RotationEstimateCandidate {
                         double cos_r = cos(-angle_rad);
                         double sin_r = sin(-angle_rad);
                         double span_pixels = rotation_width_est ? (double)rotation_width_est : (double)expected_width;
-                        if (span_pixels <= 0.0) {
-                            span_pixels = (double)expected_width;
-                        }
                         double* shear_values = (double*)malloc((usize)fiducial_rows * sizeof(double));
                         u32 shear_count = 0u;
                         if (shear_values && span_pixels > 1.0) {
@@ -14798,19 +13939,11 @@ struct RotationEstimateCandidate {
             RotationEstimateCandidate temp = auto_candidate;
             temp.width = fiducial_candidate.width;
             temp.height = fiducial_candidate.height;
-            temp.margin = compute_rotation_margin_from_geometry((unsigned)temp.width,
-                                                                (unsigned)temp.height,
-                                                                temp.angle_deg,
-                                                                (unsigned)width,
-                                                                (unsigned)height);
             if (fiducial_candidate.has_affine) {
                 temp.has_affine = true;
                 temp.affine = fiducial_candidate.affine;
             }
             apply_rotation_candidate(temp);
-        } else if (!fiducial_rotation_detected) {
-            // If we never applied fiducials (e.g., auto won first) but they exist, re-apply to replace scale.
-            apply_rotation_candidate(fiducial_candidate);
         }
         // Force trusted fiducial scale even if angle comes from another candidate.
         if (has_rotation && fiducial_candidate.valid) {
@@ -14856,23 +13989,6 @@ struct RotationEstimateCandidate {
             refresh_rotation_state();
             
         }
-    }
-    if (has_rotation &&
-        fabs(state.rotation_degrees_value) < 0.2 &&
-        state.has_skew_y_pixels &&
-        fabs(state.skew_y_pixels_value) >= 1.0) {
-        double forced_angle = 1.0;
-        state.has_rotation_degrees = true;
-        state.rotation_degrees_value = forced_angle;
-        double forced_margin = compute_rotation_margin_from_geometry(rotation_width ? rotation_width : (unsigned)width,
-                                                                     rotation_height ? rotation_height : (unsigned)height,
-                                                                     forced_angle,
-                                                                     (unsigned)width,
-                                                                     (unsigned)height);
-        state.has_rotation_margin = true;
-        state.rotation_margin_value = (forced_margin > 0.0) ? forced_margin : 0.0;
-        state.has_affine_transform = false;
-        refresh_rotation_state();
     }
     if (!has_rotation &&
         state.has_affine_transform && state.has_skew_y_pixels &&
@@ -15376,8 +14492,6 @@ struct RotationEstimateCandidate {
             scale_y = 1.0;
             scale_x_int = 1u;
             scale_y_int = 1u;
-            scale_x_integer = true;
-            scale_y_integer = true;
         }
     }
     
@@ -15387,8 +14501,6 @@ struct RotationEstimateCandidate {
             scale_x_int = 1u;
             scale_x_integer = true;
         }
-    } else if (scale_x <= 0.0) {
-        return false;
     }
     if (scale_y_integer) {
         if (scale_y_int == 0u || (analysis_height % scale_y_int) != 0u) {
@@ -15396,8 +14508,6 @@ struct RotationEstimateCandidate {
             scale_y_int = 1u;
             scale_y_integer = true;
         }
-    } else if (scale_y <= 0.0) {
-        return false;
     }
     double logical_width_d = (double)analysis_width / scale_x;
     double logical_height_d = (double)analysis_height / scale_y;
@@ -15410,9 +14520,6 @@ struct RotationEstimateCandidate {
     double height_error = logical_height_d - (double)logical_height;
     if (height_error < 0.0) {
         height_error = -height_error;
-    }
-    if (logical_width == 0u || logical_height == 0u) {
-        return false;
     }
     if (width_error > 0.01 || height_error > 0.01) {
         return false;
@@ -15450,33 +14557,14 @@ struct RotationEstimateCandidate {
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u32 custom_palette_base = 0u;
     u8 color_mode = active_mapping.color_channels;
-    if (color_mode == 0u || color_mode > 3u) {
-        color_mode = 1u;
-    }
     if (use_custom_palette) {
         custom_palette_base = mapping_custom_palette_base(active_mapping);
-        if (custom_palette_base < 2u) {
-            return false;
-        }
-        if (state.has_palette_base) {
-            u32 metadata_base = (u32)state.palette_base_value;
-            if (metadata_base < 2u || metadata_base > MAX_CUSTOM_PALETTE_COLORS) {
-                return false;
-            }
-            if (metadata_base != custom_palette_base) {
-                
-                return false;
-            }
-        }
         if (!state.has_palette_base) {
             state.has_palette_base = true;
             state.palette_base_value = custom_palette_base;
         }
     }
     const u8 sample_bits = bits_per_sample(color_mode);
-    if (sample_bits == 0u) {
-        return false;
-    }
     const PaletteColor* palette = 0;
     u32 palette_size = 0u;
     if (!palette_for_mode(color_mode, palette, palette_size)) {
@@ -22847,7 +21935,6 @@ retry_decode:
             if (block_data_value <= 0xFFFFu && parity_value <= 0xFFFFu) {
                 u8 header_bytes[makocode::ECC_HEADER_TOTAL_BYTES];
                 if (makocode::build_ecc_header_bytes(header_bytes,
-                                                     makocode::ECC_HEADER_TOTAL_BYTES,
                                                      (u16)block_data_value,
                                                      (u16)parity_value,
                                                      aggregate_state.ecc_block_count_value,
