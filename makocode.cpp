@@ -9264,7 +9264,8 @@ namespace MetadataTile {
                                           Values& out_values,
                                           ByteBuffer& out_palette_text,
                                           AffineParams* found_affine_out = 0,
-                                          bool sample_scaled_cells = false) {
+                                          bool sample_scaled_cells = false,
+                                          bool fine_pitch_search = false) {
         if (!pixel_data_rgb || width_pixels == 0u || height_pixels == 0u || data_height_pixels == 0u) return false;
         if (data_height_pixels > height_pixels) data_height_pixels = height_pixels;
 
@@ -9290,6 +9291,13 @@ namespace MetadataTile {
         }
         if (!(pitch_guess > 0.0)) pitch_guess = 1.0;
         const bool compact_image_search = width_pixels < 400u && height_pixels < 400u;
+        auto retry_fine_pitch_search = [&]() -> bool {
+            if (!compact_image_search || fine_pitch_search) return false;
+            return search_decode_tile_affine(pixel_data_rgb, width_pixels, height_pixels,
+                data_height_pixels, max_abs_angle_degrees, expected_logical_width,
+                expected_logical_height, out_values, out_palette_text, found_affine_out,
+                sample_scaled_cells, true);
+        };
         auto affine_page_geometry_matches = [&](const Values& values,
                                                 const AffineParams& affine) -> bool {
             if (values.page_width_pixels == 0u || values.page_height_pixels == 0u) return false;
@@ -9503,7 +9511,9 @@ namespace MetadataTile {
         double pitch_anchor = pitch_guess;
         pitch_anchor = clamp_double(pitch_anchor, pitch_min, pitch_max);
         const double kPitchSearchRatio = 1.05;
-        const double kPitchSearchStep = 0.10;
+        // Low-resolution tiles have narrow valid pitch intervals; a coarse
+        // 0.10 step can lock refinement onto an unrelated repeated header.
+        const double kPitchSearchStep = compact_image_search && fine_pitch_search ? 0.025 : 0.10;
         const double kAngleStepCoarse = compact_image_search ? 0.5 : 0.1;
         double angle_candidates[201];
         u32 angle_candidate_count = 0u;
@@ -9686,7 +9696,7 @@ namespace MetadataTile {
 
 
         if (!have_best) {
-            return false;
+            return retry_fine_pitch_search();
         }
 
         // Stage 2: refine around the best header match and fully decode.
@@ -9873,7 +9883,7 @@ namespace MetadataTile {
             if (found_affine_out) *found_affine_out = verified_affine;
             return true;
         }
-        return false;
+        return retry_fine_pitch_search();
     }
 } // namespace MetadataTile
 
@@ -14474,6 +14484,7 @@ struct RotationEstimateCandidate {
             double diff_x = ratio_x - rounded_ratio_x;
             if (!has_skew && rounded_ratio_x >= 1.0 && diff_x < 0.08 && diff_x > -0.08) {
                 scale_x_int = (u64)rounded_ratio_x;
+                scale_x = (double)scale_x_int;
                 scale_x_integer = true;
             } else {
                 scale_x_integer = false;
@@ -14489,6 +14500,7 @@ struct RotationEstimateCandidate {
             double diff_y = ratio_y - rounded_ratio_y;
             if (!has_skew && rounded_ratio_y >= 1.0 && diff_y < 0.08 && diff_y > -0.08) {
                 scale_y_int = (u64)rounded_ratio_y;
+                scale_y = (double)scale_y_int;
                 scale_y_integer = true;
             } else {
                 scale_y_integer = false;
@@ -16585,11 +16597,11 @@ struct RotationEstimateCandidate {
         return false;
     }
 
-    // Below two scan pixels per module, optical mixing can erase
+    // Optical mixing and low contrast can erase
     // individual payload bits even though the repeated, RS-protected tile reads.
     // Retry bounded optical/registration hypotheses; accept only a complete archive.
     if (tile_affine_hint_available && tile_values.palette_count == 2u &&
-        tile_scale >= 0.95 && tile_scale < 2.0 &&
+        tile_scale >= 0.95 &&
         logical_width <= 96u && logical_height <= 96u &&
         width > logical_width && height > logical_height &&
         tile_values.page_count == 1u && !tile_values.ecc_enabled) {
@@ -16629,10 +16641,10 @@ struct RotationEstimateCandidate {
             sharpened.size = (usize)width * height * 3u;
             MetadataTile::Placement placement = MetadataTile::compute_tile_placement(
                 (u32)logical_width, (u32)logical_height);
-            double origin_x = tile_affine_hint.center_x - tile_scale *
-                ((double)placement.x0 + MetadataTile::TILE_SIDE * 0.5) + 0.5;
-            double origin_y = tile_affine_hint.center_y - tile_scale *
-                ((double)placement.y0 + MetadataTile::TILE_SIDE * 0.5) + 0.5;
+            // Keep the decoded tile center fixed while varying scale and angle.
+            // Pitch offsets are fractions; translation offsets are module units.
+            double tile_x = (double)placement.x0 + MetadataTile::TILE_SIDE * 0.5;
+            double tile_y = (double)placement.y0 + MetadataTile::TILE_SIDE * 0.5;
             const double shifts[] = {0.0, 0.25, -0.25, 0.5, -0.5};
             const double pitches[] = {0.0, 0.005, -0.005, 0.01, -0.01, 0.02, -0.02};
             const double strengths[] = {0.0, 0.25, 0.5, 1.0};
@@ -16660,7 +16672,7 @@ struct RotationEstimateCandidate {
                   double c = cos(angle), sn = sin(angle);
                   for (double pitch_delta : pitches) {
                    if (recovered) break;
-                   double pitch = tile_scale + pitch_delta;
+                   double pitch = tile_scale * (1.0 + pitch_delta);
                    for (double dy : shifts) {
                     if (recovered) break;
                     for (double dx : shifts) {
@@ -16669,8 +16681,8 @@ struct RotationEstimateCandidate {
                      for (u32 y = 0u; y < logical_height; ++y) for (u32 x = 0u; x < logical_width; ++x) {
                         double value = MetadataTile::sample_luminance_bilinear(sharpened.data,
                             (u32)width, (u32)height,
-                            origin_x + dx + pitch * (c*(x+0.5)-sn*(y+0.5)) - 0.5,
-                            origin_y + dy + pitch * (sn*(x+0.5)+c*(y+0.5)) - 0.5);
+                            tile_affine_hint.center_x + dx * pitch + pitch * (c*(x+0.5-tile_x)-sn*(y+0.5-tile_y)),
+                            tile_affine_hint.center_y + dy * pitch + pitch * (sn*(x+0.5-tile_x)+c*(y+0.5-tile_y)));
                         samples[y * logical_width + x] = value;
                         if (value < low) low = value;
                         if (value > high) high = value;

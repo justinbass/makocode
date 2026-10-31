@@ -371,3 +371,27 @@ test_case 0090_decode_lowres_optical_blur script "Legacy 1.5x scan recovers from
 
 test_case 0091_decode_current_lowres_optical_blur script "Current-schema 1.5x scan recovers from optical blur and expanded ink bounds" \
     test_decode_lowres_optical_blur.sh --current
+
+test_case 0092_decode_quarter_scale_registration script "Legacy 1.25x optical scan recovers a narrow metadata pitch interval" \
+    test_decode_quarter_scale_registration.sh
+
+test_case 0093_decode_current_quarter_scale_registration script "Current-schema 1.25x optical scan recovers metadata and archive" \
+    test_decode_quarter_scale_registration.sh --current
+
+test_case 0094_decode_midscale_low_contrast script "Legacy 2.5x low-contrast scan recovers its complete archive" \
+    test_decode_midscale_low_contrast.sh
+
+test_case 0095_decode_current_midscale_low_contrast script "Current-schema 2.5x low-contrast scan recovers its complete archive" \
+    test_decode_midscale_low_contrast.sh --current
+
+test_case 0096_decode_scale_relative_registration script "Legacy 6x optical scan recovers using scale-relative registration" \
+    test_decode_scale_relative_registration.sh
+
+test_case 0097_decode_current_scale_relative_registration script "Current-schema 6x optical scan preserves metadata and archive" \
+    test_decode_scale_relative_registration.sh --current
+
+test_case 0098_decode_integer_scan_dimensions script "Legacy padded scan keeps integer and floating scales consistent" \
+    test_decode_integer_scan_dimensions.sh
+
+test_case 0099_decode_current_integer_scan_dimensions script "Current-schema padded scan survives integer dimension snapping" \
+    test_decode_integer_scan_dimensions.sh --current
