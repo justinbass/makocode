@@ -12,10 +12,14 @@
           Reed-Solomon ECC, and maps the bitstream onto fiducial-marked PPM pages
           with configurable color channels and footer text.
         * `decode` ingests PPM pages (files or stdin), reconstructs payload
-          bitstreams, repairs ECC, decrypts when required, and unpacks the archive
-          into the requested output directory.
+          bitstreams, repairs ECC, decrypts when required, and restores the
+          archive tree; --decoded-file writes a single decoded file instead.
         * `overlay` blends a mask/overlay page onto an encoded base page.
         * `minify` strips comments/whitespace to emit `makocode_minified.cpp`.
+
+    Decoded file: MAKOCODE-DECODED; page and payload metadata; archive entries
+    in stored order; end. File entries include byte size and one content line.
+    Escape backslash, nonprintable bytes, and path spaces as \xHH; LF ends lines.
 
     Core subsystems:
         * MKARCH01 archive builder that normalizes paths and captures directory
@@ -55,6 +59,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -94,7 +99,6 @@ extern "C" int   write(int fd, const void* buf, unsigned long count);
 extern "C" int   read(int fd, void* buf, unsigned long count);
 extern "C" void  exit(int code);
 extern "C" int   close(int fd);
-extern "C" int   creat(const char* path, unsigned int mode);
 extern "C" int   unlink(const char* path);
 extern "C" int   open(const char* path, int flags, ...);
 extern "C" void* realloc(void* ptr, unsigned long size);
@@ -7407,6 +7411,7 @@ struct EccHeaderInfo {
     u64 block_count;
     u64 original_bytes;
     u32 header_copies_repaired;
+    EccHeader encoded_header;
 
     EccHeaderInfo()
         : detected(false),
@@ -7470,6 +7475,7 @@ static bool parse_ecc_header(const u8* bytes,
     header.block_count = parsed.block_count;
     header.original_bytes = parsed.original_bytes;
     header.header_copies_repaired = repaired_copies;
+    header.encoded_header = parsed;
     return true;
 }
 
@@ -7554,6 +7560,20 @@ static bool unshuffle_encoded_stream(u8* data, usize byte_count) {
     return fisher_yates_unshuffle(data + header_span, byte_count - header_span);
 }
 
+struct EncodedPayloadMetadata {
+    bool ecc_present;
+    EccHeader ecc;
+    bool encryption_present;
+    u8 encryption_header[ENCRYPTION_HEADER_BYTES];
+    u8 encryption_tag[ENCRYPTION_TAG_BYTES];
+    bool lzma_present;
+    u8 lzma_header[LZMA_HEADER_BYTES];
+
+    EncodedPayloadMetadata()
+        : ecc_present(false), ecc(), encryption_present(false),
+          encryption_header(), encryption_tag(), lzma_present(false), lzma_header() {}
+};
+
 struct DecoderContext {
     ByteBuffer payload;
     bool has_payload;
@@ -7562,6 +7582,7 @@ struct DecoderContext {
     bool password_failed;
     bool password_not_encrypted;
     EccDecodeStats ecc_stats;
+    EncodedPayloadMetadata encoded_metadata;
 
     DecoderContext()
         : payload(),
@@ -7584,6 +7605,7 @@ struct DecoderContext {
         password_failed = false;
         password_not_encrypted = false;
         ecc_stats = EccDecodeStats();
+        encoded_metadata = EncodedPayloadMetadata();
     }
 
     bool parse(u8* data, usize size_in_bits, const char* password, usize password_length) {
@@ -7594,6 +7616,7 @@ struct DecoderContext {
         password_failed = false;
         password_not_encrypted = false;
         ecc_stats = EccDecodeStats();
+        encoded_metadata = EncodedPayloadMetadata();
         if (size_in_bits == 0u) {
             return true;
         }
@@ -7654,6 +7677,23 @@ struct DecoderContext {
                 ecc_failed = true;
                 return false;
             }
+            encoded_metadata.ecc_present = true;
+            encoded_metadata.ecc = header.encoded_header;
+            if (working == &decrypted) {
+                encoded_metadata.encryption_present = true;
+                for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
+                    encoded_metadata.encryption_header[i] = compressed.data[i];
+                }
+                for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
+                    encoded_metadata.encryption_tag[i] = compressed.data[compressed.size - ENCRYPTION_TAG_BYTES + i];
+                }
+            }
+            if (working->size >= LZMA_HEADER_BYTES) {
+                encoded_metadata.lzma_present = true;
+                for (usize i = 0u; i < LZMA_HEADER_BYTES; ++i) {
+                    encoded_metadata.lzma_header[i] = working->data[i];
+                }
+            }
             has_payload = true;
             return true;
         }
@@ -7683,6 +7723,21 @@ struct DecoderContext {
         }
         if (!lzma_decompress(decode_data, decode_bits, payload)) {
             return false;
+        }
+        if (decode_data == decrypted.data && decrypted.data) {
+            encoded_metadata.encryption_present = true;
+            for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
+                encoded_metadata.encryption_header[i] = data[i];
+            }
+            for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
+                encoded_metadata.encryption_tag[i] = data[byte_count - ENCRYPTION_TAG_BYTES + i];
+            }
+        }
+        if (decode_bits / 8u >= LZMA_HEADER_BYTES) {
+            encoded_metadata.lzma_present = true;
+            for (usize i = 0u; i < LZMA_HEADER_BYTES; ++i) {
+                encoded_metadata.lzma_header[i] = decode_data[i];
+            }
         }
         has_payload = true;
         return true;
@@ -8049,6 +8104,9 @@ namespace MetadataTile {
     }
 
     struct Values {
+        u32 encoded_header;
+        u32 encoded_metadata_size;
+        u8 encoded_metadata[255];
         u64 page_bits;
         u64 page_count;
         u64 page_index;
@@ -8065,7 +8123,10 @@ namespace MetadataTile {
         PaletteColor palette[MAX_CUSTOM_PALETTE_COLORS];
 
         Values()
-            : page_bits(0u),
+            : encoded_header(0u),
+              encoded_metadata_size(0u),
+              encoded_metadata(),
+              page_bits(0u),
               page_count(0u),
               page_index(0u),
               page_width_pixels(0u),
@@ -8568,6 +8629,9 @@ namespace MetadataTile {
         if (!build_palette_text_from_colors(out_values.palette, out_values.palette_count, out_palette_text)) {
             return false;
         }
+        out_values.encoded_header = header;
+        out_values.encoded_metadata_size = meta_len;
+        memcpy(out_values.encoded_metadata, codeword.data, meta_len);
         return true;
     }
 
@@ -9175,6 +9239,9 @@ namespace MetadataTile {
         if (!build_palette_text_from_colors(out_values.palette, out_values.palette_count, out_palette_text)) {
             return false;
         }
+        out_values.encoded_header = header;
+        out_values.encoded_metadata_size = meta_len;
+        memcpy(out_values.encoded_metadata, codeword.data, meta_len);
         return true;
     }
 
@@ -10763,6 +10830,8 @@ static bool write_buffer_to_file(const char* path,
 
 
 struct PpmParserState {
+    bool has_encoded_tile;
+    MetadataTile::Values encoded_tile;
     const u8* data;
     usize size;
     usize cursor;
@@ -10823,7 +10892,9 @@ struct PpmParserState {
     u64 fiducial_margin_value;
 
     PpmParserState()
-        : data(0),
+        : has_encoded_tile(false),
+          encoded_tile(),
+          data(0),
           size(0u),
           cursor(0u),
           has_bits(false),
@@ -16527,6 +16598,8 @@ static bool append_bits_from_buffer(makocode::BitWriter& writer,
 static void apply_metadata_tile_metadata(PpmParserState& state,
                                          const MetadataTile::Values& values,
                                          const makocode::ByteBuffer& palette_text) {
+    state.has_encoded_tile = true;
+    state.encoded_tile = values;
     const u64 payload_bits = values.page_bits;
     const u64 frame_bits = payload_bits + 64u;
     update_metadata_field(state.has_bits, state.bits_value, payload_bits);
@@ -16779,7 +16852,8 @@ static bool frame_bits_to_payload(const u8* frame_data,
                                   u64 frame_bit_count,
                                   const PpmParserState& metadata,
                                   makocode::ByteBuffer& output,
-                                  u64& out_bit_count) {
+                                  u64& out_bit_count,
+                                  u64* encoded_bit_count = 0) {
     output.release();
     out_bit_count = 0u;
     if (!frame_data) {
@@ -16791,6 +16865,7 @@ static bool frame_bits_to_payload(const u8* frame_data,
         return false;
     }
     u64 header_bits = reader.read_bits(64u);
+    if (encoded_bit_count) *encoded_bit_count = header_bits;
     u64 available_bits = (frame_bit_count >= 64u) ? (frame_bit_count - 64u) : 0u;
     u64 payload_bits = header_bits;
     bool ecc_length_recovered = false;
@@ -18792,7 +18867,7 @@ static void write_usage() {
     console_line(1, "  --page-height PX   (page height in pixels; default 3508)");
     console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
     console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
-    console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: extract destination; default .)");
+    console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: output destination; default .)");
     console_line(1, "  --prefix TEXT       (encode: base name for generated pages; default UTC timestamp, no '/' or '\\\\').");
     console_line(1, "  --ecc RATIO        (Reed-Solomon redundancy; default 0.20, 0 disables)");
     console_line(1, "  --ecc-fill         Compute the ECC ratio that will fill the final page and use it for encoding");
@@ -18860,6 +18935,7 @@ static void write_decode_help() {
     console_line(1, "");
     console_line(1, "Output & security:");
     console_line(1, "  --output-dir PATH    Destination directory (default current directory).");
+    console_line(1, "  --decoded-file       Write a single decoded file instead of restoring the tree.");
     console_line(1, "  --password TEXT      Supply the decryption password for protected payloads.");
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
@@ -21571,6 +21647,11 @@ static int command_decode(int arg_count, char** args) {
     static const usize MAX_INPUT_FILES = 256u;
     const char* input_files[MAX_INPUT_FILES];
     usize file_count = 0u;
+    MetadataTile::Values encoded_pages[MAX_INPUT_FILES];
+    bool encoded_page_present[MAX_INPUT_FILES] = {};
+    usize encoded_page_count = 0u;
+    bool decoded_file_requested = false;
+    u64 encoded_frame_bits = 0u;
     makocode::ByteBuffer password_buffer;
     bool have_password = false;
     makocode::ByteBuffer output_dir_buffer;
@@ -21586,6 +21667,10 @@ static int command_decode(int arg_count, char** args) {
             continue;
         }
         const char* arg = args[i];
+        if (ascii_equals_token(arg, ascii_length(arg), "--decoded-file")) {
+            decoded_file_requested = true;
+            continue;
+        }
         if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
             debug_requested = true;
             continue;
@@ -21714,6 +21799,8 @@ static int command_decode(int arg_count, char** args) {
         }
     }
 retry_decode:
+    encoded_page_count = 0u;
+    encoded_frame_bits = 0u;
     frame_bits_for_length_recovery.release();
     frame_bit_count_for_length_recovery = 0u;
     if (debug_requested && debug_fiducial_csv.size > debug_fiducial_header_size) {
@@ -21796,7 +21883,12 @@ retry_decode:
                                                        frame_bit_count,
                                                        single_state,
                                                        bitstream,
-                                                       bit_count);
+                                                       bit_count,
+                                                       &encoded_frame_bits);
+
+        encoded_page_present[0] = single_state.has_encoded_tile;
+        encoded_pages[0] = single_state.encoded_tile;
+        encoded_page_count = 1u;
 
         if (!payload_extracted) {
             if (!force_disable_subgrid && !retried_subgrid) {
@@ -21889,6 +21981,8 @@ retry_decode:
                     return 1;
                 }
             }
+            encoded_page_present[encoded_page_count] = page_state.has_encoded_tile;
+            encoded_pages[encoded_page_count++] = page_state.encoded_tile;
             if (!page_state.has_page_index || page_state.page_index_value == 0u) {
                 page_state.has_page_index = true;
                 page_state.page_index_value = expected_page_index;
@@ -21921,7 +22015,8 @@ retry_decode:
                                                        frame_bit_total,
                                                        aggregate_state,
                                                        bitstream,
-                                                       bit_count);
+                                                       bit_count,
+                                                       &encoded_frame_bits);
 
         if (!payload_extracted) {
             if (!force_disable_subgrid && !retried_subgrid) {
@@ -22183,6 +22278,157 @@ retry_decode:
         console_write(1, (corrected_bits == 1u) ? " bit corrected, " : " bits corrected, ");
         console_write(1, percent_buffer);
         console_line(1, "% of available correction bits)");
+    }
+    if (decoded_file_requested) {
+        const makocode::ByteBuffer& archive = decoder.payload;
+        makocode::ByteBuffer decoded;
+        bool ok = decoded.append_ascii("MAKOCODE-DECODED\n");
+        char number[32];
+        for (usize page = 0; ok && page < encoded_page_count; ++page) {
+            u64_to_ascii(page + 1u, number, sizeof(number));
+            ok = decoded.append_ascii("page ") && decoded.append_ascii(number) && decoded.append_char('\n');
+            if (encoded_page_present[page]) {
+                const MetadataTile::Values& tile = encoded_pages[page];
+                ok = decoded.append_ascii("metadata tile_magic 19789\nmetadata metadata_magic MKMD\n");
+                if (ok && tile.encoded_metadata_size) {
+                    u64_to_ascii(tile.encoded_metadata_size, number, sizeof(number));
+                    ok = decoded.append_ascii("metadata metadata_bytes ") && decoded.append_ascii(number) && decoded.append_char('\n');
+                    u64_to_ascii(tile.encoded_metadata[tile.encoded_metadata_size - 1u], number, sizeof(number));
+                    ok = ok && decoded.append_ascii("metadata metadata_crc8 ") && decoded.append_ascii(number) && decoded.append_char('\n');
+                    u64_to_ascii(tile.encoded_header, number, sizeof(number));
+                    ok = ok && decoded.append_ascii("metadata tile_header ") && decoded.append_ascii(number) && decoded.append_ascii("\nmetadata tile_data ");
+                    static const char digits[] = "0123456789ABCDEF";
+                    for (usize i = 0; ok && i < tile.encoded_metadata_size; ++i) {
+                        u8 c = tile.encoded_metadata[i];
+                        ok = decoded.append_char(digits[c >> 4u]) && decoded.append_char(digits[c & 15u]);
+                    }
+                    ok = ok && decoded.append_char('\n');
+                }
+                const char* names[] = {"tile_schema", "page_bits", "page_count", "page_index", "width", "height", "footer_rows", "fiducial_size", "ecc_enabled", "ecc_block_data", "ecc_parity", "ecc_block_count", "ecc_original_bytes", "palette_count"};
+                u64 values[] = {MetadataTile::TILE_SCHEMA_VERSION, tile.page_bits, tile.page_count, tile.page_index, tile.page_width_pixels, tile.page_height_pixels, tile.footer_rows, tile.fiducial_marker_size_pixels, tile.ecc_enabled ? 1u : 0u, tile.ecc_block_data, tile.ecc_parity, tile.ecc_block_count, tile.ecc_original_bytes, tile.palette_count};
+                for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
+                    u64_to_ascii(values[i], number, sizeof(number));
+                    ok = decoded.append_ascii("metadata ") && decoded.append_ascii(names[i]) && decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
+                }
+                for (u32 i = 0; ok && i < tile.palette_count; ++i) {
+                    static const char hex[] = "0123456789ABCDEF";
+                    const u8 rgb[] = {tile.palette[i].r, tile.palette[i].g, tile.palette[i].b};
+                    ok = decoded.append_ascii("metadata palette ");
+                    for (usize j = 0; ok && j < 3u; ++j) {
+                        ok = decoded.append_char(hex[rgb[j] >> 4u]) && decoded.append_char(hex[rgb[j] & 15u]);
+                    }
+                    ok = ok && decoded.append_char('\n');
+                }
+            }
+            ok = ok && decoded.append_ascii("end-page\n");
+        }
+        ok = ok && decoded.append_ascii("payload\n");
+        if (encoded_frame_bits == bit_count) {
+            u64_to_ascii(encoded_frame_bits, number, sizeof(number));
+            ok = ok && decoded.append_ascii("metadata frame_bits ") && decoded.append_ascii(number) && decoded.append_char('\n');
+        }
+        const makocode::EncodedPayloadMetadata& payload_metadata = decoder.encoded_metadata;
+        if (payload_metadata.ecc_present && !ecc_header_repaired) {
+            const makocode::EccHeader& ecc = payload_metadata.ecc;
+            const char* names[] = {"ecc_magic", "ecc_version", "ecc_flags", "ecc_reserved", "ecc_block_data", "ecc_parity", "ecc_block_count", "ecc_original_bytes"};
+            u64 values[] = {ecc.magic, ecc.version, ecc.flags, ecc.reserved, ecc.block_data, ecc.parity, ecc.block_count, ecc.original_bytes};
+            for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
+                u64_to_ascii(values[i], number, sizeof(number));
+                ok = decoded.append_ascii("metadata ") && decoded.append_ascii(names[i]) && decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
+            }
+        }
+        if (payload_metadata.encryption_present) {
+            const u8* header = payload_metadata.encryption_header;
+            const char* names[] = {"encryption_magic", "encryption_version", "encryption_flags", "encryption_kdf", "encryption_reserved", "encryption_iterations", "encryption_plaintext_bytes"};
+            u64 values[] = {read_le_u32(header), header[4], header[5], header[6], header[7], read_le_u32(header + 8u), read_le_u64(header + 12u)};
+            for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
+                u64_to_ascii(values[i], number, sizeof(number));
+                ok = decoded.append_ascii("metadata ") && decoded.append_ascii(names[i]) && decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
+            }
+            const char* byte_names[] = {"encryption_salt", "encryption_nonce", "encryption_tag"};
+            const u8* bytes[] = {header + 20u, header + 36u, payload_metadata.encryption_tag};
+            usize sizes[] = {16u, 12u, 16u};
+            static const char digits[] = "0123456789ABCDEF";
+            for (usize i = 0; ok && i < 3u; ++i) {
+                ok = decoded.append_ascii("metadata ") && decoded.append_ascii(byte_names[i]) && decoded.append_char(' ');
+                for (usize j = 0; ok && j < sizes[i]; ++j) ok = decoded.append_char(digits[bytes[i][j] >> 4u]) && decoded.append_char(digits[bytes[i][j] & 15u]);
+                ok = ok && decoded.append_char('\n');
+            }
+        }
+        if (payload_metadata.lzma_present) {
+            static const char digits[] = "0123456789ABCDEF";
+            ok = decoded.append_ascii("metadata compression LZMA\nmetadata lzma_properties ");
+            for (usize i = 0; ok && i < LZMA_PROPS_SIZE; ++i) {
+                u8 c = payload_metadata.lzma_header[i];
+                ok = decoded.append_char(digits[c >> 4u]) && decoded.append_char(digits[c & 15u]);
+            }
+            u64_to_ascii(read_le_u64(payload_metadata.lzma_header + LZMA_PROPS_SIZE), number, sizeof(number));
+            ok = ok && decoded.append_ascii("\nmetadata lzma_uncompressed_bytes ") && decoded.append_ascii(number) && decoded.append_char('\n');
+        }
+        ok = ok && decoded.append_ascii("end-payload\narchive MKARCH01\nentries ");
+        if (!archive.data || archive.size < ARCHIVE_HEADER_SIZE) ok = false;
+        for (usize i = 0; ok && i < ARCHIVE_MAGIC_SIZE; ++i) {
+            if (archive.data[i] != (u8)ARCHIVE_MAGIC[i]) ok = false;
+        }
+        u32 entries = ok ? read_le_u32(archive.data + ARCHIVE_MAGIC_SIZE) : 0u;
+        u64_to_ascii(entries, number, sizeof(number));
+        ok = ok && decoded.append_ascii(number) && decoded.append_char('\n');
+        usize cursor = ARCHIVE_HEADER_SIZE;
+        static const char hex[] = "0123456789ABCDEF";
+        for (u32 entry = 0; ok && entry < entries; ++entry) {
+            if (cursor > archive.size || archive.size - cursor < 5u) { ok = false; break; }
+            u8 type = archive.data[cursor++];
+            u32 path_size = read_le_u32(archive.data + cursor);
+            cursor += 4u;
+            if (path_size == 0u || path_size > archive.size - cursor || !is_safe_archive_path((const char*)archive.data + cursor, path_size) || type > 1u) { ok = false; break; }
+            ok = decoded.append_ascii(type == 1u ? "directory " : "file ");
+            for (u32 i = 0; ok && i < path_size; ++i) {
+                u8 c = archive.data[cursor++];
+                if (c >= 33u && c <= 126u && c != '\\') ok = decoded.append_char((char)c);
+                else ok = decoded.append_ascii("\\x") && decoded.append_char(hex[c >> 4u]) && decoded.append_char(hex[c & 15u]);
+            }
+            if (type == 0u) {
+                if (!ok || archive.size - cursor < 8u) { ok = false; break; }
+                u64 size = read_le_u64(archive.data + cursor);
+                cursor += 8u;
+                if (size > archive.size - cursor) { ok = false; break; }
+                u64_to_ascii(size, number, sizeof(number));
+                ok = decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
+                for (u64 i = 0; ok && i < size; ++i) {
+                    u8 c = archive.data[cursor++];
+                    if (c >= 32u && c <= 126u && c != '\\') ok = decoded.append_char((char)c);
+                    else ok = decoded.append_ascii("\\x") && decoded.append_char(hex[c >> 4u]) && decoded.append_char(hex[c & 15u]);
+                }
+            }
+            ok = ok && decoded.append_char('\n');
+        }
+        if (cursor != archive.size) ok = false;
+        ok = ok && decoded.append_ascii("end-archive\nend\n");
+        time_t now = time(0);
+        struct tm* local = localtime(&now);
+        char filename[64];
+        if (!local || !strftime(filename, sizeof(filename), "makocode_decoded_%Y%m%d%H%M%S.txt", local)) ok = false;
+        makocode::ByteBuffer output_path;
+        if (!ok || !join_output_path(output_dir, filename, output_path) ||
+            !ensure_parent_directories((const char*)output_path.data)) {
+            console_line(2, "decode: failed to write decoded file");
+            return 1;
+        }
+        int output_fd = open((const char*)output_path.data, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (output_fd < 0) {
+            console_line(2, "decode: failed to create decoded file");
+            return 1;
+        }
+        bool written = write_all_fd(output_fd, decoded.data, decoded.size);
+        if (close(output_fd) != 0) written = false;
+        if (!written) {
+            unlink((const char*)output_path.data);
+            console_line(2, "decode: failed to write decoded file");
+            return 1;
+        }
+        console_write(1, "decode: wrote ");
+        console_line(1, (const char*)output_path.data);
+        return 0;
     }
     if (!unpack_archive_to_directory(decoder.payload, output_dir)) {
         const char* raw_fallback = getenv("MAKOCODE_DECODE_RAW_FALLBACK");

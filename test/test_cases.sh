@@ -344,3 +344,6 @@ test_case 0081_decode_short_length_header script "Decode low-resolution affine s
 
 test_case 0082_decode_lowres_rotated_scan script "Generated rotated scan below 2 pixels per module round-trips" \
     test_decode_lowres_rotated_scan.sh
+
+test_case 0083_decoded_file script "Decoded file retains metadata and archive bytes" \
+    test_decoded_file.sh
