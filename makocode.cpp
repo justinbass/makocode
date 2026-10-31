@@ -13162,7 +13162,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (!tile_available) {
         // Without a metadata tile, the page layout cannot be recovered.
         
-        console_line(1, "decode: metadata tile missing; aborting (no metadata available)");
+        console_line(2, "decode: metadata tile missing; aborting (no metadata available)");
         return false;
     }
     if (retry_without_subgrid_out) {
@@ -18945,6 +18945,7 @@ static void write_decode_help() {
     console_line(1, "Output & security:");
     console_line(1, "  --output-dir PATH    Destination directory (default current directory).");
     console_line(1, "  --decoded-file       Write a single decoded file instead of restoring the tree.");
+    console_line(1, "  --decoded-stdout     Write decoded file content to stdout without creating files.");
     console_line(1, "  --password TEXT      Supply the decryption password for protected payloads.");
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
@@ -21660,6 +21661,7 @@ static int command_decode(int arg_count, char** args) {
     bool encoded_page_present[MAX_INPUT_FILES] = {};
     usize encoded_page_count = 0u;
     bool decoded_file_requested = false;
+    bool decoded_stdout_requested = false;
     u64 encoded_frame_bits = 0u;
     makocode::ByteBuffer password_buffer;
     bool have_password = false;
@@ -21678,6 +21680,10 @@ static int command_decode(int arg_count, char** args) {
         const char* arg = args[i];
         if (ascii_equals_token(arg, ascii_length(arg), "--decoded-file")) {
             decoded_file_requested = true;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--decoded-stdout")) {
+            decoded_stdout_requested = true;
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
@@ -21771,6 +21777,10 @@ static int command_decode(int arg_count, char** args) {
         }
     input_files[file_count++] = arg;
 }
+    if (decoded_stdout_requested && (decoded_file_requested || debug_requested)) {
+        console_line(2, "decode: --decoded-stdout cannot be combined with --decoded-file or --debug");
+        return 1;
+    }
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "decode")) {
             return 1;
@@ -22280,15 +22290,16 @@ retry_decode:
         u64_to_ascii(ecc_stats.corrected_symbols, count_buffer, sizeof(count_buffer));
         u64_to_ascii(corrected_bits, bits_buffer, sizeof(bits_buffer));
         format_fixed_3(usage, percent_buffer, sizeof(percent_buffer));
-        console_write(1, "decode: ECC detected ");
-        console_write(1, count_buffer);
-        console_write(1, (ecc_stats.corrected_symbols == 1u) ? " symbol error (" : " symbol errors (");
-        console_write(1, bits_buffer);
-        console_write(1, (corrected_bits == 1u) ? " bit corrected, " : " bits corrected, ");
-        console_write(1, percent_buffer);
-        console_line(1, "% of available correction bits)");
+        int ecc_output = decoded_stdout_requested ? 2 : 1;
+        console_write(ecc_output, "decode: ECC detected ");
+        console_write(ecc_output, count_buffer);
+        console_write(ecc_output, (ecc_stats.corrected_symbols == 1u) ? " symbol error (" : " symbol errors (");
+        console_write(ecc_output, bits_buffer);
+        console_write(ecc_output, (corrected_bits == 1u) ? " bit corrected, " : " bits corrected, ");
+        console_write(ecc_output, percent_buffer);
+        console_line(ecc_output, "% of available correction bits)");
     }
-    if (decoded_file_requested) {
+    if (decoded_file_requested || decoded_stdout_requested) {
         const makocode::ByteBuffer& archive = decoder.payload;
         makocode::ByteBuffer decoded;
         bool ok = decoded.append_ascii("MAKOCODE-DECODED\n");
@@ -22413,6 +22424,13 @@ retry_decode:
         }
         if (cursor != archive.size) ok = false;
         ok = ok && decoded.append_ascii("end-archive\nend\n");
+        if (decoded_stdout_requested) {
+            if (!ok || !write_all_fd(1, decoded.data, decoded.size)) {
+                console_line(2, "decode: failed to write decoded stdout");
+                return 1;
+            }
+            return 0;
+        }
         time_t now = time(0);
         struct tm* local = localtime(&now);
         char filename[64];

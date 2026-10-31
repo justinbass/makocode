@@ -30,6 +30,19 @@ PY
 mkdir -p "$work/stdin_out"
 cat "$work"/pages/*.ppm | "$bin" decode --decoded-file --password=secret --output-dir="$work/stdin_out" >/dev/null
 cmp "$work"/out/*.txt "$work"/stdin_out/*.txt
+mkdir -p "$work/stdout_cwd"
+(cd "$work/stdout_cwd" && "$bin" decode --decoded-stdout --password=secret --output-dir="$work/not_created" "$work"/pages/*.ppm >"$work/stdout.txt" 2>"$work/stdout.err")
+cmp "$work"/out/*.txt "$work/stdout.txt"
+[[ ! -e "$work/not_created" && -z $(ls -A "$work/stdout_cwd") ]]
+cat "$work"/pages/*.ppm | "$bin" decode --decoded-stdout --password=secret >"$work/stdout_stdin.txt" 2>/dev/null
+cmp "$work/stdout.txt" "$work/stdout_stdin.txt"
+for option in --decoded-file --debug; do
+    if (cd "$work/stdout_cwd" && "$bin" decode --decoded-stdout "$option" "$work"/pages/*.ppm >"$work/conflict.txt" 2>/dev/null); then
+        echo "decoded stdout unexpectedly accepted $option" >&2
+        exit 1
+    fi
+    [[ ! -s "$work/conflict.txt" && -z $(ls -A "$work/stdout_cwd") ]]
+done
 if "$bin" decode --decoded-file --password=secret --output-dir="$work/input/blank" "$work"/pages/*.ppm >/dev/null 2>&1; then
     echo 'decoded file unexpectedly written to a regular file' >&2
     exit 1
