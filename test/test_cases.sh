@@ -341,3 +341,6 @@ test_case 0080_decode_scan_off_center_noise script "Recoverable scan with off-ce
 
 test_case 0081_decode_short_length_header script "Decode low-resolution affine scans and recover a damaged frame-length bit" \
     test_decode_short_length_header.sh
+
+test_case 0082_decode_lowres_rotated_scan script "Generated rotated scan below 2 pixels per module round-trips" \
+    test_decode_lowres_rotated_scan.sh

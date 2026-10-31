@@ -12827,6 +12827,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                                         tile_palette_text,
                                                                         &found_affine,
                                                                         sample_scaled_cells);
+            if (affine_tile_found) {
+                affine_data_height_hint = data_height_hint;
+            }
         }
         if (affine_tile_found && affine_data_height_hint != data_height_hint &&
             fabs(found_affine.angle_rad * (180.0 / 3.14159265358979323846)) < 0.5) {
@@ -12852,7 +12855,61 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             }
         }
         if (affine_tile_found) {
-            
+            double found_angle_degrees = found_affine.angle_rad *
+                                         (180.0 / 3.14159265358979323846);
+            if (width < 400u && height < 400u &&
+                found_affine.pitch_pixels > 1.3 && found_affine.pitch_pixels <= 2.1 &&
+                fabs(found_angle_degrees) >= 0.5) {
+                MetadataTile::AffineParams best_affine = found_affine;
+                MetadataTile::Values best_values = tile_values;
+                makocode::ByteBuffer best_palette_text;
+                double best_border_mismatch = 1.0;
+                for (double pitch = found_affine.pitch_pixels - 0.012;
+                     pitch <= found_affine.pitch_pixels + 0.012 + 1e-9;
+                     pitch += 0.002) {
+                    if (!(pitch > 0.0)) continue;
+                    for (double angle_degrees = found_angle_degrees - 0.3;
+                         angle_degrees <= found_angle_degrees + 0.3 + 1e-9;
+                         angle_degrees += 0.05) {
+                        for (double center_dx = -0.5; center_dx <= 0.5001; center_dx += 0.25) {
+                            for (double center_dy = -0.5; center_dy <= 0.5001; center_dy += 0.25) {
+                                MetadataTile::AffineParams candidate = found_affine;
+                                candidate.pitch_pixels = pitch;
+                                candidate.pitch_x_pixels = pitch;
+                                candidate.pitch_y_pixels = pitch;
+                                candidate.angle_rad = angle_degrees *
+                                                      (3.14159265358979323846 / 180.0);
+                                candidate.center_x += center_dx;
+                                candidate.center_y += center_dy;
+                                MetadataTile::Values candidate_values;
+                                makocode::ByteBuffer candidate_palette_text;
+                                double border_mismatch = 1.0;
+                                if (!MetadataTile::decode_tile_affine(pixel_data,
+                                                                      (u32)width,
+                                                                      (u32)height,
+                                                                      affine_data_height_hint,
+                                                                      candidate,
+                                                                      candidate_values,
+                                                                      candidate_palette_text,
+                                                                      &border_mismatch,
+                                                                      sample_scaled_cells) ||
+                                    border_mismatch >= best_border_mismatch) {
+                                    continue;
+                                }
+                                best_border_mismatch = border_mismatch;
+                                best_affine = candidate;
+                                best_values = candidate_values;
+                                byte_buffer_move(best_palette_text, candidate_palette_text);
+                            }
+                        }
+                    }
+                }
+                if (best_border_mismatch < 0.12) {
+                    found_affine = best_affine;
+                    tile_values = best_values;
+                    byte_buffer_move(tile_palette_text, best_palette_text);
+                }
+            }
             if (metadata_tile_plausible(tile_values, (u32)width, (u32)height)) {
                 tile_available = true;
                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
