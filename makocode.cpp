@@ -9523,8 +9523,8 @@ namespace MetadataTile {
             }
         }
 
-        int center_offset_x[4225];
-        int center_offset_y[4225];
+        int center_offset_x[16641];
+        int center_offset_y[16641];
         u32 center_offset_count = 0u;
         bool have_best = false;
         bool have_verified_candidate = false;
@@ -9542,7 +9542,7 @@ namespace MetadataTile {
                    !have_verified_candidate) {
                 center_offset_count = 0u;
                 if (compact_image_search) {
-                    for (int radius = 0; radius <= 32; ++radius) {
+                    for (int radius = 0; radius <= (pitch <= 1.25 ? 64 : 32); ++radius) {
                         for (int dy = -radius; dy <= radius; ++dy) {
                             for (int dx = -radius; dx <= radius; ++dx) {
                                 int abs_dx = dx < 0 ? -dx : dx;
@@ -9572,8 +9572,11 @@ namespace MetadataTile {
                      ++center_index) {
                     int dx = center_offset_x[center_index];
                     int dy = center_offset_y[center_index];
-                    double cx = base_center_x + (double)dx;
-                    double cy = base_center_y + (double)dy;
+                    // Near one pixel per module, integer centers can miss the entire
+                    // valid alignment interval. Search half-pixel phases as well.
+                    double center_step = compact_image_search && pitch <= 1.25 ? 0.5 : 1.0;
+                    double cx = base_center_x + (double)dx * center_step;
+                    double cy = base_center_y + (double)dy * center_step;
                     for (u32 angle_index = 0u;
                          angle_index < angle_candidate_count && !have_verified_candidate;
                          ++angle_index) {
@@ -12534,6 +12537,10 @@ static bool validate_integer_scale(const u8* pixels,
     return true;
 }
 
+static bool is_safe_archive_path(const char*, usize);
+static bool frame_bits_to_payload(const u8*, u64, const PpmParserState&,
+                                  makocode::ByteBuffer&, u64&, u64*);
+
 static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    const ImageMappingConfig& overrides,
                                    makocode::ByteBuffer& frame_bits,
@@ -14125,7 +14132,7 @@ struct RotationEstimateCandidate {
         width < 400u && height < 400u &&
         expected_width > 0u && expected_height > 0u &&
         expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull &&
-        tile_scale > 1.005 && tile_scale <= 4.20) {
+        tile_scale >= 0.90 && tile_scale <= 4.20) {
         u32 logical_data_height = (u32)expected_height;
         if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
             logical_data_height -= (u32)state.footer_rows_value;
@@ -16576,6 +16583,140 @@ struct RotationEstimateCandidate {
 
     if (!append_debug_fiducials()) {
         return false;
+    }
+
+    // At approximately one scan pixel per module, optical mixing can erase
+    // individual payload bits even though the repeated, RS-protected tile reads.
+    // Retry bounded optical/registration hypotheses; accept only a complete archive.
+    if (tile_affine_hint_available && tile_values.palette_count == 2u &&
+        tile_scale >= 0.95 && tile_scale <= 1.10 &&
+        logical_width <= 96u && logical_height <= 96u &&
+        width > logical_width && height > logical_height &&
+        tile_values.page_count == 1u && !tile_values.ecc_enabled) {
+        auto complete_archive = [&](const makocode::ByteBuffer& archive) -> bool {
+            if (archive.size < 12u || memcmp(archive.data, "MKARCH01", 8u) != 0) return false;
+            usize cursor = 12u;
+            u32 entries = read_le_u32(archive.data + 8u);
+            for (u32 entry = 0u; entry < entries; ++entry) {
+                if (cursor > archive.size || archive.size - cursor < 5u) return false;
+                u8 type = archive.data[cursor++];
+                u32 length = read_le_u32(archive.data + cursor);
+                cursor += 4u;
+                if (type > 1u || !length || length > archive.size - cursor ||
+                    !is_safe_archive_path((const char*)archive.data + cursor, length)) return false;
+                cursor += length;
+                if (type == 0u) {
+                    if (archive.size - cursor < 8u) return false;
+                    u64 size = read_le_u64(archive.data + cursor);
+                    cursor += 8u;
+                    if (size > archive.size - cursor) return false;
+                    cursor += (usize)size;
+                }
+            }
+            return cursor == archive.size;
+        };
+        makocode::ByteBuffer observed;
+        u64 observed_bits = 0u;
+        makocode::DecoderContext observed_decoder;
+        bool observed_valid = frame_bits_to_payload(frame_bits.data, frame_bit_count,
+            state, observed, observed_bits, 0) && observed_bits &&
+            observed_decoder.parse(observed.data, observed_bits, 0, 0) &&
+            complete_archive(observed_decoder.payload);
+        if (!observed_valid) {
+            const u8* original = affine_source_pixels.data ? affine_source_pixels.data : pixel_data;
+            makocode::ByteBuffer sharpened;
+            if (!sharpened.ensure((usize)width * height * 3u)) return false;
+            sharpened.size = (usize)width * height * 3u;
+            MetadataTile::Placement placement = MetadataTile::compute_tile_placement(
+                (u32)logical_width, (u32)logical_height);
+            double origin_x = tile_affine_hint.center_x - tile_scale *
+                ((double)placement.x0 + MetadataTile::TILE_SIDE * 0.5) + 0.5;
+            double origin_y = tile_affine_hint.center_y - tile_scale *
+                ((double)placement.y0 + MetadataTile::TILE_SIDE * 0.5) + 0.5;
+            const double shifts[] = {0.0, 0.25, -0.25, 0.5, -0.5};
+            const double pitches[] = {0.0, 0.005, -0.005, 0.01, -0.01, 0.02, -0.02};
+            const double strengths[] = {0.0, 0.25, 0.5, 1.0};
+            double samples[96u * 96u];
+            u8 raster[96u * 96u * 3u];
+            bool recovered = false;
+            for (double strength : strengths) {
+                if (recovered) break;
+                for (u32 y = 0u; y < height; ++y) for (u32 x = 0u; x < width; ++x) {
+                    usize i = ((usize)y * width + x) * 3u;
+                    double value = MetadataTile::rgb_luminance_u8(original[i], original[i+1u], original[i+2u]);
+                    double neighbors = 0.0;
+                    for (u32 direction = 0u; direction < 4u; ++direction) {
+                        u32 nx = direction == 0u && x ? x-1u : direction == 1u && x+1u < width ? x+1u : x;
+                        u32 ny = direction == 2u && y ? y-1u : direction == 3u && y+1u < height ? y+1u : y;
+                        usize j = ((usize)ny * width + nx) * 3u;
+                        neighbors += MetadataTile::rgb_luminance_u8(original[j], original[j+1u], original[j+2u]);
+                    }
+                    u8 sharp = (u8)clamp_double(value + strength * (4.0 * value - neighbors), 0.0, 255.0);
+                    sharpened.data[i] = sharpened.data[i+1u] = sharpened.data[i+2u] = sharp;
+                }
+                for (double angle_delta : shifts) {
+                  if (recovered) break;
+                  double angle = tile_affine_hint.angle_rad + angle_delta * (3.14159265358979323846 / 180.0);
+                  double c = cos(angle), sn = sin(angle);
+                  for (double pitch_delta : pitches) {
+                   if (recovered) break;
+                   double pitch = tile_scale + pitch_delta;
+                   for (double dy : shifts) {
+                    if (recovered) break;
+                    for (double dx : shifts) {
+                     if (recovered) break;
+                     double low = 255.0, high = 0.0;
+                     for (u32 y = 0u; y < logical_height; ++y) for (u32 x = 0u; x < logical_width; ++x) {
+                        double value = MetadataTile::sample_luminance_bilinear(sharpened.data,
+                            (u32)width, (u32)height,
+                            origin_x + dx + pitch * (c*(x+0.5)-sn*(y+0.5)) - 0.5,
+                            origin_y + dy + pitch * (sn*(x+0.5)+c*(y+0.5)) - 0.5);
+                        samples[y * logical_width + x] = value;
+                        if (value < low) low = value;
+                        if (value > high) high = value;
+                     }
+                     for (u32 level = 2u; level <= 12u; ++level) {
+                        double threshold = low + (high-low) * (double)level / 16.0;
+                        for (usize i = 0u; i < logical_width*logical_height; ++i) {
+                            u8 value = samples[i] < threshold ? 0u : 255u;
+                            raster[i*3u] = raster[i*3u+1u] = raster[i*3u+2u] = value;
+                        }
+                        MetadataTile::Values candidate_values;
+                        makocode::ByteBuffer palette;
+                        if (!MetadataTile::decode_tile(raster, (u32)logical_width, (u32)logical_height,
+                            (u32)logical_height, placement, candidate_values, palette) ||
+                            candidate_values.encoded_header != tile_values.encoded_header ||
+                            candidate_values.encoded_metadata_size != tile_values.encoded_metadata_size ||
+                            memcmp(candidate_values.encoded_metadata, tile_values.encoded_metadata,
+                                   tile_values.encoded_metadata_size) != 0) continue;
+                        makocode::ByteBuffer normalized;
+                        char header[64];
+                        snprintf(header, sizeof(header), "P3\n%u %u\n255\n", (u32)logical_width, (u32)logical_height);
+                        if (!normalized.append_ascii(header)) return false;
+                        for (usize i = 0u; i < logical_width*logical_height; ++i) {
+                            if (!normalized.append_ascii(raster[i*3u] ? "255 255 255\n" : "0 0 0\n")) return false;
+                        }
+                        makocode::ByteBuffer candidate_frame, candidate_payload;
+                        PpmParserState candidate_state;
+                        u64 candidate_bits = 0u, payload_bits = 0u;
+                        // The normalized page has native dimensions, so this retry cannot recurse.
+                        if (!ppm_extract_frame_bits(normalized, overrides, candidate_frame, candidate_bits,
+                            candidate_state, true) || !frame_bits_to_payload(candidate_frame.data,
+                            candidate_bits, candidate_state, candidate_payload, payload_bits, 0) || !payload_bits) continue;
+                        makocode::DecoderContext candidate_decoder;
+                        if (!candidate_decoder.parse(candidate_payload.data, payload_bits, 0, 0)) continue;
+                        if (!complete_archive(candidate_decoder.payload)) continue;
+                        byte_buffer_move(frame_bits, candidate_frame);
+                        frame_bit_count = candidate_bits;
+                        recovered = true;
+                        break;
+                     }
+                    }
+                   }
+                  }
+                }
+            }
+        }
     }
 
     metadata_out = state;

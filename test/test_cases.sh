@@ -353,3 +353,15 @@ test_case 0084_decode_legacy_metadata script "Damaged schema 2 metadata round-tr
 
 test_case 0085_decode_scan_registration script "Offset scan with off-center noise preserves the archive" \
     test_decode_scan_registration.sh
+
+test_case 0086_decode_unit_scale_translation script "Unit-scale padded scan recovers half-pixel tile centers and translation" \
+    test_decode_unit_scale_translation.sh
+
+test_case 0087_decode_unit_scale_edge_bleed script "Unit-scale ink bleed must not override decoded tile geometry" \
+    test_decode_unit_scale_translation.sh --edge-bleed
+
+test_case 0088_decode_unit_scale_optical_blur script "Legacy unit-scale scan with optical blur preserves its archive" \
+    test_decode_unit_scale_translation.sh --optical-blur --legacy
+
+test_case 0089_decode_current_unit_scale_optical_blur script "Current-schema unit-scale optical blur preserves its archive" \
+    test_decode_unit_scale_translation.sh --optical-blur
