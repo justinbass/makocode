@@ -16585,11 +16585,11 @@ struct RotationEstimateCandidate {
         return false;
     }
 
-    // At approximately one scan pixel per module, optical mixing can erase
+    // Below two scan pixels per module, optical mixing can erase
     // individual payload bits even though the repeated, RS-protected tile reads.
     // Retry bounded optical/registration hypotheses; accept only a complete archive.
     if (tile_affine_hint_available && tile_values.palette_count == 2u &&
-        tile_scale >= 0.95 && tile_scale <= 1.10 &&
+        tile_scale >= 0.95 && tile_scale < 2.0 &&
         logical_width <= 96u && logical_height <= 96u &&
         width > logical_width && height > logical_height &&
         tile_values.page_count == 1u && !tile_values.ecc_enabled) {

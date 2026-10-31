@@ -365,3 +365,9 @@ test_case 0088_decode_unit_scale_optical_blur script "Legacy unit-scale scan wit
 
 test_case 0089_decode_current_unit_scale_optical_blur script "Current-schema unit-scale optical blur preserves its archive" \
     test_decode_unit_scale_translation.sh --optical-blur
+
+test_case 0090_decode_lowres_optical_blur script "Legacy 1.5x scan recovers from optical blur and expanded ink bounds" \
+    test_decode_lowres_optical_blur.sh
+
+test_case 0091_decode_current_lowres_optical_blur script "Current-schema 1.5x scan recovers from optical blur and expanded ink bounds" \
+    test_decode_lowres_optical_blur.sh --current
