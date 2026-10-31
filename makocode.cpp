@@ -6868,6 +6868,7 @@ struct ReedSolomonTables {
     bool initialized;
     u8 exp_table[512];
     u8 log_table[256];
+    u8 product[256][256];
 };
 
 static ReedSolomonTables g_rs_tables;
@@ -6890,6 +6891,12 @@ static void rs_ensure_tables() {
         g_rs_tables.exp_table[i] = g_rs_tables.exp_table[i - RS_FIELD_SIZE];
     }
     g_rs_tables.log_table[0] = 0u;
+    for (u16 a = 1u; a < 256u; ++a) {
+        for (u16 b = 1u; b < 256u; ++b) {
+            u16 sum = (u16)g_rs_tables.log_table[a] + (u16)g_rs_tables.log_table[b];
+            g_rs_tables.product[a][b] = g_rs_tables.exp_table[sum];
+        }
+    }
     g_rs_tables.initialized = true;
 }
 
@@ -6898,8 +6905,7 @@ static inline u8 gf_mul(u8 a, u8 b) {
         return 0u;
     }
     rs_ensure_tables();
-    u16 log_sum = (u16)g_rs_tables.log_table[a] + (u16)g_rs_tables.log_table[b];
-    return g_rs_tables.exp_table[log_sum % RS_FIELD_SIZE];
+    return g_rs_tables.product[a][b];
 }
 
 static inline u8 gf_div(u8 a, u8 b) {
@@ -7043,8 +7049,9 @@ static bool rs_compute_syndromes(const u8* codeword,
     for (u16 i = 0u; i < parity_symbols; ++i) {
         u8 evaluation = 0u;
         u8 root = gf_pow_alpha(i + 1u);
+        const u8* products = g_rs_tables.product[root];
         for (u16 j = 0u; j < codeword_length; ++j) {
-            evaluation = gf_mul(evaluation, root) ^ codeword[j];
+            evaluation = products[evaluation] ^ codeword[j];
         }
         syndromes[i] = evaluation;
         if (evaluation) {
@@ -8879,12 +8886,14 @@ namespace MetadataTile {
         // Threshold from inner region statistics (like decode_tile).
         double min_l = 255.0;
         double max_l = 0.0;
+        double inner_luminance[TILE_SIDE * TILE_SIDE];
         for (u32 y = 0u; y < TILE_SIDE; ++y) {
             for (u32 x = 0u; x < TILE_SIDE; ++x) {
                 if (x < TILE_BORDER || y < TILE_BORDER || x >= TILE_SIDE - TILE_BORDER || y >= TILE_SIDE - TILE_BORDER) {
                     continue;
                 }
                 double l = module_luminance(x, y);
+                inner_luminance[y * TILE_SIDE + x] = l;
                 if (l < min_l) min_l = l;
                 if (l > max_l) max_l = l;
             }
@@ -9069,6 +9078,9 @@ namespace MetadataTile {
                                     affine.pitch_pixels > 1.005 && affine.pitch_pixels <= 1.25)
                                        ? 2u
                                        : 1u;
+        if (codeword.size > 255u) return false;
+        u8 attempted_codewords[66][255];
+        u32 attempted_count = 0u;
         for (u32 sample_mode = 0u;
              sample_mode < payload_sample_modes && (!rs_valid || expected_crc != computed_crc);
              ++sample_mode) {
@@ -9086,7 +9098,7 @@ namespace MetadataTile {
                 for (u32 inner_x = TILE_BORDER; inner_x < TILE_SIDE - TILE_BORDER; ++inner_x) {
                     if (inner_x >= hole_x0 && inner_x < hole_x1 && inner_y >= hole_y0 && inner_y < hole_y1) continue;
                     if (module_sample_cursor >= total_module_samples) break;
-                    double module_sample_luminance = module_luminance(inner_x, inner_y);
+                    double module_sample_luminance = inner_luminance[inner_y * TILE_SIDE + inner_x];
                     accumulated_luminance += module_sample_luminance;
                     if ((module_sample_cursor % payload_repetitions) == (payload_repetitions / 2u)) {
                         center_repetition_luminance = module_sample_luminance;
@@ -9111,6 +9123,15 @@ namespace MetadataTile {
             }
             if (module_sample_cursor != total_module_samples || bit_cursor != total_bits) return false;
 
+            bool already_attempted = false;
+            for (u32 i = 0u; i < attempted_count; ++i) {
+                if (memcmp(attempted_codewords[i], codeword.data, codeword.size) == 0) {
+                    already_attempted = true;
+                    break;
+                }
+            }
+            if (already_attempted) continue;
+            memcpy(attempted_codewords[attempted_count++], codeword.data, codeword.size);
             corrections = 0u;
             rs_valid = rs_decode_with_parity(codeword, (usize)meta_len, parity_bytes, corrections);
             expected_crc = codeword.data[meta_len - 1u];
