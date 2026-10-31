@@ -12544,6 +12544,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     // Pixel-carried metadata (preferred): 48x48 2-color metadata tile.
     const char* disable_tile_env = getenv("MAKO_DISABLE_METADATA_TILE");
     bool tile_available = false;
+    bool native_tile_available = false;
     MetadataTile::Values tile_values;
     makocode::ByteBuffer tile_palette_text;
     auto metadata_tile_plausible = [&](const MetadataTile::Values& values,
@@ -12583,6 +12584,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     continue;
                 }
                 tile_available = true;
+                native_tile_available = tile_values.page_width_pixels == width &&
+                                        tile_values.page_height_pixels == height;
                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
                 
                 break;
@@ -12717,7 +12720,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     // If the tile is present but the page was scaled/rotated, the axis-aligned 1px/module sampler
     // won't see it. Fall back to an affine tile decode centered near the expected location.
     if ((!tile_available ||
-         (!tile_affine_hint_available && width < 400u && height < 400u)) &&
+         (!native_tile_available && !tile_affine_hint_available && width < 400u && height < 400u)) &&
         !(disable_tile_env && disable_tile_env[0]) &&
         width <= 0xFFFFFFFFull &&
         height <= 0xFFFFFFFFull) {
