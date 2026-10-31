@@ -11,7 +11,7 @@ Then you, the master agent, can combine all those into ./todo2.txt.
 You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly 866 lines in there, basically one per block, but it's ok if we were a bit off too.
 
 - Run physical tests, against calibration script
-- All distortions test (scale 2.5x, border/dirt, stretch, wavy) in one large image per color
+- Remove LZMA/compression from header
 - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
