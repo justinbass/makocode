@@ -9,6 +9,7 @@ LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
 GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category
 
 STATUS ?= ./test/make_step.sh
+TEST_VERBOSE ?= 0
 
 TEST_CASES := $(shell bash ./test/run_test_case.sh --list)
 TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
@@ -34,7 +35,22 @@ test-setup:
 	@$(STATUS) test "prepare test suite" bash ./test/run_test_suite.sh --prepare
 
 $(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform
-	@bash ./test/run_test_case.sh --run "$*"
+	@if [ "$(TEST_VERBOSE)" = 1 ]; then \
+		bash ./test/run_test_case.sh --run "$*"; \
+	else \
+		log="test_output/test_logs/$*.log"; \
+		pass=''; fail=''; reset=''; \
+		if [ -t 1 ] && [ -z "$${NO_COLOR:-}" ]; then \
+			pass=$$(printf '\033[32m'); fail=$$(printf '\033[31m'); reset=$$(printf '\033[0m'); \
+		fi; \
+		if bash ./test/run_test_case.sh --run "$*" >"$$log" 2>&1; then \
+			printf '%s[PASS]%s %s\n' "$$pass" "$$reset" "$*"; \
+		else \
+			status=$$?; \
+			printf '%s[FAIL]%s %s (exit %s; %s)\n' "$$fail" "$$reset" "$*" "$$status" "$$log" >&2; \
+			exit "$$status"; \
+		fi; \
+	fi
 
 test-finalize: $(TEST_CASE_TARGETS)
 	@$(STATUS) test "collect visual artifacts" bash ./test/run_test_suite.sh --finalize
@@ -51,6 +67,7 @@ clean:
 	@$(STATUS) clean "binary" rm -f makocode
 	@$(STATUS) clean "symbol bundle" rm -rf makocode.dSYM
 	@$(STATUS) clean "ppm_transform helper" rm -f test/ppm_transform
+	@$(STATUS) clean "ppm_transform symbol bundle" rm -rf test/ppm_transform.dSYM
 	@$(STATUS) clean "test artifacts" rm -rf test_output
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
 	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno test/*.gcda test/*.gcno $(LCOV_REPORT)

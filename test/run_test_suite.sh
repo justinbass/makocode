@@ -28,6 +28,7 @@ prepare_suite() {
     unset MAKO_TEST_SEED_REPORTED
     mako_test_seed_init "$repo_root"
     rm -rf "$repo_root/test_output/visual"
+    mkdir -p "$repo_root/test_output/test_logs"
 }
 
 finalize_suite() {

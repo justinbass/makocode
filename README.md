@@ -41,8 +41,9 @@ the CLI output image remain in `test_output/` and are linked from `test_output/v
 relative symlinks.
 
 Test cases are registered in `test/test_cases.sh`. Run independent cases in
-parallel with GNU Make, for example `make -j test` to allow up to four cases
-at once.
+parallel with GNU Make using `make -j test`. Each completed case prints one
+result line; its full output is saved in `test_output/test_logs/`. Use `make test TEST_VERBOSE=1`
+to stream full output instead.
 
 Each `make test` run prints its master seed and writes it to `test_output/test_seed.txt`.
 Repeat a randomized run with the same seed using:
