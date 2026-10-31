@@ -8508,7 +8508,7 @@ namespace MetadataTile {
                 return false;
             }
             u32 schema = (header_out >> 12) & 0x0Fu;
-            if (schema != TILE_SCHEMA_VERSION) return false;
+            if (schema != TILE_SCHEMA_VERSION && schema != 2u) return false;
             u32 meta_len = (header_out >> 4) & 0xFFu;
             u32 palette_count = header_out & 0x0Fu;
             if (palette_count < 2u || palette_count > MAX_CUSTOM_PALETTE_COLORS) return false;
@@ -8598,6 +8598,8 @@ namespace MetadataTile {
         reader.reset(codeword.data, (u64)(meta_len - 1u) * 8u);
         u64 magic32 = reader.read_bits(32u);
         if (reader.failed || magic32 != 0x4D4B4D44u) return false;
+        // Schema 2 stored its version in the payload as well as the tile header.
+        if (((header >> 12) & 0x0Fu) == 2u && reader.read_bits(8u) != 2u) return false;
         u64 pal_count = reader.read_bits(8u);
         if (reader.failed || pal_count != (u64)palette_count) return false;
         out_values.palette_count = (u32)pal_count;
@@ -8780,7 +8782,7 @@ namespace MetadataTile {
             conf_avg = conf_sum / (double)TILE_HEADER_BITS;
             u16 magic16 = (u16)((header_tmp >> 16) & 0xFFFFu);
             u32 schema = (header_tmp >> 12) & 0x0Fu;
-            if (magic16 != (u16)0x4D4Du || schema != TILE_SCHEMA_VERSION) {
+            if (magic16 != (u16)0x4D4Du || (schema != TILE_SCHEMA_VERSION && schema != 2u)) {
                 if (!allow_incomplete_palette) return false;
                 u32 signature_mask = 0xFFFFF000u;
                 u32 expected_signature = ((u32)0x4D4Du << 16) | (TILE_SCHEMA_VERSION << 12);
@@ -9008,15 +9010,20 @@ namespace MetadataTile {
                 header_out |= ((u32)bit_value << bit);
             }
             u32 signature_mask = 0xFFFFF000u;
-            u32 expected_signature = ((u32)0x4D4Du << 16) | (TILE_SCHEMA_VERSION << 12);
-            u32 difference = (header_out ^ expected_signature) & signature_mask;
-            u32 signature_errors = 0u;
-            while (difference) {
-                signature_errors += difference & 1u;
-                difference >>= 1u;
+            u32 best_signature = 0u;
+            u32 best_errors = 21u;
+            for (u32 schema = 1u; schema <= 2u; ++schema) {
+                u32 signature = ((u32)0x4D4Du << 16) | (schema << 12);
+                u32 difference = (header_out ^ signature) & signature_mask;
+                u32 errors = 0u;
+                while (difference) {
+                    errors += difference & 1u;
+                    difference >>= 1u;
+                }
+                if (errors < best_errors) { best_errors = errors; best_signature = signature; }
             }
-            if (signature_errors > 2u) return false;
-            header_out = (header_out & ~signature_mask) | expected_signature;
+            if (best_errors > 2u) return false;
+            header_out = (header_out & ~signature_mask) | best_signature;
             u32 meta_len = (header_out >> 4) & 0xFFu;
             u32 palette_count = header_out & 0x0Fu;
             u32 parity_bytes = tile_rs_parity_bytes(palette_count);
@@ -9209,6 +9216,8 @@ namespace MetadataTile {
         reader.reset(codeword.data, (u64)(meta_len - 1u) * 8u);
         u64 magic32 = reader.read_bits(32u);
         if (reader.failed || magic32 != 0x4D4B4D44u) return false;
+        // Schema 2 stored its version in the payload as well as the tile header.
+        if (((header >> 12) & 0x0Fu) == 2u && reader.read_bits(8u) != 2u) return false;
         u64 pal_count = reader.read_bits(8u);
         if (reader.failed || pal_count != (u64)palette_count) return false;
         out_values.palette_count = (u32)pal_count;

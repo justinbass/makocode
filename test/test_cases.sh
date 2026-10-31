@@ -347,3 +347,6 @@ test_case 0082_decode_lowres_rotated_scan script "Generated rotated scan below 2
 
 test_case 0083_decoded_file script "Decoded file retains metadata and archive bytes" \
     test_decoded_file.sh
+
+test_case 0084_decode_legacy_metadata script "Damaged schema 2 metadata round-trip" \
+    test_decode_legacy_metadata.sh
