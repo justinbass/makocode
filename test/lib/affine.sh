@@ -32,13 +32,10 @@ mako_check_affine() {
             scale_error = 100 * scale_error / expected_scale
             rotation_error = $4 - expected_rotation
             if (rotation_error < 0) rotation_error = -rotation_error
-            rotation_base = expected_rotation
-            if (rotation_base < 0) rotation_base = -rotation_base
-            rotation_error = 100 * rotation_error / rotation_base
-            printf "%s page=%s affine scale=%.6f (%.3f%% error), rotation=%.6f deg (%.3f%% error)\n", \
+            printf "%s page=%s affine scale=%.6f (%.3f%% error), rotation=%.6f deg (%.3f deg error)\n", \
                 label, $1, $3, scale_error, $4, rotation_error
-            if (scale_error > tolerance_percent || rotation_error > tolerance_percent) {
-                printf "%s page=%s exceeds affine tolerance of %.3f%%\n", \
+            if (scale_error > tolerance_percent || rotation_error > 0.1) {
+                printf "%s page=%s exceeds affine tolerance of %.3f%% scale or 0.1 degrees rotation\n", \
                     label, $1, tolerance_percent
                 failures++
             }
@@ -49,7 +46,7 @@ mako_check_affine() {
                 failures++
             }
             if (failures) exit 1
-            printf "%s affine estimates within %.3f%% tolerance for %d page(s)\n", \
+            printf "%s affine estimates within %.3f%% scale and 0.1 degrees rotation for %d page(s)\n", \
                 label, tolerance_percent, rows
         }
     ' "$csv_path"

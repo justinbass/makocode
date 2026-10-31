@@ -14125,7 +14125,9 @@ struct RotationEstimateCandidate {
             if (y > max_y) max_y = y;
         }
         bool bounds_refined = false;
-        if (min_x < (u32)width && min_y < (u32)height && min_x > 0u && min_y > 0u &&
+        // Checker damage can erase edge ink and make the inferred bounds too small.
+        if (!alternating_white_damage &&
+            min_x < (u32)width && min_y < (u32)height && min_x > 0u && min_y > 0u &&
             max_x + 1u < (u32)width && max_y + 1u < (u32)height) {
             double bounds_scale_x = ((double)max_x - (double)min_x + 1.0) /
                                     (double)expected_width;
@@ -14159,8 +14161,8 @@ struct RotationEstimateCandidate {
         // of propagating a small pitch error across the payload.
         if (!bounds_refined && tile_available &&
             tile_scale > 1.5 && tile_scale < 4.20 &&
-            fabs(state.affine_transform.a01) < 0.001 &&
-            fabs(state.affine_transform.a10) < 0.001) {
+            fabs(state.affine_transform.a01) < (alternating_white_damage ? 0.01 : 0.001) &&
+            fabs(state.affine_transform.a10) < (alternating_white_damage ? 0.01 : 0.001)) {
             u32 logical_data_height = (u32)expected_height;
             if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
                 logical_data_height -= (u32)state.footer_rows_value;
@@ -14209,6 +14211,10 @@ struct RotationEstimateCandidate {
                                     double bottom = top + 1.0 / candidate[1];
                                     if (top < 0.0 || bottom >= MetadataTile::TILE_SIDE) continue;
                                     for (u32 x = 0u; x < (u32)width; ++x) {
+                                        // Fit only pixels untouched by the checker damage.
+                                        if (alternating_white_damage &&
+                                            white_pixels_by_parity[(x + y) & 1u] ==
+                                                pixels_by_parity[(x + y) & 1u]) continue;
                                         double left = ((double)x - 0.5 - candidate[2]) / candidate[0] +
                                                       MetadataTile::TILE_SIDE * 0.5;
                                         double right = left + 1.0 / candidate[0];
@@ -14249,6 +14255,10 @@ struct RotationEstimateCandidate {
                     }
                 }
                 state.affine_transform.a00 = fitted[0];
+                if (alternating_white_damage) {
+                    state.affine_transform.a01 = 0.0;
+                    state.affine_transform.a10 = 0.0;
+                }
                 state.affine_transform.a11 = fitted[1];
                 state.affine_transform.tx = fitted[2] - fitted[0] * tile_x;
                 state.affine_transform.ty = fitted[3] - fitted[1] * tile_y;
