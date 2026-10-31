@@ -7189,7 +7189,6 @@ static u16 rs_compute_locator_derivative(const u8* locator,
 }
 
 static bool rs_correct_errors(u8* codeword,
-                              u16 codeword_length,
                               u16 exponent_offset,
                               const u8* omega,
                               u16 omega_size,
@@ -7257,7 +7256,6 @@ static bool rs_decode_block(u8* block,
     u8 locator_derivative[RS_POLY_CAPACITY];
     u16 derivative_size = rs_compute_locator_derivative(locator, locator_size, locator_derivative);
     if (!rs_correct_errors(block,
-                           codeword_length,
                            exponent_offset,
                            evaluator,
                            evaluator_size,
@@ -7901,55 +7899,29 @@ namespace MetadataTile {
     static const u32 TILE_SIDE = 48u;
     static const u32 TILE_BORDER = 1u;
     static const u32 TILE_HEADER_BITS = 32u;
-    static const u32 TILE_HEADER_REPETITIONS_V1 = 5u;
     static const u32 TILE_HEADER_REPETITIONS = 5u;
-    static const u32 TILE_RS_PARITY_BYTES_V1 = 32u;
     static const u32 TILE_RS_PARITY_BYTES = 96u;
-    static const u32 TILE_RS_PARITY_BYTES_V2_TWO_COLOR = 12u;
-    static const u32 TILE_RS_PARITY_BYTES_V2_THREE_COLOR = 8u;
-    static const u32 TILE_RS_PARITY_BYTES_V2_FOUR_COLOR = 16u;
-    static const u32 TILE_SCHEMA_VERSION_V1 = 1u;
-    static const u32 TILE_SCHEMA_VERSION = 2u;
+    static const u32 TILE_RS_PARITY_BYTES_TWO_COLOR = 12u;
+    static const u32 TILE_RS_PARITY_BYTES_THREE_COLOR = 8u;
+    static const u32 TILE_RS_PARITY_BYTES_FOUR_COLOR = 16u;
+    static const u32 TILE_SCHEMA_VERSION = 1u;
 
     // Reserve a central hole to avoid high-risk collisions with fiducial pixels.
-    static const u32 TILE_HOLE_SIDE_V1 = 20u;
     static const u32 TILE_HOLE_SIDE = 15u;
 
-    static const usize TILE_PAYLOAD_MODULE_CAPACITY_V1 =
-        (usize)(TILE_SIDE - TILE_BORDER * 2u) * (usize)(TILE_SIDE - TILE_BORDER * 2u) -
-        (usize)TILE_HEADER_REPETITIONS_V1 * (usize)(TILE_SIDE - TILE_BORDER * 2u) -
-        (usize)TILE_HOLE_SIDE_V1 * (usize)TILE_HOLE_SIDE_V1;
     static const usize TILE_PAYLOAD_MODULE_CAPACITY =
         (usize)(TILE_SIDE - TILE_BORDER * 2u) * (usize)(TILE_SIDE - TILE_BORDER * 2u) -
         (usize)TILE_HEADER_REPETITIONS * (usize)(TILE_SIDE - TILE_BORDER * 2u) -
         (usize)TILE_HOLE_SIDE * (usize)TILE_HOLE_SIDE;
 
-    static u32 tile_header_repetitions(u32 schema_version) {
-        return (schema_version == TILE_SCHEMA_VERSION_V1) ? TILE_HEADER_REPETITIONS_V1
-                                                          : TILE_HEADER_REPETITIONS;
-    }
-
-    static usize tile_payload_module_capacity(u32 schema_version) {
-        return (schema_version == TILE_SCHEMA_VERSION_V1) ? TILE_PAYLOAD_MODULE_CAPACITY_V1
-                                                          : TILE_PAYLOAD_MODULE_CAPACITY;
-    }
-
-    static u32 tile_hole_side(u32 schema_version) {
-        return (schema_version == TILE_SCHEMA_VERSION_V1) ? TILE_HOLE_SIDE_V1 : TILE_HOLE_SIDE;
-    }
-
-    static u32 tile_rs_parity_bytes(u32 schema_version, u32 palette_count) {
-        if (schema_version == TILE_SCHEMA_VERSION_V1) {
-            return TILE_RS_PARITY_BYTES_V1;
-        }
-        if (palette_count <= 2u) return TILE_RS_PARITY_BYTES_V2_TWO_COLOR;
-        if (palette_count == 3u) return TILE_RS_PARITY_BYTES_V2_THREE_COLOR;
-        if (palette_count == 4u) return TILE_RS_PARITY_BYTES_V2_FOUR_COLOR;
+    static u32 tile_rs_parity_bytes(u32 palette_count) {
+        if (palette_count <= 2u) return TILE_RS_PARITY_BYTES_TWO_COLOR;
+        if (palette_count == 3u) return TILE_RS_PARITY_BYTES_THREE_COLOR;
+        if (palette_count == 4u) return TILE_RS_PARITY_BYTES_FOUR_COLOR;
         return TILE_RS_PARITY_BYTES;
     }
 
-    static u32 tile_payload_bit_repetitions(u32 schema_version, u32 palette_count) {
-        if (schema_version != TILE_SCHEMA_VERSION) return 1u;
+    static u32 tile_payload_bit_repetitions(u32 palette_count) {
         if (palette_count <= 3u) return 3u;
         return (palette_count == 4u) ? 2u : 1u;
     }
@@ -8164,10 +8136,8 @@ namespace MetadataTile {
     static bool encode_metadata_bytes(const Values& values, ByteBuffer& out) {
         out.release();
         BitWriter writer;
-        // Fixed header (byte-aligned):
-        // magic(32) "MKMD" | schema(8)
+        // Fixed header (byte-aligned): magic(32) "MKMD".
         if (!writer.write_bits((u64)0x4D4B4D44u, 32u)) return false; // 'M''K''M''D'
-        if (!writer.write_bits((u64)TILE_SCHEMA_VERSION, 8u)) return false;
 
         // Palette block (always present as a sanity check):
         // palette_count(8) then RGB triples.
@@ -8351,8 +8321,8 @@ namespace MetadataTile {
         ByteBuffer metadata;
         if (!encode_metadata_bytes(values, metadata)) return false;
         ByteBuffer codeword;
-        u32 parity_bytes = tile_rs_parity_bytes(TILE_SCHEMA_VERSION, values.palette_count);
-        u32 payload_repetitions = tile_payload_bit_repetitions(TILE_SCHEMA_VERSION, values.palette_count);
+        u32 parity_bytes = tile_rs_parity_bytes(values.palette_count);
+        u32 payload_repetitions = tile_payload_bit_repetitions(values.palette_count);
         if (!rs_encode_with_parity(metadata, parity_bytes, codeword)) return false;
         u32 meta_len = (u32)metadata.size;
         if (meta_len == 0u || meta_len > 255u) return false;
@@ -8446,7 +8416,6 @@ namespace MetadataTile {
             // Dark => 1
             return (l < threshold) ? 1u : 0u;
         };
-        u32 schema_version = 0u;
         auto decode_header = [&](bool invert_bits, u32& header_out) -> bool {
             header_out = 0u;
             for (u32 bit = 0u; bit < TILE_HEADER_BITS; ++bit) {
@@ -8477,7 +8446,6 @@ namespace MetadataTile {
             if (palette_count < 2u || palette_count > MAX_CUSTOM_PALETTE_COLORS) return false;
             if (meta_len == 0u || meta_len > 255u) return false;
             if (meta_len + TILE_RS_PARITY_BYTES > 255u) return false;
-            schema_version = schema;
             return true;
         };
 
@@ -8501,20 +8469,18 @@ namespace MetadataTile {
 
         u32 meta_len = (header >> 4) & 0xFFu;
         u32 palette_count = header & 0x0Fu;
-        u32 parity_bytes = tile_rs_parity_bytes(schema_version, palette_count);
-        u32 payload_repetitions = tile_payload_bit_repetitions(schema_version, palette_count);
-        u32 header_repetitions = tile_header_repetitions(schema_version);
+        u32 parity_bytes = tile_rs_parity_bytes(palette_count);
+        u32 payload_repetitions = tile_payload_bit_repetitions(palette_count);
 
         // Extract RS codeword bits from tile inner area.
-        u32 hole_side = tile_hole_side(schema_version);
-        u32 hole_x0 = (TILE_SIDE - hole_side) / 2u;
-        u32 hole_y0 = (TILE_SIDE - hole_side) / 2u;
-        u32 hole_x1 = hole_x0 + hole_side;
-        u32 hole_y1 = hole_y0 + hole_side;
+        u32 hole_x0 = (TILE_SIDE - TILE_HOLE_SIDE) / 2u;
+        u32 hole_y0 = (TILE_SIDE - TILE_HOLE_SIDE) / 2u;
+        u32 hole_x1 = hole_x0 + TILE_HOLE_SIDE;
+        u32 hole_y1 = hole_y0 + TILE_HOLE_SIDE;
 
         usize total_bits = ((usize)meta_len + (usize)parity_bytes) * 8u;
         usize total_module_samples = total_bits * payload_repetitions;
-        if (total_module_samples > tile_payload_module_capacity(schema_version)) return false;
+        if (total_module_samples > TILE_PAYLOAD_MODULE_CAPACITY) return false;
         ByteBuffer codeword;
         if (!codeword.ensure((usize)meta_len + (usize)parity_bytes)) return false;
         codeword.size = (usize)meta_len + (usize)parity_bytes;
@@ -8524,7 +8490,7 @@ namespace MetadataTile {
         usize module_sample_cursor = 0u;
         double accumulated_luminance = 0.0;
         for (u32 inner_y = TILE_BORDER; inner_y < TILE_SIDE - TILE_BORDER; ++inner_y) {
-            if (inner_y < TILE_BORDER + header_repetitions) continue;
+            if (inner_y < TILE_BORDER + TILE_HEADER_REPETITIONS) continue;
             for (u32 inner_x = TILE_BORDER; inner_x < TILE_SIDE - TILE_BORDER; ++inner_x) {
                 if (inner_x >= hole_x0 && inner_x < hole_x1 && inner_y >= hole_y0 && inner_y < hole_y1) continue;
                 if (module_sample_cursor >= total_module_samples) break;
@@ -8549,15 +8515,12 @@ namespace MetadataTile {
         
 
         u32 corrections = 0u;
-        bool rs_ok = rs_decode_with_parity(codeword, (usize)meta_len, parity_bytes, corrections);
+        rs_decode_with_parity(codeword, (usize)meta_len, parity_bytes, corrections);
 
         // Validate CRC byte at end of metadata (also doubles as a fallback check when RS fails).
         if (meta_len < 1u) return false;
         u8 expected_crc = codeword.data[meta_len - 1u];
         u8 computed_crc = compute_crc8(codeword.data, meta_len - 1u);
-        if (!rs_ok && expected_crc != computed_crc) {
-            return false;
-        }
         if (expected_crc != computed_crc) {
             return false;
         }
@@ -8567,8 +8530,6 @@ namespace MetadataTile {
         reader.reset(codeword.data, (u64)(meta_len - 1u) * 8u);
         u64 magic32 = reader.read_bits(32u);
         if (reader.failed || magic32 != 0x4D4B4D44u) return false;
-        u64 schema8 = reader.read_bits(8u);
-        if (reader.failed || schema8 != schema_version) return false;
         u64 pal_count = reader.read_bits(8u);
         if (reader.failed || pal_count != (u64)palette_count) return false;
         out_values.palette_count = (u32)pal_count;
@@ -8748,40 +8709,28 @@ namespace MetadataTile {
             conf_avg = conf_sum / (double)TILE_HEADER_BITS;
             u16 magic16 = (u16)((header_tmp >> 16) & 0xFFFFu);
             u32 schema = (header_tmp >> 12) & 0x0Fu;
-            if (magic16 != (u16)0x4D4Du ||
-                (schema != TILE_SCHEMA_VERSION_V1 && schema != TILE_SCHEMA_VERSION)) {
+            if (magic16 != (u16)0x4D4Du || schema != TILE_SCHEMA_VERSION) {
                 if (!allow_incomplete_palette) return false;
                 u32 signature_mask = 0xFFFFF000u;
-                u32 best_signature = 0u;
-                u32 best_signature_errors = 21u;
-                for (u32 candidate_schema = TILE_SCHEMA_VERSION_V1;
-                     candidate_schema <= TILE_SCHEMA_VERSION;
-                     ++candidate_schema) {
-                    u32 expected_signature = ((u32)0x4D4Du << 16) | (candidate_schema << 12);
-                    u32 difference = (header_tmp ^ expected_signature) & signature_mask;
-                    u32 errors = 0u;
-                    while (difference) {
-                        errors += difference & 1u;
-                        difference >>= 1u;
-                    }
-                    if (errors < best_signature_errors) {
-                        best_signature_errors = errors;
-                        best_signature = expected_signature;
-                        schema = candidate_schema;
-                    }
+                u32 expected_signature = ((u32)0x4D4Du << 16) | (TILE_SCHEMA_VERSION << 12);
+                u32 difference = (header_tmp ^ expected_signature) & signature_mask;
+                u32 signature_errors = 0u;
+                while (difference) {
+                    signature_errors += difference & 1u;
+                    difference >>= 1u;
                 }
-                if (best_signature_errors > 2u) return false;
-                header_tmp = (header_tmp & ~signature_mask) | best_signature;
+                if (signature_errors > 2u) return false;
+                header_tmp = (header_tmp & ~signature_mask) | expected_signature;
             }
             u32 meta_len = (header_tmp >> 4) & 0xFFu;
             u32 palette_count = header_tmp & 0x0Fu;
-            u32 parity_bytes = tile_rs_parity_bytes(schema, palette_count);
+            u32 parity_bytes = tile_rs_parity_bytes(palette_count);
             if (!allow_incomplete_palette &&
                 (palette_count < 2u || palette_count > MAX_CUSTOM_PALETTE_COLORS)) return false;
             if (meta_len == 0u || meta_len > 255u) return false;
             if (meta_len + parity_bytes > 255u) return false;
             if (((usize)meta_len + (usize)parity_bytes) * 8u *
-                tile_payload_bit_repetitions(schema, palette_count) > tile_payload_module_capacity(schema)) return false;
+                tile_payload_bit_repetitions(palette_count) > TILE_PAYLOAD_MODULE_CAPACITY) return false;
             return true;
         };
 
@@ -8967,7 +8916,6 @@ namespace MetadataTile {
             return (l < header_threshold) ? 1u : 0u; // dark => 1
         };
 
-        u32 schema_version = 0u;
         auto decode_header = [&](bool invert_bits, u32& header_out) -> bool {
             header_out = 0u;
             for (u32 bit = 0u; bit < TILE_HEADER_BITS; ++bit) {
@@ -8987,36 +8935,23 @@ namespace MetadataTile {
                 header_out |= ((u32)bit_value << bit);
             }
             u32 signature_mask = 0xFFFFF000u;
-            u32 best_signature = 0u;
-            u32 best_signature_errors = 21u;
-            u32 schema = 0u;
-            for (u32 candidate_schema = TILE_SCHEMA_VERSION_V1;
-                 candidate_schema <= TILE_SCHEMA_VERSION;
-                 ++candidate_schema) {
-                u32 expected_signature = ((u32)0x4D4Du << 16) | (candidate_schema << 12);
-                u32 difference = (header_out ^ expected_signature) & signature_mask;
-                u32 errors = 0u;
-                while (difference) {
-                    errors += difference & 1u;
-                    difference >>= 1u;
-                }
-                if (errors < best_signature_errors) {
-                    best_signature_errors = errors;
-                    best_signature = expected_signature;
-                    schema = candidate_schema;
-                }
+            u32 expected_signature = ((u32)0x4D4Du << 16) | (TILE_SCHEMA_VERSION << 12);
+            u32 difference = (header_out ^ expected_signature) & signature_mask;
+            u32 signature_errors = 0u;
+            while (difference) {
+                signature_errors += difference & 1u;
+                difference >>= 1u;
             }
-            if (best_signature_errors > 2u) return false;
-            header_out = (header_out & ~signature_mask) | best_signature;
+            if (signature_errors > 2u) return false;
+            header_out = (header_out & ~signature_mask) | expected_signature;
             u32 meta_len = (header_out >> 4) & 0xFFu;
             u32 palette_count = header_out & 0x0Fu;
-            u32 parity_bytes = tile_rs_parity_bytes(schema, palette_count);
+            u32 parity_bytes = tile_rs_parity_bytes(palette_count);
             if (palette_count < 2u || palette_count > MAX_CUSTOM_PALETTE_COLORS) return false;
             if (meta_len == 0u || meta_len > 255u) return false;
             if (meta_len + parity_bytes > 255u) return false;
             if (((usize)meta_len + (usize)parity_bytes) * 8u *
-                tile_payload_bit_repetitions(schema, palette_count) > tile_payload_module_capacity(schema)) return false;
-            schema_version = schema;
+                tile_payload_bit_repetitions(palette_count) > TILE_PAYLOAD_MODULE_CAPACITY) return false;
             return true;
         };
 
@@ -9104,20 +9039,18 @@ namespace MetadataTile {
 
         u32 meta_len = (header >> 4) & 0xFFu;
         u32 palette_count = header & 0x0Fu;
-        u32 parity_bytes = tile_rs_parity_bytes(schema_version, palette_count);
-        u32 payload_repetitions = tile_payload_bit_repetitions(schema_version, palette_count);
-        u32 header_repetitions = tile_header_repetitions(schema_version);
+        u32 parity_bytes = tile_rs_parity_bytes(palette_count);
+        u32 payload_repetitions = tile_payload_bit_repetitions(palette_count);
 
         // Extract RS codeword bits from tile inner area.
-        u32 hole_side = tile_hole_side(schema_version);
-        u32 hole_x0 = (TILE_SIDE - hole_side) / 2u;
-        u32 hole_y0 = (TILE_SIDE - hole_side) / 2u;
-        u32 hole_x1 = hole_x0 + hole_side;
-        u32 hole_y1 = hole_y0 + hole_side;
+        u32 hole_x0 = (TILE_SIDE - TILE_HOLE_SIDE) / 2u;
+        u32 hole_y0 = (TILE_SIDE - TILE_HOLE_SIDE) / 2u;
+        u32 hole_x1 = hole_x0 + TILE_HOLE_SIDE;
+        u32 hole_y1 = hole_y0 + TILE_HOLE_SIDE;
 
         usize total_bits = ((usize)meta_len + (usize)parity_bytes) * 8u;
         usize total_module_samples = total_bits * payload_repetitions;
-        if (total_module_samples > tile_payload_module_capacity(schema_version)) return false;
+        if (total_module_samples > TILE_PAYLOAD_MODULE_CAPACITY) return false;
         ByteBuffer codeword;
         if (!codeword.ensure((usize)meta_len + (usize)parity_bytes)) return false;
         codeword.size = (usize)meta_len + (usize)parity_bytes;
@@ -9149,7 +9082,7 @@ namespace MetadataTile {
             double accumulated_luminance = 0.0;
             double center_repetition_luminance = 0.0;
             for (u32 inner_y = TILE_BORDER; inner_y < TILE_SIDE - TILE_BORDER; ++inner_y) {
-                if (inner_y < TILE_BORDER + header_repetitions) continue;
+                if (inner_y < TILE_BORDER + TILE_HEADER_REPETITIONS) continue;
                 for (u32 inner_x = TILE_BORDER; inner_x < TILE_SIDE - TILE_BORDER; ++inner_x) {
                     if (inner_x >= hole_x0 && inner_x < hole_x1 && inner_y >= hole_y0 && inner_y < hole_y1) continue;
                     if (module_sample_cursor >= total_module_samples) break;
@@ -9191,8 +9124,6 @@ namespace MetadataTile {
         reader.reset(codeword.data, (u64)(meta_len - 1u) * 8u);
         u64 magic32 = reader.read_bits(32u);
         if (reader.failed || magic32 != 0x4D4B4D44u) return false;
-        u64 schema8 = reader.read_bits(8u);
-        if (reader.failed || schema8 != schema_version) return false;
         u64 pal_count = reader.read_bits(8u);
         if (reader.failed || pal_count != (u64)palette_count) return false;
         out_values.palette_count = (u32)pal_count;
@@ -13583,7 +13514,7 @@ struct RotationEstimateCandidate {
                                ? (double)(logical_data_height - 1u - marker_margin)
                                : (double)(logical_data_height - 1u);
             bool any_marker_pixel_visible = false;
-            const u32 hole_side = MetadataTile::tile_hole_side(MetadataTile::TILE_SCHEMA_VERSION);
+            const u32 hole_side = MetadataTile::TILE_HOLE_SIDE;
             const u32 hole_x0 = (MetadataTile::TILE_SIDE - hole_side) / 2u;
             const u32 hole_y0 = (MetadataTile::TILE_SIDE - hole_side) / 2u;
             for (u32 grid_row = 0u; grid_row < marker_rows && !any_marker_pixel_visible; ++grid_row) {
@@ -17634,7 +17565,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     // Build metadata tile bits (2-color endpoints) so reserved pixels in the tile
     // region render as metadata rather than blank white.
     MetadataTile::Placement tile_placement = MetadataTile::compute_tile_placement(width_pixels, data_height_pixels);
-    const u32 tile_hole_side = MetadataTile::tile_hole_side(MetadataTile::TILE_SCHEMA_VERSION);
+    const u32 tile_hole_side = MetadataTile::TILE_HOLE_SIDE;
     const u32 tile_hole_x0 = (MetadataTile::TILE_SIDE - tile_hole_side) / 2u;
     const u32 tile_hole_y0 = (MetadataTile::TILE_SIDE - tile_hole_side) / 2u;
     const char* disable_tile_env = getenv("MAKO_DISABLE_METADATA_TILE");
