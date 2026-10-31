@@ -350,3 +350,6 @@ test_case 0083_decoded_file script "Decoded file retains metadata and archive by
 
 test_case 0084_decode_legacy_metadata script "Damaged schema 2 metadata round-trip" \
     test_decode_legacy_metadata.sh
+
+test_case 0085_decode_scan_registration script "Offset scan with off-center noise preserves the archive" \
+    test_decode_scan_registration.sh

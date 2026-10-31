@@ -14260,10 +14260,8 @@ struct RotationEstimateCandidate {
                 bounds_refined = true;
             }
         }
-        // Margin ink can invalidate the page bounds. Refine the remaining
-        // tile-derived estimate against the decoded metadata template instead
-        // of propagating a small pitch error across the payload.
-        if (!bounds_refined && tile_available &&
+        // Retry suspect bounds against the decoded metadata template.
+        if ((!bounds_refined || force_disable_fiducial_subgrid) && tile_available &&
             tile_scale > 1.5 && tile_scale < 4.20 &&
             fabs(state.affine_transform.a01) < (alternating_white_damage ? 0.01 : 0.001) &&
             fabs(state.affine_transform.a10) < (alternating_white_damage ? 0.01 : 0.001)) {
