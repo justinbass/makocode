@@ -207,29 +207,14 @@ def write_sample_crop(path, page_width, page_pixels, sample):
             write_p3_pixel_row(output, page_pixels[start:end])
 
 
-def read_calibration_source(sheet_path, page_width, page_height):
-    sheet_width, sheet_height, sheet_pixels = read_p3_ppm(sheet_path)
-    if (sheet_width, sheet_height) != (page_width, page_height):
-        raise ValueError(
-            f"calibration sheet dimensions are {sheet_width}x{sheet_height}; "
-            f"expected {page_width}x{page_height}"
-        )
-
+def make_calibration_layout(page_width, page_height):
     rows, samples = make_rows(55, 55, page_width, page_height)
     if not rows:
         raise ValueError("original page dimensions are too small to contain a calibration sample")
-
-    source_sample = samples[0]
-    source_pixels = bytearray()
-    for y in range(source_sample["height_px"]):
-        start = ((source_sample["y"] + y) * sheet_width + source_sample["x"]) * 3
-        end = start + source_sample["width_px"] * 3
-        source_pixels.extend(sheet_pixels[start:end])
-    return rows, samples, source_pixels
+    return rows, samples
 
 
-def fit_scan_transform(rows, samples, source_width, source_height, source_pixels,
-                       scan_width, scan_height, scan_pixels):
+def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
     """Fit the transform by matching the expected and scanned ink moments."""
     # Barcode cells are sparse and labels also contribute ink, so sample-box
     # rectangles do not describe the page's actual dark-pixel distribution.
@@ -268,17 +253,12 @@ def fit_scan_transform(rows, samples, source_width, source_height, source_pixels
 
     def expected_ink_points():
         for sample in samples:
+            # The barcode artwork is intentionally not part of calibration
+            # scan geometry; model each known sample box as a solid mark.
             for dy in range(sample["height_px"]):
-                source_y = dy * source_height // sample["height_px"]
                 for dx in range(sample["width_px"]):
-                    source_x = dx * source_width // sample["width_px"]
-                    offset = (source_y * source_width + source_x) * 3
-                    red, green, blue = source_pixels[offset:offset + 3]
-                    if (red * 299 + green * 587 + blue * 114) // 1000 <= 160:
-                        yield expected_point(
-                            sample["x"] + dx + 0.5,
-                            sample["y"] + dy + 0.5,
-                        )
+                    yield expected_point(sample["x"] + dx + 0.5,
+                                         sample["y"] + dy + 0.5)
 
         for row in rows:
             label_y = row["y"] + (row["height_px"] - LABEL_HEIGHT) // 2
@@ -501,6 +481,9 @@ def map_sample_to_scan(sample, transform, scan_width, scan_height, offset=(0, 0)
 
 def fit_sample_row_offsets(rows, samples, transform, source_width, source_height,
                            source_pixels, scan_width, scan_height, scan_pixels):
+    """Return neutral offsets; calibration geometry comes from page dimensions."""
+    return {row["index"]: (0, 0) for row in rows}
+
     """Measure small row placement errors against the known sample bitmap."""
     expected_x, expected_y, observed_x, observed_y, scale, angle, scale_x, scale_y = transform
     cosine = math.cos(angle)
@@ -569,19 +552,16 @@ def fit_sample_row_offsets(rows, samples, transform, source_width, source_height
     return offsets
 
 
-def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet_path):
+def analyze_scan(makocode_bin, scan_path, original_width, original_height):
     page_width, page_height, page_pixels = read_p3_ppm(scan_path)
-    rows, samples, source_pixels = read_calibration_source(
-        sheet_path, original_width, original_height
-    )
+    rows, samples = make_calibration_layout(original_width, original_height)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
         work_dir = Path(temporary_directory)
         transform = fit_scan_transform(
-            rows, samples, 55, 55, source_pixels,
-            page_width, page_height, page_pixels,
+            rows, samples, page_width, page_height, page_pixels,
         )
         row_offsets = fit_sample_row_offsets(
-            rows, samples, transform, 55, 55, source_pixels,
+            rows, samples, transform, 55, 55, None,
             page_width, page_height, page_pixels,
         )
         sample_row_index = {
@@ -707,20 +687,17 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height, sheet
           + (f"{every_copy['scale']:g}x" if every_copy else "none"))
 
 
-def crop_scan(scan_path, original_width, original_height, sheet_path):
+def crop_scan(makocode_bin, scan_path, original_width, original_height):
     if original_width <= 0 or original_height <= 0:
         raise ValueError("original page width and height must be positive")
 
-    rows, samples, source_pixels = read_calibration_source(
-        sheet_path, original_width, original_height
-    )
+    rows, samples = make_calibration_layout(original_width, original_height)
     scan_width, scan_height, scan_pixels = read_p3_ppm(scan_path)
     transform = fit_scan_transform(
-        rows, samples, 55, 55, source_pixels,
-        scan_width, scan_height, scan_pixels,
+        rows, samples, scan_width, scan_height, scan_pixels,
     )
     row_offsets = fit_sample_row_offsets(
-        rows, samples, transform, 55, 55, source_pixels,
+        rows, samples, transform, 55, 55, None,
         scan_width, scan_height, scan_pixels,
     )
     sample_row_index = {
@@ -773,9 +750,6 @@ def parse_args(argv):
                                help="original calibration page width in pixels")
     decode_parser.add_argument("--height", type=int, required=True,
                                help="original calibration page height in pixels")
-    decode_parser.add_argument("--sheet", type=Path, default=default_output,
-                               help=f"original calibration sheet (default: {default_output})")
-
     crop_parser = commands.add_parser("crop", help="crop calibration samples without decoding")
     crop_parser.add_argument("scan", type=Path, metavar="SCAN.ppm",
                              help="scanned calibration sheet to crop")
@@ -783,8 +757,6 @@ def parse_args(argv):
                              help="original calibration page width in pixels")
     crop_parser.add_argument("--height", type=int, required=True,
                              help="original calibration page height in pixels")
-    crop_parser.add_argument("--sheet", type=Path, default=default_output,
-                             help=f"original calibration sheet (default: {default_output})")
     return parser.parse_args(argv)
 
 
@@ -828,17 +800,17 @@ def main(argv=None):
     repo_root = Path(__file__).resolve().parent.parent
     makocode_bin = repo_root / "makocode"
 
-    if args.command == "crop":
-        crop_scan(args.scan, args.width, args.height, args.sheet)
-        return 0
-
     if not makocode_bin.is_file():
         raise ValueError(f"makocode executable not found at {makocode_bin}; build it first")
+
+    if args.command == "crop":
+        crop_scan(makocode_bin, args.scan, args.width, args.height)
+        return 0
 
     if args.command == "decode":
         if args.width <= 0 or args.height <= 0:
             raise ValueError("original page width and height must be positive")
-        analyze_scan(makocode_bin, args.scan, args.width, args.height, args.sheet)
+        analyze_scan(makocode_bin, args.scan, args.width, args.height)
         return 0
 
     if args.width <= 0 or args.height <= 0:
