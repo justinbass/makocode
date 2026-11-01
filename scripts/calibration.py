@@ -481,9 +481,6 @@ def map_sample_to_scan(sample, transform, scan_width, scan_height, offset=(0, 0)
 
 def fit_sample_row_offsets(rows, samples, transform, source_width, source_height,
                            source_pixels, scan_width, scan_height, scan_pixels):
-    """Return neutral offsets; calibration geometry comes from page dimensions."""
-    return {row["index"]: (0, 0) for row in rows}
-
     """Measure small row placement errors against the known sample bitmap."""
     expected_x, expected_y, observed_x, observed_y, scale, angle, scale_x, scale_y = transform
     cosine = math.cos(angle)
@@ -560,8 +557,11 @@ def analyze_scan(makocode_bin, scan_path, original_width, original_height):
         transform = fit_scan_transform(
             rows, samples, page_width, page_height, page_pixels,
         )
+        source_width, source_height, source_pixels = read_p3_ppm(
+            encode_source_ppm(makocode_bin, work_dir)
+        )
         row_offsets = fit_sample_row_offsets(
-            rows, samples, transform, 55, 55, None,
+            rows, samples, transform, source_width, source_height, source_pixels,
             page_width, page_height, page_pixels,
         )
         sample_row_index = {
@@ -696,8 +696,12 @@ def crop_scan(makocode_bin, scan_path, original_width, original_height):
     transform = fit_scan_transform(
         rows, samples, scan_width, scan_height, scan_pixels,
     )
+    with tempfile.TemporaryDirectory(prefix="makocode-calibration-source-") as temporary_directory:
+        source_width, source_height, source_pixels = read_p3_ppm(
+            encode_source_ppm(makocode_bin, Path(temporary_directory))
+        )
     row_offsets = fit_sample_row_offsets(
-        rows, samples, transform, 55, 55, None,
+        rows, samples, transform, source_width, source_height, source_pixels,
         scan_width, scan_height, scan_pixels,
     )
     sample_row_index = {
