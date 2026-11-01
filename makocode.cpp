@@ -22460,21 +22460,6 @@ retry_decode:
             ok = decoded.append_ascii("page ") && decoded.append_ascii(number) && decoded.append_char('\n');
             if (encoded_page_present[page]) {
                 const MetadataTile::Values& tile = encoded_pages[page];
-                ok = decoded.append_ascii("metadata tile_magic 19789\nmetadata metadata_magic MKMD\n");
-                if (ok && tile.encoded_metadata_size) {
-                    u64_to_ascii(tile.encoded_metadata_size, number, sizeof(number));
-                    ok = decoded.append_ascii("metadata metadata_bytes ") && decoded.append_ascii(number) && decoded.append_char('\n');
-                    u64_to_ascii(tile.encoded_metadata[tile.encoded_metadata_size - 1u], number, sizeof(number));
-                    ok = ok && decoded.append_ascii("metadata metadata_crc8 ") && decoded.append_ascii(number) && decoded.append_char('\n');
-                    u64_to_ascii(tile.encoded_header, number, sizeof(number));
-                    ok = ok && decoded.append_ascii("metadata tile_header ") && decoded.append_ascii(number) && decoded.append_ascii("\nmetadata tile_data ");
-                    static const char digits[] = "0123456789ABCDEF";
-                    for (usize i = 0; ok && i < tile.encoded_metadata_size; ++i) {
-                        u8 c = tile.encoded_metadata[i];
-                        ok = decoded.append_char(digits[c >> 4u]) && decoded.append_char(digits[c & 15u]);
-                    }
-                    ok = ok && decoded.append_char('\n');
-                }
                 const char* names[] = {"tile_schema", "page_bits", "page_count", "page_index", "width", "height", "footer_rows", "fiducial_size", "ecc_enabled", "ecc_block_data", "ecc_parity", "ecc_block_count", "ecc_original_bytes", "palette_count"};
                 u64 values[] = {MetadataTile::TILE_SCHEMA_VERSION, tile.page_bits, tile.page_count, tile.page_index, tile.page_width_pixels, tile.page_height_pixels, tile.footer_rows, tile.fiducial_marker_size_pixels, tile.ecc_enabled ? 1u : 0u, tile.ecc_block_data, tile.ecc_parity, tile.ecc_block_count, tile.ecc_original_bytes, tile.palette_count};
                 for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
@@ -22527,14 +22512,8 @@ retry_decode:
             }
         }
         if (payload_metadata.lzma_present) {
-            static const char digits[] = "0123456789ABCDEF";
-            ok = decoded.append_ascii("metadata compression LZMA\nmetadata lzma_properties ");
-            for (usize i = 0; ok && i < LZMA_PROPS_SIZE; ++i) {
-                u8 c = payload_metadata.lzma_header[i];
-                ok = decoded.append_char(digits[c >> 4u]) && decoded.append_char(digits[c & 15u]);
-            }
             u64_to_ascii(read_le_u64(payload_metadata.lzma_header + LZMA_PROPS_SIZE), number, sizeof(number));
-            ok = ok && decoded.append_ascii("\nmetadata lzma_uncompressed_bytes ") && decoded.append_ascii(number) && decoded.append_char('\n');
+            ok = decoded.append_ascii("metadata lzma_uncompressed_bytes ") && decoded.append_ascii(number) && decoded.append_char('\n');
         }
         ok = ok && decoded.append_ascii("end-payload\narchive MKARCH01\nentries ");
         if (!archive.data || archive.size < ARCHIVE_HEADER_SIZE) ok = false;
