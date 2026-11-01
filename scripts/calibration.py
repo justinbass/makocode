@@ -8,7 +8,7 @@
 # warranty of merchantability or fitness for a particular purpose. See the
 # LICENSE file for the full license text.
 
-"""Build a labeled calibration sheet or measure decode success from its scan."""
+"""Build a calibration sheet or measure decode success from its scan."""
 
 import argparse
 import math
@@ -18,27 +18,58 @@ import sys
 import tempfile
 
 
-FONT = {
-    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
-    "3": ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
-    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    "5": ("11111", "10000", "10000", "11110", "00001", "00001", "11110"),
-    "6": ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
-    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
-    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
-    ".": ("00000", "00000", "00000", "00000", "00000", "00110", "00110"),
-    "x": ("00000", "00000", "10001", "01010", "00100", "01010", "10001"),
-}
-
-LABEL_SCALE = 3
-LABEL_HEIGHT = 7 * LABEL_SCALE
-LABEL_COLUMN_WIDTH = 72
-LABEL_GAP = 12
+CALIBRATION_MODES = (
+    ("BW", ("White", "Black")),
+    ("CMYK", ("White", "Cyan", "Magenta", "Yellow")),
+    ("CMYKW", ("White", "Cyan", "Magenta", "Yellow", "Black")),
+    ("RGBCMYKB", (
+        "FFFFFF", "FF0000", "00FF00", "0000FF",
+        "FFFF00", "FF00FF", "00FFFF", "000000",
+    )),
+)
+SCALE_DENOMINATORS = (1, 2, 3, 4)
+SOURCE_PAGE_WIDTH = 160
+SOURCE_PAGE_HEIGHT = 160
 MARGIN = 24
 PADDING = 12
+FOOTER_GLYPH_WIDTH = 5
+FOOTER_GLYPH_HEIGHT = 8
+FOOTER_CHAR_SPACING = 1
+
+# The glyphs used by the calibration footer, copied from makocode.cpp's
+# default 5x8 footer font.
+FOOTER_GLYPHS = {
+    " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000", "00000"),
+    ",": ("00000", "00000", "00000", "00000", "00100", "00100", "01000", "00000"),
+    ":": ("00000", "00100", "00000", "00000", "00100", "00000", "00000", "00000"),
+    "0": ("01110", "10001", "11001", "10101", "10011", "10001", "01110", "00000"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110", "00000"),
+    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111", "00000"),
+    "3": ("01110", "10001", "00001", "00110", "00001", "10001", "01110", "00000"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010", "00000"),
+    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110", "00000"),
+    "6": ("01110", "10000", "11110", "10001", "10001", "10001", "01110", "00000"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000", "00000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110", "00000"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110", "00000"),
+    "d": ("00001", "00001", "01111", "10001", "10001", "10001", "01111", "00000"),
+    "e": ("00000", "00000", "01110", "10001", "11111", "10000", "01110", "00000"),
+    "g": ("00000", "01110", "10001", "10001", "01111", "00001", "01110", "00000"),
+    "h": ("10000", "10000", "11110", "10001", "10001", "10001", "10001", "00000"),
+    "i": ("00100", "00000", "01100", "00100", "00100", "00100", "01110", "00000"),
+    "t": ("01000", "01000", "11110", "01000", "01000", "01001", "00110", "00000"),
+    "w": ("00000", "00000", "10001", "10001", "10101", "11011", "10001", "00000"),
+}
+
+calibration_payload = bytearray(b"makocode")
+calibration_prng_state = 0xC0FFEE
+for _ in range(1024):
+    calibration_prng_state ^= (calibration_prng_state << 13) & 0xFFFFFFFF
+    calibration_prng_state ^= calibration_prng_state >> 17
+    calibration_prng_state ^= (calibration_prng_state << 5) & 0xFFFFFFFF
+    calibration_prng_state &= 0xFFFFFFFF
+    calibration_payload.append(calibration_prng_state & 0xFF)
+CALIBRATION_PAYLOAD = bytes(calibration_payload)
 
 
 def read_p3_ppm(path):
@@ -81,62 +112,77 @@ def read_p3_ppm(path):
     return width, height, pixels
 
 
-def scaled_dimension(source_dimension, scale_half_steps):
-    # scale_half_steps=3 means 1.5x. Round half up to retain the requested size.
-    return (source_dimension * scale_half_steps + 1) // 2
+def scaled_dimension(source_dimension, scale_twelfths):
+    return (source_dimension * scale_twelfths + 6) // 12
 
 
-def scale_label(scale_half_steps):
-    if scale_half_steps % 2 == 0:
-        return f"{scale_half_steps // 2}x"
-    return f"{scale_half_steps // 2}.5x"
+def scale_label(scale_twelfths):
+    whole, remainder = divmod(scale_twelfths, 12)
+    if remainder == 0:
+        return f"{whole}x"
+    if remainder == 6:
+        return f"{whole}.5x"
+    fraction = {3: "1/4", 4: "1/3", 8: "2/3", 9: "3/4"}[remainder]
+    return f"{whole}+{fraction}x"
 
 
-def make_rows(source_width, source_height, page_width, page_height):
-    rows = []
+def make_scale_steps(denominator):
+    scale_steps = {12, 24, 36, 48}
+    for fraction_denominator in range(2, denominator + 1):
+        for numerator in range(1, fraction_denominator):
+            if math.gcd(numerator, fraction_denominator) != 1:
+                continue
+            fraction_twelfths = 12 * numerator // fraction_denominator
+            for whole in range(1, 4):
+                scale_steps.add(whole * 12 + fraction_twelfths)
+    return tuple(sorted(scale_steps))
+
+
+def make_columns(source_sizes, scale_steps):
+    columns = []
     samples = []
-    row_y = MARGIN
-    scale_half_steps = 2
-    usable_right = page_width - MARGIN
-    first_barcode_x = MARGIN + LABEL_COLUMN_WIDTH + LABEL_GAP
+    column_widths = []
+    column_x = []
+    next_x = MARGIN
 
-    while True:
-        barcode_width = scaled_dimension(source_width, scale_half_steps)
-        barcode_height = scaled_dimension(source_height, scale_half_steps)
-        row_height = max(barcode_height, LABEL_HEIGHT)
-        if row_y + row_height > page_height - MARGIN:
-            break
-        if first_barcode_x + barcode_width > usable_right:
-            break
+    for source_width, _ in source_sizes:
+        column_width = max(
+            scaled_dimension(source_width, scale_twelfths)
+            for scale_twelfths in scale_steps
+        )
+        column_widths.append(column_width)
+        column_x.append(next_x)
+        next_x += column_width + PADDING
 
-        count = (usable_right - first_barcode_x + PADDING) // (barcode_width + PADDING)
-        row_samples = []
-        for copy_index in range(count):
-            x = first_barcode_x + copy_index * (barcode_width + PADDING)
+    for mode_index, (source_width, source_height) in enumerate(source_sizes):
+        column = {"index": mode_index, "sample_indexes": []}
+        scale_order = scale_steps if mode_index % 2 == 0 else tuple(reversed(scale_steps))
+        column_y = MARGIN
+        for scale_twelfths in scale_order:
+            barcode_width = scaled_dimension(source_width, scale_twelfths)
+            barcode_height = scaled_dimension(source_height, scale_twelfths)
             sample = {
                 "index": len(samples),
-                "copy": copy_index,
-                "x": x,
-                "y": row_y + (row_height - barcode_height) // 2,
+                "mode": mode_index,
+                "x": column_x[mode_index],
+                "y": column_y,
                 "width_px": barcode_width,
                 "height_px": barcode_height,
-                "scale": scale_half_steps / 2,
+                "scale_twelfths": scale_twelfths,
+                "scale": scale_twelfths / 12,
             }
             samples.append(sample)
-            row_samples.append(sample["index"])
+            column["sample_indexes"].append(sample["index"])
+            column_y += barcode_height + PADDING
+        columns.append(column)
 
-        rows.append({
-            "index": len(rows),
-            "scale": scale_half_steps / 2,
-            "label": scale_label(scale_half_steps),
-            "y": row_y,
-            "height_px": row_height,
-            "sample_indexes": row_samples,
-        })
-        row_y += row_height + PADDING
-        scale_half_steps += 1
-
-    return rows, samples
+    page_width = MARGIN + sum(column_widths) + PADDING * (len(source_sizes) - 1) + MARGIN
+    page_height = max(
+        max(samples[index]["y"] + samples[index]["height_px"]
+            for index in column["sample_indexes"])
+        for column in columns
+    ) + MARGIN
+    return columns, samples, page_width, page_height
 
 
 def write_p3_pixel_row(output, pixels):
@@ -147,13 +193,14 @@ def write_p3_pixel_row(output, pixels):
     output.write("\n".join(lines) + "\n")
 
 
-def write_sheet(path, source_width, source_height, source_pixels,
-                page_width, page_height, rows, samples):
-    # Row placement is based on scale bands. Keep each band indexed by its top
-    # pixel so rendering can paint just the barcodes intersecting each scanline.
-    row_samples = []
-    for row in rows:
-        row_samples.append([samples[index] for index in row["sample_indexes"]])
+def write_sheet(path, source_images, page_width, page_height, columns, samples):
+    footer_text = f"width: {page_width}, height: {page_height}"
+    footer_width = (
+        len(footer_text) * FOOTER_GLYPH_WIDTH
+        + (len(footer_text) - 1) * FOOTER_CHAR_SPACING
+    )
+    footer_left = max(0, (page_width - footer_width) // 2)
+    footer_top = page_height - FOOTER_GLYPH_HEIGHT
 
     with path.open("w", encoding="ascii", newline="\n") as output:
         output.write("P3\n")
@@ -161,13 +208,12 @@ def write_sheet(path, source_width, source_height, source_pixels,
 
         for page_y in range(page_height):
             pixels = bytearray([255]) * (page_width * 3)
-            for row, row_items in zip(rows, row_samples):
-                barcode_y = row_items[0]["y"] if row_items else row["y"]
-                barcode_height = row_items[0]["height_px"] if row_items else 0
-                if barcode_height == 0 or not (barcode_y <= page_y < barcode_y + barcode_height):
-                    continue
-
-                for sample in row_items:
+            for column in columns:
+                for sample_index in column["sample_indexes"]:
+                    sample = samples[sample_index]
+                    if not (sample["y"] <= page_y < sample["y"] + sample["height_px"]):
+                        continue
+                    source_width, source_height, source_pixels = source_images[sample["mode"]]
                     source_y = (page_y - sample["y"]) * source_height // sample["height_px"]
                     source_y = min(source_y, source_height - 1)
                     for dx in range(sample["width_px"]):
@@ -176,48 +222,83 @@ def write_sheet(path, source_width, source_height, source_pixels,
                         page_offset = (sample["x"] + dx) * 3
                         pixels[page_offset:page_offset + 3] = source_pixels[source_offset:source_offset + 3]
 
-            for row in rows:
-                if row["y"] <= page_y < row["y"] + row["height_px"]:
-                    label_y = row["y"] + (row["height_px"] - LABEL_HEIGHT) // 2
-                    if label_y <= page_y < label_y + LABEL_HEIGHT:
-                        # Draw only the glyphs that land on this scanline.
-                        glyph_row = (page_y - label_y) // LABEL_SCALE
-                        for char_index, char in enumerate(row["label"]):
-                            char_x = MARGIN + char_index * 6 * LABEL_SCALE
-                            for glyph_x, bit in enumerate(FONT[char][glyph_row]):
-                                if bit == "1":
-                                    for dx in range(LABEL_SCALE):
-                                        px = char_x + glyph_x * LABEL_SCALE + dx
-                                        offset = (px * 3)
-                                        pixels[offset:offset + 3] = b"\x00\x00\x00"
+            footer_y = page_y - footer_top
+            if 0 <= footer_y < FOOTER_GLYPH_HEIGHT:
+                for character_index, character in enumerate(footer_text):
+                    glyph_row = FOOTER_GLYPHS[character][footer_y]
+                    glyph_left = footer_left + character_index * (
+                        FOOTER_GLYPH_WIDTH + FOOTER_CHAR_SPACING
+                    )
+                    for glyph_x, bit in enumerate(glyph_row):
+                        if bit == "1":
+                            pixel_offset = (glyph_left + glyph_x) * 3
+                            pixels[pixel_offset:pixel_offset + 3] = b"\x00\x00\x00"
 
             write_p3_pixel_row(output, pixels)
 
 
-def write_sample_crop(path, page_width, page_pixels, sample):
-    crop_width = sample["width_px"]
-    crop_height = sample["height_px"]
-    crop_x = sample["x"]
-    crop_y = sample["y"]
+def write_sample_crop(path, page_width, page_height, page_pixels, sample,
+                      transform, offset=(0, 0)):
+    expected_x, expected_y, observed_x, observed_y, _, angle, scale_x, scale_y = transform
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    padding = 2
+    crop_width = sample["width_px"] + padding * 2
+    crop_height = sample["height_px"] + padding * 2
     with path.open("w", encoding="ascii", newline="\n") as output:
         output.write(f"P3\n{crop_width} {crop_height}\n255\n")
-        for y in range(crop_y, crop_y + crop_height):
-            start = (y * page_width + crop_x) * 3
-            end = start + crop_width * 3
-            write_p3_pixel_row(output, page_pixels[start:end])
+        for crop_y in range(crop_height):
+            pixels = bytearray([255]) * (crop_width * 3)
+            sample_y = crop_y - padding
+            if 0 <= sample_y < sample["height_px"]:
+                page_y = sample["y"] + sample_y + 0.5
+                for crop_x in range(padding, crop_width - padding):
+                    page_x = sample["x"] + crop_x - padding + 0.5
+                    dx = page_x - expected_x
+                    dy = page_y - expected_y
+                    scan_x = (cosine * scale_x * dx - sine * scale_y * dy
+                              + observed_x + offset[0])
+                    scan_y = (sine * scale_x * dx + cosine * scale_y * dy
+                              + observed_y + offset[1])
+                    pixel_x = math.floor(scan_x)
+                    pixel_y = math.floor(scan_y)
+                    if 0 <= pixel_x < page_width and 0 <= pixel_y < page_height:
+                        source_offset = (pixel_y * page_width + pixel_x) * 3
+                        destination_offset = crop_x * 3
+                        pixels[destination_offset:destination_offset + 3] = (
+                            page_pixels[source_offset:source_offset + 3]
+                        )
+            write_p3_pixel_row(output, pixels)
 
 
-def make_calibration_layout(page_width, page_height):
-    rows, samples = make_rows(55, 55, page_width, page_height)
-    if not rows:
-        raise ValueError("original page dimensions are too small to contain a calibration sample")
-    return rows, samples
+def make_calibration_layout(source_sizes, page_width=None, page_height=None,
+                            scale_denominator=None):
+    denominators = ((scale_denominator,) if scale_denominator is not None
+                    else tuple(reversed(SCALE_DENOMINATORS)))
+    for denominator in denominators:
+        columns, samples, required_width, required_height = make_columns(
+            source_sizes, make_scale_steps(denominator),
+        )
+        if (scale_denominator is not None
+                or (required_width <= page_width and required_height <= page_height)):
+            return (
+                columns, samples, required_width, required_height, denominator,
+            )
+
+    _, _, minimum_width, minimum_height = make_columns(
+        source_sizes, make_scale_steps(SCALE_DENOMINATORS[0]),
+    )
+    raise ValueError(
+        f"page must be at least {minimum_width}x{minimum_height} to fit "
+        "the 1x, 2x, 3x, and 4x calibration samples"
+    )
 
 
-def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
-    """Fit the transform by matching the expected and scanned ink moments."""
-    # Barcode cells are sparse and labels also contribute ink, so sample-box
-    # rectangles do not describe the page's actual dark-pixel distribution.
+def fit_scan_transform(columns, samples, scan_width, scan_height, scan_pixels,
+                       initial_angle=None):
+    """Fit the scan geometry using its page bounds and calibration marks."""
+    # Palette colors produce very different ink profiles, so fit from sample
+    # bounds before refining the placement against the artwork.
     expected_x_hist = {}
     expected_y_hist = {}
 
@@ -253,31 +334,14 @@ def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
 
     def expected_ink_points():
         for sample in samples:
-            # The barcode artwork is intentionally not part of calibration
-            # scan geometry; model each known sample box as a solid mark.
             for dy in range(sample["height_px"]):
                 for dx in range(sample["width_px"]):
                     yield expected_point(sample["x"] + dx + 0.5,
                                          sample["y"] + dy + 0.5)
 
-        for row in rows:
-            label_y = row["y"] + (row["height_px"] - LABEL_HEIGHT) // 2
-            for glyph_row in range(7):
-                for char_index, char in enumerate(row["label"]):
-                    char_x = MARGIN + char_index * 6 * LABEL_SCALE
-                    for glyph_x, bit in enumerate(FONT[char][glyph_row]):
-                        if bit == "1":
-                            for dy in range(LABEL_SCALE):
-                                for dx in range(LABEL_SCALE):
-                                    yield expected_point(
-                                        char_x + glyph_x * LABEL_SCALE + dx + 0.5,
-                                        label_y + glyph_row * LABEL_SCALE + dy + 0.5,
-                                    )
-
     expected_ink = moments(expected_ink_points())
     if expected_ink is None:
         raise ValueError("could not find ink in the generated calibration samples")
-    _, expected_ink_x, expected_ink_y, _, _, _ = expected_ink
 
     # The sample bounds provide a stable large-scale orientation and size
     # estimate. Use the actual ink profiles below only to refine translation.
@@ -332,6 +396,8 @@ def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
     angle = observed_angle - expected_angle
     # A principal axis describes a line, so equivalent angles differ by pi.
     angle = (angle + math.pi / 2) % math.pi - math.pi / 2
+    if initial_angle is not None:
+        angle = initial_angle
 
     expected_gap = math.hypot(expected_xx - expected_yy, 2 * expected_xy)
     observed_gap = math.hypot(observed_xx - observed_yy, 2 * observed_xy)
@@ -352,8 +418,31 @@ def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
     # and vertical structure instead.
     model_left = min(MARGIN, min(sample["x"] for sample in samples))
     model_right = max(sample["x"] + sample["width_px"] for sample in samples)
-    model_top = min(row["y"] for row in rows)
-    model_bottom = max(row["y"] + row["height_px"] for row in rows)
+    model_top = min(sample["y"] for sample in samples)
+    model_bottom = max(sample["y"] + sample["height_px"] for sample in samples)
+    expected_page_width = model_right + MARGIN
+    expected_page_height = model_bottom + MARGIN
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    abs_cosine = abs(cosine)
+    abs_sine = abs(sine)
+    coefficient_a = abs_cosine * expected_page_width
+    coefficient_b = abs_sine * expected_page_height
+    coefficient_c = abs_sine * expected_page_width
+    coefficient_d = abs_cosine * expected_page_height
+    determinant = coefficient_a * coefficient_d - coefficient_b * coefficient_c
+    if abs(determinant) > 1e-9:
+        scale_x = (scan_width * coefficient_d - coefficient_b * scan_height) / determinant
+        scale_y = (coefficient_a * scan_height - scan_width * coefficient_c) / determinant
+        page_scale = math.sqrt(scale_x * scale_y) if scale_x > 0 and scale_y > 0 else 0
+        if (0.25 <= scale_x <= 4 and 0.25 <= scale_y <= 4
+                and abs(page_scale - scale) <= 0.05 * max(page_scale, scale)):
+            return (
+                expected_page_width / 2, expected_page_height / 2,
+                scan_width / 2, scan_height / 2, page_scale, angle,
+                scale_x, scale_y,
+            )
+
     margin = max(20, round(scale * max(model_right - model_left,
                                       model_bottom - model_top) * 0.05))
     initial_cosine = math.cos(angle)
@@ -378,26 +467,27 @@ def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
     if len(grid_points) < 100:
         raise ValueError("could not find the calibration grid structure in the scanned image")
 
-    angle_center = angle
-    best_angle = angle
-    best_score = -1
-    for tenth_degree in range(-40, 41):
-        candidate = angle_center + math.radians(tenth_degree / 10)
-        candidate_cosine = math.cos(candidate)
-        candidate_sine = math.sin(candidate)
-        x_projection = {}
-        y_projection = {}
-        for x, y in grid_points:
-            x_bin = round(candidate_cosine * x + candidate_sine * y)
-            y_bin = round(-candidate_sine * x + candidate_cosine * y)
-            x_projection[x_bin] = x_projection.get(x_bin, 0) + 1
-            y_projection[y_bin] = y_projection.get(y_bin, 0) + 1
-        score = (sum(count * count for count in x_projection.values())
-                 + sum(count * count for count in y_projection.values()))
-        if score > best_score:
-            best_angle = candidate
-            best_score = score
-    angle = best_angle
+    if initial_angle is None:
+        angle_center = angle
+        best_angle = angle
+        best_score = -1
+        for tenth_degree in range(-40, 41):
+            candidate = angle_center + math.radians(tenth_degree / 10)
+            candidate_cosine = math.cos(candidate)
+            candidate_sine = math.sin(candidate)
+            x_projection = {}
+            y_projection = {}
+            for x, y in grid_points:
+                x_bin = round(candidate_cosine * x + candidate_sine * y)
+                y_bin = round(-candidate_sine * x + candidate_cosine * y)
+                x_projection[x_bin] = x_projection.get(x_bin, 0) + 1
+                y_projection[y_bin] = y_projection.get(y_bin, 0) + 1
+            score = (sum(count * count for count in x_projection.values())
+                     + sum(count * count for count in y_projection.values()))
+            if score > best_score:
+                best_angle = candidate
+                best_score = score
+        angle = best_angle
 
     # Estimate independent axis scales and translation from the grid bounds.
     # Moment scales expand with dark-ink thickness, which shifts samples far
@@ -442,87 +532,54 @@ def fit_scan_transform(rows, samples, scan_width, scan_height, scan_pixels):
             angle, scale_x, scale_y)
 
 
-def map_sample_to_scan(sample, transform, scan_width, scan_height, offset=(0, 0)):
-    (expected_x, expected_y, observed_x, observed_y, scale, angle,
-     scale_x, scale_y) = transform
-    cosine = math.cos(angle)
-    sine = math.sin(angle)
-    page_x = sample["x"] + sample["width_px"] / 2 - expected_x
-    page_y = sample["y"] + sample["height_px"] / 2 - expected_y
-    center_x = (cosine * scale_x * page_x
-                - sine * scale_y * page_y + observed_x + offset[0])
-    center_y = (sine * scale_x * page_x
-                + cosine * scale_y * page_y + observed_y + offset[1])
-    crop_width = (
-        abs(cosine) * scale_x * sample["width_px"]
-        + abs(sine) * scale_y * sample["height_px"]
-    )
-    crop_height = (
-        abs(sine) * scale_x * sample["width_px"]
-        + abs(cosine) * scale_y * sample["height_px"]
-    )
-    # Keep a small scan edge around the sample. Padding proportional to the
-    # sample size can capture neighboring rows on this tightly packed sheet.
-    padding = max(2, round(scale * 1.5))
-    left = max(0, math.floor(center_x - crop_width / 2) - padding)
-    top = max(0, math.floor(center_y - crop_height / 2) - padding)
-    right = min(scan_width, math.ceil(center_x + crop_width / 2) + padding)
-    bottom = min(scan_height, math.ceil(center_y + crop_height / 2) + padding)
-    if right <= left or bottom <= top:
-        raise ValueError("the detected calibration square is outside the scanned image")
-    return {
-        **sample,
-        "x": left,
-        "y": top,
-        "width_px": right - left,
-        "height_px": bottom - top,
-    }
-
-
-def fit_sample_row_offsets(rows, samples, transform, source_width, source_height,
-                           source_pixels, scan_width, scan_height, scan_pixels):
-    """Measure small row placement errors against the known sample bitmap."""
+def fit_sample_row_offsets(columns, samples, transform, source_images,
+                           scan_width, scan_height, scan_pixels):
+    """Measure small placement errors against each sample's source bitmap."""
     expected_x, expected_y, observed_x, observed_y, scale, angle, scale_x, scale_y = transform
     cosine = math.cos(angle)
     sine = math.sin(angle)
-    template = []
-    for source_y in range(source_height):
-        for source_x in range(source_width):
-            offset = (source_y * source_width + source_x) * 3
-            red, green, blue = source_pixels[offset:offset + 3]
-            if (red * 299 + green * 587 + blue * 114) // 1000 <= 160:
-                template.append((source_x + 0.5, source_y + 0.5))
-
-    def score_offset(sample, shift_x, shift_y):
-        score = 0
-        for source_x, source_y in template:
-            page_x = sample["x"] + source_x * sample["width_px"] / source_width
-            page_y = sample["y"] + source_y * sample["height_px"] / source_height
-            dx = page_x - expected_x
-            dy = page_y - expected_y
-            scan_x = (cosine * scale_x * dx - sine * scale_y * dy
-                      + observed_x + shift_x)
-            scan_y = (sine * scale_x * dx + cosine * scale_y * dy
-                      + observed_y + shift_y)
-            pixel_x = math.floor(scan_x)
-            pixel_y = math.floor(scan_y)
-            if not (0 <= pixel_x < scan_width and 0 <= pixel_y < scan_height):
-                continue
-            offset = (pixel_y * scan_width + pixel_x) * 3
-            red, green, blue = scan_pixels[offset:offset + 3]
-            luma = (red * 299 + green * 587 + blue * 114) // 1000
-            score += 128 - luma
-        return score
+    templates = []
+    for source_width, source_height, source_pixels in source_images:
+        template = []
+        for source_y in range(source_height):
+            for source_x in range(source_width):
+                offset = (source_y * source_width + source_x) * 3
+                red, green, blue = source_pixels[offset:offset + 3]
+                if (red * 299 + green * 587 + blue * 114) // 1000 <= 160:
+                    template.append((source_x + 0.5, source_y + 0.5))
+        templates.append(template)
 
     offsets = {}
-    for row_index, row in enumerate(rows):
-        sample = samples[row["sample_indexes"][0]]
-        # Keep the search inside the row's own barcode and clear of its label
-        # and neighboring rows. The page fit supplies the location; matching
-        # only corrects the remaining small scan-placement error.
-        radius_x = max(2, min(20, round(scale_x * LABEL_GAP * 0.8)))
-        if row_index + 1 < len(rows):
-            next_sample = samples[rows[row_index + 1]["sample_indexes"][0]]
+    for sample in samples:
+        source_width, source_height, _ = source_images[sample["mode"]]
+        template = templates[sample["mode"]]
+
+        def score_offset(shift_x, shift_y):
+            score = 0
+            for source_x, source_y in template:
+                page_x = sample["x"] + source_x * sample["width_px"] / source_width
+                page_y = sample["y"] + source_y * sample["height_px"] / source_height
+                dx = page_x - expected_x
+                dy = page_y - expected_y
+                scan_x = (cosine * scale_x * dx - sine * scale_y * dy
+                          + observed_x + shift_x)
+                scan_y = (sine * scale_x * dx + cosine * scale_y * dy
+                          + observed_y + shift_y)
+                pixel_x = math.floor(scan_x)
+                pixel_y = math.floor(scan_y)
+                if not (0 <= pixel_x < scan_width and 0 <= pixel_y < scan_height):
+                    continue
+                offset = (pixel_y * scan_width + pixel_x) * 3
+                red, green, blue = scan_pixels[offset:offset + 3]
+                luma = (red * 299 + green * 587 + blue * 114) // 1000
+                score += 128 - luma
+            return score
+
+        column = columns[sample["mode"]]
+        sample_position = column["sample_indexes"].index(sample["index"])
+        radius_x = max(2, min(20, round(scale_x * PADDING)))
+        if sample_position + 1 < len(column["sample_indexes"]):
+            next_sample = samples[column["sample_indexes"][sample_position + 1]]
             row_spacing = (next_sample["y"] - sample["y"]) * scale_y
         else:
             row_spacing = (sample["height_px"] + PADDING) * scale_y
@@ -530,10 +587,10 @@ def fit_sample_row_offsets(rows, samples, transform, source_width, source_height
         coarse_step = max(1, round(scale * 2))
 
         best_x = best_y = 0
-        best_score = score_offset(sample, 0, 0)
+        best_score = score_offset(0, 0)
         for shift_y in range(-radius_y, radius_y + 1, coarse_step):
             for shift_x in range(-radius_x, radius_x + 1, coarse_step):
-                score = score_offset(sample, shift_x, shift_y)
+                score = score_offset(shift_x, shift_y)
                 if score > best_score:
                     best_x, best_y, best_score = shift_x, shift_y, score
 
@@ -542,195 +599,297 @@ def fit_sample_row_offsets(rows, samples, transform, source_width, source_height
             for shift_x in range(coarse_x - coarse_step, coarse_x + coarse_step + 1):
                 if abs(shift_x) > radius_x or abs(shift_y) > radius_y:
                     continue
-                score = score_offset(sample, shift_x, shift_y)
+                score = score_offset(shift_x, shift_y)
                 if score > best_score:
                     best_x, best_y, best_score = shift_x, shift_y, score
-        offsets[row["index"]] = (best_x, best_y)
+        offsets[sample["index"]] = (best_x, best_y)
     return offsets
 
 
-def analyze_scan(makocode_bin, scan_path, original_width, original_height):
-    page_width, page_height, page_pixels = read_p3_ppm(scan_path)
-    rows, samples = make_calibration_layout(original_width, original_height)
-    with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
-        work_dir = Path(temporary_directory)
-        transform = fit_scan_transform(
-            rows, samples, page_width, page_height, page_pixels,
+def infer_scale_layout(source_sizes, scan_width, scan_height, scan_pixels):
+    step = max(1, (max(scan_width, scan_height) + 1499) // 1500)
+    ink_points = []
+    for y in range(step // 2, scan_height, step):
+        for x in range(step // 2, scan_width, step):
+            offset = (y * scan_width + x) * 3
+            red, green, blue = scan_pixels[offset:offset + 3]
+            luma = (red * 299 + green * 587 + blue * 114) // 1000
+            if luma <= 160 or max(red, green, blue) - min(red, green, blue) >= 32:
+                ink_points.append((x + 0.5, y + 0.5))
+    if len(ink_points) < 100:
+        raise ValueError("could not find enough calibration ink to identify the layout")
+
+    def projection_score(angle):
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        x_projection = {}
+        y_projection = {}
+        for x, y in ink_points:
+            x_bin = round(cosine * x + sine * y)
+            y_bin = round(-sine * x + cosine * y)
+            x_projection[x_bin] = x_projection.get(x_bin, 0) + 1
+            y_projection[y_bin] = y_projection.get(y_bin, 0) + 1
+        return (sum(count * count for count in x_projection.values())
+                + sum(count * count for count in y_projection.values()))
+
+    best_angle = 0.0
+    best_score = -1
+    for tenth_degree in range(-150, 151, 10):
+        candidate = math.radians(tenth_degree / 10)
+        score = projection_score(candidate)
+        if score > best_score:
+            best_angle = candidate
+            best_score = score
+    center_tenth_degree = round(math.degrees(best_angle) * 10)
+    for tenth_degree in range(center_tenth_degree - 10, center_tenth_degree + 11):
+        candidate = math.radians(tenth_degree / 10)
+        score = projection_score(candidate)
+        if score > best_score:
+            best_angle = candidate
+            best_score = score
+
+    cosine = math.cos(best_angle)
+    sine = math.sin(best_angle)
+    projected_x = []
+    projected_y = []
+    for x, y in ink_points:
+        projected_x.append(cosine * x + sine * y)
+        projected_y.append(-sine * x + cosine * y)
+    observed_width = max(projected_x) - min(projected_x)
+    observed_height = max(projected_y) - min(projected_y)
+
+    candidate_denominators = tuple(reversed(SCALE_DENOMINATORS))
+    denominator_scores = {}
+    for candidate in candidate_denominators:
+        _, _, expected_width, expected_height = make_columns(
+            source_sizes, make_scale_steps(candidate),
         )
-        source_width, source_height, source_pixels = read_p3_ppm(
-            encode_source_ppm(makocode_bin, work_dir)
+        expected_width -= 2 * MARGIN
+        expected_height -= 2 * MARGIN
+        predicted_height = expected_height * observed_width / expected_width
+        denominator_scores[candidate] = abs(
+            math.log(max(1.0, observed_height) / max(1.0, predicted_height))
         )
-        row_offsets = fit_sample_row_offsets(
-            rows, samples, transform, source_width, source_height, source_pixels,
-            page_width, page_height, page_pixels,
-        )
-        sample_row_index = {
-            sample_index: row["index"]
-            for row in rows
-            for sample_index in row["sample_indexes"]
-        }
-        print(
-            f"Detected calibration grid at {transform[4]:.3g}x, "
-            f"rotated {math.degrees(transform[5]):.2f} degrees.",
-            file=sys.stderr,
-            flush=True,
-        )
-
-        total_samples = len(samples)
-        decoded_samples = {}
-
-        def decode_sample(original_sample, status):
-            sample_dir = work_dir / f"sample-{original_sample['index']:04d}"
-            sample_dir.mkdir()
-            crop_path = sample_dir / "sample.ppm"
-            decode_dir = sample_dir / "decoded"
-            decode_dir.mkdir()
-            sample = map_sample_to_scan(
-                original_sample, transform, page_width, page_height,
-                row_offsets[sample_row_index[original_sample["index"]]],
-            )
-            write_sample_crop(crop_path, page_width, page_pixels, sample)
-
-            print(
-                f"{status} {original_sample['index'] + 1}/{total_samples} "
-                f"({original_sample['scale']:g}x copy {original_sample['copy'] + 1})...",
-                end="",
-                file=sys.stderr,
-                flush=True,
-            )
-            result = subprocess.run(
-                [str(makocode_bin), "decode", f"--output-dir={decode_dir}", str(crop_path)],
-                cwd=makocode_bin.parent,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            decoded = (result.returncode == 0 and any(
-                payload.is_file() and payload.read_bytes() == b"makocode"
-                for payload in decode_dir.rglob("makocode.bin")
-            ))
-            decoded_samples[original_sample["index"]] = decoded
-            print(" decoded" if decoded else " failed", file=sys.stderr, flush=True)
-            return decoded
-
-        # One representative from each scale row locates the first plausible
-        # success scale without decoding every copy in every smaller row.
-        print("Probing the first copy at each scale...", file=sys.stderr, flush=True)
-        first_success_row = None
-        for row_index, row in enumerate(rows, start=1):
-            first_sample = samples[row["sample_indexes"][0]]
-            decode_sample(first_sample, f"Probe row {row_index}/{len(rows)}")
-            if decoded_samples[first_sample["index"]] and first_success_row is None:
-                first_success_row = row_index - 1
-
-        results = []
-        if first_success_row is None:
-            print(
-                "No first-copy probe decoded; checking the other copies in each row...",
-                file=sys.stderr,
-                flush=True,
-            )
-            for row_index, row in enumerate(rows):
-                row_samples = [samples[index] for index in row["sample_indexes"]]
-                for original_sample in row_samples[1:]:
-                    if decode_sample(
-                        original_sample,
-                        f"Probe row {row_index + 1}/{len(rows)}",
-                    ):
-                        first_success_row = row_index
-                        break
-                if first_success_row is not None:
-                    break
-                results.append((row, 0, len(row_samples)))
-
-        if first_success_row is not None:
-            print(
-                f"First successful sample is at {rows[first_success_row]['scale']:g}x; "
-                "checking every copy from there upward.",
-                file=sys.stderr,
-                flush=True,
-            )
-            for row_index in range(first_success_row, len(rows)):
-                row = rows[row_index]
-                row_samples = [samples[index] for index in row["sample_indexes"]]
-                decoded_count = 0
-                for original_sample in row_samples:
-                    decoded = decoded_samples.get(original_sample["index"])
-                    if decoded is None:
-                        decoded = decode_sample(original_sample, f"Verify {row['scale']:g}x")
-                    if decoded:
-                        decoded_count += 1
-
-                results.append((row, decoded_count, len(row_samples)))
-                if decoded_count == len(row_samples):
-                    print(
-                        f"Every copy decoded at {row['scale']:g}x; stopping at this row.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    break
-
-    fully_scanned = {row["index"]: (decoded_count, sample_count)
-                     for row, decoded_count, sample_count in results}
-    for row_index, row in enumerate(rows):
-        if row_index in fully_scanned:
-            decoded_count, sample_count = fully_scanned[row_index]
-            percent = 100.0 * decoded_count / sample_count if sample_count else 0.0
-            print(f"{row['scale']:g}x: {decoded_count}/{sample_count} decoded ({percent:.1f}%)")
-        else:
-            sample = samples[row["sample_indexes"][0]]
-            state = "decoded" if decoded_samples[sample["index"]] else "failed"
-            print(f"{row['scale']:g}x: first copy {state}; other copies not checked")
-
-    every_copy = next((row for row, count, total in results if count == total), None)
-    print("Smallest scale that worked (every copy decoded): "
-          + (f"{every_copy['scale']:g}x" if every_copy else "none"))
-
-
-def crop_scan(makocode_bin, scan_path, original_width, original_height):
-    if original_width <= 0 or original_height <= 0:
-        raise ValueError("original page width and height must be positive")
-
-    rows, samples = make_calibration_layout(original_width, original_height)
-    scan_width, scan_height, scan_pixels = read_p3_ppm(scan_path)
-    transform = fit_scan_transform(
-        rows, samples, scan_width, scan_height, scan_pixels,
+    denominator = min(denominator_scores, key=denominator_scores.get)
+    _, _, expected_width, expected_height = make_columns(
+        source_sizes, make_scale_steps(denominator),
     )
-    with tempfile.TemporaryDirectory(prefix="makocode-calibration-source-") as temporary_directory:
-        source_width, source_height, source_pixels = read_p3_ppm(
-            encode_source_ppm(makocode_bin, Path(temporary_directory))
+    observed_ratio = scan_width / scan_height
+    angle_denominator = observed_ratio * expected_width - expected_height
+    if abs(angle_denominator) > 1e-9:
+        angle_magnitude = math.atan(
+            (expected_width - observed_ratio * expected_height)
+            / angle_denominator
         )
-    row_offsets = fit_sample_row_offsets(
-        rows, samples, transform, source_width, source_height, source_pixels,
+        if 0 < angle_magnitude <= math.radians(15):
+            sine = math.sin(angle_magnitude)
+            cosine = math.cos(angle_magnitude)
+            predicted_width = expected_width * cosine + expected_height * sine
+            predicted_height = expected_height * cosine + expected_width * sine
+            page_scale = math.sqrt(
+                (scan_width / predicted_width) * (scan_height / predicted_height)
+            )
+            ink_scale = math.sqrt(
+                (observed_width / max(1, expected_width - 2 * MARGIN))
+                * (observed_height / max(1, expected_height - 2 * MARGIN))
+            )
+            if abs(page_scale - ink_scale) <= 0.1 * max(page_scale, ink_scale):
+                positive_score = projection_score(angle_magnitude)
+                negative_score = projection_score(-angle_magnitude)
+                best_angle = (angle_magnitude if positive_score >= negative_score
+                              else -angle_magnitude)
+    return denominator, best_angle
+
+
+def fit_calibration_scan(work_dir, columns, samples, source_images,
+                         expected_width, expected_height,
+                         scan_width, scan_height, scan_pixels,
+                         initial_angle=None):
+    if scan_width >= expected_width and scan_height >= expected_height:
+        reference_path = work_dir / "expected-calibration.ppm"
+        write_sheet(
+            reference_path, source_images, scan_width, scan_height,
+            columns, samples,
+        )
+        _, _, reference_pixels = read_p3_ppm(reference_path)
+        if scan_pixels == reference_pixels:
+            center_x = scan_width / 2
+            center_y = scan_height / 2
+            transform = (center_x, center_y, center_x, center_y, 1.0, 0.0, 1.0, 1.0)
+            offsets = {sample["index"]: (0, 0) for sample in samples}
+            return transform, offsets, True
+
+    transform = fit_scan_transform(
+        columns, samples, scan_width, scan_height, scan_pixels, initial_angle,
+    )
+    offsets = fit_sample_row_offsets(
+        columns, samples, transform, source_images,
         scan_width, scan_height, scan_pixels,
     )
-    sample_row_index = {
-        sample_index: row["index"]
-        for row in rows
-        for sample_index in row["sample_indexes"]
-    }
-    print(
-        f"Bounds fit at {transform[4]:.3g}x, "
-        f"rotated {math.degrees(transform[5]):.2f} degrees"
-    )
-    adjustments = ", ".join(
-        f"{row['label']} {row_offsets[row['index']][0]:+d},"
-        f"{row_offsets[row['index']][1]:+d}"
-        for row in rows
-    )
-    print(f"Row position adjustments in scan pixels (x,y): {adjustments}")
+    return transform, offsets, False
 
-    output_dir = Path.cwd() / "calibration-crops" / scan_path.stem
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for sample in samples:
-        crop = map_sample_to_scan(
-            sample, transform, scan_width, scan_height,
-            row_offsets[sample_row_index[sample["index"]]],
+
+def analyze_scan(makocode_bin, scan_path):
+    page_width, page_height, page_pixels = read_p3_ppm(scan_path)
+    with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
+        work_dir = Path(temporary_directory)
+        source_images = encode_calibration_sources(makocode_bin, work_dir)
+        source_sizes = [(image[0], image[1]) for image in source_images]
+        scale_denominator, initial_angle = infer_scale_layout(
+            source_sizes, page_width, page_height, page_pixels,
         )
-        crop_path = output_dir / (
-            f"{sample['scale']:g}x-copy{sample['copy'] + 1:02d}.ppm"
+        columns, samples, expected_width, expected_height, _ = make_calibration_layout(
+            source_sizes, scale_denominator=scale_denominator,
         )
-        write_sample_crop(crop_path, scan_width, scan_pixels, crop)
+        transform, sample_offsets, exact_sheet = fit_calibration_scan(
+            work_dir, columns, samples, source_images, expected_width, expected_height,
+            page_width, page_height, page_pixels, initial_angle,
+        )
+        if exact_sheet:
+            print(
+                f"Input matches the generated sheet with 1/{scale_denominator} subdivisions; "
+                "using its exact layout.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Detected calibration grid at {transform[4]:.3g}x, "
+                f"rotated {math.degrees(transform[5]):.2f} degrees, "
+                f"with 1/{scale_denominator} subdivisions.",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        mode_results = {mode_index: [] for mode_index in range(len(CALIBRATION_MODES))}
+        smallest_scales = {}
+        mode_order = [len(CALIBRATION_MODES) - 1, *range(len(CALIBRATION_MODES) - 1)]
+        for mode_index in mode_order:
+            mode_samples = sorted(
+                (sample for sample in samples if sample["mode"] == mode_index),
+                key=lambda sample: sample["scale_twelfths"],
+            )
+            for original_sample in mode_samples:
+                sample_dir = work_dir / f"sample-{original_sample['index']:04d}"
+                sample_dir.mkdir()
+                crop_path = sample_dir / "sample.ppm"
+                decode_dir = sample_dir / "decoded"
+                decode_dir.mkdir()
+                write_sample_crop(
+                    crop_path, page_width, page_height, page_pixels,
+                    original_sample, transform,
+                    sample_offsets[original_sample["index"]],
+                )
+
+                print(
+                    f"{CALIBRATION_MODES[mode_index][0]} "
+                    f"{scale_label(original_sample['scale_twelfths'])}...",
+                    end="",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                result = subprocess.run(
+                    [str(makocode_bin), "decode", f"--output-dir={decode_dir}", str(crop_path)],
+                    cwd=makocode_bin.parent,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                decoded = (result.returncode == 0 and any(
+                    payload.is_file() and payload.read_bytes() == CALIBRATION_PAYLOAD
+                    for payload in decode_dir.rglob("makocode.bin")
+                ))
+                mode_results[mode_index].append((original_sample["scale_twelfths"], decoded))
+                print(" decoded" if decoded else " failed", file=sys.stderr, flush=True)
+                if decoded:
+                    smallest_scales[mode_index] = original_sample["scale_twelfths"]
+                    break
+
+    for mode_index, (mode_name, _) in enumerate(CALIBRATION_MODES):
+        print(f"{mode_name}: " + ", ".join(
+            f"{scale_label(scale_twelfths)} {'decoded' if decoded else 'failed'}"
+            for scale_twelfths, decoded in mode_results[mode_index]
+        ) or "no samples checked")
+        print(
+            f"Smallest scale that decoded for {mode_name}: "
+            f"{scale_label(smallest_scales[mode_index]) if mode_index in smallest_scales else 'none'}"
+        )
+    preferred_mode = next(
+        (mode_index for mode_index in reversed(range(len(CALIBRATION_MODES)))
+         if smallest_scales.get(mode_index) == 12),
+        None,
+    )
+    if preferred_mode is None:
+        print("Preferred mode at 1x: none")
+    else:
+        mode_name, palette = CALIBRATION_MODES[preferred_mode]
+        print(f"Preferred mode at 1x: {mode_name} ({len(palette)} colors)")
+    if smallest_scales:
+        best_mode = max(
+            smallest_scales,
+            key=lambda mode_index: math.log2(len(CALIBRATION_MODES[mode_index][1]))
+            / (smallest_scales[mode_index] / 12) ** 2,
+        )
+        mode_name, palette = CALIBRATION_MODES[best_mode]
+        scale_twelfths = smallest_scales[best_mode]
+        scale = scale_twelfths / 12
+        _, _, _, _, _, _, scan_scale_x, scan_scale_y = transform
+        bits_per_pixel = (
+            math.log2(len(palette))
+            / (scale * scale * scan_scale_x * scan_scale_y)
+        )
+        bytes_per_page = int(page_width * page_height * bits_per_pixel / 8)
+        print("Best case assumes flat data; ignores metadata, fiducials, and other overhead.")
+        print(
+            f"Bytes per page: {bytes_per_page} "
+            f"({mode_name} at {scale_label(scale_twelfths)}, "
+            f"{bits_per_pixel:.3g} bits/pixel)"
+        )
+    else:
+        print("Bytes per page: none decoded")
+
+
+def crop_scan(makocode_bin, scan_path):
+    scan_width, scan_height, scan_pixels = read_p3_ppm(scan_path)
+    with tempfile.TemporaryDirectory(prefix="makocode-calibration-source-") as temporary_directory:
+        source_images = encode_calibration_sources(
+            makocode_bin, Path(temporary_directory),
+        )
+        source_sizes = [(image[0], image[1]) for image in source_images]
+        scale_denominator, initial_angle = infer_scale_layout(
+            source_sizes, scan_width, scan_height, scan_pixels,
+        )
+        columns, samples, expected_width, expected_height, _ = make_calibration_layout(
+            source_sizes, scale_denominator=scale_denominator,
+        )
+        transform, sample_offsets, exact_sheet = fit_calibration_scan(
+            Path(temporary_directory), columns, samples, source_images,
+            expected_width, expected_height, scan_width, scan_height, scan_pixels,
+            initial_angle,
+        )
+        fit_description = "exact generated layout" if exact_sheet else (
+            f"{transform[4]:.3g}x, rotated {math.degrees(transform[5]):.2f} degrees"
+        )
+        print(f"Bounds fit at {fit_description}")
+        adjustments = ", ".join(
+            f"{CALIBRATION_MODES[sample['mode']][0]} "
+            f"{scale_label(sample['scale_twelfths'])} "
+            f"{sample_offsets[sample['index']][0]:+d},"
+            f"{sample_offsets[sample['index']][1]:+d}"
+            for sample in samples
+        )
+        print(f"Sample position adjustments in scan pixels (x,y): {adjustments}")
+
+        output_dir = Path.cwd() / "calibration-crops" / scan_path.stem
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for sample in samples:
+            crop_path = output_dir / (
+                f"{CALIBRATION_MODES[sample['mode']][0]}-"
+                f"{scale_label(sample['scale_twelfths']).replace('+', '-').replace('/', '_')}.ppm"
+            )
+            write_sample_crop(
+                crop_path, scan_width, scan_height, scan_pixels, sample,
+                transform, sample_offsets[sample["index"]],
+            )
     print(f"Wrote {len(samples)} crops to {output_dir}")
 
 
@@ -750,34 +909,28 @@ def parse_args(argv):
     decode_parser = commands.add_parser("decode", help="measure decode success from a scan")
     decode_parser.add_argument("scan", type=Path, metavar="SCAN.ppm",
                                help="scanned calibration sheet as a P3 PPM")
-    decode_parser.add_argument("--width", type=int, required=True,
-                               help="original calibration page width in pixels")
-    decode_parser.add_argument("--height", type=int, required=True,
-                               help="original calibration page height in pixels")
     crop_parser = commands.add_parser("crop", help="crop calibration samples without decoding")
     crop_parser.add_argument("scan", type=Path, metavar="SCAN.ppm",
                              help="scanned calibration sheet to crop")
-    crop_parser.add_argument("--width", type=int, required=True,
-                             help="original calibration page width in pixels")
-    crop_parser.add_argument("--height", type=int, required=True,
-                             help="original calibration page height in pixels")
     return parser.parse_args(argv)
 
 
-def encode_source_ppm(makocode_bin, work_dir):
+def encode_source_ppm(makocode_bin, work_dir, palette):
     payload_path = work_dir / "makocode.bin"
-    payload_path.write_bytes(b"makocode")
+    payload_path.write_bytes(CALIBRATION_PAYLOAD)
     command = [
         str(makocode_bin),
         "encode",
         f"--input={payload_path.name}",
         "--ecc=0",
-        "--page-width=55",
-        "--page-height=55",
+        f"--page-width={SOURCE_PAGE_WIDTH}",
+        f"--page-height={SOURCE_PAGE_HEIGHT}",
         "--no-filename",
         "--no-page-count",
         "--prefix=calibration_source",
         f"--output-dir={work_dir}",
+        "--palette",
+        " ".join(palette),
     ]
     try:
         subprocess.run(
@@ -799,6 +952,16 @@ def encode_source_ppm(makocode_bin, work_dir):
     return source_path
 
 
+def encode_calibration_sources(makocode_bin, work_dir):
+    source_images = []
+    for mode_name, palette in CALIBRATION_MODES:
+        mode_dir = work_dir / mode_name.lower()
+        mode_dir.mkdir()
+        source_path = encode_source_ppm(makocode_bin, mode_dir, palette)
+        source_images.append(read_p3_ppm(source_path))
+    return source_images
+
+
 def main(argv=None):
     args = parse_args(argv)
     repo_root = Path(__file__).resolve().parent.parent
@@ -808,35 +971,32 @@ def main(argv=None):
         raise ValueError(f"makocode executable not found at {makocode_bin}; build it first")
 
     if args.command == "crop":
-        crop_scan(makocode_bin, args.scan, args.width, args.height)
+        crop_scan(makocode_bin, args.scan)
         return 0
 
     if args.command == "decode":
-        if args.width <= 0 or args.height <= 0:
-            raise ValueError("original page width and height must be positive")
-        analyze_scan(makocode_bin, args.scan, args.width, args.height)
+        analyze_scan(makocode_bin, args.scan)
         return 0
 
     if args.width <= 0 or args.height <= 0:
         raise ValueError("page width and height must be positive")
-    if args.width <= 2 * MARGIN or args.height <= 2 * MARGIN:
-        raise ValueError("page dimensions must leave room inside the margins")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-") as temporary_directory:
-        source_path = encode_source_ppm(makocode_bin, Path(temporary_directory))
-        source_width, source_height, source_pixels = read_p3_ppm(source_path)
-        rows, samples = make_rows(source_width, source_height, args.width, args.height)
-        if not rows:
-            raise ValueError("page is too small to fit a labeled sample at 1x")
-
+        source_images = encode_calibration_sources(makocode_bin, Path(temporary_directory))
+        source_sizes = [(image[0], image[1]) for image in source_images]
+        columns, samples, _, _, scale_denominator = make_calibration_layout(
+            source_sizes, args.width, args.height,
+        )
         write_sheet(
-            args.output, source_width, source_height, source_pixels,
-            args.width, args.height, rows, samples,
+            args.output, source_images, args.width, args.height, columns, samples,
         )
 
     print(f"Wrote {args.output} ({args.width}x{args.height})")
-    print(f"Placed {len(rows)} scales in {len(samples)} samples")
+    print(
+        f"Placed {len(samples)} samples across {len(CALIBRATION_MODES)} color modes "
+        f"using 1/{scale_denominator} scale subdivisions"
+    )
     return 0
 
 

@@ -79,13 +79,24 @@ dashboard under `test_output/coverage/index.html`.
 ### Calibration
 
 ```
-python3 scripts/calibration.py encode --width 4797 --height 5915
+python3 scripts/calibration.py encode --width 2644 --height 2920
 ```
 
 ```
-python3 scripts/calibration.py decode scan.ppm --width 2399 --height 2399
-Smallest scale that worked (every copy decoded): 1x
+python3 scripts/calibration.py decode scan.ppm
 ```
+
+The generated sheet has four columns: White/Black; White/Cyan/Magenta/Yellow;
+that palette plus Black; and the eight-color White/Red/Green/Blue/Yellow/
+Magenta/Cyan/Black palette. Each column stacks its samples tightly, with scale
+order alternating by column. The 2644x1684 minimum fits 1x, 2x, 3x, and 4x;
+extra height adds half, third, and quarter scale intervals when they fit.
+Every sample encodes `makocode` followed by 1024 deterministic bytes. Decode
+infers the layout from the scanned sample arrangement. Its bytes-per-page
+estimate treats the full page as flat data at the densest successfully decoded
+mode and scale, adjusted for scan scale, and ignores metadata, fiducials, and
+other overhead. The PPM footer prints `width: N, height: N` in the default
+5x8 footer font.
 
 Handy linux printing command:
 
