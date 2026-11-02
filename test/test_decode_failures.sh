@@ -260,11 +260,30 @@ run_case_footer_data_destroyed() {
     fi
     "$ppm_transform_bin" corrupt-footer-data-destroyed \
         --input "${ppm_paths[0]}" \
+        --footer-height-px 8 \
         --output "$footer_data_destroyed"
 
     local decode_dir="$work_dir/footer_data_destroyed_decode"
-    run_expect_failure "decode-footer-present-data-destroyed" "$makocode_bin" decode "$footer_data_destroyed" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" footer_data_destroyed
+    local decode_log="$work_dir/footer_data_destroyed_decode.log"
+    print_makocode_cmd "decode-footer-present-data-destroyed" "$makocode_bin" decode "$footer_data_destroyed" --debug "--output-dir=$decode_dir"
+    set +e
+    "$makocode_bin" decode "$footer_data_destroyed" --debug "--output-dir=$decode_dir" >"$decode_log" 2>&1
+    local decode_status=$?
+    set -e
+    if [[ $decode_status -eq 0 ]]; then
+        echo "test_decode_failures: decoder unexpectedly succeeded for footer_data_destroyed" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'decode: ECC could not repair the payload' "$decode_log"; then
+        echo "test_decode_failures: preserved tile did not lead to the expected payload ECC failure" >&2
+        cat "$decode_log" >&2
+        exit 1
+    fi
+    if [[ ! -f $decode_dir/decode_fiducials.csv ]]; then
+        echo "test_decode_failures: footer corruption decode did not write fiducial CSV" >&2
+        exit 1
+    fi
+    cp "$decode_dir/decode_fiducials.csv" "$test_dir/${label}_footer_data_destroyed_decode_fiducials.csv"
     rm -rf "$work_dir"
 }
 
@@ -277,8 +296,8 @@ run_case_footer_valid_data_too_corrupt() {
         "$makocode_bin" encode \
         "--input=payload.bin" \
         "--ecc=0.25" \
-        "--page-width=600" \
-        "--page-height=600" \
+        "--page-width=1000" \
+        "--page-height=1000" \
         "--no-filename" \
         "--no-page-count" \
         "--prefix=${label}_footer_valid_data_too_corrupt" \
@@ -289,8 +308,8 @@ run_case_footer_valid_data_too_corrupt() {
         "$makocode_bin" encode \
             --input=payload.bin \
             --ecc=0.25 \
-            --page-width=600 \
-            --page-height=600 \
+            --page-width=1000 \
+            --page-height=1000 \
             --no-filename \
             --no-page-count \
             --prefix="${label}_footer_valid_data_too_corrupt" \

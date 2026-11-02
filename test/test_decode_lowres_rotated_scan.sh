@@ -30,7 +30,7 @@ printf 'makocode' > "$work_dir/makocode.bin"
     cd "$work_dir"
     "$makocode_bin" encode \
         --input=makocode.bin \
-        --ecc=0 --page-width=55 --page-height=55 \
+        --ecc=0 --page-width=80 --page-height=80 \
         --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=source >/dev/null
 )
@@ -44,7 +44,7 @@ tokens = Path(sys.argv[1]).read_text().split()
 assert tokens[0] == 'P3' and tokens[3] == '255'
 source_width, source_height = int(tokens[1]), int(tokens[2])
 source = list(map(int, tokens[4:]))
-assert (source_width, source_height) == (55, 55)
+assert (source_width, source_height) == (80, 80)
 assert len(source) == source_width * source_height * 3
 
 # Rasterize the encoded modules through one affine camera pass. Four-by-four
@@ -57,9 +57,11 @@ a00 = scale * cosine
 a01 = -scale * sine
 a10 = scale * sine
 a11 = scale * cosine
-canvas_width, canvas_height = 101, 102
-tx = 50.0 - 48.0 * cosine + 48.0 * sine
-ty = 50.0 - 48.0 * sine - 48.0 * cosine
+canvas_width, canvas_height = 150, 151
+logical_center_x = (source_width - 1.0) * 0.5
+logical_center_y = (source_height - 1.0) * 0.5
+tx = 75.0 - (a00 * logical_center_x + a01 * logical_center_y)
+ty = 75.0 - (a10 * logical_center_x + a11 * logical_center_y)
 canvas = [230] * (canvas_width * canvas_height * 3)
 coverage = 4
 
@@ -102,7 +104,7 @@ damaged_samples = (
 exact_samples = set()
 for row in range(source_height):
     for col in range(source_width):
-        if 3 <= col < 51 and 3 <= row < 51:
+        if 16 <= col < 64 and 16 <= row < 64:
             continue
         sample_x = a00 * (col + 0.5) + a01 * (row + 0.5) + tx
         sample_y = a10 * (col + 0.5) + a11 * (row + 0.5) + ty

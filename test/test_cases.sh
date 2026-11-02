@@ -11,13 +11,13 @@
 # namespace the artifacts written under test_output/.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' baseline" \
-    --size 1 --ecc 0 --width 55 --height 55 \
+    --size 1 --ecc 0 --width 80 --height 80 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \
-    --size 8 --ecc 0 --width 55 --height 55 \
+    --size 8 --ecc 0 --width 80 --height 80 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
     --payload-literal "makocode"
@@ -25,7 +25,7 @@ test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseli
 test_case 0002_baseline_8k_ecc_050 roundtrip "8 KiB payload, ECC 0.5 baseline" \
     --size 8192 --ecc 0.5 --width 500 --height 500
 
-test_case 0003_baseline_8k_ecc_000 roundtrip "8 KiB payload, ECC disabled baseline" \
+test_case 0003_baseline_8k_ecc_000 roundtrip "8 KiB payload, zero requested unknown-error budget with structural ECC" \
     --size 8192 --ecc 0 --width 500 --height 500
 
 test_case 0004_baseline_multi_page_ecc_100 roundtrip "128 KiB payload, ECC 1.0 multi-page" \
@@ -155,11 +155,13 @@ test_case 0040_header_copy_corruption script "Header RS repairs and ECC metadata
     test_header_copy_corruption.sh
 
 test_case 0041_palette_white_black_blot_black roundtrip "High-ECC black blot recovery on White/Black page" \
-    --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
+    --size 4096 --ecc 0.25 --width 600 --height 600 --palette "White Black" \
+    --encode-opt "--ecc-fill" --encode-opt "--no-overlay-reserve" \
     --ink-blot-radius 180 --ink-blot-color black
 
 test_case 0042_palette_white_black_blot_white roundtrip "High-ECC white blot recovery on White/Black page" \
-    --size 4096 --ecc 8.0 --width 600 --height 600 --palette "White Black" \
+    --size 4096 --ecc 0.25 --width 600 --height 600 --palette "White Black" \
+    --encode-opt "--ecc-fill" --encode-opt "--no-overlay-reserve" \
     --ink-blot-radius 180 --ink-blot-color white
 
 test_case 0043_overlay_e2e overlay "Overlay CLI merges masks and decodes" \
@@ -197,7 +199,11 @@ test_case 0047_overlay_e2e_ignore_colors overlay "Overlay CLI skips white backgr
 
 test_case 0048_overlay_bw_ecc_target_025 overlay "Black/white circle overlay obeys ECC target 0.25" \
     MAKO_OVERLAY_FRACTION=0.1 \
-    MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill \
+    MAKO_OVERLAY_PAGE_WIDTH=1840 \
+    MAKO_OVERLAY_PAGE_HEIGHT=1840 \
+    MAKO_OVERLAY_EXPECT_PAGES=1 \
+    MAKO_OVERLAY_ECC_TARGET=0.25 \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill --fiducials=4,60,12" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
@@ -206,7 +212,11 @@ test_case 0048_overlay_bw_ecc_target_025 overlay "Black/white circle overlay obe
 
 test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obeys ECC target 0.5" \
     MAKO_OVERLAY_FRACTION=0.1 \
-    MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill \
+    MAKO_OVERLAY_PAGE_WIDTH=1840 \
+    MAKO_OVERLAY_PAGE_HEIGHT=1840 \
+    MAKO_OVERLAY_EXPECT_PAGES=1 \
+    MAKO_OVERLAY_ECC_TARGET=0.5 \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill --fiducials=4,60,12" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
@@ -282,10 +292,10 @@ test_case 0066_decode_raw_fallback script "Raw decode fallback is gated and writ
 test_case 0067_ppm_transform_cli script "ppm_transform help and fatal error paths" \
     test_ppm_transform_cli.sh
 
-test_case 0068_decode_parse_retry script "Generic decoder parse failure retries once, then fails" \
-    test_decode_parse_retry.sh
+test_case 0068_decode_ecc_retry script "Canonical ECC failure retries without fiducial subgrid, then fails" \
+    test_decode_ecc_retry.sh
 
-test_case 0069_decode_scale_318 script "Decode a 55x55 page rendered at 3.18 pixels per module" \
+test_case 0069_decode_scale_318 script "Decode a 160x160 page rendered at 3.18 pixels per module" \
     test_decode_scale_318.sh
 
 test_case 0070_decode_scale_2071 roundtrip "Fractional affine scan scale 2.071x" \
@@ -300,16 +310,16 @@ test_case 0072_decode_scale_4701 roundtrip "Fractional affine scan scale 4.701x"
     --size 4096 --ecc 0.25 --width 620 --height 620 \
     --scale 4.701 --transform-seed 4701
 
-test_case 0073_tiny_palette_2_white_checker roundtrip "Two-color tiny page with diagonal white damage at 2.701x" \
-    --size 8 --ecc 0 --width 55 --height 55 \
+test_case 0073_tiny_palette_2_white_checker roundtrip "Two-color tiny page with white checker overwrite at 2.701x" \
+    --size 8 --ecc 0.25 --width 160 --height 160 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
     --palette "White Black" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
-test_case 0074_tiny_palette_4_white_checker roundtrip "Four-color tiny page with diagonal white damage at 2.701x" \
-    --size 8 --ecc 0 --width 55 --height 55 \
+test_case 0074_tiny_palette_4_white_checker roundtrip "Four-color tiny page with white checker overwrite at 2.701x" \
+    --size 8 --ecc 0.25 --width 160 --height 160 \
     --encode-opt "--no-filename" \
     --encode-opt "--no-page-count" \
     --palette "White Cyan Magenta Yellow" \
@@ -327,7 +337,7 @@ test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payloa
 test_case 0076_decode_affine_cell_sampling script "Affine retry sampling preserves translated cell coordinates" \
     test_decode_affine_cell_sampling.sh
 
-test_case 0077_decode_small_scan script "Decodes grayscale affine bias in a 137x132 scan" \
+test_case 0077_decode_small_scan script "Decodes grayscale affine bias in a 193x188 scan" \
     test_decode_small_scan.sh
 
 test_case 0078_decode_synthetic_scan_damage script "Generated blurred 4.5x scan remains decodable" \
@@ -339,7 +349,7 @@ test_case 0079_decode_scan_margin_noise script "Generated scan margin noise stil
 test_case 0080_decode_scan_off_center_noise script "Recoverable scan with off-center specks must decode" \
     test_decode_synthetic_scan_damage.sh --off-center-noise
 
-test_case 0081_decode_short_length_header script "Decode low-resolution affine scans and recover a damaged frame-length bit" \
+test_case 0081_decode_short_length_header script "Canonical tile length survives a flipped raster prefix bit" \
     test_decode_short_length_header.sh
 
 test_case 0082_decode_lowres_rotated_scan script "Generated rotated scan below 2 pixels per module round-trips" \
@@ -348,8 +358,8 @@ test_case 0082_decode_lowres_rotated_scan script "Generated rotated scan below 2
 test_case 0083_decoded_file script "Decoded file retains metadata and archive bytes" \
     test_decoded_file.sh
 
-test_case 0084_decode_legacy_metadata script "Damaged schema 2 metadata round-trip" \
-    test_decode_legacy_metadata.sh
+test_case 0084_decode_current_metadata script "Damaged canonical metadata payload module is RS-repaired" \
+    test_decode_current_metadata.sh
 
 test_case 0085_decode_scan_registration script "Offset scan with off-center noise preserves the archive" \
     test_decode_scan_registration.sh
@@ -360,38 +370,29 @@ test_case 0086_decode_unit_scale_translation script "Unit-scale padded scan reco
 test_case 0087_decode_unit_scale_edge_bleed script "Unit-scale ink bleed must not override decoded tile geometry" \
     test_decode_unit_scale_translation.sh --edge-bleed
 
-test_case 0088_decode_unit_scale_optical_blur script "Legacy unit-scale scan with optical blur preserves its archive" \
-    test_decode_unit_scale_translation.sh --optical-blur --legacy
-
-test_case 0089_decode_current_unit_scale_optical_blur script "Current-schema unit-scale optical blur preserves its archive" \
+test_case 0088_decode_unit_scale_optical_blur script "Canonical unit-scale scan with optical blur preserves its archive" \
     test_decode_unit_scale_translation.sh --optical-blur
 
-test_case 0090_decode_lowres_optical_blur script "Legacy 1.5x scan recovers from optical blur and expanded ink bounds" \
+test_case 0090_decode_lowres_optical_blur script "Canonical 1.5x scan recovers from optical blur and expanded ink bounds" \
     test_decode_lowres_optical_blur.sh
 
-test_case 0091_decode_current_lowres_optical_blur script "Current-schema 1.5x scan recovers from optical blur and expanded ink bounds" \
-    test_decode_lowres_optical_blur.sh --current
-
-test_case 0092_decode_quarter_scale_registration script "Legacy 1.25x optical scan recovers a narrow metadata pitch interval" \
+test_case 0092_decode_quarter_scale_registration script "Canonical 1.25x optical scan recovers a narrow metadata pitch interval" \
     test_decode_quarter_scale_registration.sh
 
-test_case 0093_decode_current_quarter_scale_registration script "Current-schema 1.25x optical scan recovers metadata and archive" \
-    test_decode_quarter_scale_registration.sh --current
-
-test_case 0094_decode_midscale_low_contrast script "Legacy 2.5x low-contrast scan recovers its complete archive" \
+test_case 0094_decode_midscale_low_contrast script "Canonical 2.5x low-contrast scan recovers its complete archive" \
     test_decode_midscale_low_contrast.sh
 
-test_case 0095_decode_current_midscale_low_contrast script "Current-schema 2.5x low-contrast scan recovers its complete archive" \
-    test_decode_midscale_low_contrast.sh --current
-
-test_case 0096_decode_scale_relative_registration script "Legacy 6x optical scan recovers using scale-relative registration" \
+test_case 0096_decode_scale_relative_registration script "Canonical 6x optical scan recovers using scale-relative registration" \
     test_decode_scale_relative_registration.sh
 
-test_case 0097_decode_current_scale_relative_registration script "Current-schema 6x optical scan preserves metadata and archive" \
-    test_decode_scale_relative_registration.sh --current
-
-test_case 0098_decode_integer_scan_dimensions script "Legacy padded scan keeps integer and floating scales consistent" \
+test_case 0098_decode_integer_scan_dimensions script "Canonical padded scan keeps integer and floating scales consistent" \
     test_decode_integer_scan_dimensions.sh
 
-test_case 0099_decode_current_integer_scan_dimensions script "Current-schema padded scan survives integer dimension snapping" \
-    test_decode_integer_scan_dimensions.sh --current
+test_case 0100_rs_erasures script "RS erasure decoder enforces mixed correction boundaries" \
+    test_rs_erasures.sh
+
+test_case 0101_canonical_tile script "Canonical center tile reserves structural ECC on narrow and wide pages" \
+    test_canonical_tile.sh
+
+test_case 0102_canonical_overlay_multipage script "Canonical overlay selectors merge across multipage streams" \
+    test_canonical_overlay_multipage.sh

@@ -47,8 +47,8 @@ printf 'makocode' > "$work_dir/makocode.bin"
     "$makocode_bin" encode \
         --input=makocode.bin \
         --ecc=0 \
-        --page-width=55 \
-        --page-height=55 \
+        --page-width=80 \
+        --page-height=80 \
         --no-filename \
         --no-page-count \
         "--output-dir=$work_dir/encoded" \
@@ -61,7 +61,7 @@ printf 'makocode' > "$work_dir/makocode.bin"
     --scale-x 3.2363636363636363 \
     --scale-y 3.2363636363636363
 
-# Put the 178x178 bilinear render at (7, 6) on the 190x190 white canvas.
+# Put the 259x259 bilinear render at (7, 6) on the 278x278 white canvas.
 awk '
     NR == 1 { if ($0 != "P3") exit 2; next }
     /^[[:space:]]*#/ { next }
@@ -75,11 +75,11 @@ awk '
     }
     END {
         if (!have_width || !have_height || !have_maxval || count != source_width * source_height * 3) exit 2
-        canvas_width = 190
-        canvas_height = 190
+        canvas_width = 278
+        canvas_height = 278
         offset_x = 7
         offset_y = 6
-        if (source_width != 178 || source_height != 178) exit 2
+        if (source_width != 259 || source_height != 259) exit 2
         print "P3"
         print canvas_width, canvas_height
         print 255

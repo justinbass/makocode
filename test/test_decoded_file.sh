@@ -64,7 +64,8 @@ pages = list((work / 'plain_pages').glob('*.ppm'))
 assert len(pages) > 1
 lines = next((work / 'plain_out').iterdir()).read_text('ascii').splitlines()
 assert sum(line.startswith('page ') for line in lines) == len(pages)
-assert 'metadata ecc_enabled 0' in lines
+assert 'metadata ecc_enabled 1' in lines
+assert any(line.startswith('metadata ecc_parity ') and int(line.rsplit(' ', 1)[1]) > 0 for line in lines)
 assert not any(line.startswith('metadata encryption_') for line in lines)
 content = lines[lines.index('file plain.bin 3000') + 1]
 restored = bytearray()

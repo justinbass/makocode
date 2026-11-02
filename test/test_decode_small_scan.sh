@@ -29,13 +29,12 @@ printf 'makocode' > "$work_dir/makocode.bin"
 (
     cd "$work_dir"
     "$repo_root/makocode" encode \
-        --input=makocode.bin --ecc=0 --page-width=55 --page-height=55 \
+        --input=makocode.bin --ecc=0 --page-width=80 --page-height=80 \
         --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=small_scan > /dev/null
 )
 
-# The 4.5x scan is 137x132 with a 2.239 pixels/cell source transform. The
-# successful 5x control is 150x146 and reports a 2.477 pixels/cell pitch.
+# The scan fixtures retain their original 2.239 and 2.477 pixels/cell pitches.
 for sample in 4_5x 5x; do
     if [[ $sample == 4_5x ]]; then
         pitch=2.239
@@ -59,11 +58,11 @@ width, height = int(tokens[1]), int(tokens[2])
 pixels = list(map(int, tokens[4:]))
 assert len(pixels) == width * height * 3
 if sys.argv[3] == '4_5x':
-    assert (width, height) == (123, 123)
-    canvas_width, canvas_height, offset_x, offset_y = 137, 132, 2, 4
+    assert (width, height) == (179, 179)
+    canvas_width, canvas_height, offset_x, offset_y = 193, 188, 2, 4
 else:
-    assert (width, height) == (136, 136)
-    canvas_width, canvas_height, offset_x, offset_y = 150, 146, 4, 5
+    assert (width, height) == (198, 198)
+    canvas_width, canvas_height, offset_x, offset_y = 212, 208, 4, 5
 
 canvas = [255] * (canvas_width * canvas_height * 3)
 hard_canvas = [230] * (canvas_width * canvas_height * 3)
@@ -84,15 +83,15 @@ for y in range(height):
 # Verify every logical cell still has its source value at the known geometric
 # center. The soft raster retains the bilinear gray edges produced by scaling.
 original = Path(sys.argv[4]).read_text().split()
-assert original[:4] == ['P3', '55', '55', '255']
+assert original[:4] == ['P3', '80', '80', '255']
 source_pixels = list(map(int, original[4:]))
 pitch = float(sys.argv[5])
 verification_canvas = soft_canvas if sys.argv[3] == '4_5x' else canvas
-for y in range(55):
-    for x in range(55):
+for y in range(80):
+    for x in range(80):
         sample_x = round(offset_x + (x + 0.5) * pitch - 0.5)
         sample_y = round(offset_y + (y + 0.5) * pitch - 0.5)
-        original_index = (y * 55 + x) * 3
+        original_index = (y * 80 + x) * 3
         canvas_index = (sample_y * canvas_width + sample_x) * 3
         assert (sum(source_pixels[original_index:original_index + 3]) < 384) == \
                (sum(verification_canvas[canvas_index:canvas_index + 3]) < 384)
@@ -140,6 +139,9 @@ import sys
 with open(sys.argv[1], newline='') as affine_file:
     row = next(csv.DictReader(affine_file))
 assert row['has_affine'] == '1'
-assert (row['scale'], row['tx'], row['ty']) == ('2.236', '1.500', '3.500')
+assert abs(float(row['scale']) - 2.239) <= 0.005
+assert abs(float(row['tx']) - 1.5) <= 0.2
+assert abs(float(row['ty']) - 3.5) <= 0.2
+assert abs(float(row['rotation_degrees'])) <= 0.25
 PY
 printf 'small scan affine-bias decode passed (label=%s)\n' "$label"

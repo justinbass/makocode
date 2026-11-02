@@ -8,7 +8,7 @@ trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$wo
 rm -rf "$work"
 mkdir -p "$work/pages"
 printf 'registration regression' > "$work/input.bin"
-(cd "$work" && "$bin" encode --input=input.bin --ecc=0 --page-width=55 --page-height=55 --no-filename --no-page-count --output-dir=pages --prefix=page >/dev/null)
+(cd "$work" && "$bin" encode --input=input.bin --ecc=0 --page-width=80 --page-height=80 --no-filename --no-page-count --output-dir=pages --prefix=page >/dev/null)
 python3 - "$work/pages/page.ppm" "$work/scan.ppm" <<'PY'
 import math
 import random
@@ -16,13 +16,13 @@ import sys
 from pathlib import Path
 
 tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[:4] == ['P3', '55', '55', '255']
+assert tokens[:4] == ['P3', '80', '80', '255']
 pixels = list(map(int, tokens[4:]))
 pitch, ox, oy = 2.75, 2.5, 2.0
-width, height = 156, 157
+width, height = 225, 226
 centers = {(round((x + .5) * pitch + ox - .5),
             round((y + .5) * pitch + oy - .5))
-           for y in range(55) for x in range(55)}
+           for y in range(80) for x in range(80)}
 rng = random.Random(0)
 scan = []
 for y in range(height):
@@ -32,17 +32,17 @@ for y in range(height):
             for sx in (.125, .375, .625, .875):
                 col = math.floor((x + sx - ox) / pitch)
                 row = math.floor((y + sy - oy) / pitch)
-                if 0 <= col < 55 and 0 <= row < 55:
-                    dark += pixels[3 * (row * 55 + col)] < 128
+                if 0 <= col < 80 and 0 <= row < 80:
+                    dark += pixels[3 * (row * 80 + col)] < 128
         value = round(230 - 200 * dark / 16)
         if (x, y) not in centers and rng.random() < .012:
             value = 0
         scan.append(value)
-for y in range(55):
-    for x in range(55):
+for y in range(80):
+    for x in range(80):
         cx = round((x + .5) * pitch + ox - .5)
         cy = round((y + .5) * pitch + oy - .5)
-        assert (scan[cy * width + cx] < 128) == (pixels[3 * (y * 55 + x)] < 128)
+        assert (scan[cy * width + cx] < 128) == (pixels[3 * (y * 80 + x)] < 128)
 with Path(sys.argv[2]).open('w') as out:
     out.write(f'P3\n{width} {height}\n255\n')
     for value in scan:

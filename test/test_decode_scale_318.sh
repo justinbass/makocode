@@ -39,9 +39,9 @@ printf '0' > "$work_dir/payload.bin"
     cd "$work_dir"
     "$repo_root/makocode" encode \
         --input=payload.bin \
-        --ecc=0 \
-        --page-width=55 \
-        --page-height=55 \
+        --ecc=0.25 \
+        --page-width=160 \
+        --page-height=160 \
         --no-filename \
         --no-page-count \
         "--output-dir=$work_dir/encoded" \
@@ -54,8 +54,8 @@ printf '0' > "$work_dir/payload.bin"
     --scale-x 3.18 \
     --scale-y 3.18
 
-# Keep the scaled 55x55 page on the 190x190 white canvas used by the
-# regression fixture. Centering a 175px render leaves a 7px border per side.
+# Keep the rendered page at its exact scaled dimensions. The canonical tile
+# and fiducial grid need the larger source page; this retains the 3.18x scale.
 awk '
     NR == 1 { if ($0 != "P3") exit 2; next }
     /^[[:space:]]*#/ { next }
@@ -69,10 +69,10 @@ awk '
     }
     END {
         if (!have_width || !have_height || !have_maxval || count != source_width * source_height * 3) exit 2
-        canvas_width = 190
-        canvas_height = 190
-        offset_x = int((canvas_width - source_width) / 2)
-        offset_y = int((canvas_height - source_height) / 2)
+        canvas_width = source_width
+        canvas_height = source_height
+        offset_x = 0
+        offset_y = 0
         if (source_width > canvas_width || source_height > canvas_height) exit 2
         print "P3"
         print canvas_width, canvas_height

@@ -42,14 +42,16 @@ test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_overlay_work"
 payload_path="$test_dir/${label}_overlay_payload.bin"
 payload_work="$work_dir/payload.bin"
-encoded_path="$test_dir/${label}_overlay_encoded.ppm"
 overlay_path="$test_dir/${label}_overlay_mask.ppm"
-merged_path="$test_dir/${label}_overlay_merged.ppm"
 decoded_path="$test_dir/${label}_overlay_decoded.bin"
+encoded_dir="$work_dir/encoded_pages"
+merged_dir="$work_dir/merged_pages"
 
 ecc="${MAKO_OVERLAY_ECC:-1.0}"
 ignore_colors="${MAKO_OVERLAY_IGNORE_COLORS:-}"
 ecc_target="${MAKO_OVERLAY_ECC_TARGET:-}"
+page_width="${MAKO_OVERLAY_PAGE_WIDTH:-1000}"
+page_height="${MAKO_OVERLAY_PAGE_HEIGHT:-1000}"
 
 cleanup() {
     local exit_code=${1:-0}
@@ -67,8 +69,10 @@ on_exit() {
 trap 'on_exit' EXIT
 
 rm -rf "$work_dir"
-mkdir -p "$test_dir" "$work_dir"
-rm -f "$payload_path" "$encoded_path" "$overlay_path" "$merged_path" "$decoded_path"
+mkdir -p "$test_dir" "$work_dir" "$encoded_dir" "$merged_dir"
+rm -f "$payload_path" "$overlay_path" "$decoded_path"
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
+    "$script_dir/test_canonical_tile_harness.cpp" -o "$work_dir/canonical_tile_harness"
 
 "$ppm_transform_bin" bytes --output "$payload_path" --size 32768 --seed "$payload_seed"
 cp "$payload_path" "$payload_work"
@@ -77,9 +81,9 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
     "--ecc=$ecc"
-    --page-width=1000
-    --page-height=1000
-    "--output-dir=$work_dir"
+    "--page-width=$page_width"
+    "--page-height=$page_height"
+    "--output-dir=$encoded_dir"
     "--prefix=${label}_overlay"
     --debug
 )
@@ -96,7 +100,7 @@ fi
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >/dev/null
-encode_csv="$work_dir/${label}_overlay_encode_fiducials.csv"
+encode_csv="$encoded_dir/${label}_overlay_encode_fiducials.csv"
 if [[ ! -f $encode_csv ]]; then
     echo "test_overlay_e2e: encode did not write fiducial CSV" >&2
     exit 1
@@ -104,13 +108,59 @@ fi
 cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
-ppms=("$work_dir"/*.ppm)
+ppms=("$encoded_dir"/*.ppm)
 shopt -u nullglob
 if [[ ${#ppms[@]} -eq 0 ]]; then
     echo "test_overlay_e2e: encode did not produce a ppm page" >&2
     exit 1
 fi
-mv -f "${ppms[0]}" "$encoded_path"
+if [[ -n "${MAKO_OVERLAY_EXPECT_PAGES:-}" &&
+      ${#ppms[@]} -ne $MAKO_OVERLAY_EXPECT_PAGES ]]; then
+    echo "test_overlay_e2e: expected $MAKO_OVERLAY_EXPECT_PAGES page(s), found ${#ppms[@]}" >&2
+    exit 1
+fi
+
+# Filenames are not the authority for document order. Read each protected tile,
+# validate its page metadata, and order pages by the serialized one-based index.
+page_indices=()
+page_summaries=()
+page_paths=()
+for page in "${ppms[@]}"; do
+    summary=$("$work_dir/canonical_tile_harness" "$page" "$page_width" "$page_height" 1 --report-page)
+    IFS=$'\t' read -r page_index page_count block_count parity unknown_budget overlay_budget selector_present selector_total selector_seed selector_counts <<< "$summary"
+    if [[ -z ${page_index:-} || $page_count -ne ${#ppms[@]} ]]; then
+        echo "test_overlay_e2e: tile page count does not match emitted PPM pages" >&2
+        exit 1
+    fi
+    page_indices+=("$page_index")
+    page_summaries+=("$summary")
+    page_paths+=("$page")
+done
+ordered_ppms=()
+ordered_summaries=()
+for ((expected_index = 1; expected_index <= ${#ppms[@]}; ++expected_index)); do
+    match=-1
+    for candidate in "${!page_indices[@]}"; do
+        if [[ ${page_indices[$candidate]} -eq $expected_index ]]; then
+            match=$candidate
+            break
+        fi
+    done
+    if [[ $match -lt 0 ]]; then
+        echo "test_overlay_e2e: missing tile page index $expected_index" >&2
+        exit 1
+    fi
+    ordered_ppms+=("${page_paths[$match]}")
+    ordered_summaries+=("${page_summaries[$match]}")
+    IFS=$'\t' read -r page_index page_count block_count parity unknown_budget overlay_budget selector_present selector_total selector_seed selector_counts <<< "${page_summaries[$match]}"
+    if [[ $selector_present -ne 1 || $block_count -eq 0 || $parity -eq 0 ||
+          $overlay_budget -eq 0 || $selector_total -ne $((block_count * overlay_budget)) ]]; then
+        echo "test_overlay_e2e: page lacks its centered selector budget or ECC metadata" >&2
+        exit 1
+    fi
+done
+ppms=("${ordered_ppms[@]}")
+page_summaries=("${ordered_summaries[@]}")
 
 circle_color="${MAKO_OVERLAY_CIRCLE_COLOR:-0 0 0}"
 background_color="${MAKO_OVERLAY_BACKGROUND_COLOR:-255 255 255}"
@@ -118,23 +168,71 @@ background_color="${MAKO_OVERLAY_BACKGROUND_COLOR:-255 255 255}"
     --output "$overlay_path" \
     --circle-color "$circle_color" \
     --background-color "$background_color" \
-    --width 1000 \
-    --height 1000
+    --width "$page_width" \
+    --height "$page_height"
 
 fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 overlay_cmd=("$makocode_bin" overlay)
+overlay_cmd+=(--debug)
 if [[ -n "$ignore_colors" ]]; then
     overlay_cmd+=(--ignore-colors "$ignore_colors")
 fi
 if [[ -n "$ecc_target" ]]; then
     overlay_cmd+=(--overlay-ecc-target "$ecc_target")
 fi
-overlay_cmd+=("$encoded_path" "$overlay_path" "$fraction")
-"${overlay_cmd[@]}" > "$merged_path"
+merged_pages=()
+for index in "${!ppms[@]}"; do
+    merged_page="$merged_dir/$(basename "${ppms[$index]}")"
+    page_overlay_cmd=("${overlay_cmd[@]}" "${ppms[$index]}" "$overlay_path" "$fraction")
+    selector_log="$work_dir/overlay_selector_${index}.log"
+    "${page_overlay_cmd[@]}" > "$merged_page" 2>"$selector_log"
+    selector_report=$(awk '/overlay selector symbols used:/ {print $5}' "$selector_log")
+    IFS=/ read -r selector_used selector_capacity <<< "$selector_report"
+    merged_summary=$("$work_dir/canonical_tile_harness" "$merged_page" "$page_width" "$page_height" 1 --report-page)
+    IFS=$'\t' read -r merged_index merged_count merged_blocks merged_parity merged_unknown merged_overlay merged_selector_present merged_total merged_seed merged_counts <<< "$merged_summary"
+    IFS=$'\t' read -r base_index base_count base_blocks base_parity base_unknown base_overlay base_selector_present base_total base_seed base_counts <<< "${page_summaries[$index]}"
+    if [[ $merged_index -ne $base_index || $merged_count -ne $base_count ||
+          $merged_blocks -ne $base_blocks || $merged_parity -ne $base_parity ||
+          $merged_unknown -ne $base_unknown || $merged_overlay -ne $base_overlay ||
+          $base_selector_present -ne 1 || $merged_selector_present -ne 1 ||
+          $merged_seed -ne $base_seed ||
+          $merged_total -ne $((merged_blocks * merged_overlay)) ||
+          $selector_capacity -ne $((merged_blocks * merged_overlay)) ]]; then
+        echo "test_overlay_e2e: merged page selector or ECC metadata changed unexpectedly" >&2
+        exit 1
+    fi
+    IFS=, read -r -a merged_count_values <<< "$merged_counts"
+    merged_sum=0
+    for selector_count in "${merged_count_values[@]}"; do
+        if [[ $selector_count -ne $merged_overlay ]]; then
+            echo "test_overlay_e2e: decoder did not reconstruct the full selector set" >&2
+            exit 1
+        fi
+        merged_sum=$((merged_sum + selector_count))
+    done
+    if [[ $merged_sum -ne $merged_total || -z $selector_used || -z $selector_capacity ||
+          $selector_used -gt $selector_capacity ]]; then
+        echo "test_overlay_e2e: selector reserve report is inconsistent" >&2
+        exit 1
+    fi
+    if [[ -n $ecc_target ]]; then
+        available_budget=$((merged_blocks * merged_overlay))
+        expected_budget=$(awk -v available="$available_budget" -v target="$ecc_target" \
+            'BEGIN { printf "%d", available * target + 0.5 }')
+        if [[ $selector_used -ne $expected_budget ]]; then
+            echo "test_overlay_e2e: selector use $selector_used does not match requested ECC target $ecc_target (expected $expected_budget)" >&2
+            exit 1
+        fi
+    elif [[ $selector_used -eq 0 ]]; then
+        echo "test_overlay_e2e: overlay did not consume any protected selector budget" >&2
+        exit 1
+    fi
+    merged_pages+=("$merged_page")
+done
 
 decoded_dir="$work_dir/decoded"
 mkdir -p "$decoded_dir"
-"$makocode_bin" decode "$merged_path" --output-dir "$decoded_dir" --debug
+"$makocode_bin" decode "${merged_pages[@]}" --output-dir "$decoded_dir" --debug
 decode_csv="$decoded_dir/decode_fiducials.csv"
 if [[ ! -f $decode_csv ]]; then
     echo "test_overlay_e2e: decode did not write fiducial CSV" >&2
@@ -154,7 +252,10 @@ cmp --silent "$payload_path" "$decoded_source"
 mv "$decoded_source" "$decoded_path"
 
 skip_grayscale="${MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK:-0}"
-"$ppm_transform_bin" overlay-check --base "$encoded_path" --merged "$merged_path" --skip-grayscale "$skip_grayscale"
-mako_register_visual_artifacts "$repo_root" "$merged_path"
+for index in "${!ppms[@]}"; do
+    "$ppm_transform_bin" overlay-check --base "${ppms[$index]}" \
+        --merged "${merged_pages[$index]}" --skip-grayscale "$skip_grayscale"
+done
+mako_register_visual_artifacts "$repo_root" "${merged_pages[0]}"
 
 echo "overlay e2e ok (label=$label, artifacts prefix ${label}_overlay_*)"

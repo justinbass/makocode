@@ -9,8 +9,24 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
-label="${1:-ppm_transform_cli}"
-work_dir="$repo_root/test_output/${label}_work"
+label="ppm_transform_cli"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --label)
+            if [[ $# -lt 2 || -z $2 ]]; then
+                echo 'test_ppm_transform_cli: --label requires a value' >&2
+                exit 1
+            fi
+            label=$2
+            shift 2
+            ;;
+        *)
+            echo "test_ppm_transform_cli: unknown flag '$1'" >&2
+            exit 1
+            ;;
+    esac
+done
+test_output_dir="$repo_root/test_output"
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
 if [[ ! -x "$ppm_transform_bin" ]]; then
@@ -18,8 +34,8 @@ if [[ ! -x "$ppm_transform_bin" ]]; then
     exit 1
 fi
 
-rm -rf "$work_dir"
-mkdir -p "$work_dir"
+mkdir -p "$test_output_dir"
+work_dir=$(mktemp -d "$test_output_dir/${label}_work.XXXXXX")
 trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
 
 if "$ppm_transform_bin" --help >"$work_dir/help.out" 2>"$work_dir/help.err"; then

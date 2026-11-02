@@ -2,10 +2,8 @@
 set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
-legacy=1
 label=decode_scale_relative_registration
 if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
-if [[ ${1:-} == --current ]]; then legacy=0; shift; fi
 [[ $# == 0 ]]
 work_dir="$repo_root/test_output/${label}_work"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
@@ -14,24 +12,19 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/control" "$work_dir/decoded"
 printf makocode > "$work_dir/payload.bin"
 (cd "$work_dir"; "$makocode_bin" encode --input=payload.bin --ecc=0 \
-    --page-width=55 --page-height=55 --no-filename --no-page-count \
+    --page-width=80 --page-height=80 --no-filename --no-page-count \
     "--output-dir=$work_dir/encoded" --prefix=source >/dev/null)
-if [[ $legacy == 1 ]]; then
-    "${CXX:-g++}" -O2 -std=c++17 "$script_dir/test_legacy_metadata_fixture.cpp" -o "$work_dir/legacy_fixture"
-    "$work_dir/legacy_fixture" "$work_dir/encoded/source.ppm" "$work_dir/legacy.ppm"
-    cp "$work_dir/legacy.ppm" "$work_dir/encoded/source.ppm"
-fi
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan.ppm" <<'PYTHON'
 from pathlib import Path
 import math
 import sys
 source = Path(sys.argv[1]).read_text().split()
-assert source[:4] == ['P3', '55', '55', '255']
+assert source[:4] == ['P3', '80', '80', '255']
 pixels = list(map(int, source[4:]))
-assert len(pixels) == 55 * 55 * 3
+assert len(pixels) == 80 * 80 * 3
 # Rasterize a fresh encode at 6 scan pixels/module, using 4x4 coverage.
 # No scanned image, measured scan pixels, or external fixture data are used.
-width, height = 340, 342
+width, height = 490, 492
 pitch, ox, oy = 6.0, 4.25, 5.25
 canvas = []
 for y in range(height):
@@ -41,8 +34,8 @@ for y in range(height):
             for sx in (.125, .375, .625, .875):
                 col = math.floor((x + sx - ox) / pitch)
                 row = math.floor((y + sy - oy) / pitch)
-                total += (120 + round(114 * pixels[(row * 55 + col) * 3] / 255)
-                          if 0 <= col < 55 and 0 <= row < 55 else 234)
+                total += (120 + round(114 * pixels[(row * 80 + col) * 3] / 255)
+                          if 0 <= col < 80 and 0 <= row < 80 else 234)
         canvas.append(round(total / 16))
 # Mild optical spread and two external ink streaks. The latter expand the
 # supported dark bounds without changing any encoded module's center pixel.
@@ -54,7 +47,7 @@ for y in range(1, height - 1):
             canvas[j] for j in (i-1, i+1, i-width, i+width)))
 centers = {(round(ox + (x + .5) * pitch - .5),
             round(oy + (y + .5) * pitch - .5))
-           for y in range(55) for x in range(55)}
+           for y in range(80) for x in range(80)}
 for x, y in [(336, y) for y in range(20, 23)] + [(x, 337) for x in range(20, 23)]:
     assert (x, y) not in centers
     blurred[y * width + x] = 60

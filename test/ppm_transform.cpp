@@ -713,7 +713,7 @@ static void usage() {
             "                       [--seed N] [--ink-blot-radius PX] [--ink-blot-color C]\n"
             "                       [--paper-color C] [--paper-alpha A] [--paper-splotch-alpha A]\n"
             "                       [--paper-splotch-shade A] [--paper-splotch-px PX]\n"
-            "                       [--white-checker]\n"
+            "                       [--white-checker] [--preserve-canonical-control]\n"
             "                       [--corrupt-header-copies N]\n"
             "  ppm_transform solid --output OUT --width W --height H --r R --g G --b B\n"
             "  ppm_transform noise --output OUT --width W --height H --seed N\n"
@@ -1088,6 +1088,7 @@ static void cmd_transform(int argc, char** argv) {
     int paper_splotch_px = 0;
     int corrupt_header_copies = 0;
     bool white_checker = false;
+    bool preserve_canonical_control = false;
 
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
@@ -1113,6 +1114,7 @@ static void cmd_transform(int argc, char** argv) {
         else if (strcmp(arg, "--paper-splotch-shade") == 0) paper_splotch_shade = parse_f64(require_value("--paper-splotch-shade"), "paper-splotch-shade");
         else if (strcmp(arg, "--paper-splotch-px") == 0) paper_splotch_px = parse_i32(require_value("--paper-splotch-px"), "paper-splotch-px");
         else if (strcmp(arg, "--white-checker") == 0) white_checker = true;
+        else if (strcmp(arg, "--preserve-canonical-control") == 0) preserve_canonical_control = true;
         else if (strcmp(arg, "--corrupt-header-copies") == 0) corrupt_header_copies = parse_i32(require_value("--corrupt-header-copies"), "corrupt-header-copies");
         else die2("ppm_transform: unknown flag ", arg);
     }
@@ -1123,6 +1125,108 @@ static void cmd_transform(int argc, char** argv) {
     }
 
     Ppm ppm = read_ppm_p3_ascii(input);
+    unsigned char* canonical_control_source_mask = nullptr;
+    if (preserve_canonical_control) {
+        if (!white_checker) {
+            die("ppm_transform: --preserve-canonical-control requires --white-checker");
+        }
+        if (corrupt_header_copies != 0 || !nearly_equal(rotate_deg, 0.0) ||
+            !nearly_equal(skew_x, 0.0) || !nearly_equal(skew_y, 0.0) ||
+            border_thickness != 0 || ink_blot_radius != 0 || paper_alpha > 0.0 ||
+            paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0) {
+            ppm_free(&ppm);
+            die("ppm_transform: --preserve-canonical-control supports scale-only white-checker transforms");
+        }
+        if (ppm.width < 48 || ppm.height < 48) {
+            ppm_free(&ppm);
+            die("ppm_transform: --preserve-canonical-control requires a 48x48 metadata tile");
+        }
+
+        int tile_x0 = (ppm.width - 48) / 2;
+        int tile_y0 = (ppm.height - 48) / 2;
+        double darkest_luminance = 256.0;
+        double lightest_luminance = -1.0;
+        size_t source_pixel_count = (size_t)ppm.width * (size_t)ppm.height;
+        for (size_t pixel = 0u; pixel < source_pixel_count; ++pixel) {
+            size_t rgb = pixel * 3u;
+            double luminance = 0.2126 * (double)ppm.pixels.data[rgb] +
+                               0.7152 * (double)ppm.pixels.data[rgb + 1u] +
+                               0.0722 * (double)ppm.pixels.data[rgb + 2u];
+            if (luminance < darkest_luminance) darkest_luminance = luminance;
+            if (luminance > lightest_luminance) lightest_luminance = luminance;
+        }
+        if (!(lightest_luminance > darkest_luminance + 1.0)) {
+            ppm_free(&ppm);
+            die("ppm_transform: --preserve-canonical-control could not detect tile color endpoints");
+        }
+        double tile_threshold = (darkest_luminance + lightest_luminance) * 0.5;
+        uint32_t tile_header = 0u;
+        for (unsigned int bit = 0u; bit < 32u; ++bit) {
+            unsigned int dark_votes = 0u;
+            for (unsigned int repetition = 0u; repetition < 5u; ++repetition) {
+                size_t pixel = (size_t)(tile_y0 + 1 + (int)repetition) * (size_t)ppm.width +
+                               (size_t)(tile_x0 + 1 + (int)bit);
+                size_t rgb = pixel * 3u;
+                double luminance = 0.2126 * (double)ppm.pixels.data[rgb] +
+                                   0.7152 * (double)ppm.pixels.data[rgb + 1u] +
+                                   0.0722 * (double)ppm.pixels.data[rgb + 2u];
+                if (luminance < tile_threshold) ++dark_votes;
+            }
+            if (dark_votes >= 3u) tile_header |= (uint32_t)1u << bit;
+        }
+        if (((tile_header >> 16u) & 0xFFFFu) != 0x4D4Du ||
+            ((tile_header >> 12u) & 0x0Fu) != 1u) {
+            ppm_free(&ppm);
+            die("ppm_transform: --preserve-canonical-control expects a centered canonical metadata tile");
+        }
+
+        canonical_control_source_mask = (unsigned char*)calloc(source_pixel_count, 1u);
+        if (!canonical_control_source_mask) {
+            ppm_free(&ppm);
+            die("ppm_transform: OOM");
+        }
+        for (int y = tile_y0; y < tile_y0 + 48; ++y) {
+            for (int x = tile_x0; x < tile_x0 + 48; ++x) {
+                canonical_control_source_mask[(size_t)y * (size_t)ppm.width + (size_t)x] = 1u;
+            }
+        }
+        // Keep the encoded default fiducial markers intact so the transformed
+        // test still checks their exact decoded locations after the overwrite.
+        const unsigned int marker_size = 4u;
+        const unsigned int spacing = 24u;
+        const unsigned int margin = 12u;
+        double min_x = (margin < (unsigned int)ppm.width) ? (double)margin : 0.0;
+        double max_x = (ppm.width > (int)margin)
+                           ? (double)(ppm.width - 1 - (int)margin)
+                           : (double)(ppm.width - 1);
+        double min_y = (margin < (unsigned int)ppm.height) ? (double)margin : 0.0;
+        double max_y = (ppm.height > (int)margin)
+                           ? (double)(ppm.height - 1 - (int)margin)
+                           : (double)(ppm.height - 1);
+        if (max_x < min_x) max_x = min_x;
+        if (max_y < min_y) max_y = min_y;
+        unsigned int columns = (unsigned int)ceil((max_x - min_x) / (double)spacing) + 1u;
+        unsigned int rows = (unsigned int)ceil((max_y - min_y) / (double)spacing) + 1u;
+        for (unsigned int row = 0u; row < rows; ++row) {
+            double t_y = (rows == 1u) ? 0.5 : (double)row / (double)(rows - 1u);
+            double center_y = min_y + (max_y - min_y) * t_y;
+            int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+            for (unsigned int column = 0u; column < columns; ++column) {
+                double t_x = (columns == 1u) ? 0.5 : (double)column / (double)(columns - 1u);
+                double center_x = min_x + (max_x - min_x) * t_x;
+                int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
+                for (unsigned int dy = 0u; dy < marker_size; ++dy) {
+                    int y = start_y + (int)dy;
+                    if (y < 0 || y >= ppm.height) continue;
+                    for (unsigned int dx = 0u; dx < marker_size; ++dx) {
+                        int x = start_x + (int)dx;
+                        if (x < 0 || x >= ppm.width) continue;
+                        canonical_control_source_mask[(size_t)y * (size_t)ppm.width + (size_t)x] = 1u;
+                    }
+                }
+            }
+        }
+    }
     StrVec comments;
     StrVec metadata;
 
@@ -1219,6 +1323,30 @@ static void cmd_transform(int argc, char** argv) {
             die("ppm_transform: invalid dimensions for header corruption");
         }
         size_t total_pixels = (size_t)w * (size_t)h;
+        bool canonical = false;
+        if (w >= 48 && h >= 48) {
+            int tile_x0 = (w - 48) / 2;
+            int tile_y0 = (h - 48) / 2;
+            uint32_t tile_header = 0u;
+            for (unsigned int bit = 0u; bit < 32u; ++bit) {
+                unsigned int dark_votes = 0u;
+                for (unsigned int repetition = 0u; repetition < 5u; ++repetition) {
+                    size_t pixel = (size_t)(tile_y0 + 1 + (int)repetition) * (size_t)w +
+                                   (size_t)(tile_x0 + 1 + (int)bit);
+                    size_t rgb = pixel * 3u;
+                    if (current.data[rgb] < 128 && current.data[rgb + 1u] < 128 &&
+                        current.data[rgb + 2u] < 128) {
+                        ++dark_votes;
+                    }
+                }
+                if (dark_votes >= 3u) tile_header |= (uint32_t)1u << bit;
+            }
+            canonical = ((tile_header >> 16u) == 0x4D4Du) &&
+                      (((tile_header >> 12u) & 0x0Fu) == 1u);
+        }
+        if (!canonical) {
+            die("ppm_transform: header corruption expects a centered canonical metadata tile");
+        }
         unsigned char* reserved = (unsigned char*)calloc(total_pixels, 1u);
         if (!reserved) die("ppm_transform: OOM");
 
@@ -1234,8 +1362,8 @@ static void cmd_transform(int argc, char** argv) {
         if (max_y < min_y) max_y = min_y;
         double available_width = max_x - min_x;
         double available_height = max_y - min_y;
-        unsigned int columns = (unsigned int)(available_width / (double)spacing) + 1u;
-        unsigned int rows = (unsigned int)(available_height / (double)spacing) + 1u;
+        unsigned int columns = (unsigned int)ceil(available_width / (double)spacing) + 1u;
+        unsigned int rows = (unsigned int)ceil(available_height / (double)spacing) + 1u;
         for (unsigned int grid_row = 0u; grid_row < rows; ++grid_row) {
             double t_y = (rows == 1u) ? 0.5 : (double)grid_row / (double)(rows - 1u);
             double center_y = min_y + (max_y - min_y) * t_y;
@@ -1256,26 +1384,13 @@ static void cmd_transform(int argc, char** argv) {
             }
         }
 
-        if (w >= 48 && h >= 48) {
-            unsigned int mid_col = columns / 2u;
-            unsigned int mid_row = rows / 2u;
-            double t_x = (columns == 1u) ? 0.5 : (double)mid_col / (double)(columns - 1u);
-            double t_y = (rows == 1u) ? 0.5 : (double)mid_row / (double)(rows - 1u);
-            double center_x = min_x + (max_x - min_x) * t_x;
-            double center_y = min_y + (max_y - min_y) * t_y;
-            int tile_x0 = (int)(center_x - 23.5);
-            int tile_y0 = (int)(center_y - 23.5);
-            if (tile_x0 < 0) tile_x0 = 0;
-            if (tile_y0 < 0) tile_y0 = 0;
-            if (tile_x0 + 48 > w) tile_x0 = w - 48;
-            if (tile_y0 + 48 > h) tile_y0 = h - 48;
-            for (int tile_y = tile_y0; tile_y < tile_y0 + 48; ++tile_y) {
-                for (int tile_x = tile_x0; tile_x < tile_x0 + 48; ++tile_x) {
-                    reserved[(size_t)tile_y * (size_t)w + (size_t)tile_x] = 1u;
-                }
+        int tile_x0 = (w - 48) / 2;
+        int tile_y0 = (h - 48) / 2;
+        for (int tile_y = tile_y0; tile_y < tile_y0 + 48; ++tile_y) {
+            for (int tile_x = tile_x0; tile_x < tile_x0 + 48; ++tile_x) {
+                reserved[(size_t)tile_y * (size_t)w + (size_t)tile_x] = 1u;
             }
         }
-
         size_t target_bits[3u * 6u * 8u];
         size_t target_count = 0u;
         for (int copy = 0; copy < corrupt_header_copies; ++copy) {
@@ -1291,8 +1406,13 @@ static void cmd_transform(int argc, char** argv) {
         size_t target_index = 0u;
         size_t modified_pixels = 0u;
         for (size_t pixel = 0u; pixel < total_pixels && target_index < target_count; ++pixel) {
-            if (reserved[pixel]) continue;
+            // The current format advances the payload cursor through the
+            // deterministic fiducial/tile overwrites.
             if (carrier_bit == target_bits[target_index]) {
+                if (reserved[pixel] == 1u) {
+                    free(reserved);
+                    die("ppm_transform: target ECC header bit is overwritten in canonical layout");
+                }
                 size_t rgb = pixel * 3u;
                 int value = current.data[rgb];
                 if (current.data[rgb + 1u] != value || current.data[rgb + 2u] != value ||
@@ -1320,6 +1440,20 @@ static void cmd_transform(int argc, char** argv) {
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 if (((x + y) & 1) == 0) {
+                    if (canonical_control_source_mask) {
+                        double source_x = ((double)x + 0.5) * (double)ppm.width / (double)w - 0.5;
+                        double source_y = ((double)y + 0.5) * (double)ppm.height / (double)h - 0.5;
+                        int source_pixel_x = (int)floor(source_x + 0.5);
+                        int source_pixel_y = (int)floor(source_y + 0.5);
+                        if (source_pixel_x < 0) source_pixel_x = 0;
+                        if (source_pixel_y < 0) source_pixel_y = 0;
+                        if (source_pixel_x >= ppm.width) source_pixel_x = ppm.width - 1;
+                        if (source_pixel_y >= ppm.height) source_pixel_y = ppm.height - 1;
+                        if (canonical_control_source_mask[(size_t)source_pixel_y * (size_t)ppm.width +
+                                                          (size_t)source_pixel_x]) {
+                            continue;
+                        }
+                    }
                     size_t index = ((size_t)y * (size_t)w + (size_t)x) * 3u;
                     current.data[index + 0u] = 255;
                     current.data[index + 1u] = 255;
@@ -1332,6 +1466,7 @@ static void cmd_transform(int argc, char** argv) {
     write_ppm_p3_ascii(output, &comments, w, h, &current, 0);
 
     intvec_free(&current);
+    free(canonical_control_source_mask);
     strvec_free(&metadata);
     strvec_free(&comments);
     ppm_free(&ppm);

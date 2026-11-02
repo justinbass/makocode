@@ -498,7 +498,7 @@ if [[ $transform_needed -eq 1 ]]; then
             --paper-splotch-shade "$paper_splotch_shade"
             --paper-splotch-px "$paper_splotch_px")
         if [[ $white_checker -eq 1 ]]; then
-            transform_cmd+=(--white-checker)
+    transform_cmd+=(--white-checker --preserve-canonical-control)
         fi
         "${transform_cmd[@]}"
         transform_outputs+=("$transformed_path")
@@ -534,7 +534,7 @@ if [[ $transform_needed -eq 1 ]]; then
     fi
     transform_decode_cmd+=("--output-dir=$transformed_decode_dir")
     transform_decode_cmd+=(--debug)
-    if [[ $multi_page -eq 1 ]]; then
+    if [[ $multi_page -eq 1 || ${#transformed_targets[@]} -gt 1 ]]; then
         transform_decode_cmd+=("${transformed_targets[@]}")
     else
         transform_decode_cmd+=("${transformed_targets[0]}")

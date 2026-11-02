@@ -132,8 +132,8 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=$payload"
     --ecc=0.5
-    --page-width=720
-    --page-height=720
+    --page-width=1000
+    --page-height=1000
     "--password=$password"
     "--output-dir=$work_dir"
     "--prefix=${label}_page"
@@ -153,6 +153,10 @@ ppms=("$work_dir"/*.ppm)
 shopt -u nullglob
 if [[ ${#ppms[@]} -eq 0 ]]; then
     echo "test_password_failures: encode emitted no PPMs" >&2
+    exit 1
+fi
+if [[ ${#ppms[@]} -ne 1 ]]; then
+    echo "test_password_failures: expected one valid encoded page, got ${#ppms[@]}" >&2
     exit 1
 fi
 ppm_path="${ppms[0]}"

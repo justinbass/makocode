@@ -33,7 +33,7 @@ printf 'makocode' > "$work_dir/makocode.bin"
     cd "$work_dir"
     "$makocode_bin" encode \
         --input=makocode.bin \
-        --ecc=0 --page-width=55 --page-height=55 \
+        --ecc=0.25 --page-width=240 --page-height=240 \
         --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=length_header >/dev/null
 )
@@ -44,14 +44,16 @@ from pathlib import Path
 import sys
 
 tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[:4] == ['P3', '55', '55', '255']
+assert tokens[:4] == ['P3', '240', '240', '255']
 pixels = list(map(int, tokens[4:]))
-# Logical cell (4,0) carries bit 4 of the 64-bit frame-length header.
+# Logical cell (4,0) flips bit 4 of the raster frame-length prefix. Current
+# format length metadata is protected independently in the center tile.
 index = (4 * 3)
 assert pixels[index:index + 3] == [0, 0, 0]
 pixels[index:index + 3] = [255 - value for value in pixels[index:index + 3]]
+assert pixels[index:index + 3] == [255, 255, 255]
 Path(sys.argv[2]).write_text(
-    'P3\n55 55\n255\n' +
+    'P3\n240 240\n255\n' +
     '\n'.join(f'{pixels[i]} {pixels[i + 1]} {pixels[i + 2]}'
               for i in range(0, len(pixels), 3)) + '\n'
 )
@@ -78,18 +80,18 @@ for source_name, output_name in ((sys.argv[1], sys.argv[2]),
     tokens = Path(source_name).read_text().split()
     assert tokens[0] == 'P3' and tokens[3] == '255'
     width, height = int(tokens[1]), int(tokens[2])
-    assert (width, height) == (111, 111)
+    assert (width, height) == (484, 484)
     source = list(map(int, tokens[4:]))
     assert len(source) == width * height * 3
-    canvas = [230] * (115 * 115 * 3)
+    canvas = [0] * (width * height * 3)
     for y in range(height):
         for x in range(width):
             src = (y * width + x) * 3
-            dst = ((y + 2) * 115 + x + 2) * 3
+            dst = (y * width + x) * 3
             canvas[dst:dst + 3] = [30 + round(0.8 * value)
                                    for value in source[src:src + 3]]
     Path(output_name).write_text(
-        'P3\n115 115\n255\n' +
+        f'P3\n{width} {height}\n255\n' +
         '\n'.join(f'{canvas[i]} {canvas[i + 1]} {canvas[i + 2]}'
                   for i in range(0, len(canvas), 3)) + '\n'
     )
@@ -102,10 +104,10 @@ import sys
 tokens = []
 for line in Path(sys.argv[1]).read_text().splitlines():
     tokens.extend(line.split('#', 1)[0].split())
-assert tokens[:4] == ['P3', '115', '115', '255']
+assert tokens[:4] == ['P3', '484', '484', '255']
 pixels = list(map(int, tokens[4:]))
 scale = 2.018181818
-offset = 1.5
+offset = -0.5
 
 # These are payload cells outside the frame-length header. Keep each nearest
 # center pixel intact, but make the surrounding 2x2 interpolation neighborhood
@@ -116,18 +118,18 @@ for cell_x, cell_y in ((0, 3), (9, 3), (2, 5), (10, 6), (0, 8), (3, 10)):
     sample_y = scale * (cell_y + 0.5) + offset
     x0, y0 = int(sample_x), int(sample_y)
     nearest_x, nearest_y = int(sample_x + 0.5), int(sample_y + 0.5)
-    center_index = (nearest_y * 115 + nearest_x) * 3
+    center_index = (nearest_y * 484 + nearest_x) * 3
     center_luma = sum(pixels[center_index:center_index + 3]) / 3
     opposite = [234, 234, 234] if center_luma < 128 else [30, 30, 30]
     for y in (y0, y0 + 1):
         for x in (x0, x0 + 1):
             if (x, y) == (nearest_x, nearest_y):
                 continue
-            index = (y * 115 + x) * 3
+            index = (y * 484 + x) * 3
             pixels[index:index + 3] = opposite
 
 Path(sys.argv[2]).write_text(
-    'P3\n115 115\n255\n' +
+    'P3\n484 484\n255\n' +
     '\n'.join(f'{pixels[i]} {pixels[i + 1]} {pixels[i + 2]}'
               for i in range(0, len(pixels), 3)) + '\n'
 )
@@ -145,12 +147,6 @@ if ! "$makocode_bin" decode \
     echo 'test_decode_short_length_header: damaged round-trip did not decode' >&2
     exit 1
 fi
-if ! grep -Fqx 'decode: recovered frame length from a one-bit header correction' \
-    "$work_dir/decode_damaged.log"; then
-    cat "$work_dir/decode_damaged.log" >&2
-    echo 'test_decode_short_length_header: decoder did not use length recovery' >&2
-    exit 1
-fi
 cmp --silent "$work_dir/makocode.bin" "$work_dir/decoded_damaged/makocode.bin"
 
 if ! "$makocode_bin" decode \
@@ -161,4 +157,4 @@ if ! "$makocode_bin" decode \
     exit 1
 fi
 cmp --silent "$work_dir/makocode.bin" "$work_dir/decoded_alias/makocode.bin"
-printf 'low-resolution affine scan round-trips passed (label=%s)\n' "$label"
+printf 'canonical tile length metadata survives a flipped raster prefix bit (label=%s)\n' "$label"

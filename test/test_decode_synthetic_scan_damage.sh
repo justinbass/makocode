@@ -48,7 +48,7 @@ fi
     cd "$work_dir"
     "$makocode_bin" encode \
         "--input=$payload_path" \
-        --ecc=0 --page-width=55 --page-height=55 \
+        --ecc=0 --page-width=80 --page-height=80 \
         --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=synthetic > /dev/null
 )
@@ -66,12 +66,12 @@ import random
 import sys
 
 source = Path(sys.argv[1]).read_text().split()
-assert source[:4] == ['P3', '55', '55', '255']
+assert source[:4] == ['P3', '80', '80', '255']
 pixels = list(map(int, source[4:]))
-assert len(pixels) == 55 * 55 * 3
+assert len(pixels) == 80 * 80 * 3
 modules = [int(sum(pixels[index:index + 3]) < 384)
            for index in range(0, len(pixels), 3)]
-width, height = 137, 132
+width, height = 193, 188
 margin_noise = sys.argv[5] == '1'
 pitch, offset_x, offset_y = 2.24, 2.6 if margin_noise else 2.2, 3.5
 base = []
@@ -83,8 +83,8 @@ for y in range(height):
             for sub_x in (0.125, 0.375, 0.625, 0.875):
                 logical_x = math.floor((x + sub_x - offset_x) / pitch)
                 logical_y = math.floor((y + sub_y - offset_y) / pitch)
-                if 0 <= logical_x < 55 and 0 <= logical_y < 55:
-                    dark += modules[logical_y * 55 + logical_x]
+                if 0 <= logical_x < 80 and 0 <= logical_y < 80:
+                    dark += modules[logical_y * 80 + logical_x]
         row.append(round(230 - 200 * dark / 16))
     base.append(row)
 
@@ -93,9 +93,9 @@ if not margin_noise:
         base[y][x] = 80
 damaged = [row.copy() for row in base]
 if margin_noise:
-    assert offset_x + 55 * pitch < 133  # Mark lies outside the page.
-    for y in range(125, 128):
-        for x in range(133, 136):
+    assert offset_x + 80 * pitch < width - 4  # Mark lies outside the page.
+    for y in range(height - 7, height - 4):
+        for x in range(width - 5, width - 2):
             damaged[y][x] = 80
 else:
     for x, y in ((6, 78), (6, 79), (7, 79)):
@@ -107,7 +107,7 @@ if sys.argv[6] == '1':
     damaged = [row.copy() for row in base]
     centers = {(round((x + 0.5) * pitch + offset_x - 0.5),
                 round((y + 0.5) * pitch + offset_y - 0.5))
-               for y in range(55) for x in range(55)}
+               for y in range(80) for x in range(80)}
     rng = random.Random(0)
     for y in range(height):
         for x in range(width):
@@ -127,13 +127,13 @@ with Path(sys.argv[4]).open('w', encoding='ascii') as output:
             output.write(f'{value} {value} {value}\n')
 
 with Path(sys.argv[3]).open('w', encoding='ascii') as output:
-    output.write('P3\n55 55\n255\n')
-    for y in range(55):
-        for x in range(55):
+    output.write('P3\n80 80\n255\n')
+    for y in range(80):
+        for x in range(80):
             sample_x = round((x + 0.5) * pitch + offset_x - 0.5)
             sample_y = round((y + 0.5) * pitch + offset_y - 0.5)
             recovered = int(damaged[sample_y][sample_x] < 128)
-            original = modules[y * 55 + x]
+            original = modules[y * 80 + x]
             assert recovered == original, (x, y)
             value = 0 if recovered else 255
             output.write(f'{value} {value} {value}\n')
