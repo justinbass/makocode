@@ -1,7 +1,8 @@
 TODO
-- Calibration script needs each color mode, plus a binary search - start with large values, accepts finer ones. Also can use width/height to get more integers to fit... 1/2, 1/3, 1/4, 1/5... Needs to pack efficiently on page.
-- Page height or width too small for title or metadata, fails to encode. Could metadata tile and fiducial markings be known-position damage written to a barcode, so they become optional?
+- Calibration script: colors ; binary search - start with large values, accepts finer ones ; width/height to get more integers to fit, e.g. 1/2, 1/3, 1/4, 1/5... ; needs to pack efficiently on page.
 - Run physical tests, against calibration script
+- Make metadata/fidicuals optional
+- Improve overlay approaching ~100% ECC
 - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
@@ -12,9 +13,6 @@ TODO
 - Footer text scaling glyphs? Could use an internal vector image. May not look good in practice.
 - Footer title wrap, confirm page-height/width applies as a hard limit
 - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
-- Overlay improvements
- - Use predictable positions (pseudorandom?) so they count as erasures with known position. Different colors actually already do this (as they are obviously known positions).
- - Improve overlay up to 50% ECC for each, including ignore - or 100% if possible.
 - Metadata recovery mode to brute force guess it if missing, exponentially difficult
  - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
  - What if white/black or light/dark are inverted for the metadata?

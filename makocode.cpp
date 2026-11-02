@@ -14163,8 +14163,25 @@ struct RotationEstimateCandidate {
                 }
                 double tile_angle_degrees = tile_affine_hint.angle_rad *
                                             (180.0 / 3.14159265358979323846);
+                double page_pitch_x = (expected_width > 0u)
+                                          ? (double)width / (double)expected_width
+                                          : 0.0;
+                double page_pitch_y = (expected_height_eff > 0u)
+                                          ? (double)sample_height / (double)expected_height_eff
+                                          : 0.0;
+                double page_pitch = (page_pitch_x + page_pitch_y) * 0.5;
+                double tile_pitch_error = (page_pitch > 0.0 && tile_affine_hint.pitch_pixels > 0.0)
+                                              ? fabs(tile_affine_hint.pitch_pixels - page_pitch) / page_pitch
+                                              : 1.0;
+                // Uniform page dimensions distinguish scale-only scans from bounds expanded by shear.
+                bool page_dimensions_support_uniform_scale = page_pitch > 0.0 &&
+                    fabs(page_pitch_x - page_pitch_y) <= page_pitch * 0.001 &&
+                    tile_pitch_error <= 0.0075;
+                double page_tile_angle_error = fabs(makocode::image::normalize_angle(
+                    page_angle_degrees - tile_angle_degrees));
                 if (page_angle_available &&
-                    fabs(makocode::image::normalize_angle(page_angle_degrees - tile_angle_degrees)) > 1.5) {
+                    ((!tile_affine_hint_trusted && page_dimensions_support_uniform_scale &&
+                      page_tile_angle_error > 0.25) || page_tile_angle_error > 1.5)) {
                     initial_sample_tile_hint.angle_rad = page_angle_degrees *
                                                          (3.14159265358979323846 / 180.0);
                 }
