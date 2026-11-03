@@ -28,8 +28,14 @@ CALIBRATION_MODES = (
     )),
 )
 SCALE_DENOMINATORS = (1, 2, 3, 4)
-SOURCE_PAGE_WIDTH = 160
-SOURCE_PAGE_HEIGHT = 160
+# Keep the encoder's source pages close to the generated barcode bounds. The
+# four-color (2-bit) palette needs a little more room than the denser palettes.
+SOURCE_PAGE_SIZES = {
+    "BW": (123, 123),
+    "CMYK": (93, 93),
+    "CMYKW": (93, 93),
+    "RGBCMYKB": (85, 85),
+}
 MARGIN = 24
 PADDING = 12
 FOOTER_GLYPH_WIDTH = 5
@@ -915,7 +921,7 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def encode_source_ppm(makocode_bin, work_dir, palette):
+def encode_source_ppm(makocode_bin, work_dir, palette, page_width, page_height):
     payload_path = work_dir / "makocode.bin"
     payload_path.write_bytes(CALIBRATION_PAYLOAD)
     command = [
@@ -923,8 +929,8 @@ def encode_source_ppm(makocode_bin, work_dir, palette):
         "encode",
         f"--input={payload_path.name}",
         "--ecc=0",
-        f"--page-width={SOURCE_PAGE_WIDTH}",
-        f"--page-height={SOURCE_PAGE_HEIGHT}",
+        f"--page-width={page_width}",
+        f"--page-height={page_height}",
         "--no-filename",
         "--no-page-count",
         "--prefix=calibration_source",
@@ -933,7 +939,7 @@ def encode_source_ppm(makocode_bin, work_dir, palette):
         " ".join(palette),
     ]
     try:
-        subprocess.run(
+        result = subprocess.run(
             command,
             cwd=work_dir,
             check=True,
@@ -948,7 +954,11 @@ def encode_source_ppm(makocode_bin, work_dir, palette):
 
     source_path = work_dir / "calibration_source.ppm"
     if not source_path.is_file():
-        raise ValueError("makocode encode completed without creating calibration_source.ppm")
+        detail = (result.stderr or result.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise ValueError(
+            "makocode encode completed without creating calibration_source.ppm" + suffix
+        )
     return source_path
 
 
@@ -957,7 +967,10 @@ def encode_calibration_sources(makocode_bin, work_dir):
     for mode_name, palette in CALIBRATION_MODES:
         mode_dir = work_dir / mode_name.lower()
         mode_dir.mkdir()
-        source_path = encode_source_ppm(makocode_bin, mode_dir, palette)
+        page_width, page_height = SOURCE_PAGE_SIZES[mode_name]
+        source_path = encode_source_ppm(
+            makocode_bin, mode_dir, palette, page_width, page_height,
+        )
         source_images.append(read_p3_ppm(source_path))
     return source_images
 
