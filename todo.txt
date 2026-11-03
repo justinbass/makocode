@@ -1,27 +1,29 @@
 TODO
-- Calibration script: colors ; binary search - start with large values, accepts finer ones ; width/height to get more integers to fit, e.g. 1/2, 1/3, 1/4, 1/5... ; needs to pack efficiently on page.
+- Calibration script, remove fractions. If there's additional space, simply pad with additional data. Stick to 1x, 2x, 3x, 4x. Calibration returns best data amount per color mode.
+- Fix 5-bit mode, clearly not as intended (in calibration script)
 - Run physical tests, against calibration script
-- Make metadata/fidicuals optional
-- Improve overlay approaching ~100% ECC
-- Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
-- Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
-- ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
-- Security concerns with altered code, invalid dir attacks, etc. How to prove encoder/decoder is not altered?
+- Top of images appears to have uncompressed region
 - Footer title and metadata just on first page - or middle page?
 - Compress metadata (confirm it saves space worth the risk of corruption)
 - Handle compressed ppm natively
 - Footer text scaling glyphs? Could use an internal vector image. May not look good in practice.
 - Footer title wrap, confirm page-height/width applies as a hard limit
+- Make metadata/fidicuals optional, or resizable
+  - Metadata recovery mode to brute force guess it if missing, exponentially difficult
+    - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
+    - What if white/black or light/dark are inverted for the metadata?
+  - With no metadata/fiducials and very high overlay, it should be useful as steganography. Do a security review of this.
+- Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+- ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
+- Improve overlay approaching ~100% ECC
 - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
-- Metadata recovery mode to brute force guess it if missing, exponentially difficult
- - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
- - What if white/black or light/dark are inverted for the metadata?
 - SVG for overlay, so it scales? Overlay picture across multiple images, so they can be lined up as a block like a mosaic?
 - Given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
-- One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
+- Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Increase all distortions until decoding breaks, make improvements
-- Print calibration page, has mutliple settings, possibly binary search - scanned back in and the best settings are printed to the user. Data is randomly generated seed-0.
-- Run physical tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
+- Security concerns with altered code, invalid dir attacks, etc. How to prove encoder/decoder is not altered? Security concerns with password protection. Security concerns with steganography.
+- One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak as reference
+- Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
 - Determine proper defaults
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
