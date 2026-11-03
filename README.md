@@ -79,7 +79,7 @@ dashboard under `test_output/coverage/index.html`.
 ### Calibration
 
 ```
-python3 scripts/calibration.py encode --width 2644 --height 2920
+python3 scripts/calibration.py encode --width 2398 --height 2957
 ```
 
 ```
