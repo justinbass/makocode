@@ -13,6 +13,7 @@
 import argparse
 import math
 from pathlib import Path
+import random
 import subprocess
 import sys
 import tempfile
@@ -144,51 +145,102 @@ def make_scale_steps(denominator):
     return tuple(sorted(scale_steps))
 
 
-def make_columns(source_sizes, scale_steps):
-    columns = []
+def make_columns(source_sizes, scale_steps, page_width, page_height):
+    """Pack samples with repeatable MaxRects best-short-side-fit searches."""
     samples = []
-    column_widths = []
-    column_x = []
-    next_x = MARGIN
-
-    for source_width, _ in source_sizes:
-        column_width = max(
-            scaled_dimension(source_width, scale_twelfths)
-            for scale_twelfths in scale_steps
-        )
-        column_widths.append(column_width)
-        column_x.append(next_x)
-        next_x += column_width + PADDING
-
+    columns = [{"index": mode_index, "sample_indexes": []}
+               for mode_index in range(len(source_sizes))]
     for mode_index, (source_width, source_height) in enumerate(source_sizes):
-        column = {"index": mode_index, "sample_indexes": []}
         scale_order = scale_steps if mode_index % 2 == 0 else tuple(reversed(scale_steps))
-        column_y = MARGIN
         for scale_twelfths in scale_order:
-            barcode_width = scaled_dimension(source_width, scale_twelfths)
-            barcode_height = scaled_dimension(source_height, scale_twelfths)
             sample = {
                 "index": len(samples),
                 "mode": mode_index,
-                "x": column_x[mode_index],
-                "y": column_y,
-                "width_px": barcode_width,
-                "height_px": barcode_height,
+                "x": 0,
+                "y": 0,
+                "width_px": scaled_dimension(source_width, scale_twelfths),
+                "height_px": scaled_dimension(source_height, scale_twelfths),
                 "scale_twelfths": scale_twelfths,
                 "scale": scale_twelfths / 12,
             }
             samples.append(sample)
-            column["sample_indexes"].append(sample["index"])
-            column_y += barcode_height + PADDING
-        columns.append(column)
+            columns[mode_index]["sample_indexes"].append(sample["index"])
 
-    page_width = MARGIN + sum(column_widths) + PADDING * (len(source_sizes) - 1) + MARGIN
-    page_height = max(
-        max(samples[index]["y"] + samples[index]["height_px"]
-            for index in column["sample_indexes"])
-        for column in columns
-    ) + MARGIN
-    return columns, samples, page_width, page_height
+    bin_width = page_width - 2 * MARGIN
+    bin_height = page_height - 2 * MARGIN - FOOTER_GLYPH_HEIGHT - PADDING
+    if bin_width <= 0 or bin_height <= 0:
+        return columns, samples, page_width + 1, page_height + 1
+    packed_items = [
+        (sample["index"], sample["width_px"] + PADDING,
+         sample["height_px"] + PADDING)
+        for sample in samples
+    ]
+    best_layout = None
+    for seed in range(32):
+        ordered_items = packed_items[:]
+        random.Random(0xCA1B + seed).shuffle(ordered_items)
+        ordered_items.sort(key=lambda item: item[1] * item[2], reverse=True)
+        free_rectangles = [(0, 0, bin_width, bin_height)]
+        placements = {}
+        for sample_index, item_width, item_height in ordered_items:
+            best_choice = None
+            for free_index, (free_x, free_y, free_width, free_height) in enumerate(free_rectangles):
+                if item_width > free_width or item_height > free_height:
+                    continue
+                remaining_width = free_width - item_width
+                remaining_height = free_height - item_height
+                score = (min(remaining_width, remaining_height),
+                         max(remaining_width, remaining_height), free_y, free_x)
+                if best_choice is None or score < best_choice[0]:
+                    best_choice = (score, free_index, free_x, free_y)
+            if best_choice is None:
+                break
+
+            _, _, placed_x, placed_y = best_choice
+            placements[sample_index] = (placed_x, placed_y, item_width, item_height)
+            split_rectangles = []
+            for free_x, free_y, free_width, free_height in free_rectangles:
+                if (placed_x >= free_x + free_width or placed_x + item_width <= free_x
+                        or placed_y >= free_y + free_height or placed_y + item_height <= free_y):
+                    split_rectangles.append((free_x, free_y, free_width, free_height))
+                    continue
+                if placed_x > free_x:
+                    split_rectangles.append((free_x, free_y, placed_x - free_x, free_height))
+                if placed_x + item_width < free_x + free_width:
+                    split_rectangles.append((placed_x + item_width, free_y,
+                                             free_x + free_width - placed_x - item_width,
+                                             free_height))
+                if placed_y > free_y:
+                    split_rectangles.append((free_x, free_y, free_width, placed_y - free_y))
+                if placed_y + item_height < free_y + free_height:
+                    split_rectangles.append((free_x, placed_y + item_height, free_width,
+                                             free_y + free_height - placed_y - item_height))
+            free_rectangles = []
+            for rectangle_index, rectangle in enumerate(split_rectangles):
+                rx, ry, rw, rh = rectangle
+                if any(other_index != rectangle_index
+                       and rx >= ox and ry >= oy and rx + rw <= ox + ow and ry + rh <= oy + oh
+                       for other_index, (ox, oy, ow, oh) in enumerate(split_rectangles)):
+                    continue
+                free_rectangles.append(rectangle)
+        if len(placements) != len(samples):
+            continue
+        bounds_width = max(x + width for x, _, width, _ in placements.values())
+        bounds_height = max(y + height for _, y, _, height in placements.values())
+        score = (bounds_width * bounds_height, abs(bounds_width - bounds_height))
+        if best_layout is None or score < best_layout[0]:
+            best_layout = (score, placements)
+
+    if best_layout is None:
+        return columns, samples, page_width + 1, page_height + 1
+    for sample in samples:
+        placed_x, placed_y, _, _ = best_layout[1][sample["index"]]
+        sample["x"] = MARGIN + placed_x + PADDING // 2
+        sample["y"] = MARGIN + placed_y + PADDING // 2
+    required_width = max(sample["x"] + sample["width_px"] for sample in samples) + MARGIN
+    required_height = (max(sample["y"] + sample["height_px"] for sample in samples)
+                       + MARGIN + FOOTER_GLYPH_HEIGHT + PADDING)
+    return columns, samples, required_width, required_height
 
 
 def write_p3_pixel_row(output, pixels):
@@ -283,7 +335,7 @@ def make_calibration_layout(source_sizes, page_width=None, page_height=None,
                     else tuple(reversed(SCALE_DENOMINATORS)))
     for denominator in denominators:
         columns, samples, required_width, required_height = make_columns(
-            source_sizes, make_scale_steps(denominator),
+            source_sizes, make_scale_steps(denominator), page_width, page_height,
         )
         if (scale_denominator is not None
                 or (required_width <= page_width and required_height <= page_height)):
@@ -292,7 +344,7 @@ def make_calibration_layout(source_sizes, page_width=None, page_height=None,
             )
 
     _, _, minimum_width, minimum_height = make_columns(
-        source_sizes, make_scale_steps(SCALE_DENOMINATORS[0]),
+        source_sizes, make_scale_steps(SCALE_DENOMINATORS[0]), page_width, page_height,
     )
     raise ValueError(
         f"page must be at least {minimum_width}x{minimum_height} to fit "
@@ -581,15 +633,8 @@ def fit_sample_row_offsets(columns, samples, transform, source_images,
                 score += 128 - luma
             return score
 
-        column = columns[sample["mode"]]
-        sample_position = column["sample_indexes"].index(sample["index"])
         radius_x = max(2, min(20, round(scale_x * PADDING)))
-        if sample_position + 1 < len(column["sample_indexes"]):
-            next_sample = samples[column["sample_indexes"][sample_position + 1]]
-            row_spacing = (next_sample["y"] - sample["y"]) * scale_y
-        else:
-            row_spacing = (sample["height_px"] + PADDING) * scale_y
-        radius_y = max(4, min(40, round(row_spacing * 0.4)))
+        radius_y = max(2, min(20, round(scale_y * PADDING)))
         coarse_step = max(1, round(scale * 2))
 
         best_x = best_y = 0
@@ -668,17 +713,21 @@ def infer_scale_layout(source_sizes, scan_width, scan_height, scan_pixels):
     denominator_scores = {}
     for candidate in candidate_denominators:
         _, _, expected_width, expected_height = make_columns(
-            source_sizes, make_scale_steps(candidate),
+            source_sizes, make_scale_steps(candidate), scan_width, scan_height,
         )
+        if expected_width > scan_width or expected_height > scan_height:
+            continue
         expected_width -= 2 * MARGIN
         expected_height -= 2 * MARGIN
         predicted_height = expected_height * observed_width / expected_width
         denominator_scores[candidate] = abs(
             math.log(max(1.0, observed_height) / max(1.0, predicted_height))
         )
+    if not denominator_scores:
+        raise ValueError("no supported calibration layout fits the scanned image")
     denominator = min(denominator_scores, key=denominator_scores.get)
     _, _, expected_width, expected_height = make_columns(
-        source_sizes, make_scale_steps(denominator),
+        source_sizes, make_scale_steps(denominator), scan_width, scan_height,
     )
     observed_ratio = scan_width / scan_height
     angle_denominator = observed_ratio * expected_width - expected_height
@@ -745,7 +794,7 @@ def analyze_scan(makocode_bin, scan_path):
             source_sizes, page_width, page_height, page_pixels,
         )
         columns, samples, expected_width, expected_height, _ = make_calibration_layout(
-            source_sizes, scale_denominator=scale_denominator,
+            source_sizes, page_width, page_height, scale_denominator=scale_denominator,
         )
         transform, sample_offsets, exact_sheet = fit_calibration_scan(
             work_dir, columns, samples, source_images, expected_width, expected_height,
@@ -865,7 +914,7 @@ def crop_scan(makocode_bin, scan_path):
             source_sizes, scan_width, scan_height, scan_pixels,
         )
         columns, samples, expected_width, expected_height, _ = make_calibration_layout(
-            source_sizes, scale_denominator=scale_denominator,
+            source_sizes, scan_width, scan_height, scale_denominator=scale_denominator,
         )
         transform, sample_offsets, exact_sheet = fit_calibration_scan(
             Path(temporary_directory), columns, samples, source_images,
