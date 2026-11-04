@@ -16797,6 +16797,42 @@ struct RotationEstimateCandidate {
                             tile_anchored_axis_affine_valid = true;
                             state.affine_transform = tile_anchored_axis_affine;
                             recompute_skew_flags();
+                            for (u32 row = 0u; row < fiducial_row_count; ++row) {
+                                double t_row = (fiducial_row_count <= 1u)
+                                                   ? 0.5
+                                                   : (double)row /
+                                                         (double)(fiducial_row_count - 1u);
+                                double logical_y = marker_margin +
+                                    ((double)data_height - 1.0 - 2.0 * marker_margin) * t_row;
+                                logical_y = (double)(int)(logical_y - marker_half_span) +
+                                            marker_half_span + 0.5;
+                                for (u32 column = 0u; column < fiducial_column_count; ++column) {
+                                    usize point = (usize)row * (usize)fiducial_column_count +
+                                                  (usize)column;
+                                    if (!fiducial_storage.visible[point]) continue;
+                                    double t_column = (fiducial_column_count <= 1u)
+                                                          ? 0.5
+                                                          : (double)column /
+                                                                (double)(fiducial_column_count - 1u);
+                                    double logical_x = marker_margin +
+                                        ((double)logical_width - 1.0 -
+                                         2.0 * marker_margin) * t_column;
+                                    logical_x = (double)(int)(logical_x - marker_half_span) +
+                                                marker_half_span + 0.5;
+                                    double predicted_x = measured_affine.a00 * logical_x +
+                                                         measured_affine.a01 * logical_y +
+                                                         measured_affine.tx;
+                                    double predicted_y = measured_affine.a10 * logical_x +
+                                                         measured_affine.a11 * logical_y +
+                                                         measured_affine.ty;
+                                    double dx = fiducial_storage.centers_x[point] - predicted_x;
+                                    double dy = fiducial_storage.centers_y[point] - predicted_y;
+                                    if (dx * dx + dy * dy > 6.25) {
+                                        fiducial_storage.centers_x[point] = predicted_x;
+                                        fiducial_storage.centers_y[point] = predicted_y;
+                                    }
+                                }
+                            }
                         } else if (fitted_skew_signs_usable && logical_tile.valid &&
                                    fabs(state.rotation_degrees_value) < 0.5) {
                             if (fabs(measured_affine.a01) > 0.001 &&
