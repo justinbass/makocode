@@ -86,17 +86,20 @@ python3 scripts/calibration.py encode --width 2398 --height 2957
 python3 scripts/calibration.py decode scan.ppm
 ```
 
-The generated sheet has four columns: White/Black; White/Cyan/Magenta/Yellow;
-that palette plus Black; and the eight-color White/Red/Green/Blue/Yellow/
-Magenta/Cyan/Black palette. Each column stacks its samples tightly, with scale
-order alternating by column. The 2644x1684 minimum fits 1x, 2x, 3x, and 4x;
-extra height adds half, third, and quarter scale intervals when they fit.
-Every sample encodes `makocode` followed by 1024 deterministic bytes. Decode
-infers the layout from the scanned sample arrangement. Its bytes-per-page
-estimate treats the full page as flat data at the densest successfully decoded
-mode and scale, adjusted for scan scale, and ignores metadata, fiducials, and
-other overhead. The PPM footer prints `width: N, height: N` in the default
-5x8 footer font.
+The generated sheet has a 4x4 grid of equal-size barcodes. The four columns use
+White/Black; White/Cyan/Magenta/Yellow; that palette plus Black; and the
+eight-color White/Red/Green/Blue/Yellow/Magenta/Cyan/Black palette. Rows use
+1x, 2x, 3x, and 4x pixels per dot, from top to bottom. Every barcode encodes
+`makocode` followed by deterministic padding sized to fill its available page
+capacity. The minimum page size is 1186x1200; larger pages enlarge every
+barcode equally. Higher-capacity palettes receive more padding bytes, so the
+8-color mode fills the same visual area as the 1-bit mode.
+
+Decode checks all 16 barcodes and reports the smallest pixels-per-dot setting
+that decodes for each mode. Its maximum bytes-per-page estimate extrapolates
+the densest successful mode and scale across the full page as flat data,
+adjusted for scan scale, and ignores metadata, fiducials, and other overhead.
+The PPM footer prints `width: N, height: N` in the default 5x8 footer font.
 
 Handy linux printing command:
 
