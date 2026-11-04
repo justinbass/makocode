@@ -16480,25 +16480,40 @@ struct RotationEstimateCandidate {
         logical_width > 1u && logical_height > 1u &&
         data_height > 1u && logical_width <= 0xFFFFFFFFull &&
         data_height <= 0xFFFFFFFFull) {
-        // Use the detected whole-page angle directly.  The tile and fiducial
-        // cross terms are noisy at this scale and must not be interpreted as
-        // page-span shear while searching for an angle.
+        // Start with the detected whole-page angle. Refine it against page
+        // bounds only when those bounds also indicate residual shear.
         double angle = has_rotation ? state.rotation_degrees_value : 0.0;
-        if (has_rotation && fabs(angle) <= 0.25 &&
-            initial_fiducial_affine_hint_available &&
+        if (has_rotation && initial_fiducial_affine_hint_available &&
             tile_affine_hint.pitch_pixels > 0.0) {
-            // Opposing horizontal and vertical skews can produce a small
-            // apparent polar rotation.  In that case, use the raster bounds
-            // to separate the small angle from the measured page-span shear.
-            double base_width = tile_affine_hint.pitch_pixels * (double)logical_width;
-            double base_height = tile_affine_hint.pitch_pixels * (double)logical_height;
-            double target_horizontal_shear = fabs(initial_fiducial_affine_hint.a01) *
-                                             (double)(logical_height - 1u);
-            double target_vertical_shear = fabs(initial_fiducial_affine_hint.a10) *
-                                           (double)(logical_width - 1u);
+            // Compare the shear left after undoing each candidate rotation with
+            // the page extents. The raw affine cross terms include rotation and
+            // overestimate shear when both are present.
+            double detected_angle_rad = angle *
+                                        (3.14159265358979323846 / 180.0);
+            double detected_cos = cos(detected_angle_rad);
+            double detected_sin = sin(detected_angle_rad);
+            double detected_det = detected_cos * detected_cos -
+                                  detected_sin * detected_sin;
+            double detected_pre_width = (fabs(detected_det) > 0.1)
+                ? (detected_cos * (double)width - detected_sin * (double)height) /
+                      detected_det
+                : (double)width;
+            double detected_pre_height = (fabs(detected_det) > 0.1)
+                ? (detected_cos * (double)height - detected_sin * (double)width) /
+                      detected_det
+                : (double)height;
+            double detected_scale_x = detected_pre_width / (double)logical_width;
+            double detected_scale_y = detected_pre_height / (double)logical_height;
+            double detected_scale = 0.5 * (detected_scale_x + detected_scale_y);
+            double base_scale = floor(detected_scale + 0.5);
+            double base_width = base_scale * (double)logical_width;
+            double base_height = base_scale * (double)logical_height;
+            bool page_bounds_show_shear = base_scale > 0.0 &&
+                (fabs(detected_pre_width - base_width) > 1.5 ||
+                 fabs(detected_pre_height - base_height) > 1.5);
             double best_error = 1.0e30;
             double best_angle = angle;
-            for (int step = -150; step <= 150; ++step) {
+            for (int step = -150; page_bounds_show_shear && step <= 150; ++step) {
                 double candidate_angle = angle + (double)step * 0.01;
                 double candidate_rad = candidate_angle *
                                        (3.14159265358979323846 / 180.0);
@@ -16511,10 +16526,19 @@ struct RotationEstimateCandidate {
                                            candidate_sin * (double)height) / candidate_det;
                 double candidate_height = (candidate_cos * (double)height -
                                             candidate_sin * (double)width) / candidate_det;
-                double horizontal_shear = candidate_width - base_width;
-                double vertical_shear = candidate_height - base_height;
-                double error = fabs(fabs(horizontal_shear) - target_horizontal_shear) +
-                               fabs(fabs(vertical_shear) - target_vertical_shear);
+                double fitted_xy = candidate_cos * initial_fiducial_affine_hint.a01 +
+                                   candidate_sin * initial_fiducial_affine_hint.a11;
+                double fitted_yx = -candidate_sin * initial_fiducial_affine_hint.a00 +
+                                   candidate_cos * initial_fiducial_affine_hint.a10;
+                double measured_horizontal_shear =
+                    fabs(fitted_xy) * (double)(logical_height - 1u);
+                double measured_vertical_shear =
+                    fabs(fitted_yx) * (double)(logical_width - 1u);
+                double horizontal_shear_extent = fabs(candidate_width - base_width);
+                double vertical_shear_extent = fabs(candidate_height - base_height);
+                double error = fabs(horizontal_shear_extent - measured_horizontal_shear) +
+                               fabs(vertical_shear_extent - measured_vertical_shear) +
+                               fabs(candidate_angle - angle) * 0.01;
                 if (error < best_error) {
                     best_error = error;
                     best_angle = candidate_angle;

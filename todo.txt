@@ -1,5 +1,5 @@
 TODO
-- Calibration script, remove fractions. If there's additional space, simply pad with additional data. Stick to 1x, 2x, 3x, 4x. Calibration returns best data amount per color mode.
+- Calibration script, remove fractions. If there's additional space, simply pad with additional data. Stick to 1x, 2x, 3x, 4x, 4x4 grid of barcodes. Calibration returns best data amount per color mode.
 - Fix 5-bit mode, clearly not as intended (in calibration script)
 - Run physical tests, against calibration script
 - Top of images appears to have uncompressed region
