@@ -1,5 +1,4 @@
 TODO
-- Fix 5-bit mode, clearly not as intended (in calibration script)
 - Run physical tests, against calibration script
 - Top of images appears to have uncompressed region
 - Footer title and metadata just on first page - or middle page?

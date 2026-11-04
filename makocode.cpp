@@ -10973,13 +10973,7 @@ static bool map_rgb_to_samples(u8 mode, const u8* rgb, u32* samples) {
 
 static double mapping_bits_per_data_pixel(const ImageMappingConfig& mapping) {
     if (mapping_has_custom_palette(mapping)) {
-        u32 count = mapping.custom_palette_count;
-        u32 symbol_bits = 0u;
-        while (count >= 2u) {
-            count >>= 1u;
-            ++symbol_bits;
-        }
-        return (double)symbol_bits;
+        return log((double)mapping.custom_palette_count) / log(2.0);
     }
     u8 sample_bits = bits_per_sample(mapping.color_channels);
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
@@ -15290,7 +15284,8 @@ struct RotationEstimateCandidate {
         }
         custom_fixed_width = state.has_encoded_tile &&
                              state.encoded_tile.schema_version == MetadataTile::TILE_SCHEMA_VERSION &&
-                             palette_count >= 2u;
+                             palette_count >= 2u &&
+                             is_power_of_two_u32(palette_count);
         if (!state.has_palette_base) {
             state.has_palette_base = true;
             state.palette_base_value = custom_palette_base;
@@ -15300,13 +15295,15 @@ struct RotationEstimateCandidate {
     if (custom_fixed_width) {
         payload_custom_mapping.custom_palette_count = (1u << custom_symbol_bits);
     }
-    const u8 sample_bits = custom_fixed_width ? (u8)custom_symbol_bits : bits_per_sample(color_mode);
+    const u8 sample_bits = custom_fixed_width
+                               ? (u8)custom_symbol_bits
+                               : (use_custom_palette ? 0u : bits_per_sample(color_mode));
     const PaletteColor* palette = 0;
     u32 palette_size = 0u;
-    if (!palette_for_mode(color_mode, palette, palette_size)) {
+    if (!use_custom_palette && !palette_for_mode(color_mode, palette, palette_size)) {
         return false;
     }
-    if (!custom_fixed_width && palette_size != (1u << sample_bits)) {
+    if (!use_custom_palette && palette_size != (1u << sample_bits)) {
         return false;
     }
     (void)palette;
@@ -15315,14 +15312,23 @@ struct RotationEstimateCandidate {
     if (reserved_data_pixels > total_data_pixels) {
         reserved_data_pixels = total_data_pixels;
     }
-    u64 capacity_without_reserve = total_data_pixels *
+    u64 capacity_without_reserve = 0u;
+    if (use_custom_palette && !custom_fixed_width) {
+        u64 usable_pixels = total_data_pixels - reserved_data_pixels;
+        double capacity_bits = (double)usable_pixels *
+                               (log((double)custom_palette_base) / log(2.0));
+        if (capacity_bits > (double)U64_MAX_VALUE) return false;
+        capacity_without_reserve = (u64)capacity_bits;
+    } else {
+        capacity_without_reserve = total_data_pixels *
                                    (u64)sample_bits *
                                    (u64)samples_per_pixel;
+    }
     u64 capacity_with_reserve = capacity_without_reserve;
     makocode::ByteBuffer custom_digits;
     u64 digits_target = 0u;
     if (use_custom_palette && !custom_fixed_width) {
-        digits_target = total_data_pixels;
+        digits_target = total_data_pixels - reserved_data_pixels;
         
         if (digits_target > 0u) {
             if (!custom_digits.ensure((usize)digits_target)) {
@@ -18180,7 +18186,8 @@ struct RotationEstimateCandidate {
                     }
                     continue;
                 }
-                if (digits_target > 0u && custom_digits.size >= (usize)digits_target) {
+                if (reserved_pixel ||
+                    (digits_target > 0u && custom_digits.size >= (usize)digits_target)) {
                     continue;
                 }
                 u32 symbol = 0u;
@@ -18250,8 +18257,16 @@ struct RotationEstimateCandidate {
         }
         const u8* digit_data_ptr = digits_available ? custom_digits.data : (const u8*)0;
         u64 bit_target = capacity_with_reserve;
-        if (state.has_page_bits && state.page_bits_value > 0u && state.page_bits_value <= bit_target) {
-            bit_target = state.page_bits_value;
+        if (state.has_page_bits && state.page_bits_value > 0u) {
+            u64 metadata_bit_target = state.page_bits_value;
+            if (state.has_encoded_tile &&
+                state.encoded_tile.schema_version == MetadataTile::TILE_SCHEMA_VERSION &&
+                state.encoded_tile.page_bits <= U64_MAX_VALUE - 64u) {
+                metadata_bit_target = state.encoded_tile.page_bits + 64u;
+            }
+            if (metadata_bit_target <= bit_target) {
+                bit_target = metadata_bit_target;
+            }
         }
         u32 digits_base = custom_palette_base ? custom_palette_base : mapping_custom_palette_base(active_mapping);
         if (!base_digits_to_bits(digit_data_ptr,
@@ -19479,10 +19494,10 @@ static bool compute_fiducial_reservation(u32 width_pixels,
     return true;
 }
 
-static bool compute_bits_per_page(u32 width_pixels,
+static bool compute_bits_per_page(const ImageMappingConfig& mapping,
+                                  u32 width_pixels,
                                   u32 height_pixels,
                                   u32 data_height_pixels,
-                                  double bits_per_pixel,
                                   u64& bits_per_page) {
     u64 total_pixels = (u64)width_pixels * (u64)data_height_pixels;
     u64 reserved_pixels = 0u;
@@ -19494,9 +19509,11 @@ static bool compute_bits_per_page(u32 width_pixels,
                                       &temp_mask)) {
         return false;
     }
-    (void)temp_mask;
     if (reserved_pixels > total_pixels) return false;
-    double capacity_bits = (double)total_pixels * bits_per_pixel;
+    bool base_palette = mapping_has_custom_palette(mapping) &&
+                        !is_power_of_two_u32(mapping.custom_palette_count);
+    u64 data_pixels = base_palette ? total_pixels - reserved_pixels : total_pixels;
+    double capacity_bits = (double)data_pixels * mapping_bits_per_data_pixel(mapping);
     if (capacity_bits > (double)U64_MAX_VALUE) {
         return false;
     }
@@ -19631,6 +19648,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (reserved_data_pixels > total_data_pixels) return false;
     u64 usable_data_pixels = total_data_pixels;
     bool use_custom_palette = mapping_has_custom_palette(mapping);
+    bool use_base_palette = use_custom_palette &&
+                           !is_power_of_two_u32(mapping.custom_palette_count);
     u32 custom_symbol_bits = 0u;
     if (use_custom_palette) {
         u32 count = mapping.custom_palette_count;
@@ -19642,13 +19661,13 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             return false;
         }
     }
-    double bits_per_data_pixel = use_custom_palette
-                                     ? (double)custom_symbol_bits
-                                     : mapping_bits_per_data_pixel(mapping);
-    u64 expected_bits_per_page = usable_data_pixels *
-                                 (u64)bits_per_data_pixel;
-    if ((double)usable_data_pixels * bits_per_data_pixel != (double)bits_per_page ||
-        expected_bits_per_page != bits_per_page) {
+    if (use_base_palette) {
+        usable_data_pixels -= reserved_data_pixels;
+    }
+    double bits_per_data_pixel = mapping_bits_per_data_pixel(mapping);
+    double expected_capacity = (double)usable_data_pixels * bits_per_data_pixel;
+    if (expected_capacity > (double)U64_MAX_VALUE ||
+        (u64)expected_capacity != bits_per_page) {
         return false;
     }
     
@@ -19673,6 +19692,48 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     const u8* mask_data = fiducial_mask.data;
     usize mask_size = fiducial_mask.size;
     u64 bit_cursor = bit_offset;
+    u64 base_digit_cursor = 0u;
+    makocode::ByteBuffer base_digits;
+    u64 base_digits_used = 0u;
+    if (use_base_palette) {
+        u64 work_bytes_u64 = (bits_per_page + 7u) >> 3u;
+        if (work_bytes_u64 == 0u || work_bytes_u64 > (u64)USIZE_MAX_VALUE) return false;
+        usize work_bytes = (usize)work_bytes_u64;
+        makocode::ByteBuffer work;
+        if (!work.ensure(work_bytes)) return false;
+        work.size = work_bytes;
+        for (usize byte_index = 0u; byte_index < work_bytes; ++byte_index) {
+            work.data[byte_index] = 0u;
+        }
+        for (u64 local_bit = 0u; local_bit < bits_per_page; ++local_bit) {
+            u64 source_bit = bit_offset + local_bit;
+            if (source_bit >= frame_bit_count || !frame_data) continue;
+            if (frame_data[source_bit >> 3u] & (u8)(1u << (source_bit & 7u))) {
+                work.data[local_bit >> 3u] |= (u8)(1u << (local_bit & 7u));
+            }
+        }
+        usize remaining_bytes = work_bytes;
+        while (remaining_bytes > 0u) {
+            u32 remainder = 0u;
+            for (ssize_t byte_index = (ssize_t)remaining_bytes - 1; byte_index >= 0; --byte_index) {
+                u32 value = (remainder << 8u) | (u32)work.data[byte_index];
+                work.data[byte_index] = (u8)(value / mapping.custom_palette_count);
+                remainder = value % mapping.custom_palette_count;
+            }
+            while (remaining_bytes > 0u && work.data[remaining_bytes - 1u] == 0u) {
+                --remaining_bytes;
+            }
+            if (!base_digits.ensure(base_digits.size + 1u)) return false;
+            base_digits.data[base_digits.size++] = (u8)remainder;
+            if ((u64)base_digits.size > usable_data_pixels) return false;
+        }
+        if (base_digits.size == 0u) {
+            if (!base_digits.ensure(1u)) return false;
+            base_digits.data[0] = 0u;
+            base_digits.size = 1u;
+        }
+        base_digits_used = (u64)base_digits.size;
+    }
 
     // Build metadata tile bits (2-color endpoints) so reserved pixels in the tile
     // region render as metadata rather than blank white.
@@ -19822,15 +19883,24 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     u8 payload_rgb[3] = {0u, 0u, 0u};
                     if (use_custom_palette) {
                         u32 symbol = 0u;
-                        for (u32 bit = 0u; bit < custom_symbol_bits; ++bit) {
-                            u8 bit_value = 0u;
-                            if (bit_cursor < frame_bit_count && frame_data) {
-                                usize byte_index = (usize)(bit_cursor >> 3u);
-                                u8 bit_mask = (u8)(1u << (bit_cursor & 7u));
-                                bit_value = (frame_data[byte_index] & bit_mask) ? 1u : 0u;
+                        if (use_base_palette) {
+                            if (!reserved_pixel && !inside_tile) {
+                                if (base_digit_cursor < base_digits_used) {
+                                    symbol = base_digits.data[base_digit_cursor];
+                                }
+                                ++base_digit_cursor;
                             }
-                            symbol |= ((u32)bit_value) << bit;
-                            ++bit_cursor;
+                        } else {
+                            for (u32 bit = 0u; bit < custom_symbol_bits; ++bit) {
+                                u8 bit_value = 0u;
+                                if (bit_cursor < frame_bit_count && frame_data) {
+                                    usize byte_index = (usize)(bit_cursor >> 3u);
+                                    u8 bit_mask = (u8)(1u << (bit_cursor & 7u));
+                                    bit_value = (frame_data[byte_index] & bit_mask) ? 1u : 0u;
+                                }
+                                symbol |= ((u32)bit_value) << bit;
+                                ++bit_cursor;
+                            }
                         }
                         if (symbol >= mapping.custom_palette_count) {
                             return false;
@@ -21158,7 +21228,6 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
                                 u32& data_height_pixels,
                                 u64& bits_per_page,
                                 u64& page_count) {
-    double bits_per_pixel = mapping_bits_per_data_pixel(mapping);
     data_height_pixels = height_pixels;
     bits_per_page = 0u;
     page_count = 1u;
@@ -21171,10 +21240,10 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
             return false;
         }
         data_height_pixels = footer_layout.data_height_pixels;
-        if (!compute_bits_per_page(width_pixels,
+        if (!compute_bits_per_page(mapping,
+                                   width_pixels,
                                    height_pixels,
                                    data_height_pixels,
-                                   bits_per_pixel,
                                    bits_per_page)) {
             return false;
         }
@@ -21205,6 +21274,16 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
                                            u16 overlay_erasure_budget,
                                            u16* minimum_parity_required_out = 0) {
     if (minimum_parity_required_out) *minimum_parity_required_out = 0u;
+    if (mapping_has_custom_palette(mapping) &&
+        !is_power_of_two_u32(mapping.custom_palette_count)) {
+        u64 expected_bits_per_page = 0u;
+        return compute_bits_per_page(mapping,
+                                     width_pixels,
+                                     height_pixels,
+                                     data_height_pixels,
+                                     expected_bits_per_page) &&
+               expected_bits_per_page == bits_per_page;
+    }
     if (!ecc_summary.enabled || !ecc_summary.block_data_symbols ||
         !ecc_summary.parity_symbols || !ecc_summary.block_count ||
         frame_bit_count < 64u || !frame_bits.data ||
@@ -22159,8 +22238,11 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: canonical layout has no payload capacity");
         return 1;
     }
-    structural_erasure_fraction = (double)overwritten_pixels /
-                               (double)data_pixels;
+    structural_erasure_fraction =
+        mapping_has_custom_palette(mapping) &&
+                !is_power_of_two_u32(mapping.custom_palette_count)
+            ? 0.0
+            : (double)overwritten_pixels / (double)data_pixels;
     if (ecc_fill_requested) {
         double best_ratio = -1.0;
         double best_requested_ratio = -1.0;
@@ -22398,10 +22480,10 @@ static int command_encode(int arg_count, char** args) {
                     while (low <= high) {
                         u32 mid = low + (high - low) / 2u;
                         u64 candidate_bits = 0u;
-                        if (compute_bits_per_page(width_pixels,
+                        if (compute_bits_per_page(mapping,
+                                                  width_pixels,
                                                   height_pixels,
                                                   mid,
-                                                  bits_per_pixel,
                                                   candidate_bits) &&
                             candidate_bits >= frame_bit_count) {
                             best = mid;
@@ -22417,10 +22499,10 @@ static int command_encode(int arg_count, char** args) {
                              candidate_height <= max_data_height;
                              ++candidate_height) {
                             u64 candidate_bits = 0u;
-                            if (!compute_bits_per_page(width_pixels,
+                            if (!compute_bits_per_page(mapping,
+                                                       width_pixels,
                                                        height_pixels,
                                                        candidate_height,
-                                                       bits_per_pixel,
                                                        candidate_bits) ||
                                 candidate_bits < frame_bit_count) {
                                 continue;

@@ -396,3 +396,6 @@ test_case 0101_canonical_tile script "Canonical center tile reserves structural 
 
 test_case 0102_canonical_overlay_multipage script "Canonical overlay selectors merge across multipage streams" \
     test_canonical_overlay_multipage.sh
+
+test_case 0103_palette_base5_capacity script "Base-5 palette uses black symbols and exceeds two bits per pixel" \
+    test_palette_base5_capacity.sh
