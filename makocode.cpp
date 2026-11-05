@@ -8196,12 +8196,6 @@ static bool compute_fiducial_reservation(u32 width_pixels,
                                          u32 rows_override = 0u,
                                          u32 margin_override = 0u);
 
-static bool compute_bits_per_page(u32 width_pixels,
-                                  u32 height_pixels,
-                                  u32 data_height_pixels,
-                                  double bits_per_pixel,
-                                  u64& bits_per_page);
-
 static const u8 OVERWRITE_MASK_PIXEL = 1u;
 static const u64 OVERLAY_SELECTOR_SEED = 0x4D4B4F5645524C59ull;
 
