@@ -38,12 +38,12 @@ static int nearly_equal(double a, double b) {
     return fabs(a - b) < kEpsilon;
 }
 
-static bool canonical_metadata_tile_header(uint32_t header) {
-    if ((header >> 16u) != 0x4D43u) return false;
+static bool canonical_metadata_tile_header(uint64_t header) {
+    if ((header >> 24u) != 0x4D43u) return false;
     unsigned int cursor = 16u;
     auto read_bit = [&](unsigned int& bit_out) -> bool {
-        if (cursor >= 32u) return false;
-        bit_out = (header >> (31u - cursor)) & 1u;
+        if (cursor >= 40u) return false;
+        bit_out = (unsigned int)((header >> (39u - cursor)) & 1u);
         ++cursor;
         return true;
     };
@@ -64,7 +64,41 @@ static bool canonical_metadata_tile_header(uint32_t header) {
         if (!read_bit(bit)) return false;
         metadata_length = (metadata_length << 1u) | bit;
     }
-    return metadata_length > 0u && metadata_length <= 139u;
+    return metadata_length > 0u && metadata_length <= 42u * 42u && (metadata_length & 7u) == 0u;
+}
+
+static bool read_canonical_metadata_tile_header(const int* pixels,
+                                                int width,
+                                                int tile_x0,
+                                                int tile_y0,
+                                                double threshold,
+                                                uint64_t& header_out) {
+    if (!pixels || width <= 0) return false;
+    const unsigned int header_bits = 40u;
+    const unsigned int header_repetitions = 3u;
+    const int header_x0 = (48 - (int)header_bits) / 2;
+    const int max_header_y = (48 - 1) / 2 - (int)header_repetitions;
+    for (int header_y0 = 0; header_y0 <= max_header_y; ++header_y0) {
+        uint64_t header = 0u;
+        for (unsigned int bit = 0u; bit < header_bits; ++bit) {
+            unsigned int dark_votes = 0u;
+            for (unsigned int repetition = 0u; repetition < header_repetitions; ++repetition) {
+                size_t pixel = (size_t)(tile_y0 + header_y0 + (int)repetition) * (size_t)width +
+                               (size_t)(tile_x0 + header_x0 + (int)bit);
+                size_t rgb = pixel * 3u;
+                double luminance = 0.2126 * (double)pixels[rgb] +
+                                   0.7152 * (double)pixels[rgb + 1u] +
+                                   0.0722 * (double)pixels[rgb + 2u];
+                if (luminance < threshold) ++dark_votes;
+            }
+            header = (header << 1u) | (dark_votes >= 2u ? 1u : 0u);
+        }
+        if (canonical_metadata_tile_header(header)) {
+            header_out = header;
+            return true;
+        }
+    }
+    return false;
 }
 
 struct StrVec {
@@ -1189,21 +1223,13 @@ static void cmd_transform(int argc, char** argv) {
             die("ppm_transform: --preserve-canonical-control could not detect tile color endpoints");
         }
         double tile_threshold = (darkest_luminance + lightest_luminance) * 0.5;
-        uint32_t tile_header = 0u;
-        for (unsigned int bit = 0u; bit < 32u; ++bit) {
-            unsigned int dark_votes = 0u;
-            for (unsigned int repetition = 0u; repetition < 5u; ++repetition) {
-                size_t pixel = (size_t)(tile_y0 + 1 + (int)repetition) * (size_t)ppm.width +
-                               (size_t)(tile_x0 + 1 + (int)bit);
-                size_t rgb = pixel * 3u;
-                double luminance = 0.2126 * (double)ppm.pixels.data[rgb] +
-                                   0.7152 * (double)ppm.pixels.data[rgb + 1u] +
-                                   0.0722 * (double)ppm.pixels.data[rgb + 2u];
-                if (luminance < tile_threshold) ++dark_votes;
-            }
-            tile_header = (tile_header << 1u) | (dark_votes >= 3u ? 1u : 0u);
-        }
-        if (!canonical_metadata_tile_header(tile_header)) {
+        uint64_t tile_header = 0u;
+        if (!read_canonical_metadata_tile_header(ppm.pixels.data,
+                                                 ppm.width,
+                                                 tile_x0,
+                                                 tile_y0,
+                                                 tile_threshold,
+                                                 tile_header)) {
             ppm_free(&ppm);
             die("ppm_transform: --preserve-canonical-control expects a centered canonical metadata tile");
         }
@@ -1355,21 +1381,13 @@ static void cmd_transform(int argc, char** argv) {
         if (w >= 48 && h >= 48) {
             int tile_x0 = (w - 48) / 2;
             int tile_y0 = (h - 48) / 2;
-            uint32_t tile_header = 0u;
-            for (unsigned int bit = 0u; bit < 32u; ++bit) {
-                unsigned int dark_votes = 0u;
-                for (unsigned int repetition = 0u; repetition < 5u; ++repetition) {
-                    size_t pixel = (size_t)(tile_y0 + 1 + (int)repetition) * (size_t)w +
-                                   (size_t)(tile_x0 + 1 + (int)bit);
-                    size_t rgb = pixel * 3u;
-                    if (current.data[rgb] < 128 && current.data[rgb + 1u] < 128 &&
-                        current.data[rgb + 2u] < 128) {
-                        ++dark_votes;
-                    }
-                }
-                tile_header = (tile_header << 1u) | (dark_votes >= 3u ? 1u : 0u);
-            }
-            canonical = canonical_metadata_tile_header(tile_header);
+            uint64_t tile_header = 0u;
+            canonical = read_canonical_metadata_tile_header(current.data,
+                                                             w,
+                                                             tile_x0,
+                                                             tile_y0,
+                                                             128.0,
+                                                             tile_header);
         }
         if (!canonical) {
             die("ppm_transform: header corruption expects a centered canonical metadata tile");
