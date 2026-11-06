@@ -1,4 +1,5 @@
 TODO
+- Metadata tile must be minimal sized, only fit data that is needed.
 - Metadata tile must contain all header metadata (see uncompressed region at beginning)
 - Compress metadata (confirm it saves space worth the risk of corruption)
 - Run physical tests, against calibration script
