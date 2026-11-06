@@ -38,6 +38,35 @@ static int nearly_equal(double a, double b) {
     return fabs(a - b) < kEpsilon;
 }
 
+static bool canonical_metadata_tile_header(uint32_t header) {
+    if ((header >> 16u) != 0x4D43u) return false;
+    unsigned int cursor = 16u;
+    auto read_bit = [&](unsigned int& bit_out) -> bool {
+        if (cursor >= 32u) return false;
+        bit_out = (header >> (31u - cursor)) & 1u;
+        ++cursor;
+        return true;
+    };
+    unsigned int bit = 0u;
+    if (!read_bit(bit)) return false;
+    unsigned int section_one_bits = bit << 1u;
+    if (!read_bit(bit)) return false;
+    section_one_bits = (section_one_bits | bit) + 1u;
+    unsigned int metadata_bits = 0u;
+    for (unsigned int i = 0u; i < section_one_bits; ++i) {
+        if (!read_bit(bit)) return false;
+        metadata_bits = (metadata_bits << 1u) | bit;
+    }
+    ++metadata_bits;
+    if (metadata_bits > 16u) return false;
+    unsigned int metadata_length = 0u;
+    for (unsigned int i = 0u; i < metadata_bits; ++i) {
+        if (!read_bit(bit)) return false;
+        metadata_length = (metadata_length << 1u) | bit;
+    }
+    return metadata_length > 0u && metadata_length <= 139u;
+}
+
 struct StrVec {
     char** data = nullptr;
     size_t size = 0;
@@ -1172,10 +1201,9 @@ static void cmd_transform(int argc, char** argv) {
                                    0.0722 * (double)ppm.pixels.data[rgb + 2u];
                 if (luminance < tile_threshold) ++dark_votes;
             }
-            if (dark_votes >= 3u) tile_header |= (uint32_t)1u << bit;
+            tile_header = (tile_header << 1u) | (dark_votes >= 3u ? 1u : 0u);
         }
-        if (((tile_header >> 16u) & 0xFFFFu) != 0x4D4Du ||
-            ((tile_header >> 12u) & 0x0Fu) != 1u) {
+        if (!canonical_metadata_tile_header(tile_header)) {
             ppm_free(&ppm);
             die("ppm_transform: --preserve-canonical-control expects a centered canonical metadata tile");
         }
@@ -1339,10 +1367,9 @@ static void cmd_transform(int argc, char** argv) {
                         ++dark_votes;
                     }
                 }
-                if (dark_votes >= 3u) tile_header |= (uint32_t)1u << bit;
+                tile_header = (tile_header << 1u) | (dark_votes >= 3u ? 1u : 0u);
             }
-            canonical = ((tile_header >> 16u) == 0x4D4Du) &&
-                      (((tile_header >> 12u) & 0x0Fu) == 1u);
+            canonical = canonical_metadata_tile_header(tile_header);
         }
         if (!canonical) {
             die("ppm_transform: header corruption expects a centered canonical metadata tile");
