@@ -115,7 +115,7 @@ run_decode_expect() {
     "$ppm_transform_bin" transform \
         --input "$encoded_ppm" \
         --output "$damaged_ppm" \
-        --corrupt-header-copies "$corrupt_count" >/dev/null
+        --corrupt-former-header-slots "$corrupt_count" >/dev/null
 
     local decode_cmd=("$makocode_bin" decode "--output-dir=$output_dir" --debug)
     decode_cmd+=("$damaged_ppm")
@@ -130,14 +130,6 @@ run_decode_expect() {
     fi
     if [[ $expect_success -eq 0 && $status -eq 0 ]]; then
         echo "test_header_copy_corruption: decode ${scenario} unexpectedly succeeded" >&2
-        exit 1
-    fi
-    if [[ $corrupt_count -eq 3 ]] && ! grep -q 'decode: repaired ECC header from metadata' "$decode_log"; then
-        echo "test_header_copy_corruption: decode ${scenario} did not recover from metadata" >&2
-        exit 1
-    fi
-    if [[ $corrupt_count -lt 3 ]] && grep -q 'decode: repaired ECC header from metadata' "$decode_log"; then
-        echo "test_header_copy_corruption: decode ${scenario} bypassed surviving header copies" >&2
         exit 1
     fi
     local fiducial_csv="$output_dir/decode_fiducials.csv"
@@ -159,11 +151,12 @@ run_decode_expect() {
     fi
 }
 
-run_decode_expect "one_copy" 1 1
-run_decode_expect "two_copies" 1 2
-# The metadata tile reconstructs the ECC header after all three protected copies are damaged.
-run_decode_expect "all_copies" 1 3
+run_decode_expect "one_group" 1 1
+run_decode_expect "two_groups" 1 2
+# These former in-band header slots now contain ordinary RS-protected payload.
+# Damage one, two, and three six-symbol groups and require exact recovery.
+run_decode_expect "three_groups" 1 3
 mako_register_visual_artifacts "$repo_root" "$encoded_ppm"
 
 label_fmt="$label"
-printf '%s SUCCESS header copy corruption expectations met\n' "$label_fmt"
+printf '%s SUCCESS ECC payload recovery at former header slots\n' "$label_fmt"

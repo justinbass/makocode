@@ -151,7 +151,7 @@ test_case 0038_palette_wrong_rejected script "Decoder rejects forced wrong palet
 test_case 0039_password_failures script "Decoder enforces password requirement" \
     test_password_failures.sh
 
-test_case 0040_header_copy_corruption script "Header RS repairs and ECC metadata fallback" \
+test_case 0040_header_copy_corruption script "Payload ECC repairs damage at former in-band header slots" \
     test_header_copy_corruption.sh
 
 test_case 0041_palette_white_black_blot_black roundtrip "High-ECC black blot recovery on White/Black page" \
@@ -349,7 +349,7 @@ test_case 0079_decode_scan_margin_noise script "Generated scan margin noise stil
 test_case 0080_decode_scan_off_center_noise script "Recoverable scan with off-center specks must decode" \
     test_decode_synthetic_scan_damage.sh --off-center-noise
 
-test_case 0081_decode_short_length_header script "Canonical tile length survives a flipped raster prefix bit" \
+test_case 0081_decode_short_length_header script "Center metadata length survives a damaged first payload bit" \
     test_decode_short_length_header.sh
 
 test_case 0082_decode_lowres_rotated_scan script "Generated rotated scan below 2 pixels per module round-trips" \

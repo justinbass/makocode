@@ -777,7 +777,7 @@ static void usage() {
             "                       [--paper-color C] [--paper-alpha A] [--paper-splotch-alpha A]\n"
             "                       [--paper-splotch-shade A] [--paper-splotch-px PX]\n"
             "                       [--white-checker] [--preserve-canonical-control]\n"
-            "                       [--corrupt-header-copies N]\n"
+            "                       [--corrupt-former-header-slots N]\n"
             "  ppm_transform solid --output OUT --width W --height H --r R --g G --b B\n"
             "  ppm_transform noise --output OUT --width W --height H --seed N\n"
             "  ppm_transform corrupt-footer-data-destroyed --input IN --output OUT [--seed N] [--footer-height-px N]\n"
@@ -1149,7 +1149,7 @@ static void cmd_transform(int argc, char** argv) {
     double paper_splotch_alpha = 0.0;
     double paper_splotch_shade = 0.0;
     int paper_splotch_px = 0;
-    int corrupt_header_copies = 0;
+    int corrupt_former_header_slots = 0;
     bool white_checker = false;
     bool preserve_canonical_control = false;
 
@@ -1178,13 +1178,13 @@ static void cmd_transform(int argc, char** argv) {
         else if (strcmp(arg, "--paper-splotch-px") == 0) paper_splotch_px = parse_i32(require_value("--paper-splotch-px"), "paper-splotch-px");
         else if (strcmp(arg, "--white-checker") == 0) white_checker = true;
         else if (strcmp(arg, "--preserve-canonical-control") == 0) preserve_canonical_control = true;
-        else if (strcmp(arg, "--corrupt-header-copies") == 0) corrupt_header_copies = parse_i32(require_value("--corrupt-header-copies"), "corrupt-header-copies");
+        else if (strcmp(arg, "--corrupt-former-header-slots") == 0) corrupt_former_header_slots = parse_i32(require_value("--corrupt-former-header-slots"), "corrupt-former-header-slots");
         else die2("ppm_transform: unknown flag ", arg);
     }
 
     if (!input || !output) die("ppm_transform: --input and --output are required");
-    if (corrupt_header_copies < 0 || corrupt_header_copies > 3) {
-        die("ppm_transform: --corrupt-header-copies must be between 0 and 3");
+    if (corrupt_former_header_slots < 0 || corrupt_former_header_slots > 3) {
+        die("ppm_transform: --corrupt-former-header-slots must be between 0 and 3");
     }
 
     Ppm ppm = read_ppm_p3_ascii(input);
@@ -1193,7 +1193,7 @@ static void cmd_transform(int argc, char** argv) {
         if (!white_checker) {
             die("ppm_transform: --preserve-canonical-control requires --white-checker");
         }
-        if (corrupt_header_copies != 0 || !nearly_equal(rotate_deg, 0.0) ||
+        if (corrupt_former_header_slots != 0 || !nearly_equal(rotate_deg, 0.0) ||
             !nearly_equal(skew_x, 0.0) || !nearly_equal(skew_y, 0.0) ||
             border_thickness != 0 || ink_blot_radius != 0 || paper_alpha > 0.0 ||
             paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0) {
@@ -1364,17 +1364,17 @@ static void cmd_transform(int argc, char** argv) {
                               paper_splotch_px,
                               seed);
 
-    if (corrupt_header_copies > 0) {
+    if (corrupt_former_header_slots > 0) {
         if (w != ppm.width || h != ppm.height ||
             !nearly_equal(scale_x, 1.0) || !nearly_equal(scale_y, 1.0) ||
             !nearly_equal(rotate_deg, 0.0) || !nearly_equal(skew_x, 0.0) ||
             !nearly_equal(skew_y, 0.0) || border_thickness != 0 ||
             ink_blot_radius != 0 || paper_alpha > 0.0 ||
             paper_splotch_alpha > 0.0 || paper_splotch_shade > 0.0) {
-            die("ppm_transform: header corruption requires an otherwise unmodified page");
+            die("ppm_transform: former-header-slot corruption requires an otherwise unmodified page");
         }
         if (w < 1 || h < 1 || (size_t)w > ((size_t)-1) / (size_t)h) {
-            die("ppm_transform: invalid dimensions for header corruption");
+            die("ppm_transform: invalid dimensions for former-header-slot corruption");
         }
         size_t total_pixels = (size_t)w * (size_t)h;
         bool canonical = false;
@@ -1390,7 +1390,7 @@ static void cmd_transform(int argc, char** argv) {
                                                              tile_header);
         }
         if (!canonical) {
-            die("ppm_transform: header corruption expects a centered canonical metadata tile");
+            die("ppm_transform: former-header-slot corruption expects a centered canonical metadata tile");
         }
         unsigned char* reserved = (unsigned char*)calloc(total_pixels, 1u);
         if (!reserved) die("ppm_transform: OOM");
@@ -1438,11 +1438,11 @@ static void cmd_transform(int argc, char** argv) {
         }
         size_t target_bits[3u * 6u * 8u];
         size_t target_count = 0u;
-        for (int copy = 0; copy < corrupt_header_copies; ++copy) {
+        for (int group = 0; group < corrupt_former_header_slots; ++group) {
             for (size_t parity_byte = 0u; parity_byte < 6u; ++parity_byte) {
-                size_t byte_index = (size_t)copy * 32u + 26u + parity_byte;
+                size_t byte_index = (size_t)group * 32u + 26u + parity_byte;
                 for (size_t bit = 0u; bit < 8u; ++bit) {
-                    target_bits[target_count++] = 64u + byte_index * 8u + bit;
+                    target_bits[target_count++] = byte_index * 8u + bit;
                 }
             }
         }
@@ -1451,19 +1451,19 @@ static void cmd_transform(int argc, char** argv) {
         size_t target_index = 0u;
         size_t modified_pixels = 0u;
         for (size_t pixel = 0u; pixel < total_pixels && target_index < target_count; ++pixel) {
-            // The current format advances the payload cursor through the
-            // deterministic fiducial/tile overwrites.
+            // The current frame starts with RS-protected payload symbols;
+            // the old length prefix and repeated ECC header are absent.
             if (carrier_bit == target_bits[target_index]) {
                 if (reserved[pixel] == 1u) {
                     free(reserved);
-                    die("ppm_transform: target ECC header bit is overwritten in canonical layout");
+                    die("ppm_transform: target payload bit is overwritten in canonical layout");
                 }
                 size_t rgb = pixel * 3u;
                 int value = current.data[rgb];
                 if (current.data[rgb + 1u] != value || current.data[rgb + 2u] != value ||
                     (value != 0 && value != 255)) {
                     free(reserved);
-                    die("ppm_transform: header corruption expects a black/white encoded page");
+                    die("ppm_transform: former-header-slot corruption expects a black/white encoded page");
                 }
                 int flipped = value ? 0 : 255;
                 current.data[rgb] = flipped;
@@ -1476,9 +1476,9 @@ static void cmd_transform(int argc, char** argv) {
         }
         free(reserved);
         if (target_index != target_count) {
-            die("ppm_transform: page does not contain all header parity carriers");
+            die("ppm_transform: page does not contain all former-header-slot payload bits");
         }
-        fprintf(stdout, "header parity carrier pixels modified: %zu\n", modified_pixels);
+        fprintf(stdout, "former-header-slot payload pixels modified: %zu\n", modified_pixels);
     }
 
     if (white_checker) {

@@ -46,12 +46,13 @@ import sys
 tokens = Path(sys.argv[1]).read_text().split()
 assert tokens[:4] == ['P3', '240', '240', '255']
 pixels = list(map(int, tokens[4:]))
-# Logical cell (4,0) flips bit 4 of the raster frame-length prefix. Current
-# format length metadata is protected independently in the center tile.
+# Logical cell (4,0) flips a bit in the first RS-protected payload symbols.
+# The overall data length is read from the protected center metadata tile.
 index = (4 * 3)
-assert pixels[index:index + 3] == [0, 0, 0]
-pixels[index:index + 3] = [255 - value for value in pixels[index:index + 3]]
-assert pixels[index:index + 3] == [255, 255, 255]
+original = pixels[index:index + 3]
+assert original in ([0, 0, 0], [255, 255, 255])
+pixels[index:index + 3] = [255 - value for value in original]
+assert pixels[index:index + 3] != original
 Path(sys.argv[2]).write_text(
     'P3\n240 240\n255\n' +
     '\n'.join(f'{pixels[i]} {pixels[i + 1]} {pixels[i + 2]}'
@@ -109,7 +110,7 @@ pixels = list(map(int, tokens[4:]))
 scale = 2.018181818
 offset = -0.5
 
-# These are payload cells outside the frame-length header. Keep each nearest
+# These are payload cells outside the center metadata tile. Keep each nearest
 # center pixel intact, but make the surrounding 2x2 interpolation neighborhood
 # look like the opposite color. Bilinear sampling then mixes adjacent cells;
 # nearest-center sampling still sees the encoded cell value.
@@ -157,4 +158,4 @@ if ! "$makocode_bin" decode \
     exit 1
 fi
 cmp --silent "$work_dir/makocode.bin" "$work_dir/decoded_alias/makocode.bin"
-printf 'canonical tile length metadata survives a flipped raster prefix bit (label=%s)\n' "$label"
+printf 'center metadata length survives a damaged first payload bit (label=%s)\n' "$label"

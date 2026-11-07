@@ -10,7 +10,7 @@
 int main(int argc, char** argv) {
     if (argc != 3) return 2;
     // The original scan and generated fixture select this same affine fit,
-    // extract a frame, and corrupt the LZMA length in both retry modes.
+    // extract a frame, and preserve center-metadata LZMA length in both retry modes.
     // Only generated images are passed here by the E2E test.
     u64 reference_size = 0u;
     u64 reference_bits = 0u;
@@ -28,9 +28,10 @@ int main(int argc, char** argv) {
             !frame_bits_to_payload(frame.data, frame_bits, metadata,
                                    payload, payload_bits) ||
             !makocode::unshuffle_encoded_stream(payload.data, payload.size) ||
-            payload.size < makocode::LZMA_HEADER_BYTES) return 1;
-        u64 output_size = read_le_u64(payload.data + LZMA_PROPS_SIZE);
-        printf("pass=%d frame_bits=%llu payload_bits=%llu LZMA_size=%llu "
+            payload.size < (usize)LZMA_PROPS_SIZE ||
+            !metadata.has_encoded_tile || metadata.encoded_tile.schema_version < 3u) return 1;
+        u64 output_size = metadata.encoded_tile.lzma_uncompressed_bytes;
+        printf("pass=%d frame_bits=%llu payload_bits=%llu metadata_LZMA_size=%llu "
                "affine=(%.9f,%.9f,%.9f)\n", pass,
                (unsigned long long)frame_bits, (unsigned long long)payload_bits,
                (unsigned long long)output_size, metadata.affine_transform.a00,
@@ -40,11 +41,14 @@ int main(int argc, char** argv) {
             reference_bits = payload_bits;
             reference_frame_bits = frame_bits;
             makocode::ByteBuffer decoded;
-            if (!makocode::lzma_decompress(payload.data, payload_bits, decoded)) return 1;
+            if (!makocode::lzma_decompress(payload.data,
+                                           payload_bits,
+                                           decoded,
+                                           output_size)) return 1;
         } else {
             if (frame_bits != reference_frame_bits || payload_bits > reference_bits ||
                 reference_size >= 1024u ||
-                output_size < (1ull << 50u) ||
+                output_size != reference_size ||
                 !metadata.has_affine_transform ||
                 fabs(metadata.affine_transform.a00 - 2.269230769) > 0.000001 ||
                 fabs(metadata.affine_transform.a11 - 2.269230769) > 0.000001 ||
@@ -62,7 +66,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             printf("sampling failure: subgrid_disabled=%d frame_bits=%llu "
-                   "payload_bits=%llu LZMA_size=%llu->%llu "
+                   "payload_bits=%llu metadata_LZMA_size=%llu->%llu "
                    "affine=(%.9f,%.9f,%.9f)\n", pass == 2,
                    (unsigned long long)frame_bits, (unsigned long long)payload_bits,
                    (unsigned long long)reference_size, (unsigned long long)output_size,

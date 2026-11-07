@@ -268,7 +268,6 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "canonical tile: failed to recover erased payload symbols\n");
                 return 1;
             }
-            usize header_span = makocode::ecc_header_span_for_bytes(payload.size);
             usize block_total = (usize)values.ecc_block_data + (usize)values.ecc_parity;
             makocode::ByteBuffer parse_erasures;
             if (check_reserve_reject &&
@@ -276,18 +275,17 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "canonical tile: could not copy parser erasures\n");
                 return 1;
             }
-            if (header_span > erased_symbols.size ||
-                ((usize)values.ecc_block_count > 0u &&
-                 block_total > (erased_symbols.size - header_span) / (usize)values.ecc_block_count) ||
-                (erased_symbols.size > header_span &&
-                 !makocode::fisher_yates_unshuffle(erased_symbols.data + header_span,
-                                                   erased_symbols.size - header_span))) {
+            if (block_total == 0u || values.ecc_block_count == 0u ||
+                values.ecc_block_count > (u64)(USIZE_MAX_VALUE / block_total) ||
+                (usize)values.ecc_block_count * block_total != payload.size ||
+                erased_symbols.size != payload.size ||
+                !makocode::fisher_yates_unshuffle(erased_symbols.data, erased_symbols.size)) {
                 fprintf(stderr, "canonical tile: invalid extracted ECC symbol layout\n");
                 return 1;
             }
             u64 reserve_reject_budget = 0u;
             for (u64 block = 0u; block < values.ecc_block_count; ++block) {
-                usize block_start = header_span + (usize)block * block_total;
+                usize block_start = (usize)block * block_total;
                 u32 structural_erasures = 0u;
                 for (usize symbol = 0u; symbol < block_total; ++symbol) {
                     if (erased_symbols.data[block_start + symbol]) ++structural_erasures;
@@ -315,25 +313,59 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "canonical tile: test page has no valid selector reserve boundary\n");
                     return 1;
                 }
+                u8 header_bytes[makocode::ECC_HEADER_TOTAL_BYTES];
+                makocode::ByteBuffer parse_stream;
+                makocode::ByteBuffer synthetic_parse_erasures;
+                if ((payload_bits & 7u) != 0u ||
+                    payload_bits > U64_MAX_VALUE - (u64)makocode::ECC_HEADER_TOTAL_BITS ||
+                    payload.size > USIZE_MAX_VALUE - makocode::ECC_HEADER_TOTAL_BYTES ||
+                    !makocode::build_ecc_header_bytes(header_bytes,
+                                                      values.ecc_block_data,
+                                                      values.ecc_parity,
+                                                      values.ecc_block_count,
+                                                      values.ecc_original_bytes,
+                                                      values.ecc_header_magic,
+                                                      values.ecc_header_version,
+                                                      values.ecc_header_flags,
+                                                      values.ecc_header_reserved) ||
+                    !parse_stream.ensure(makocode::ECC_HEADER_TOTAL_BYTES + payload.size) ||
+                    !synthetic_parse_erasures.ensure(makocode::ECC_HEADER_TOTAL_BYTES + parse_erasures.size)) {
+                    fprintf(stderr, "canonical tile: could not build synthetic ECC parser input\n");
+                    return 1;
+                }
+                parse_stream.size = makocode::ECC_HEADER_TOTAL_BYTES + payload.size;
+                memcpy(parse_stream.data, header_bytes, makocode::ECC_HEADER_TOTAL_BYTES);
+                memcpy(parse_stream.data + makocode::ECC_HEADER_TOTAL_BYTES,
+                       payload.data,
+                       payload.size);
+                synthetic_parse_erasures.size = makocode::ECC_HEADER_TOTAL_BYTES + parse_erasures.size;
+                memset(synthetic_parse_erasures.data, 0, makocode::ECC_HEADER_TOTAL_BYTES);
+                memcpy(synthetic_parse_erasures.data + makocode::ECC_HEADER_TOTAL_BYTES,
+                       parse_erasures.data,
+                       parse_erasures.size);
+                u64 parse_bit_count = payload_bits + (u64)makocode::ECC_HEADER_TOTAL_BITS;
                 makocode::ByteBuffer valid_input;
                 makocode::ByteBuffer invalid_input;
-                if (!valid_input.append_bytes(payload.data, payload.size) ||
-                    !invalid_input.append_bytes(payload.data, payload.size)) {
+                if (!valid_input.append_bytes(parse_stream.data, parse_stream.size) ||
+                    !invalid_input.append_bytes(parse_stream.data, parse_stream.size)) {
                     fprintf(stderr, "canonical tile: could not copy parser regression inputs\n");
                     return 1;
                 }
                 makocode::DecoderContext valid_decoder;
                 if (!valid_decoder.parse(valid_input.data,
-                                         payload_bits,
+                                         parse_bit_count,
                                          0,
                                          0u,
-                                         parse_erasures.data,
-                                         parse_erasures.size,
+                                         synthetic_parse_erasures.data,
+                                         synthetic_parse_erasures.size,
                                          selector_seed,
                                          selector_counts.data,
                                          selector_counts.size,
                                          unknown_budget,
-                                         overlay_budget)) {
+                                         overlay_budget,
+                                         true,
+                                         true,
+                                         values.lzma_uncompressed_bytes)) {
                     fprintf(stderr, "canonical tile: valid selector reserve did not decode before reserve mutation\n");
                     return 1;
                 }
@@ -343,7 +375,7 @@ int main(int argc, char** argv) {
                 }
                 makocode::ByteBuffer partial_input;
                 makocode::ByteBuffer partial_selector_counts;
-                if (!partial_input.append_bytes(payload.data, payload.size) ||
+                if (!partial_input.append_bytes(parse_stream.data, parse_stream.size) ||
                     !partial_selector_counts.append_bytes(selector_counts.data,
                                                           selector_counts.size)) {
                     fprintf(stderr, "canonical tile: could not copy partial selector regression inputs\n");
@@ -352,53 +384,62 @@ int main(int argc, char** argv) {
                 --partial_selector_counts.data[0u];
                 makocode::DecoderContext partial_decoder;
                 if (partial_decoder.parse(partial_input.data,
-                                          payload_bits,
+                                          parse_bit_count,
                                           0,
                                           0u,
-                                          parse_erasures.data,
-                                          parse_erasures.size,
+                                          synthetic_parse_erasures.data,
+                                          synthetic_parse_erasures.size,
                                           selector_seed,
                                           partial_selector_counts.data,
                                           partial_selector_counts.size,
                                           unknown_budget,
-                                          overlay_budget) ||
+                                          overlay_budget,
+                                          true,
+                                          true,
+                                          values.lzma_uncompressed_bytes) ||
                     !partial_decoder.ecc_correction_failed()) {
                     fprintf(stderr, "canonical tile: parser accepted a partial fixed selector map\n");
                     return 1;
                 }
                 makocode::ByteBuffer missing_selector_input;
-                if (!missing_selector_input.append_bytes(payload.data, payload.size)) {
+                if (!missing_selector_input.append_bytes(parse_stream.data, parse_stream.size)) {
                     fprintf(stderr, "canonical tile: could not copy missing selector regression input\n");
                     return 1;
                 }
                 makocode::DecoderContext missing_selector_decoder;
                 if (missing_selector_decoder.parse(missing_selector_input.data,
-                                                   payload_bits,
+                                                   parse_bit_count,
                                                    0,
                                                    0u,
-                                                   parse_erasures.data,
-                                                   parse_erasures.size,
+                                                   synthetic_parse_erasures.data,
+                                                   synthetic_parse_erasures.size,
                                                    selector_seed,
                                                    0,
                                                    0u,
                                                    unknown_budget,
-                                                   overlay_budget) ||
+                                                   overlay_budget,
+                                                   true,
+                                                   true,
+                                                   values.lzma_uncompressed_bytes) ||
                     !missing_selector_decoder.ecc_correction_failed()) {
                     fprintf(stderr, "canonical tile: parser accepted a missing fixed selector map\n");
                     return 1;
                 }
                 makocode::DecoderContext invalid_decoder;
                 if (invalid_decoder.parse(invalid_input.data,
-                                          payload_bits,
+                                          parse_bit_count,
                                           0,
                                           0u,
-                                          parse_erasures.data,
-                                          parse_erasures.size,
+                                          synthetic_parse_erasures.data,
+                                          synthetic_parse_erasures.size,
                                           selector_seed,
                                           selector_counts.data,
                                           selector_counts.size,
                                           unknown_budget,
-                                          (u16)reserve_reject_budget) ||
+                                          (u16)reserve_reject_budget,
+                                          true,
+                                          true,
+                                          values.lzma_uncompressed_bytes) ||
                     !invalid_decoder.ecc_correction_failed()) {
                     fprintf(stderr, "canonical tile: parser accepted impossible declared overlay reserve\n");
                     return 1;
