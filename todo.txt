@@ -1,5 +1,5 @@
 TODO
-- MKARCH move to metadata center tile
+- MKARCH compress schema
 - Consider making linear barcode as regular metadata? Compression and ECC apply
 - Shuffle metadata middle tile throughout the image
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
