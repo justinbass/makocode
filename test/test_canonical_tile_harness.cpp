@@ -365,7 +365,8 @@ int main(int argc, char** argv) {
                                          overlay_budget,
                                          true,
                                          true,
-                                         values.lzma_uncompressed_bytes)) {
+                                         values.lzma_uncompressed_bytes,
+                                         values.schema_version < 4u)) {
                     fprintf(stderr, "canonical tile: valid selector reserve did not decode before reserve mutation\n");
                     return 1;
                 }

@@ -6449,6 +6449,7 @@ struct BitReader {
 };
 
 static const usize LZMA_HEADER_BYTES = (usize)LZMA_PROPS_SIZE + 8u;
+static const u8 LZMA_FIXED_PROPERTIES[LZMA_PROPS_SIZE] = {93u, 0u, 0u, 0u, 8u};
 static const u64 LZMA_SIZE_FROM_HEADER = U64_MAX_VALUE;
 
 static bool lzma_compress(const u8* input,
@@ -6464,7 +6465,7 @@ static bool lzma_compress(const u8* input,
     }
     const u8 zero = 0u;
     const u8* source = (length > 0u) ? input : &zero;
-    usize header = include_uncompressed_size ? LZMA_HEADER_BYTES : (usize)LZMA_PROPS_SIZE;
+    usize header = include_uncompressed_size ? (usize)8u : 0u;
     usize extra = (length / 16u) + 65536u + 64u;
     usize baseline = header;
     baseline += length;
@@ -6490,11 +6491,16 @@ static bool lzma_compress(const u8* input,
                                   props,
                                   &props_size);
         if (status == SZ_OK) {
+            if (props_size != (size_t)LZMA_PROPS_SIZE) {
+                return false;
+            }
             for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
-                output.data[i] = props[i];
+                if (props[i] != LZMA_FIXED_PROPERTIES[i]) {
+                    return false;
+                }
             }
             if (include_uncompressed_size) {
-                write_le_u64(output.data + LZMA_PROPS_SIZE, (u64)length);
+                write_le_u64(output.data, (u64)length);
             }
             output.size = header + dest_len;
             return true;
@@ -6512,7 +6518,8 @@ static bool lzma_compress(const u8* input,
 static bool lzma_decompress(const u8* input,
                             usize bit_count,
                             ByteBuffer& output,
-                            u64 external_uncompressed_size = LZMA_SIZE_FROM_HEADER) {
+                            u64 external_uncompressed_size = LZMA_SIZE_FROM_HEADER,
+                            bool properties_embedded = true) {
     output.release();
     if (!input) {
         return (bit_count == 0u);
@@ -6525,13 +6532,15 @@ static bool lzma_decompress(const u8* input,
     }
     usize byte_count = bit_count >> 3u;
     bool external_size = (external_uncompressed_size != LZMA_SIZE_FROM_HEADER);
-    usize header_bytes = external_size ? (usize)LZMA_PROPS_SIZE : LZMA_HEADER_BYTES;
+    usize properties_bytes = properties_embedded ? (usize)LZMA_PROPS_SIZE : 0u;
+    usize size_bytes = external_size ? 0u : (usize)8u;
+    usize header_bytes = properties_bytes + size_bytes;
     if (byte_count < header_bytes) {
         return false;
     }
     u64 original = external_size
                        ? external_uncompressed_size
-                       : read_le_u64(input + LZMA_PROPS_SIZE);
+                       : read_le_u64(input + properties_bytes);
     if (original > (u64)USIZE_MAX_VALUE) {
         return false;
     }
@@ -6550,11 +6559,12 @@ static bool lzma_decompress(const u8* input,
     }
     SizeT src_len = (SizeT)payload_bytes;
     const u8* src = input + header_bytes;
+    const u8* properties = properties_embedded ? input : LZMA_FIXED_PROPERTIES;
     SRes status = LzmaUncompress(output.data,
                                  &dest_len,
                                  src,
                                  &src_len,
-                                 input,
+                                 properties,
                                  LZMA_PROPS_SIZE);
     if (status != SZ_OK) {
         return false;
@@ -7749,7 +7759,8 @@ struct DecoderContext {
                u16 overlay_erasure_budget = 0u,
                bool headerless_layout = false,
                bool synthetic_ecc_header = false,
-               u64 external_lzma_uncompressed_size = LZMA_SIZE_FROM_HEADER) {
+               u64 external_lzma_uncompressed_size = LZMA_SIZE_FROM_HEADER,
+               bool lzma_properties_embedded = true) {
         payload.release();
         has_payload = false;
         ecc_failed = false;
@@ -7934,7 +7945,8 @@ struct DecoderContext {
             if (!lzma_decompress(working->data,
                                  (usize)bit_total,
                                  payload,
-                                 external_lzma_uncompressed_size)) {
+                                 external_lzma_uncompressed_size,
+                                 lzma_properties_embedded)) {
                 ecc_failed = true;
                 return false;
             }
@@ -7949,11 +7961,12 @@ struct DecoderContext {
                     encoded_metadata.encryption_tag[i] = compressed.data[compressed.size - ENCRYPTION_TAG_BYTES + i];
                 }
             }
-            if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER &&
-                working->size >= (usize)LZMA_PROPS_SIZE) {
+            if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
                 encoded_metadata.lzma_present = true;
                 for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
-                    encoded_metadata.lzma_header[i] = working->data[i];
+                    encoded_metadata.lzma_header[i] = lzma_properties_embedded
+                                                          ? working->data[i]
+                                                          : LZMA_FIXED_PROPERTIES[i];
                 }
                 write_le_u64(encoded_metadata.lzma_header + LZMA_PROPS_SIZE,
                              external_lzma_uncompressed_size);
@@ -7993,7 +8006,8 @@ struct DecoderContext {
         if (!lzma_decompress(decode_data,
                              decode_bits,
                              payload,
-                             external_lzma_uncompressed_size)) {
+                             external_lzma_uncompressed_size,
+                             lzma_properties_embedded)) {
             return false;
         }
         if (decode_data == decrypted.data && decrypted.data) {
@@ -8005,11 +8019,12 @@ struct DecoderContext {
                 encoded_metadata.encryption_tag[i] = data[byte_count - ENCRYPTION_TAG_BYTES + i];
             }
         }
-        if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER &&
-            decode_bits / 8u >= (usize)LZMA_PROPS_SIZE) {
+        if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
             encoded_metadata.lzma_present = true;
             for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
-                encoded_metadata.lzma_header[i] = decode_data[i];
+                encoded_metadata.lzma_header[i] = lzma_properties_embedded
+                                                      ? decode_data[i]
+                                                      : LZMA_FIXED_PROPERTIES[i];
             }
             write_le_u64(encoded_metadata.lzma_header + LZMA_PROPS_SIZE,
                          external_lzma_uncompressed_size);
@@ -8217,7 +8232,7 @@ static void compute_default_fiducial_dimensions(u32 width_pixels,
     }
 }
 
-static const u32 CURRENT_TILE_SCHEMA_VERSION = 3u;
+static const u32 CURRENT_TILE_SCHEMA_VERSION = 4u;
 
 static bool compute_fiducial_reservation(u32 width_pixels,
                                          u32 height_pixels,
@@ -8833,14 +8848,16 @@ namespace MetadataTile {
         u32 encoded_parity_bytes = 0u;
         if (!read_compact_u16(reader, schema) ||
             !read_compact_u16(reader, encoded_parity_bytes) ||
-            (schema != 1u && schema != 2u && schema != TILE_SCHEMA_VERSION) ||
+            (schema != 1u && schema != 2u && schema != 3u && schema != TILE_SCHEMA_VERSION) ||
             encoded_parity_bytes != parity_bytes ||
             !reader.align_to_byte()) return false;
         if (reader.cursor >= reader.bit_count || ((reader.bit_count - reader.cursor) & 7u)) return false;
         ByteBuffer metadata_payload;
         if (!lzma_decompress(codeword.data + (reader.cursor >> 3u),
                              reader.bit_count - reader.cursor,
-                             metadata_payload)) return false;
+                             metadata_payload,
+                             LZMA_SIZE_FROM_HEADER,
+                             schema < 4u)) return false;
         if (!decode_metadata_payload_bytes(metadata_payload.data,
                                            metadata_payload.size,
                                            schema,
@@ -26660,7 +26677,9 @@ retry_decode:
                        aggregate_state.has_encoded_tile &&
                                aggregate_state.encoded_tile.schema_version >= 3u
                            ? aggregate_state.encoded_tile.lzma_uncompressed_bytes
-                           : makocode::LZMA_SIZE_FROM_HEADER)) {
+                           : makocode::LZMA_SIZE_FROM_HEADER,
+                       !(aggregate_state.has_encoded_tile &&
+                         aggregate_state.encoded_tile.schema_version >= 4u))) {
         if (decoder.password_auth_failed()) {
             console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
             return 1;
