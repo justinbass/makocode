@@ -12308,6 +12308,106 @@ static bool metadata_tile_contains_pixel(const MetadataTile::Placement& placemen
            y >= placement.y0 && y < placement.y0 + MetadataTile::TILE_SIDE;
 }
 
+static u64 centered_rectangle_payload_bits(const CenteredDataRectangle& rectangle,
+                                           const MetadataTile::Placement& placement,
+                                           u32 page_bits_per_pixel,
+                                           u32 tile_bits_per_pixel) {
+    u64 area = (u64)rectangle.width * (u64)rectangle.height;
+    u64 tile_overlap_width = 0u;
+    u64 tile_overlap_height = 0u;
+    if (placement.valid) {
+        u32 x0 = rectangle.x0 > placement.x0 ? rectangle.x0 : placement.x0;
+        u32 x1 = rectangle.x0 + rectangle.width < placement.x0 + MetadataTile::TILE_SIDE
+                     ? rectangle.x0 + rectangle.width
+                     : placement.x0 + MetadataTile::TILE_SIDE;
+        u32 y0 = rectangle.y0 > placement.y0 ? rectangle.y0 : placement.y0;
+        u32 y1 = rectangle.y0 + rectangle.height < placement.y0 + MetadataTile::TILE_SIDE
+                     ? rectangle.y0 + rectangle.height
+                     : placement.y0 + MetadataTile::TILE_SIDE;
+        if (x1 > x0 && y1 > y0) {
+            tile_overlap_width = (u64)(x1 - x0);
+            tile_overlap_height = (u64)(y1 - y0);
+        }
+    }
+    u64 tile_pixels = tile_overlap_width * tile_overlap_height;
+    return area * page_bits_per_pixel -
+           tile_pixels * (u64)(page_bits_per_pixel - tile_bits_per_pixel);
+}
+
+static u64 centered_page_payload_bits(u32 page_width,
+                                      u32 page_height,
+                                      const MetadataTile::Placement& placement,
+                                      u32 page_bits_per_pixel,
+                                      u32 tile_bits_per_pixel) {
+    u64 total_pixels = (u64)page_width * page_height;
+    u64 tile_pixels = placement.valid
+                          ? (u64)MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE
+                          : 0u;
+    return total_pixels * page_bits_per_pixel -
+           tile_pixels * (u64)(page_bits_per_pixel - tile_bits_per_pixel);
+}
+
+static bool compute_centered_data_rectangle_for_bits(u32 page_width,
+                                                     u32 page_height,
+                                                     u64 payload_bits,
+                                                     const MetadataTile::Placement& placement,
+                                                     u32 page_bits_per_pixel,
+                                                     u32 tile_bits_per_pixel,
+                                                     CenteredDataRectangle& rectangle) {
+    rectangle = CenteredDataRectangle();
+    if (!page_width || !page_height || !payload_bits || !page_bits_per_pixel ||
+        tile_bits_per_pixel > page_bits_per_pixel ||
+        payload_bits > centered_page_payload_bits(page_width,
+                                                  page_height,
+                                                  placement,
+                                                  page_bits_per_pixel,
+                                                  tile_bits_per_pixel)) {
+        return false;
+    }
+    double page_aspect = (double)page_width / (double)page_height;
+    double best_aspect_error = 1.0e30;
+    u64 best_area = U64_MAX_VALUE;
+    for (u32 width = 1u; width <= page_width; ++width) {
+        u32 low = 1u;
+        u32 high = page_height;
+        CenteredDataRectangle candidate;
+        candidate.width = width;
+        while (low < high) {
+            u32 mid = low + (high - low) / 2u;
+            candidate.height = mid;
+            candidate.x0 = (page_width - candidate.width) / 2u;
+            candidate.y0 = (page_height - candidate.height) / 2u;
+            if (centered_rectangle_payload_bits(candidate,
+                                                placement,
+                                                page_bits_per_pixel,
+                                                tile_bits_per_pixel) >= payload_bits) {
+                high = mid;
+            } else {
+                low = mid + 1u;
+            }
+        }
+        candidate.height = low;
+        candidate.x0 = (page_width - candidate.width) / 2u;
+        candidate.y0 = (page_height - candidate.height) / 2u;
+        if (centered_rectangle_payload_bits(candidate,
+                                            placement,
+                                            page_bits_per_pixel,
+                                            tile_bits_per_pixel) < payload_bits) {
+            continue;
+        }
+        double content_aspect = (double)candidate.width / candidate.height;
+        double aspect_error = fabs(log(content_aspect / page_aspect));
+        u64 candidate_area = (u64)candidate.width * candidate.height;
+        if (aspect_error < best_aspect_error ||
+            (aspect_error == best_aspect_error && candidate_area < best_area)) {
+            best_aspect_error = aspect_error;
+            best_area = candidate_area;
+            rectangle = candidate;
+        }
+    }
+    return rectangle.width > 0u && rectangle.height > 0u;
+}
+
 static void update_metadata_field(bool& flag,
                                   u64& target,
                                   u64 value) {
@@ -16669,6 +16769,8 @@ struct RotationEstimateCandidate {
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u32 custom_palette_base = 0u;
     u32 custom_symbol_bits = 0u;
+    u32 custom_dark_symbol = 0u;
+    u32 tile_bits_per_pixel = 0u;
     bool custom_fixed_width = false;
     u8 color_mode = active_mapping.color_channels;
     if (use_custom_palette) {
@@ -16683,6 +16785,21 @@ struct RotationEstimateCandidate {
                              state.encoded_tile.schema_version >= 2u &&
                              palette_count >= 2u &&
                              is_power_of_two_u32(palette_count);
+        tile_bits_per_pixel = custom_symbol_bits;
+        if (custom_fixed_width && custom_symbol_bits > 1u && metadata_placement.valid) {
+            tile_bits_per_pixel = 1u;
+            u32 darkest_luminance = 256u;
+            for (u32 i = 0u; i < active_mapping.custom_palette_count; ++i) {
+                const PaletteColor& color = active_mapping.custom_palette[i];
+                u32 luminance = MetadataTile::rgb_luminance_u8(color.r,
+                                                               color.g,
+                                                               color.b);
+                if (luminance < darkest_luminance) {
+                    darkest_luminance = luminance;
+                    custom_dark_symbol = i;
+                }
+            }
+        }
         if (state.has_encoded_tile &&
             state.encoded_tile.schema_version >= 2u &&
             state.encoded_tile.overwrite_layout &&
@@ -16769,6 +16886,12 @@ struct RotationEstimateCandidate {
                                (log((double)custom_palette_base) / log(2.0));
         if (capacity_bits > (double)U64_MAX_VALUE) return false;
         capacity_without_reserve = (u64)capacity_bits;
+    } else if (custom_fixed_width && tile_bits_per_pixel < custom_symbol_bits) {
+        capacity_without_reserve = centered_page_payload_bits((u32)logical_width,
+                                                              (u32)data_height,
+                                                              metadata_placement,
+                                                              custom_symbol_bits,
+                                                              tile_bits_per_pixel);
     } else {
         capacity_without_reserve = total_data_pixels *
                                    (u64)sample_bits *
@@ -16824,6 +16947,22 @@ struct RotationEstimateCandidate {
     u64 pixel_stride = raw_width;
     double scale_xd = scale_x;
     double scale_yd = scale_y;
+    double tile_sample_pitch_x = tile_affine_hint.pitch_x_pixels > 0.0
+                                     ? tile_affine_hint.pitch_x_pixels
+                                     : tile_affine_hint.pitch_pixels;
+    double tile_sample_pitch_y = tile_affine_hint.pitch_y_pixels > 0.0
+                                     ? tile_affine_hint.pitch_y_pixels
+                                     : tile_affine_hint.pitch_pixels;
+    bool tile_underlay_palette_sampling = use_custom_palette &&
+                                          tile_affine_hint_available &&
+                                          !state.has_affine_transform &&
+                                          !has_rotation && !has_skew &&
+                                          tile_sample_pitch_x > 1.01 &&
+                                          tile_sample_pitch_y > 1.01 &&
+                                          fabs(tile_sample_pitch_x - scale_xd) <=
+                                              tile_sample_pitch_x * 0.05 &&
+                                          fabs(tile_sample_pitch_y - scale_yd) <=
+                                              tile_sample_pitch_y * 0.05;
     struct FiducialSubgridCell {
         double tl_x;
         double tl_y;
@@ -19837,6 +19976,11 @@ struct RotationEstimateCandidate {
                     reserved_pixel = (reservation_mask[mask_index] == OVERWRITE_MASK_PIXEL);
                 }
             }
+            bool inside_metadata_tile = metadata_placement.valid &&
+                logical_col >= metadata_placement.x0 &&
+                logical_col < metadata_placement.x0 + MetadataTile::TILE_SIDE &&
+                logical_row >= metadata_placement.y0 &&
+                logical_row < metadata_placement.y0 + MetadataTile::TILE_SIDE;
             double base_sample_row = ((double)logical_row + 0.5) * scale_yd - 0.5;
             double base_sample_col = ((double)logical_col + 0.5) * scale_xd - 0.5;
             double sample_row = base_sample_row;
@@ -19935,6 +20079,27 @@ struct RotationEstimateCandidate {
                 double mapped_y = tile_anchored_axis_affine.a10 * logical_center_x +
                                   tile_anchored_axis_affine.a11 * logical_center_y +
                                   tile_anchored_axis_affine.ty + warp_dy;
+                if (mapped_x < 0.0) mapped_x = 0.0;
+                if (mapped_y < 0.0) mapped_y = 0.0;
+                if (mapped_x > (double)(width - 1u)) mapped_x = (double)(width - 1u);
+                if (mapped_y > (double)(height - 1u)) mapped_y = (double)(height - 1u);
+                unsigned nearest_x = (unsigned)(mapped_x + 0.5);
+                unsigned nearest_y = (unsigned)(mapped_y + 0.5);
+                usize nearest = ((usize)nearest_y * (usize)width + (usize)nearest_x) * 3u;
+                affine_rgb[0] = pixel_data[nearest];
+                affine_rgb[1] = pixel_data[nearest + 1u];
+                affine_rgb[2] = pixel_data[nearest + 2u];
+                rgb = affine_rgb;
+                sample_col = mapped_x;
+                sample_row = mapped_y;
+                cell_sampled = true;
+            }
+            if (!cell_sampled && tile_underlay_palette_sampling &&
+                inside_metadata_tile && !reserved_pixel) {
+                double logical_center_x = (double)logical_col + 0.5;
+                double logical_center_y = (double)logical_row + 0.5;
+                double mapped_x = logical_center_x * scale_xd - 0.5;
+                double mapped_y = logical_center_y * scale_yd - 0.5;
                 if (mapped_x < 0.0) mapped_x = 0.0;
                 if (mapped_y < 0.0) mapped_y = 0.0;
                 if (mapped_x > (double)(width - 1u)) mapped_x = (double)(width - 1u);
@@ -20394,8 +20559,17 @@ struct RotationEstimateCandidate {
                 if (custom_fixed_width) {
                     u32 symbol = 0u;
                     map_rgb_to_custom_symbol(payload_custom_mapping, rgb, symbol);
-                    if (!writer.write_bits(symbol, custom_symbol_bits)) return false;
-                    for (u32 bit = 0u; bit < custom_symbol_bits; ++bit) {
+                    u32 pixel_bits = inside_metadata_tile
+                                         ? tile_bits_per_pixel
+                                         : custom_symbol_bits;
+                    if (pixel_bits == 1u && custom_symbol_bits > 1u) {
+                        if (!writer.write_bit(symbol == custom_dark_symbol ? 1u : 0u)) {
+                            return false;
+                        }
+                    } else if (!writer.write_bits(symbol, pixel_bits)) {
+                        return false;
+                    }
+                    for (u32 bit = 0u; bit < pixel_bits; ++bit) {
                         if (!erasure_writer.write_bit(reserved_pixel ? 1u : 0u)) {
                             return false;
                         }
@@ -20657,14 +20831,16 @@ struct RotationEstimateCandidate {
             (double)(u32)bits_per_pixel_value != bits_per_pixel_value) {
             return false;
         }
-        u64 page_capacity_pixels = logical_width * data_height;
-        MetadataTile::Placement tile_placement = MetadataTile::compute_center_tile_placement(
-            (u32)logical_width, (u32)data_height);
-        if (tile_placement.valid) {
-            page_capacity_pixels -=
-                (u64)MetadataTile::TILE_SIDE * (u64)MetadataTile::TILE_SIDE;
-        }
-        u64 page_capacity_bits = page_capacity_pixels * (u64)(u32)bits_per_pixel_value;
+        u32 page_bits_per_pixel = (u32)bits_per_pixel_value;
+        u32 centered_tile_bits = custom_fixed_width &&
+                                         tile_bits_per_pixel < page_bits_per_pixel
+                                     ? tile_bits_per_pixel
+                                     : page_bits_per_pixel;
+        u64 page_capacity_bits = centered_page_payload_bits((u32)logical_width,
+                                                            (u32)data_height,
+                                                            metadata_placement,
+                                                            page_bits_per_pixel,
+                                                            centered_tile_bits);
         if (page_capacity_bits == 0u) return false;
         if (page_capacity_bits_out) *page_capacity_bits_out = page_capacity_bits;
         const MetadataTile::Values& tile = state.encoded_tile;
@@ -20676,15 +20852,26 @@ struct RotationEstimateCandidate {
         if (page_bit_offset >= tile.page_bits) return false;
         u64 segment_bits = tile.page_bits - page_bit_offset;
         if (segment_bits > page_capacity_bits) segment_bits = page_capacity_bits;
-        u64 payload_pixels = segment_bits / (u64)(u32)bits_per_pixel_value;
-        if (segment_bits % (u64)(u32)bits_per_pixel_value) ++payload_pixels;
         CenteredDataRectangle payload_rectangle;
-        if (!compute_centered_data_rectangle((u32)logical_width,
-                                             (u32)data_height,
-                                             payload_pixels,
-                                             payload_rectangle,
-                                             true)) {
-            return false;
+        if (centered_tile_bits < page_bits_per_pixel) {
+            if (!compute_centered_data_rectangle_for_bits((u32)logical_width,
+                                                         (u32)data_height,
+                                                         segment_bits,
+                                                         metadata_placement,
+                                                         page_bits_per_pixel,
+                                                         centered_tile_bits,
+                                                         payload_rectangle)) {
+                return false;
+            }
+        } else {
+            u64 payload_pixels = segment_bits / page_bits_per_pixel;
+            if (segment_bits % page_bits_per_pixel) ++payload_pixels;
+            if (!compute_centered_data_rectangle((u32)logical_width,
+                                                 (u32)data_height,
+                                                 payload_pixels,
+                                                 payload_rectangle)) {
+                return false;
+            }
         }
         makocode::BitReader centered_reader;
         centered_reader.reset(frame_bits.data, frame_bit_count);
@@ -20700,19 +20887,40 @@ struct RotationEstimateCandidate {
             for (u32 column = payload_rectangle.x0;
                  column < payload_rectangle.x0 + payload_rectangle.width;
                  ++column) {
-                if (metadata_tile_contains_pixel(tile_placement, column, row)) continue;
                 u64 pixel_slot = centered_writer.bit_size();
+                u32 pixel_bits = metadata_tile_contains_pixel(metadata_placement,
+                                                               column,
+                                                               row)
+                                     ? centered_tile_bits
+                                     : page_bits_per_pixel;
+                u64 raster_slot = ((u64)row * logical_width + column) *
+                                  page_bits_per_pixel;
+                if (centered_tile_bits < page_bits_per_pixel) {
+                    u64 tile_pixels_before = 0u;
+                    if (row > metadata_placement.y0) {
+                        u32 rows = row - metadata_placement.y0;
+                        if (rows > MetadataTile::TILE_SIDE) rows = MetadataTile::TILE_SIDE;
+                        tile_pixels_before = (u64)rows * MetadataTile::TILE_SIDE;
+                    }
+                    if (row >= metadata_placement.y0 &&
+                        row < metadata_placement.y0 + MetadataTile::TILE_SIDE &&
+                        column > metadata_placement.x0) {
+                        u32 columns = column - metadata_placement.x0;
+                        if (columns > MetadataTile::TILE_SIDE) columns = MetadataTile::TILE_SIDE;
+                        tile_pixels_before += columns;
+                    }
+                    raster_slot -= tile_pixels_before *
+                                   (page_bits_per_pixel - centered_tile_bits);
+                }
                 for (u32 bit = 0u;
-                     bit < (u32)bits_per_pixel_value && pixel_slot + bit < segment_bits;
+                     bit < pixel_bits && pixel_slot + bit < segment_bits;
                      ++bit) {
-                    u64 raster_slot = ((u64)row * logical_width + column) *
-                                      (u64)(u32)bits_per_pixel_value + bit;
-                    centered_reader.cursor = (usize)raster_slot;
+                    centered_reader.cursor = (usize)(raster_slot + bit);
                     u8 value = centered_reader.read_bit();
                     if (centered_reader.failed || !centered_writer.write_bit(value)) return false;
                     u8 erased = 0u;
                     if (frame_erasure_bits && frame_erasure_bits->data) {
-                        centered_erasure_reader.cursor = (usize)raster_slot;
+                        centered_erasure_reader.cursor = (usize)(raster_slot + bit);
                         erased = centered_erasure_reader.read_bit();
                         if (centered_erasure_reader.failed) return false;
                     }
@@ -22165,14 +22373,20 @@ static bool compute_bits_per_page(const ImageMappingConfig& mapping,
     if (reserved_pixels > total_pixels) return false;
     bool base_palette = mapping_has_custom_palette(mapping) &&
                         !is_power_of_two_u32(mapping.custom_palette_count);
-    u64 data_pixels = base_palette ? total_pixels - reserved_pixels : total_pixels;
-    if (!base_palette &&
-        MetadataTile::compute_center_tile_placement(width_pixels, data_height_pixels).valid) {
-        const u64 metadata_tile_pixels =
-            (u64)MetadataTile::TILE_SIDE * (u64)MetadataTile::TILE_SIDE;
-        if (metadata_tile_pixels > data_pixels) return false;
-        data_pixels -= metadata_tile_pixels;
+    u32 bits_per_pixel = (u32)mapping_bits_per_data_pixel(mapping);
+    MetadataTile::Placement tile_placement = MetadataTile::compute_center_tile_placement(
+        width_pixels, data_height_pixels);
+    if (!base_palette && mapping_has_custom_palette(mapping) &&
+        is_power_of_two_u32(mapping.custom_palette_count) &&
+        bits_per_pixel > 1u && tile_placement.valid) {
+        bits_per_page = centered_page_payload_bits(width_pixels,
+                                                   data_height_pixels,
+                                                   tile_placement,
+                                                   bits_per_pixel,
+                                                   1u);
+        return true;
     }
+    u64 data_pixels = base_palette ? total_pixels - reserved_pixels : total_pixels;
     double capacity_bits = (double)data_pixels * mapping_bits_per_data_pixel(mapping);
     if (capacity_bits > (double)U64_MAX_VALUE) {
         return false;
@@ -22509,13 +22723,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     bool use_custom_palette = mapping_has_custom_palette(mapping);
     bool use_base_palette = use_custom_palette &&
                            !is_power_of_two_u32(mapping.custom_palette_count);
-    if (!use_base_palette &&
-        MetadataTile::compute_center_tile_placement(width_pixels, data_height_pixels).valid) {
-        const u64 metadata_tile_pixels =
-            (u64)MetadataTile::TILE_SIDE * (u64)MetadataTile::TILE_SIDE;
-        if (metadata_tile_pixels > usable_data_pixels) return false;
-        usable_data_pixels -= metadata_tile_pixels;
-    }
+    MetadataTile::Placement tile_placement = MetadataTile::compute_center_tile_placement(
+        width_pixels, data_height_pixels);
     u32 custom_symbol_bits = 0u;
     if (use_custom_palette) {
         u32 count = mapping.custom_palette_count;
@@ -22531,9 +22740,25 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         usable_data_pixels -= reserved_data_pixels;
     }
     double bits_per_data_pixel = mapping_bits_per_data_pixel(mapping);
-    double expected_capacity = (double)usable_data_pixels * bits_per_data_pixel;
-    if (expected_capacity > (double)U64_MAX_VALUE ||
-        (u64)expected_capacity != bits_per_page) {
+    u32 fixed_bits_per_pixel = (u32)bits_per_data_pixel;
+    if (fixed_bits_per_pixel == 0u) return false;
+    u32 tile_bits_per_pixel = use_custom_palette && !use_base_palette &&
+                                      custom_symbol_bits > 1u && tile_placement.valid
+                                  ? 1u
+                                  : fixed_bits_per_pixel;
+    u64 expected_capacity = 0u;
+    if (use_custom_palette && !use_base_palette && tile_bits_per_pixel < fixed_bits_per_pixel) {
+        expected_capacity = centered_page_payload_bits(width_pixels,
+                                                       data_height_pixels,
+                                                       tile_placement,
+                                                       fixed_bits_per_pixel,
+                                                       tile_bits_per_pixel);
+    } else {
+        double capacity = (double)usable_data_pixels * bits_per_data_pixel;
+        if (capacity > (double)U64_MAX_VALUE) return false;
+        expected_capacity = (u64)capacity;
+    }
+    if (expected_capacity != bits_per_page) {
         return false;
     }
     
@@ -22560,21 +22785,31 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                 ? frame_bit_count - bit_offset
                                 : 0u;
     if (page_segment_bits > bits_per_page) page_segment_bits = bits_per_page;
-    u32 fixed_bits_per_pixel = (u32)bits_per_data_pixel;
-    if (fixed_bits_per_pixel == 0u) return false;
-    u64 payload_pixel_count = page_segment_bits / fixed_bits_per_pixel;
-    if (page_segment_bits % fixed_bits_per_pixel) ++payload_pixel_count;
     CenteredDataRectangle payload_rectangle;
-    if (!use_base_palette &&
-        !compute_centered_data_rectangle(width_pixels,
-                                         data_height_pixels,
-                                         payload_pixel_count,
-                                         payload_rectangle,
-                                         true)) {
-        return false;
+    if (!use_base_palette) {
+        if (tile_bits_per_pixel < fixed_bits_per_pixel) {
+            if (!compute_centered_data_rectangle_for_bits(width_pixels,
+                                                         data_height_pixels,
+                                                         page_segment_bits,
+                                                         tile_placement,
+                                                         fixed_bits_per_pixel,
+                                                         tile_bits_per_pixel,
+                                                         payload_rectangle)) {
+                return false;
+            }
+        } else {
+            u64 payload_pixels = page_segment_bits / fixed_bits_per_pixel;
+            if (page_segment_bits % fixed_bits_per_pixel) ++payload_pixels;
+            if (!compute_centered_data_rectangle(width_pixels,
+                                                 data_height_pixels,
+                                                 payload_pixels,
+                                                 payload_rectangle)) {
+                return false;
+            }
+        }
     }
     u64 base_digit_cursor = 0u;
-    u64 payload_pixel_cursor = 0u;
+    u64 payload_bit_cursor = 0u;
     makocode::ByteBuffer base_digits;
     u64 base_digits_used = 0u;
     if (use_base_palette) {
@@ -22640,8 +22875,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
 
     // Build the exact metadata codeword before placing page data. Its active
     // cells define the known erasures used by the ECC budget.
-    MetadataTile::Placement tile_placement = MetadataTile::compute_center_tile_placement(
-        width_pixels, data_height_pixels);
     bool have_metadata_tile = tile_placement.valid;
     if (!have_metadata_tile) {
         return false;
@@ -22671,13 +22904,21 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
 
     u32 background_symbol = 0u;
+    u32 tile_light_symbol = 0u;
+    u32 tile_dark_symbol = 0u;
     if (use_custom_palette && mapping.custom_palette_count > 0u) {
         u32 brightest_luminance = palette_color_luminance(mapping.custom_palette[0u]);
+        u32 darkest_luminance = brightest_luminance;
         for (u32 i = 1u; i < mapping.custom_palette_count; ++i) {
             u32 luminance = palette_color_luminance(mapping.custom_palette[i]);
             if (luminance > brightest_luminance) {
                 brightest_luminance = luminance;
                 background_symbol = i;
+                tile_light_symbol = i;
+            }
+            if (luminance < darkest_luminance) {
+                darkest_luminance = luminance;
+                tile_dark_symbol = i;
             }
         }
     }
@@ -22703,7 +22944,6 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 reserved_data_pixel = reservation_mask.data[mask_index] != 0u;
             }
             bool payload_rectangle_pixel = !use_base_palette &&
-                !metadata_tile_contains_pixel(tile_placement, column, row) &&
                 row >= payload_rectangle.y0 &&
                 row < payload_rectangle.y0 + payload_rectangle.height &&
                 column >= payload_rectangle.x0 &&
@@ -22714,9 +22954,14 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 column >= payload_rectangle.x0 &&
                 column < payload_rectangle.x0 + payload_rectangle.width;
             u64 data_slot_cursor = payload_rectangle_pixel
-                                       ? payload_pixel_cursor * fixed_bits_per_pixel
+                                       ? payload_bit_cursor
                                        : 0u;
-            if (payload_rectangle_pixel) ++payload_pixel_cursor;
+            u32 pixel_bits_per_pixel = metadata_tile_contains_pixel(tile_placement,
+                                                                    column,
+                                                                    row)
+                                           ? tile_bits_per_pixel
+                                           : fixed_bits_per_pixel;
+            if (payload_rectangle_pixel) payload_bit_cursor += pixel_bits_per_pixel;
             bool inside_tile = false;
             if (!is_footer_row && have_metadata_tile) {
                 if (column >= tile_placement.x0 &&
@@ -22743,17 +22988,29 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                 ++base_digit_cursor;
                             }
                         } else if (payload_rectangle_pixel) {
-                            symbol = background_symbol;
-                            for (u32 bit = 0u; bit < custom_symbol_bits; ++bit) {
-                                u64 local_slot = data_slot_cursor + bit;
-                                if (local_slot < page_segment_bits && frame_data) {
-                                    u64 source_bit = bit_offset + local_slot;
+                            if (pixel_bits_per_pixel < custom_symbol_bits) {
+                                symbol = tile_light_symbol;
+                                if (data_slot_cursor < page_segment_bits && frame_data) {
+                                    u64 source_bit = bit_offset + data_slot_cursor;
                                     usize byte_index = (usize)(source_bit >> 3u);
                                     u8 bit_mask = (u8)(1u << (source_bit & 7u));
                                     if (frame_data[byte_index] & bit_mask) {
-                                        symbol |= (u32)1u << bit;
-                                    } else {
-                                        symbol &= ~((u32)1u << bit);
+                                        symbol = tile_dark_symbol;
+                                    }
+                                }
+                            } else {
+                                symbol = background_symbol;
+                                for (u32 bit = 0u; bit < custom_symbol_bits; ++bit) {
+                                    u64 local_slot = data_slot_cursor + bit;
+                                    if (local_slot < page_segment_bits && frame_data) {
+                                        u64 source_bit = bit_offset + local_slot;
+                                        usize byte_index = (usize)(source_bit >> 3u);
+                                        u8 bit_mask = (u8)(1u << (source_bit & 7u));
+                                        if (frame_data[byte_index] & bit_mask) {
+                                            symbol |= (u32)1u << bit;
+                                        } else {
+                                            symbol &= ~((u32)1u << bit);
+                                        }
                                     }
                                 }
                             }
@@ -24141,6 +24398,14 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
     if (bits_per_pixel_value < 1.0 || bits_per_pixel_value > 24.0) return false;
     u32 bits_per_pixel = (u32)bits_per_pixel_value;
     if ((double)bits_per_pixel != bits_per_pixel_value) return false;
+    bool use_custom_palette = mapping_has_custom_palette(mapping);
+    MetadataTile::Placement tile_placement = MetadataTile::compute_center_tile_placement(
+        width_pixels, data_height_pixels);
+    u32 tile_bits_per_pixel = use_custom_palette &&
+                                      is_power_of_two_u32(mapping.custom_palette_count) &&
+                                      bits_per_pixel > 1u && tile_placement.valid
+                                  ? 1u
+                                  : bits_per_pixel;
     u64 expected_bits_per_page = 0u;
     if (!compute_bits_per_page(mapping,
                                width_pixels,
@@ -24162,15 +24427,26 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
         if (page_bit_offset >= frame_bit_count) break;
         u64 segment_bits = frame_bit_count - page_bit_offset;
         if (segment_bits > bits_per_page) segment_bits = bits_per_page;
-        u64 payload_pixels = segment_bits / bits_per_pixel;
-        if (segment_bits % bits_per_pixel) ++payload_pixels;
         CenteredDataRectangle payload_rectangle;
-        if (!compute_centered_data_rectangle(width_pixels,
-                                             data_height_pixels,
-                                             payload_pixels,
-                                             payload_rectangle,
-                                             true)) {
-            return false;
+        if (tile_bits_per_pixel < bits_per_pixel) {
+            if (!compute_centered_data_rectangle_for_bits(width_pixels,
+                                                         data_height_pixels,
+                                                         segment_bits,
+                                                         tile_placement,
+                                                         bits_per_pixel,
+                                                         tile_bits_per_pixel,
+                                                         payload_rectangle)) {
+                return false;
+            }
+        } else {
+            u64 payload_pixels = segment_bits / bits_per_pixel;
+            if (segment_bits % bits_per_pixel) ++payload_pixels;
+            if (!compute_centered_data_rectangle(width_pixels,
+                                                 data_height_pixels,
+                                                 payload_pixels,
+                                                 payload_rectangle)) {
+                return false;
+            }
         }
         makocode::ByteBuffer overwrite_mask;
         if (!compute_page_payload_overwrite_mask(mapping,
@@ -24186,23 +24462,22 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
                                                  overwrite_mask)) {
             return false;
         }
-        MetadataTile::Placement tile_placement = MetadataTile::compute_center_tile_placement(
-            width_pixels, data_height_pixels);
-        if (!tile_placement.valid) return false;
-        u64 payload_pixel_cursor = 0u;
+        u64 payload_bit_cursor = 0u;
         for (u32 y = payload_rectangle.y0;
              y < payload_rectangle.y0 + payload_rectangle.height;
              ++y) {
             for (u32 x = payload_rectangle.x0;
                  x < payload_rectangle.x0 + payload_rectangle.width;
                  ++x) {
-                if (metadata_tile_contains_pixel(tile_placement, x, y)) continue;
-                u64 local_slot = payload_pixel_cursor * bits_per_pixel;
-                ++payload_pixel_cursor;
+                u32 pixel_bits = metadata_tile_contains_pixel(tile_placement, x, y)
+                                     ? tile_bits_per_pixel
+                                     : bits_per_pixel;
+                u64 local_slot = payload_bit_cursor;
+                payload_bit_cursor += pixel_bits;
                 usize pixel_index = (usize)y * (usize)width_pixels + (usize)x;
                 if (pixel_index >= overwrite_mask.size ||
                     overwrite_mask.data[pixel_index] != OVERWRITE_MASK_PIXEL) continue;
-                for (u32 bit = 0u; bit < bits_per_pixel; ++bit) {
+                for (u32 bit = 0u; bit < pixel_bits; ++bit) {
                     u64 bit_slot = local_slot + bit;
                     if (bit_slot >= segment_bits) continue;
                     u64 bit_index = page_bit_offset + bit_slot;
