@@ -16816,6 +16816,52 @@ struct RotationEstimateCandidate {
                                               state.encoded_tile.fiducial_margin_pixels)) {
                 return false;
             }
+            makocode::ByteBuffer payload_fiducial_mask;
+            u64 payload_fiducial_pixels = 0u;
+            if (!compute_fiducial_marker_mask((u32)logical_width,
+                                              (u32)logical_height,
+                                              (u32)data_height,
+                                              payload_fiducial_pixels,
+                                              &payload_fiducial_mask,
+                                              use_metadata_fiducial_grid,
+                                              state.encoded_tile.fiducial_marker_size_pixels,
+                                              state.encoded_tile.fiducial_columns,
+                                              state.encoded_tile.fiducial_rows,
+                                              state.encoded_tile.fiducial_margin_pixels)) {
+                return false;
+            }
+            if (metadata_placement.valid) {
+                const MetadataTile::Values& tile = state.encoded_tile;
+                const u32 header_x0 =
+                    (MetadataTile::TILE_SIDE - MetadataTile::TILE_HEADER_BITS) / 2u;
+                usize codeword_bits = (usize)tile.encoded_metadata_size * 8u;
+                for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+                    for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
+                        bool active =
+                            (x >= header_x0 &&
+                             x < header_x0 + MetadataTile::TILE_HEADER_BITS &&
+                             y >= tile.metadata_header_y0 &&
+                             y < tile.metadata_header_y0 +
+                                     MetadataTile::TILE_HEADER_REPETITIONS);
+                        if (!active && tile.metadata_square_side > 0u &&
+                            x >= tile.metadata_square_x0 &&
+                            x < tile.metadata_square_x0 + tile.metadata_square_side &&
+                            y >= tile.metadata_square_y0 &&
+                            y < tile.metadata_square_y0 + tile.metadata_square_side) {
+                            usize bit = (usize)(y - tile.metadata_square_y0) *
+                                            tile.metadata_square_side +
+                                        (usize)(x - tile.metadata_square_x0);
+                            active = bit < codeword_bits;
+                        }
+                        if (active) continue;
+                        usize index =
+                            (usize)(metadata_placement.y0 + y) *
+                                (usize)logical_width +
+                            metadata_placement.x0 + x;
+                        fiducial_mask.data[index] = payload_fiducial_mask.data[index];
+                    }
+                }
+            }
         }
         if (!state.has_palette_base) {
             state.has_palette_base = true;
@@ -22345,9 +22391,7 @@ static bool compute_fiducial_reservation(u32 width_pixels,
                             mask_out->data[mask_index] = 1u;
                         }
                     }
-                    if (counted) {
-                        ++reserved_data_pixels;
-                    }
+                    if (counted) ++reserved_data_pixels;
                 }
             }
         }
@@ -22902,6 +22946,18 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         console_line(2, "encode_page_to_ppm: failed to build metadata tile");
         return false;
     }
+    if (use_base_palette) {
+        for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+            for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
+                usize local_index = (usize)y * MetadataTile::TILE_SIDE + x;
+                if (tile_active_mask.data[local_index]) continue;
+                usize page_index =
+                    (usize)(tile_placement.y0 + y) * width_pixels +
+                    tile_placement.x0 + x;
+                reservation_mask.data[page_index] = fiducial_mask.data[page_index];
+            }
+        }
+    }
 
     u32 background_symbol = 0u;
     u32 tile_light_symbol = 0u;
@@ -22981,7 +23037,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     if (use_custom_palette) {
                         u32 symbol = background_symbol;
                         if (use_base_palette) {
-                            if (!reserved_data_pixel && base_digit_rectangle_pixel) {
+                            if (!reserved_data_pixel && !inside_tile &&
+                                base_digit_rectangle_pixel) {
                                 if (base_digit_cursor < base_digits_used) {
                                     symbol = base_digits.data[base_digit_cursor];
                                 }
@@ -23058,7 +23115,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                         rgb[1] = color.g;
                         rgb[2] = color.b;
                     } else if (reserved_pixel ||
-                               (use_base_palette && reserved_data_pixel)) {
+                               (use_base_palette && reserved_data_pixel &&
+                                !metadata_tile_contains_pixel(tile_placement, column, row))) {
                         rgb[0] = 255u;
                         rgb[1] = 255u;
                         rgb[2] = 255u;
