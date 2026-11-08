@@ -216,7 +216,7 @@ run_case_footer_data_destroyed() {
     mkdir -p "$work_dir"
     local payload_seed
     payload_seed=$(mako_test_case_seed "payload/$label/footer_data_destroyed")
-    "$ppm_transform_bin" bytes --output "$payload_path" --size 64 --seed "$payload_seed"
+    "$ppm_transform_bin" bytes --output "$payload_path" --size 4096 --seed "$payload_seed"
     print_makocode_cmd "encode-footer-only" \
         "$makocode_bin" encode \
         "--input=payload.bin" \

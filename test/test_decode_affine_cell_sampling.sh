@@ -47,6 +47,7 @@ printf 'makocode' > "$work_dir/makocode.bin"
     "$makocode_bin" encode \
         --input=makocode.bin \
         --ecc=0 \
+        --ecc-fill \
         --page-width=80 \
         --page-height=80 \
         --no-filename \

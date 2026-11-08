@@ -73,8 +73,11 @@ int main(int argc, char** argv) {
                             ascii_equals_token(argv[5], ascii_length(argv[5]), "--check-structural");
     bool report_page = argc == 6 &&
                        ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page");
-    if (argc != 5 && !check_ecc_budget && !check_reserve_reject && !check_structural && !report_page) {
-        fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-ecc-budget PERCENT | --check-reserve-reject | --check-structural | --report-page] | --capacity WIDTH HEIGHT\n");
+    bool report_page_direct = argc == 6 &&
+                              ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page-direct");
+    if (argc != 5 && !check_ecc_budget && !check_reserve_reject && !check_structural &&
+        !report_page && !report_page_direct) {
+        fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-ecc-budget PERCENT | --check-reserve-reject | --check-structural | --report-page | --report-page-direct] | --capacity WIDTH HEIGHT\n");
         return 2;
     }
     u32 expected_width = 0u;
@@ -120,6 +123,27 @@ int main(int argc, char** argv) {
     if (!ppm_read_rgb_pixels(state, pixel_count, pixels)) {
         fprintf(stderr, "canonical tile: failed to parse PPM pixels\n");
         return 1;
+    }
+
+    if (report_page_direct) {
+        MetadataTile::Placement direct_placement =
+            MetadataTile::compute_center_tile_placement(width, height);
+        MetadataTile::Values direct_values = {};
+        makocode::ByteBuffer direct_palette_text;
+        if (!direct_placement.valid ||
+            !MetadataTile::decode_tile(pixels.data,
+                                       width,
+                                       height,
+                                       height,
+                                       direct_placement,
+                                       direct_values,
+                                       direct_palette_text) ||
+            direct_values.schema_version != MetadataTile::TILE_SCHEMA_VERSION ||
+            !direct_values.overwrite_layout || !direct_values.ecc_enabled) {
+            fprintf(stderr, "canonical tile: protected tile failed at expected placement\n");
+            return 1;
+        }
+        return 0;
     }
 
     ImageMappingConfig mapping;

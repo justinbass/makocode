@@ -13,6 +13,7 @@ TEST_VERBOSE ?= 0
 
 TEST_CASES := $(shell bash ./test/run_test_case.sh --list)
 TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
+export CANONICAL_TILE_HARNESS_BIN := $(CURDIR)/test/canonical_tile_harness
 
 .PHONY: all clean test test-setup test-finalize coverage $(TEST_CASE_TARGETS)
 
@@ -29,12 +30,15 @@ makocode: makocode.cpp
 test/ppm_transform: test/ppm_transform.cpp
 	@$(STATUS) build "compile ppm_transform" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
+test/canonical_tile_harness: test/test_canonical_tile_harness.cpp makocode
+	@$(STATUS) build "compile canonical tile harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+
 test: test-finalize
 
 test-setup:
 	@$(STATUS) test "prepare test suite" bash ./test/run_test_suite.sh --prepare
 
-$(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform
+$(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform test/canonical_tile_harness
 	@if [ "$(TEST_VERBOSE)" = 1 ]; then \
 		bash ./test/run_test_case.sh --run "$*"; \
 	else \

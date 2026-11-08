@@ -4,9 +4,12 @@ root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$root/makocode"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/makocode-canonical-tile.XXXXXX")
 trap 'status=$?; rm -rf "$work"; exit "$status"' EXIT
-harness="$work/canonical_tile_harness"
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
-    "$root/test/test_canonical_tile_harness.cpp" -o "$harness"
+harness=${CANONICAL_TILE_HARNESS_BIN:-"$root/test/canonical_tile_harness"}
+if [[ ! -x $harness ]]; then
+    harness="$work/canonical_tile_harness"
+    "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
+        "$root/test/test_canonical_tile_harness.cpp" -o "$harness"
+fi
 python3 - "$work/payload.bin" <<'PY'
 import random, sys
 source = random.Random(42)

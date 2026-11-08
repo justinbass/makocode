@@ -33,7 +33,7 @@ printf 'makocode' > "$work_dir/makocode.bin"
     cd "$work_dir"
     "$makocode_bin" encode \
         --input=makocode.bin \
-        --ecc=0.25 --page-width=240 --page-height=240 \
+        --ecc=0.25 --ecc-fill --page-width=240 --page-height=240 \
         --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=length_header >/dev/null
 )

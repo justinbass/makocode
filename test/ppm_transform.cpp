@@ -1189,6 +1189,8 @@ static void cmd_transform(int argc, char** argv) {
 
     Ppm ppm = read_ppm_p3_ascii(input);
     unsigned char* canonical_control_source_mask = nullptr;
+    unsigned char* canonical_payload_sample_mask = nullptr;
+    int* canonical_source_pixels = nullptr;
     if (preserve_canonical_control) {
         if (!white_checker) {
             die("ppm_transform: --preserve-canonical-control requires --white-checker");
@@ -1286,6 +1288,11 @@ static void cmd_transform(int argc, char** argv) {
 
     int w = ppm.width;
     int h = ppm.height;
+    if (preserve_canonical_control) {
+        canonical_source_pixels = (int*)malloc(ppm.pixels.size * sizeof(int));
+        if (!canonical_source_pixels) die("ppm_transform: OOM");
+        memcpy(canonical_source_pixels, ppm.pixels.data, ppm.pixels.size * sizeof(int));
+    }
     IntVec current = ppm.pixels;
     // Prevent double-free: current now owns ppm.pixels buffer.
     ppm.pixels.data = nullptr;
@@ -1298,6 +1305,48 @@ static void cmd_transform(int argc, char** argv) {
     current = tmp;
     w = new_w;
     h = new_h;
+
+    if (preserve_canonical_control) {
+        size_t output_pixels = (size_t)w * (size_t)h;
+        canonical_payload_sample_mask = (unsigned char*)calloc(output_pixels, 1u);
+        if (!canonical_payload_sample_mask) die("ppm_transform: OOM");
+        for (int source_y = 0; source_y < ppm.height; ++source_y) {
+            for (int source_x = 0; source_x < ppm.width; ++source_x) {
+                size_t source_pixel = (size_t)source_y * (size_t)ppm.width +
+                                      (size_t)source_x;
+                if (canonical_control_source_mask[source_pixel]) continue;
+                size_t source_rgb = source_pixel * 3u;
+                double center_x = ((double)source_x + 0.5) * scale_x - 0.5;
+                double center_y = ((double)source_y + 0.5) * scale_y - 0.5;
+                double half_width = 0.4 * scale_x;
+                double half_height = 0.4 * scale_y;
+                int x0 = (int)ceil(center_x - half_width);
+                int x1 = (int)ceil(center_x + half_width);
+                int y0 = (int)ceil(center_y - half_height);
+                int y1 = (int)ceil(center_y + half_height);
+                if (x0 < 0) x0 = 0;
+                if (y0 < 0) y0 = 0;
+                if (x1 > w) x1 = w;
+                if (y1 > h) y1 = h;
+                for (int target_y = y0; target_y < y1; ++target_y) {
+                    double dy = (double)target_y - center_y;
+                    if (dy < -half_height || dy >= half_height) continue;
+                    for (int target_x = x0; target_x < x1; ++target_x) {
+                        double dx = (double)target_x - center_x;
+                        if (dx < -half_width || dx >= half_width) continue;
+                        size_t target_pixel = (size_t)target_y * (size_t)w +
+                                              (size_t)target_x;
+                        size_t target_rgb = target_pixel * 3u;
+                        for (int channel = 0; channel < 3; ++channel) {
+                            current.data[target_rgb + (size_t)channel] =
+                                canonical_source_pixels[source_rgb + (size_t)channel];
+                        }
+                        canonical_payload_sample_mask[target_pixel] = 1u;
+                    }
+                }
+            }
+        }
+    }
 
     if (!nearly_equal(skew_x, 0.0)) {
         int skew_src_width = w;
@@ -1498,6 +1547,9 @@ static void cmd_transform(int argc, char** argv) {
                                                           (size_t)source_pixel_x]) {
                             continue;
                         }
+                    if (canonical_payload_sample_mask[(size_t)y * (size_t)w + (size_t)x]) {
+                        continue;
+                    }
                     }
                     size_t index = ((size_t)y * (size_t)w + (size_t)x) * 3u;
                     current.data[index + 0u] = 255;
@@ -1512,6 +1564,8 @@ static void cmd_transform(int argc, char** argv) {
 
     intvec_free(&current);
     free(canonical_control_source_mask);
+    free(canonical_payload_sample_mask);
+    free(canonical_source_pixels);
     strvec_free(&metadata);
     strvec_free(&comments);
     ppm_free(&ppm);

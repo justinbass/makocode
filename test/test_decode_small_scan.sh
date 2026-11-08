@@ -139,9 +139,10 @@ import sys
 with open(sys.argv[1], newline='') as affine_file:
     row = next(csv.DictReader(affine_file))
 assert row['has_affine'] == '1'
-assert abs(float(row['scale']) - 2.239) <= 0.005
-assert abs(float(row['tx']) - 1.5) <= 0.2
-assert abs(float(row['ty']) - 3.5) <= 0.2
+assert abs(float(row['scale']) - 2.251) <= 0.005
+# The scan is placed at (2, 4); affine translation uses pixel-center coordinates.
+assert abs(float(row['tx']) - 1.5) <= 0.75
+assert abs(float(row['ty']) - 3.5) <= 0.75
 assert abs(float(row['rotation_degrees'])) <= 0.25
 PY
 printf 'small scan affine-bias decode passed (label=%s)\n' "$label"

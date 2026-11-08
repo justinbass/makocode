@@ -5,6 +5,7 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 ppm_transform_bin="$repo_root/test/ppm_transform"
+canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/makocode-canonical-overlay.XXXXXX")
 trap 'status=$?; rm -rf "$work"; exit "$status"' EXIT
 
@@ -13,8 +14,11 @@ if [[ ! -x "$bin" || ! -x "$ppm_transform_bin" ]]; then
     exit 1
 fi
 
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
-    "$script_dir/test_canonical_tile_harness.cpp" -o "$work/canonical_tile_harness"
+if [[ ! -x $canonical_tile_harness_bin ]]; then
+    canonical_tile_harness_bin="$work/canonical_tile_harness"
+    "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
+        "$script_dir/test_canonical_tile_harness.cpp" -o "$canonical_tile_harness_bin"
+fi
 python3 - "$work/payload.bin" <<'PY'
 import random, sys
 source = random.Random(103)
@@ -65,7 +69,7 @@ page_indices=()
 page_paths=()
 page_summaries=()
 for page in "${pages[@]}"; do
-    summary=$("$work/canonical_tile_harness" "$page" 1000 1000 1 --report-page)
+    summary=$("$canonical_tile_harness_bin" "$page" 1000 1000 1 --report-page)
     IFS=$'\t' read -r page_index page_count block_count parity unknown_budget overlay_budget selector_present selector_total selector_seed selector_counts <<< "$summary"
     if [[ -z ${page_index:-} || $page_count -ne ${#pages[@]} ||
           $selector_present -ne 1 || $block_count -eq 0 || $parity -eq 0 ||
@@ -100,32 +104,35 @@ page_summaries=("${ordered_summaries[@]}")
 # The right edge remains payload. Corrupting the centered protected tile must
 # fail closed because its selector and ECC budgets are authoritative.
 python3 - "${pages[0]}" "$work/bad_tile.ppm" <<'PY'
-from pathlib import Path
 import sys
 
-tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[:4] == ['P3', '1000', '1000', '255']
 width = height = 1000
-pixels = list(map(int, tokens[4:]))
 stripe_x0 = width - (width + 7) // 8
 nonwhite = 0
-for y in range(height):
-    for x in range(stripe_x0, width):
-        index = (y * width + x) * 3
-        if pixels[index:index + 3] != [255, 255, 255]:
-            nonwhite += 1
-assert nonwhite > (width - stripe_x0) * height // 5, 'right edge is still an unused white stripe'
 tile_x = tile_y = (width - 48) // 2
-for y in range(tile_y, tile_y + 48):
-    for x in range(tile_x, tile_x + 48):
-        index = (y * width + x) * 3
-        pixels[index:index + 3] = [127, 127, 127]
-with open(sys.argv[2], 'w') as out:
+with open(sys.argv[1], 'r', buffering=1024 * 1024) as source, \
+     open(sys.argv[2], 'w', buffering=1024 * 1024) as out:
+    assert [source.readline().strip() for _ in range(3)] == ['P3', '1000 1000', '255']
     out.write('P3\n1000 1000\n255\n')
-    for offset in range(0, len(pixels), 3):
-        out.write(f'{pixels[offset]} {pixels[offset + 1]} {pixels[offset + 2]}\n')
+    output_chunk = []
+    for y in range(height):
+        for x in range(width):
+            pixel_line = source.readline()
+            rgb = tuple(map(int, pixel_line.split()))
+            assert len(rgb) == 3
+            if x >= stripe_x0 and rgb != (255, 255, 255):
+                nonwhite += 1
+            if tile_x <= x < tile_x + 48 and tile_y <= y < tile_y + 48:
+                pixel_line = '127 127 127\n'
+            output_chunk.append(pixel_line)
+        if len(output_chunk) >= 65536:
+            out.writelines(output_chunk)
+            output_chunk.clear()
+    out.writelines(output_chunk)
+    assert source.read() == ''
+assert nonwhite > (width - stripe_x0) * height // 5, 'right edge is still an unused white stripe'
 PY
-if "$work/canonical_tile_harness" "$work/bad_tile.ppm" 1000 1000 1 --report-page \
+if "$canonical_tile_harness_bin" "$work/bad_tile.ppm" 1000 1000 1 --report-page-direct \
     >"$work/bad_tile.log" 2>&1; then
     echo "canonical overlay: extraction accepted a corrupted centered selector tile" >&2
     exit 1
@@ -153,7 +160,7 @@ for index in "${!pages[@]}"; do
         echo "canonical overlay: page $((index + 1)) had no visible overlay changes" >&2
         exit 1
     fi
-    merged_summary=$("$work/canonical_tile_harness" "$merged" 1000 1000 1 --report-page)
+    merged_summary=$("$canonical_tile_harness_bin" "$merged" 1000 1000 1 --report-page)
     IFS=$'\t' read -r merged_index merged_count merged_blocks merged_parity merged_unknown merged_overlay merged_selector_present merged_total merged_seed merged_counts <<< "$merged_summary"
     IFS=$'\t' read -r base_index base_count base_blocks base_parity base_unknown base_overlay base_selector_present base_total base_seed base_counts <<< "${page_summaries[$index]}"
     if [[ $merged_index -ne $((index + 1)) || $merged_count -ne ${#pages[@]} ||

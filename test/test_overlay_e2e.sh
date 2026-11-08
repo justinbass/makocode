@@ -40,6 +40,7 @@ export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_overlay_work"
+canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
 payload_path="$test_dir/${label}_overlay_payload.bin"
 payload_work="$work_dir/payload.bin"
 overlay_path="$test_dir/${label}_overlay_mask.ppm"
@@ -71,8 +72,11 @@ trap 'on_exit' EXIT
 rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir" "$encoded_dir" "$merged_dir"
 rm -f "$payload_path" "$overlay_path" "$decoded_path"
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
-    "$script_dir/test_canonical_tile_harness.cpp" -o "$work_dir/canonical_tile_harness"
+if [[ ! -x $canonical_tile_harness_bin ]]; then
+    canonical_tile_harness_bin="$work_dir/canonical_tile_harness"
+    "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
+        "$script_dir/test_canonical_tile_harness.cpp" -o "$canonical_tile_harness_bin"
+fi
 
 "$ppm_transform_bin" bytes --output "$payload_path" --size 32768 --seed "$payload_seed"
 cp "$payload_path" "$payload_work"
@@ -126,7 +130,7 @@ page_indices=()
 page_summaries=()
 page_paths=()
 for page in "${ppms[@]}"; do
-    summary=$("$work_dir/canonical_tile_harness" "$page" "$page_width" "$page_height" 1 --report-page)
+    summary=$("$canonical_tile_harness_bin" "$page" "$page_width" "$page_height" 1 --report-page)
     IFS=$'\t' read -r page_index page_count block_count parity unknown_budget overlay_budget selector_present selector_total selector_seed selector_counts <<< "$summary"
     if [[ -z ${page_index:-} || $page_count -ne ${#ppms[@]} ]]; then
         echo "test_overlay_e2e: tile page count does not match emitted PPM pages" >&2
@@ -188,7 +192,7 @@ for index in "${!ppms[@]}"; do
     "${page_overlay_cmd[@]}" > "$merged_page" 2>"$selector_log"
     selector_report=$(awk '/overlay selector symbols used:/ {print $5}' "$selector_log")
     IFS=/ read -r selector_used selector_capacity <<< "$selector_report"
-    merged_summary=$("$work_dir/canonical_tile_harness" "$merged_page" "$page_width" "$page_height" 1 --report-page)
+    merged_summary=$("$canonical_tile_harness_bin" "$merged_page" "$page_width" "$page_height" 1 --report-page)
     IFS=$'\t' read -r merged_index merged_count merged_blocks merged_parity merged_unknown merged_overlay merged_selector_present merged_total merged_seed merged_counts <<< "$merged_summary"
     IFS=$'\t' read -r base_index base_count base_blocks base_parity base_unknown base_overlay base_selector_present base_total base_seed base_counts <<< "${page_summaries[$index]}"
     if [[ $merged_index -ne $base_index || $merged_count -ne $base_count ||

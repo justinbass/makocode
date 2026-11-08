@@ -119,7 +119,8 @@ int main(int argc, char** argv) {
                                source,
                                sizeof(source),
                                properties,
-                               &properties_size) != SZ_OK) {
+                               &properties_size,
+                               0u) != SZ_OK) {
         fprintf(stderr, "decoder paths harness: LZMA fixture compression failed\n");
         return 1;
     }
