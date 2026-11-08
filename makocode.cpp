@@ -7,7 +7,7 @@
     error correction, without relying on external libraries.
 
     Supported commands:
-        * `encode` bundles files/directories into an MKARCH01 archive, applies
+        * `encode` bundles files/directories into a compact bit-packed archive, applies
           maximum-ratio LZMA compression, optional ChaCha20-Poly1305 encryption, optional
           Reed-Solomon ECC, and maps the bitstream onto fiducial-marked PPM pages
           with configurable color channels and footer text.
@@ -22,7 +22,7 @@
     Escape backslash, nonprintable bytes, and path spaces as \xHH; LF ends lines.
 
     Core subsystems:
-        * MKARCH01 archive builder that normalizes paths and captures directory
+        * Compact archive builder that normalizes paths and captures directory
           trees for the encoder.
         * Shared buffers, bitstream helpers, fiducial/page layout math, and
           portable PPM I/O for grayscale and color modes with footer layout logic.
@@ -8909,6 +8909,9 @@ namespace MetadataTile {
         u32 parity_bytes = 0u;
         if (values.ecc_enabled && values.ecc_block_data > 0u && values.ecc_parity > 0u) {
             double redundancy = (double)values.ecc_parity / (double)values.ecc_block_data;
+            if (values.ecc_block_count == 1u && redundancy > 0.70) {
+                redundancy = 0.70;
+            }
             double parity_estimate = (double)compressed_metadata.size * redundancy;
             if (parity_estimate > (double)0xFFFFu) return false;
             parity_bytes = (u32)ceil(parity_estimate);
@@ -13186,6 +13189,7 @@ static bool validate_integer_scale(const u8* pixels,
 }
 
 static bool is_safe_archive_path(const char*, usize);
+static bool archive_is_well_formed(const makocode::ByteBuffer&);
 static bool frame_bits_to_payload(const u8*, u64, const PpmParserState&,
                                   makocode::ByteBuffer&, u64&, u64* = 0,
                                   const u8* = 0, u64 = 0,
@@ -19575,26 +19579,7 @@ struct RotationEstimateCandidate {
         width > logical_width && height > logical_height &&
         tile_values.page_count == 1u) {
         auto complete_archive = [&](const makocode::ByteBuffer& archive) -> bool {
-            if (archive.size < 12u || memcmp(archive.data, "MKARCH01", 8u) != 0) return false;
-            usize cursor = 12u;
-            u32 entries = read_le_u32(archive.data + 8u);
-            for (u32 entry = 0u; entry < entries; ++entry) {
-                if (cursor > archive.size || archive.size - cursor < 5u) return false;
-                u8 type = archive.data[cursor++];
-                u32 length = read_le_u32(archive.data + cursor);
-                cursor += 4u;
-                if (type > 1u || !length || length > archive.size - cursor ||
-                    !is_safe_archive_path((const char*)archive.data + cursor, length)) return false;
-                cursor += length;
-                if (type == 0u) {
-                    if (archive.size - cursor < 8u) return false;
-                    u64 size = read_le_u64(archive.data + cursor);
-                    cursor += 8u;
-                    if (size > archive.size - cursor) return false;
-                    cursor += (usize)size;
-                }
-            }
-            return cursor == archive.size;
+            return archive_is_well_formed(archive);
         };
         makocode::ByteBuffer observed;
         u64 observed_bits = 0u;
@@ -21481,23 +21466,23 @@ static bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
     return true;
 }
 
-static const char ARCHIVE_MAGIC[8] = {'M', 'K', 'A', 'R', 'C', 'H', '0', '1'};
-static const usize ARCHIVE_MAGIC_SIZE = (usize)sizeof(ARCHIVE_MAGIC);
-static const usize ARCHIVE_HEADER_SIZE = ARCHIVE_MAGIC_SIZE + 4u;
 static const usize MAX_ARCHIVE_PATH_COMPONENTS = 512u;
 
 struct ArchiveBuildContext {
     makocode::ByteBuffer buffer;
+    makocode::BitWriter entries;
     makocode::ByteBuffer path_registry;
-    u32 entry_count;
+    u64 entry_count;
 
     ArchiveBuildContext()
         : buffer(),
+          entries(),
           path_registry(),
           entry_count(0u) {}
 
     ~ArchiveBuildContext() {
         buffer.release();
+        entries.reset();
         path_registry.release();
         entry_count = 0u;
     }
@@ -21505,58 +21490,34 @@ struct ArchiveBuildContext {
 
 static bool archive_init(ArchiveBuildContext& ctx) {
     ctx.buffer.release();
+    ctx.entries.reset();
     ctx.path_registry.release();
     ctx.entry_count = 0u;
-    if (!ctx.buffer.ensure(ARCHIVE_HEADER_SIZE)) {
-        return false;
-    }
-    for (usize i = 0u; i < ARCHIVE_MAGIC_SIZE; ++i) {
-        ctx.buffer.data[i] = (u8)ARCHIVE_MAGIC[i];
-    }
-    write_le_u32(ctx.buffer.data + ARCHIVE_MAGIC_SIZE, 0u);
-    ctx.buffer.size = ARCHIVE_HEADER_SIZE;
     return true;
 }
 
-static bool archive_append_u8(makocode::ByteBuffer& buffer, u8 value) {
-    if (!buffer.ensure(buffer.size + 1u)) {
-        return false;
-    }
-    buffer.data[buffer.size++] = value;
-    return true;
-}
-
-static bool archive_append_u32(makocode::ByteBuffer& buffer, u32 value) {
-    if (!buffer.ensure(buffer.size + 4u)) {
-        return false;
-    }
-    write_le_u32(buffer.data + buffer.size, value);
-    buffer.size += 4u;
-    return true;
-}
-
-static bool archive_append_u64(makocode::ByteBuffer& buffer, u64 value) {
-    if (!buffer.ensure(buffer.size + 8u)) {
-        return false;
-    }
-    write_le_u64(buffer.data + buffer.size, value);
-    buffer.size += 8u;
-    return true;
-}
-
-static bool archive_append_bytes(makocode::ByteBuffer& buffer,
+static bool archive_append_bytes(makocode::BitWriter& writer,
                                  const u8* data,
                                  usize length) {
-    if (length == 0u) {
-        return true;
+    for (usize i = 0u; i < length; ++i) {
+        if (!writer.write_bits(data ? data[i] : 0u, 8u)) {
+            return false;
+        }
     }
-    if (!buffer.ensure(buffer.size + length)) {
+    return true;
+}
+
+static bool archive_append_entry_header(ArchiveBuildContext& ctx,
+                                        u8 entry_type,
+                                        const char* rel_path,
+                                        usize path_length) {
+    if (ctx.entry_count == U64_MAX_VALUE || path_length == 0u ||
+        !ctx.entries.write_bit(entry_type) ||
+        !MetadataTile::write_compact_u64(ctx.entries, (u64)path_length) ||
+        !archive_append_bytes(ctx.entries, (const u8*)rel_path, path_length)) {
         return false;
     }
-    for (usize i = 0u; i < length; ++i) {
-        buffer.data[buffer.size + i] = data ? data[i] : 0u;
-    }
-    buffer.size += length;
+    ++ctx.entry_count;
     return true;
 }
 
@@ -21614,17 +21575,7 @@ static bool archive_add_directory(ArchiveBuildContext& ctx,
         }
         return false;
     }
-    if (!archive_append_u8(ctx.buffer, 1u)) {
-        return false;
-    }
-    if (!archive_append_u32(ctx.buffer, (u32)path_len)) {
-        return false;
-    }
-    if (!archive_append_bytes(ctx.buffer, (const u8*)rel_path, path_len)) {
-        return false;
-    }
-    ++ctx.entry_count;
-    return true;
+    return archive_append_entry_header(ctx, 1u, rel_path, path_len);
 }
 
 static bool archive_add_file(ArchiveBuildContext& ctx,
@@ -21632,9 +21583,6 @@ static bool archive_add_file(ArchiveBuildContext& ctx,
                              const u8* data,
                              usize length) {
     usize path_len = ascii_length(rel_path);
-    if (path_len > 0xFFFFFFFFu) {
-        return false;
-    }
     bool duplicate = false;
     if (!archive_register_path(ctx, rel_path, path_len, &duplicate)) {
         if (duplicate) {
@@ -21643,30 +21591,29 @@ static bool archive_add_file(ArchiveBuildContext& ctx,
         }
         return false;
     }
-    if (!archive_append_u8(ctx.buffer, 0u)) {
+    if (!archive_append_entry_header(ctx, 0u, rel_path, path_len) ||
+        !MetadataTile::write_compact_u64(ctx.entries, (u64)length) ||
+        !archive_append_bytes(ctx.entries, data, length)) {
         return false;
     }
-    if (!archive_append_u32(ctx.buffer, (u32)path_len)) {
-        return false;
-    }
-    if (!archive_append_bytes(ctx.buffer, (const u8*)rel_path, path_len)) {
-        return false;
-    }
-    if (!archive_append_u64(ctx.buffer, (u64)length)) {
-        return false;
-    }
-    if (!archive_append_bytes(ctx.buffer, data, length)) {
-        return false;
-    }
-    ++ctx.entry_count;
     return true;
 }
 
 static bool archive_finalize(ArchiveBuildContext& ctx) {
-    if (ctx.buffer.size < ARCHIVE_HEADER_SIZE) {
-        return false;
+    if (ctx.entry_count == 0u) return false;
+    makocode::BitWriter archive;
+    if (!MetadataTile::write_compact_u64(archive, ctx.entry_count)) return false;
+    const u8* entry_data = ctx.entries.data();
+    usize entry_bits = ctx.entries.bit_size();
+    for (usize bit = 0u; bit < entry_bits; ++bit) {
+        u8 value = (u8)((entry_data[bit >> 3u] >> (bit & 7u)) & 1u);
+        if (!archive.write_bit(value)) return false;
     }
-    write_le_u32(ctx.buffer.data + ARCHIVE_MAGIC_SIZE, ctx.entry_count);
+    usize archive_bytes = archive.byte_size();
+    ctx.buffer.release();
+    if (archive_bytes && !ctx.buffer.ensure(archive_bytes)) return false;
+    if (archive_bytes) memcpy(ctx.buffer.data, archive.data(), archive_bytes);
+    ctx.buffer.size = archive_bytes;
     return true;
 }
 
@@ -21982,6 +21929,88 @@ static bool is_safe_archive_path(const char* path, usize length) {
     return true;
 }
 
+typedef bool (*ArchiveEntryCallback)(u8,
+                                     const char*,
+                                     usize,
+                                     const u8*,
+                                     usize,
+                                     u64,
+                                     void*);
+
+static bool archive_parse(const makocode::ByteBuffer& archive,
+                          ArchiveEntryCallback callback,
+                          void* callback_context,
+                          u64* entry_count_out) {
+    if (!archive.data || archive.size == 0u ||
+        archive.size > (usize)(USIZE_MAX_VALUE / 8u)) return false;
+    makocode::BitReader reader;
+    reader.reset(archive.data, archive.size * 8u);
+    u64 entry_count = 0u;
+    if (!MetadataTile::read_compact_u64(reader, entry_count) ||
+        entry_count == 0u || entry_count > (u64)((reader.bit_count - reader.cursor) / 14u)) {
+        return false;
+    }
+    if (entry_count_out) *entry_count_out = entry_count;
+    for (u64 entry = 0u; entry < entry_count; ++entry) {
+        u8 entry_type = reader.read_bit();
+        u64 path_length_value = 0u;
+        if (reader.failed || entry_type > 1u ||
+            !MetadataTile::read_compact_u64(reader, path_length_value) ||
+            path_length_value == 0u ||
+            path_length_value > (u64)(USIZE_MAX_VALUE - 1u) ||
+            path_length_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
+            return false;
+        }
+        usize path_length = (usize)path_length_value;
+        makocode::ByteBuffer path;
+        if (!path.ensure(path_length + 1u)) return false;
+        for (usize i = 0u; i < path_length; ++i) {
+            path.data[i] = (u8)reader.read_bits(8u);
+            if (reader.failed) return false;
+        }
+        path.data[path_length] = 0u;
+        path.size = path_length;
+        if (!is_safe_archive_path((const char*)path.data, path_length)) return false;
+
+        makocode::ByteBuffer file_data;
+        usize file_size = 0u;
+        if (entry_type == 0u) {
+            u64 file_size_value = 0u;
+            if (!MetadataTile::read_compact_u64(reader, file_size_value) ||
+                file_size_value > (u64)USIZE_MAX_VALUE ||
+                file_size_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
+                return false;
+            }
+            file_size = (usize)file_size_value;
+            if (file_size && !file_data.ensure(file_size)) return false;
+            file_data.size = file_size;
+            for (usize i = 0u; i < file_size; ++i) {
+                file_data.data[i] = (u8)reader.read_bits(8u);
+                if (reader.failed) return false;
+            }
+        }
+        if (callback && !callback(entry_type,
+                                  (const char*)path.data,
+                                  path_length,
+                                  file_data.data,
+                                  file_size,
+                                  entry_count,
+                                  callback_context)) {
+            return false;
+        }
+    }
+    usize remaining_bits = reader.bit_count - reader.cursor;
+    if (remaining_bits > 7u) return false;
+    while (reader.cursor < reader.bit_count) {
+        if (reader.read_bit() != 0u) return false;
+    }
+    return !reader.failed;
+}
+
+static bool archive_is_well_formed(const makocode::ByteBuffer& archive) {
+    return archive_parse(archive, (ArchiveEntryCallback)0, (void*)0, (u64*)0);
+}
+
 static bool ensure_directory_exists(const char* path) {
     struct stat st;
     if (stat(path, &st) == 0) {
@@ -22104,103 +22133,39 @@ static bool join_output_path(const char* base_dir,
 
 static bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
                                         const char* output_dir) {
-    if (!payload.data || payload.size < ARCHIVE_HEADER_SIZE) {
-        console_line(2, "decode: payload missing archive header");
-        return false;
-    }
-    for (usize i = 0u; i < ARCHIVE_MAGIC_SIZE; ++i) {
-        if (payload.data[i] != (u8)ARCHIVE_MAGIC[i]) {
-            console_line(2, "decode: payload is not a makocode archive");
-            return false;
-        }
-    }
-    u32 entry_count = read_le_u32(payload.data + ARCHIVE_MAGIC_SIZE);
-    usize cursor = ARCHIVE_HEADER_SIZE;
-    for (u32 entry_index = 0u; entry_index < entry_count; ++entry_index) {
-        if (cursor >= payload.size) {
-            console_line(2, "decode: archive truncated before entries completed");
-            return false;
-        }
-        u8 entry_type = payload.data[cursor++];
-        if ((payload.size - cursor) < 4u) {
-            console_line(2, "decode: archive truncated during path length read");
-            return false;
-        }
-        u32 path_length = read_le_u32(payload.data + cursor);
-        cursor += 4u;
-        if (path_length == 0u) {
-            console_line(2, "decode: archive entry has empty path");
-            return false;
-        }
-        if ((payload.size - cursor) < (usize)path_length) {
-            console_line(2, "decode: archive truncated during path read");
-            return false;
-        }
-        makocode::ByteBuffer path_buffer;
-        if (!path_buffer.ensure(path_length + 1u)) {
-            return false;
-        }
-        for (u32 i = 0u; i < path_length; ++i) {
-            path_buffer.data[i] = payload.data[cursor + i];
-        }
-        path_buffer.data[path_length] = 0u;
-        path_buffer.size = path_length;
-        const char* entry_path = (const char*)path_buffer.data;
-        if (!is_safe_archive_path(entry_path, path_length)) {
-            console_write(2, "decode: unsafe archive path ");
-            console_line(2, entry_path);
-            return false;
-        }
-        cursor += (usize)path_length;
+    auto unpack_entry = [](u8 entry_type,
+                           const char* entry_path,
+                           usize,
+                           const u8* file_data,
+                           usize file_size,
+                           u64,
+                           void* context) -> bool {
+        const char* destination = (const char*)context;
+        makocode::ByteBuffer output_path;
+        if (!join_output_path(destination, entry_path, output_path)) return false;
         if (entry_type == 1u) {
-            makocode::ByteBuffer output_path;
-            if (!join_output_path(output_dir, entry_path, output_path)) {
-                return false;
-            }
             if (!ensure_directory_tree((const char*)output_path.data)) {
                 console_write(2, "decode: failed to create directory ");
                 console_line(2, (const char*)output_path.data);
                 return false;
             }
-        } else if (entry_type == 0u) {
-            if ((payload.size - cursor) < 8u) {
-                console_line(2, "decode: archive truncated during file size read");
-                return false;
-            }
-            u64 file_size = read_le_u64(payload.data + cursor);
-            cursor += 8u;
-            if ((payload.size - cursor) < file_size) {
-                console_line(2, "decode: archive truncated during file data read");
-                return false;
-            }
-            const u8* file_data = payload.data + cursor;
-            cursor += (usize)file_size;
-            makocode::ByteBuffer output_path;
-            if (!join_output_path(output_dir, entry_path, output_path)) {
-                return false;
-            }
-            if (!ensure_parent_directories((const char*)output_path.data)) {
-                console_write(2, "decode: failed to prepare directories for ");
-                console_line(2, (const char*)output_path.data);
-                return false;
-            }
-            if (!write_bytes_to_file((const char*)output_path.data,
-                                     file_data,
-                                     (usize)file_size)) {
-                console_write(2, "decode: failed to write file ");
-                console_line(2, (const char*)output_path.data);
-                return false;
-            }
-        } else {
-            console_line(2, "decode: unknown archive entry type");
+            return true;
+        }
+        if (!ensure_parent_directories((const char*)output_path.data)) {
+            console_write(2, "decode: failed to prepare directories for ");
+            console_line(2, (const char*)output_path.data);
             return false;
         }
-    }
-    if (cursor != payload.size) {
-        console_line(2, "decode: archive payload has trailing data");
-        return false;
-    }
-    return true;
+        if (!write_bytes_to_file((const char*)output_path.data,
+                                 file_data,
+                                 file_size)) {
+            console_write(2, "decode: failed to write file ");
+            console_line(2, (const char*)output_path.data);
+            return false;
+        }
+        return true;
+    };
+    return archive_parse(payload, unpack_entry, (void*)output_dir, (u64*)0);
 }
 
 static void write_usage() {
@@ -22680,8 +22645,14 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
     const double safety_margin = 0.02;
     double required_erasure_fraction = structural_fraction + safety_margin;
     if (required_erasure_fraction >= 1.0) return false;
+    u32 max_data_candidate = makocode::RS_FIELD_SIZE - 2u;
+    if (payload_bytes < (usize)max_data_candidate) {
+        // For a single short block, spend excess RS capacity on parity instead
+        // of padding the compressed payload with zero data symbols.
+        max_data_candidate = (u32)payload_bytes;
+    }
     bool found = false;
-    for (u32 data_candidate = makocode::RS_FIELD_SIZE - 2u;
+    for (u32 data_candidate = max_data_candidate;
          data_candidate > 0u && !found;
          --data_candidate) {
         for (u32 parity_candidate = 2u;
@@ -23387,7 +23358,10 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: no files or directories to encode");
         return 1;
     }
-    archive_finalize(archive);
+    if (!archive_finalize(archive)) {
+        console_line(2, "encode: failed to finalize archive");
+        return 1;
+    }
     footer_config.filename_text = 0;
     footer_config.filename_length = 0u;
     footer_config.has_filename = false;
@@ -26738,55 +26712,7 @@ retry_decode:
                     continue;
                 }
                 const makocode::ByteBuffer& archive = candidate_decoder.payload;
-                bool archive_valid = archive.data && archive.size >= ARCHIVE_HEADER_SIZE;
-                for (usize i = 0u; archive_valid && i < ARCHIVE_MAGIC_SIZE; ++i) {
-                    if (archive.data[i] != (u8)ARCHIVE_MAGIC[i]) {
-                        archive_valid = false;
-                    }
-                }
-                usize archive_cursor = ARCHIVE_HEADER_SIZE;
-                u32 archive_entries = archive_valid
-                                          ? read_le_u32(archive.data + ARCHIVE_MAGIC_SIZE)
-                                          : 0u;
-                for (u32 entry_index = 0u;
-                     archive_valid && entry_index < archive_entries;
-                     ++entry_index) {
-                    if (archive_cursor >= archive.size ||
-                        archive.size - archive_cursor < 5u) {
-                        archive_valid = false;
-                        break;
-                    }
-                    u8 entry_type = archive.data[archive_cursor++];
-                    u32 path_length = read_le_u32(archive.data + archive_cursor);
-                    archive_cursor += 4u;
-                    if (path_length == 0u ||
-                        (usize)path_length > archive.size - archive_cursor ||
-                        !is_safe_archive_path(
-                            (const char*)(archive.data + archive_cursor),
-                            path_length)) {
-                        archive_valid = false;
-                        break;
-                    }
-                    archive_cursor += (usize)path_length;
-                    if (entry_type == 0u) {
-                        if (archive.size - archive_cursor < 8u) {
-                            archive_valid = false;
-                            break;
-                        }
-                        u64 file_size = read_le_u64(archive.data + archive_cursor);
-                        archive_cursor += 8u;
-                        if (file_size > (u64)(archive.size - archive_cursor)) {
-                            archive_valid = false;
-                            break;
-                        }
-                        archive_cursor += (usize)file_size;
-                    } else if (entry_type != 1u) {
-                        archive_valid = false;
-                    }
-                }
-                if (archive_valid && archive_cursor != archive.size) {
-                    archive_valid = false;
-                }
+                bool archive_valid = archive_is_well_formed(archive);
                 if (archive_valid) {
                     ++valid_candidates;
                     if (valid_candidates == 1u) {
@@ -26937,45 +26863,63 @@ retry_decode:
             u64_to_ascii(read_le_u64(payload_metadata.lzma_header + LZMA_PROPS_SIZE), number, sizeof(number));
             ok = decoded.append_ascii("metadata lzma_uncompressed_bytes ") && decoded.append_ascii(number) && decoded.append_char('\n');
         }
-        ok = ok && decoded.append_ascii("end-payload\narchive MKARCH01\nentries ");
-        if (!archive.data || archive.size < ARCHIVE_HEADER_SIZE) ok = false;
-        for (usize i = 0; ok && i < ARCHIVE_MAGIC_SIZE; ++i) {
-            if (archive.data[i] != (u8)ARCHIVE_MAGIC[i]) ok = false;
-        }
-        u32 entries = ok ? read_le_u32(archive.data + ARCHIVE_MAGIC_SIZE) : 0u;
-        u64_to_ascii(entries, number, sizeof(number));
-        ok = ok && decoded.append_ascii(number) && decoded.append_char('\n');
-        usize cursor = ARCHIVE_HEADER_SIZE;
-        static const char hex[] = "0123456789ABCDEF";
-        for (u32 entry = 0; ok && entry < entries; ++entry) {
-            if (cursor > archive.size || archive.size - cursor < 5u) { ok = false; break; }
-            u8 type = archive.data[cursor++];
-            u32 path_size = read_le_u32(archive.data + cursor);
-            cursor += 4u;
-            if (path_size == 0u || path_size > archive.size - cursor || !is_safe_archive_path((const char*)archive.data + cursor, path_size) || type > 1u) { ok = false; break; }
-            ok = decoded.append_ascii(type == 1u ? "directory " : "file ");
-            for (u32 i = 0; ok && i < path_size; ++i) {
-                u8 c = archive.data[cursor++];
-                if (c >= 33u && c <= 126u && c != '\\') ok = decoded.append_char((char)c);
-                else ok = decoded.append_ascii("\\x") && decoded.append_char(hex[c >> 4u]) && decoded.append_char(hex[c & 15u]);
+        struct ArchiveOutputContext {
+            makocode::ByteBuffer* decoded;
+            bool started;
+        } archive_output = {&decoded, false};
+        auto append_decoded_archive_entry = [](u8 type,
+                                               const char* path,
+                                               usize path_size,
+                                               const u8* file_data,
+                                               usize file_size,
+                                               u64 entries,
+                                               void* context) -> bool {
+            ArchiveOutputContext* output = (ArchiveOutputContext*)context;
+            makocode::ByteBuffer& target = *output->decoded;
+            char number_buffer[32];
+            static const char hex_digits[] = "0123456789ABCDEF";
+            if (!output->started) {
+                u64_to_ascii(entries, number_buffer, sizeof(number_buffer));
+                if (!target.append_ascii("end-payload\narchive\nentries ") ||
+                    !target.append_ascii(number_buffer) || !target.append_char('\n')) {
+                    return false;
+                }
+                output->started = true;
             }
-            if (type == 0u) {
-                if (!ok || archive.size - cursor < 8u) { ok = false; break; }
-                u64 size = read_le_u64(archive.data + cursor);
-                cursor += 8u;
-                if (size > archive.size - cursor) { ok = false; break; }
-                u64_to_ascii(size, number, sizeof(number));
-                ok = decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
-                for (u64 i = 0; ok && i < size; ++i) {
-                    u8 c = archive.data[cursor++];
-                    if (c >= 32u && c <= 126u && c != '\\') ok = decoded.append_char((char)c);
-                    else ok = decoded.append_ascii("\\x") && decoded.append_char(hex[c >> 4u]) && decoded.append_char(hex[c & 15u]);
+            if (!target.append_ascii(type == 1u ? "directory " : "file ")) return false;
+            const u8* path_bytes = (const u8*)path;
+            for (usize i = 0u; i < path_size; ++i) {
+                u8 c = path_bytes[i];
+                if (c >= 33u && c <= 126u && c != '\\') {
+                    if (!target.append_char((char)c)) return false;
+                } else if (!target.append_ascii("\\x") ||
+                           !target.append_char(hex_digits[c >> 4u]) ||
+                           !target.append_char(hex_digits[c & 15u])) {
+                    return false;
                 }
             }
-            ok = ok && decoded.append_char('\n');
-        }
-        if (cursor != archive.size) ok = false;
-        ok = ok && decoded.append_ascii("end-archive\nend\n");
+            if (type == 0u) {
+                u64_to_ascii((u64)file_size, number_buffer, sizeof(number_buffer));
+                if (!target.append_char(' ') || !target.append_ascii(number_buffer) ||
+                    !target.append_char('\n')) return false;
+                for (usize i = 0u; i < file_size; ++i) {
+                    u8 c = file_data[i];
+                    if (c >= 32u && c <= 126u && c != '\\') {
+                        if (!target.append_char((char)c)) return false;
+                    } else if (!target.append_ascii("\\x") ||
+                               !target.append_char(hex_digits[c >> 4u]) ||
+                               !target.append_char(hex_digits[c & 15u])) {
+                        return false;
+                    }
+                }
+            }
+            return target.append_char('\n');
+        };
+        ok = ok && archive.data && archive_parse(archive,
+                                                  append_decoded_archive_entry,
+                                                  &archive_output,
+                                                  (u64*)0);
+        ok = ok && archive_output.started && decoded.append_ascii("end-archive\nend\n");
         if (decoded_stdout_requested) {
             if (!ok || !write_all_fd(1, decoded.data, decoded.size)) {
                 console_line(2, "decode: failed to write decoded stdout");

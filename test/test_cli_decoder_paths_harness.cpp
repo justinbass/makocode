@@ -61,18 +61,12 @@ int main(int argc, char** argv) {
 
     ArchiveBuildContext traversal_archive;
     const char* traversal_path = "../traversal_escape";
-    usize traversal_path_length = ascii_length(traversal_path);
     if (!archive_init(traversal_archive) ||
-        !archive_append_u8(traversal_archive.buffer, 1u) ||
-        !archive_append_u32(traversal_archive.buffer, (u32)traversal_path_length) ||
-        !archive_append_bytes(traversal_archive.buffer,
-                              (const u8*)traversal_path,
-                              traversal_path_length)) {
+        !archive_add_directory(traversal_archive, traversal_path) ||
+        !archive_finalize(traversal_archive)) {
         fprintf(stderr, "decoder paths harness: traversal archive setup failed\n");
         return 1;
     }
-    traversal_archive.entry_count = 1u;
-    archive_finalize(traversal_archive);
     struct stat outside_entry;
     char outside_path[4096];
     int outside_path_length = snprintf(outside_path,

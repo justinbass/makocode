@@ -1,7 +1,7 @@
 TODO
-- MKARCH compress schema
+- Write data to the middle of the page with a margin, not pooled at the top
 - Consider making linear barcode as regular metadata? Compression and ECC apply
-- Shuffle metadata middle tile throughout the image
+- Shuffle metadata middle tile throughout the image, test damage to the middle too
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Footer title and metadata just on first page - or middle page?
 - Optional fiducial markings and center code, use known error position to correct in place. Data could simply be linear across the page...
