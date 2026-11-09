@@ -196,8 +196,8 @@ static void ppm_free(Ppm* ppm) {
     strvec_free(&ppm->comments);
 }
 
-static Ppm read_ppm_p3_ascii(const char* path) {
-    FILE* f = fopen(path, "r");
+static Ppm read_ppm_p6(const char* path) {
+    FILE* f = fopen(path, "rb");
     if (!f) die2("ppm_transform: failed to open ", path);
 
     Ppm ppm;
@@ -212,13 +212,14 @@ static Ppm read_ppm_p3_ascii(const char* path) {
         die2("ppm_transform: ", "truncated header");
     }
     trim_right_in_place(line);
-    if (strcmp(line, "P3") != 0) {
+    if (strcmp(line, "P6") != 0) {
         free(line);
         fclose(f);
-        die2("ppm_transform: ", "not an ASCII P3 PPM");
+        die2("ppm_transform: ", "not a binary P6 PPM");
     }
 
-    int have_w = 0, have_h = 0, have_max = 0;
+    int header_values[3] = {0, 0, 0};
+    int header_count = 0;
 
     while ((nread = getline(&line, &line_cap, f)) != -1) {
         trim_right_in_place(line);
@@ -230,73 +231,49 @@ static Ppm read_ppm_p3_ascii(const char* path) {
         }
         char* saveptr = nullptr;
         for (char* tok = strtok_r(stripped, " \t\r\n", &saveptr); tok; tok = strtok_r(nullptr, " \t\r\n", &saveptr)) {
-            if (!have_w) {
-                ppm.width = parse_i32(tok, "width");
-                if (ppm.width <= 0) die("ppm_transform: invalid dimensions");
-                have_w = 1;
-                continue;
-            }
-            if (!have_h) {
-                ppm.height = parse_i32(tok, "height");
-                if (ppm.height <= 0) die("ppm_transform: invalid dimensions");
-                have_h = 1;
-                continue;
-            }
-            if (!have_max) {
-                int maxval = parse_i32(tok, "maxval");
-                if (maxval != 255) die("ppm_transform: expected maxval 255");
-                have_max = 1;
-                continue;
-            }
-            int v = parse_i32(tok, "pixel");
-            if (v < 0 || v > 255) die("ppm_transform: pixel value out of range");
-            intvec_push(&ppm.pixels, v);
+            if (header_count >= 3) die("ppm_transform: malformed P6 header");
+            header_values[header_count++] = parse_i32(tok, "header value");
         }
+        if (header_count == 3) break;
     }
 
     free(line);
-    fclose(f);
 
-    if (!have_w || !have_h || !have_max) die("ppm_transform: truncated header");
+    if (header_count != 3) die("ppm_transform: truncated header");
+    ppm.width = header_values[0];
+    ppm.height = header_values[1];
+    if (ppm.width <= 0 || ppm.height <= 0 || header_values[2] != 255)
+        die("ppm_transform: invalid P6 dimensions or maxval");
 
     size_t expected = (size_t)ppm.width * (size_t)ppm.height * 3;
-    if (ppm.pixels.size != expected) die("ppm_transform: pixel count mismatch");
+    for (size_t i = 0; i < expected; ++i) {
+        int c = fgetc(f);
+        if (c == EOF) die("ppm_transform: truncated pixel data");
+        intvec_push(&ppm.pixels, c);
+    }
+    if (fgetc(f) != EOF) die("ppm_transform: pixel count mismatch");
+    fclose(f);
     return ppm;
 }
 
-static void write_ppm_p3_ascii(const char* path,
+static void write_ppm_p6(const char* path,
                                const StrVec* comments,
                                int width,
                                int height,
                                const IntVec* pixels,
                                int row_compact) {
-    FILE* f = fopen(path, "w");
+    FILE* f = fopen(path, "wb");
     if (!f) die2("ppm_transform: failed to write ", path);
 
-    fprintf(f, "P3\n");
+    fprintf(f, "P6\n");
     if (comments) {
         for (size_t i = 0; i < comments->size; i++) fprintf(f, "%s\n", comments->data[i]);
     }
     fprintf(f, "%d %d\n", width, height);
     fprintf(f, "255\n");
 
-    if (!row_compact) {
-        for (size_t i = 0; i + 2 < pixels->size; i += 3) {
-            fprintf(f, "%d %d %d\n", pixels->data[i], pixels->data[i + 1], pixels->data[i + 2]);
-        }
-        fclose(f);
-        return;
-    }
-
-    size_t row_stride = (size_t)width * 3;
-    for (int y = 0; y < height; y++) {
-        size_t base = (size_t)y * row_stride;
-        for (size_t i = 0; i < row_stride; i++) {
-            if (i) fputc(' ', f);
-            fprintf(f, "%d", pixels->data[base + i]);
-        }
-        fputc('\n', f);
-    }
+    (void)row_compact;
+    for (size_t i = 0; i < pixels->size; ++i) fputc(pixels->data[i], f);
     fclose(f);
 }
 
@@ -800,7 +777,7 @@ static void cmd_solid(int argc, char** argv) {
         pixels.data[i + 1] = g;
         pixels.data[i + 2] = b;
     }
-    write_ppm_p3_ascii(output, nullptr, width, height, &pixels, 0);
+    write_ppm_p6(output, nullptr, width, height, &pixels, 0);
     intvec_free(&pixels);
 }
 
@@ -829,7 +806,7 @@ static void cmd_noise(int argc, char** argv) {
     pixels.size = sz;
     pixels.cap = sz;
     for (size_t i = 0; i < sz; i++) pixels.data[i] = rand_u8(&rng);
-    write_ppm_p3_ascii(output, nullptr, width, height, &pixels, 0);
+    write_ppm_p6(output, nullptr, width, height, &pixels, 0);
     intvec_free(&pixels);
 }
 
@@ -851,7 +828,7 @@ static void cmd_corrupt_footer_data_destroyed(int argc, char** argv) {
         else die2("ppm_transform: unknown flag ", arg);
     }
     if (!input || !output) die("ppm_transform: corrupt-footer-data-destroyed requires --input/--output");
-    Ppm ppm = read_ppm_p3_ascii(input);
+    Ppm ppm = read_ppm_p6(input);
     if (ppm.height <= footer_height_px) die("ppm_transform: corrupt-footer-data-destroyed: image too short");
     uint32_t rng = (uint32_t)seed ^ 0x12345678u;
     int stripe_top = ppm.height - footer_height_px;
@@ -867,7 +844,7 @@ static void cmd_corrupt_footer_data_destroyed(int argc, char** argv) {
             ppm.pixels.data[idx + 2] = rand_u8(&rng);
         }
     }
-    write_ppm_p3_ascii(output, &ppm.comments, ppm.width, ppm.height, &ppm.pixels, 0);
+    write_ppm_p6(output, &ppm.comments, ppm.width, ppm.height, &ppm.pixels, 0);
     ppm_free(&ppm);
 }
 
@@ -891,7 +868,7 @@ static void cmd_corrupt_footer_valid_data_too_corrupt(int argc, char** argv) {
         else die2("ppm_transform: unknown flag ", arg);
     }
     if (!input || !output) die("ppm_transform: corrupt-footer-valid-data-too-corrupt requires --input/--output");
-    Ppm ppm = read_ppm_p3_ascii(input);
+    Ppm ppm = read_ppm_p6(input);
     int data_bottom = ppm.height - footer_height_px;
     if (data_bottom <= border_keep + 1) die("ppm_transform: corrupt-footer-valid-data-too-corrupt: image too short");
     int y0 = border_keep;
@@ -913,7 +890,7 @@ static void cmd_corrupt_footer_valid_data_too_corrupt(int argc, char** argv) {
             ppm.pixels.data[idx + 2] = rand_u8(&rng);
         }
     }
-    write_ppm_p3_ascii(output, &ppm.comments, ppm.width, ppm.height, &ppm.pixels, 0);
+    write_ppm_p6(output, &ppm.comments, ppm.width, ppm.height, &ppm.pixels, 0);
     ppm_free(&ppm);
 }
 
@@ -1016,7 +993,7 @@ static void cmd_overlay_mask(int argc, char** argv) {
         }
     }
 
-    write_ppm_p3_ascii(output, &comments, width, height, &pixels, 1);
+    write_ppm_p6(output, &comments, width, height, &pixels, 1);
 
     free(circle_palette);
     intvec_free(&pixels);
@@ -1040,8 +1017,8 @@ static void cmd_overlay_check(int argc, char** argv) {
     }
     if (!base_path || !merged_path) die("ppm_transform: overlay-check requires --base/--merged");
 
-    Ppm base = read_ppm_p3_ascii(base_path);
-    Ppm merged = read_ppm_p3_ascii(merged_path);
+    Ppm base = read_ppm_p6(base_path);
+    Ppm merged = read_ppm_p6(merged_path);
     if (base.width != merged.width || base.height != merged.height) die("dimension mismatch");
 
     // Optional allowed colors set.
@@ -1162,7 +1139,7 @@ static void cmd_transform(int argc, char** argv) {
         die("ppm_transform: --corrupt-former-header-slots must be between 0 and 3");
     }
 
-    Ppm ppm = read_ppm_p3_ascii(input);
+    Ppm ppm = read_ppm_p6(input);
     unsigned char* canonical_control_source_mask = nullptr;
     unsigned char* canonical_payload_sample_mask = nullptr;
     int* canonical_source_pixels = nullptr;
@@ -1535,7 +1512,7 @@ static void cmd_transform(int argc, char** argv) {
         }
     }
 
-    write_ppm_p3_ascii(output, &comments, w, h, &current, 0);
+    write_ppm_p6(output, &comments, w, h, &current, 0);
 
     intvec_free(&current);
     free(canonical_control_source_mask);

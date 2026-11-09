@@ -147,11 +147,10 @@ rm -rf "$work_dir"
 
 run_case_wrong_depth() {
     cat > "$wrong_depth" <<'PPM'
-P3
+P6
 2 2
 42
-0 0 0  0 0 0
-0 0 0  0 0 0
+
 PPM
     local decode_dir="$work_dir/wrong_depth_decode"
     run_expect_failure "decode-wrong-depth" "$makocode_bin" decode "$wrong_depth" --debug "--output-dir=$decode_dir"

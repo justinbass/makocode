@@ -37,13 +37,11 @@ printf 'makocode' > "$work_dir/makocode.bin"
 
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan/scan.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import math
 import sys
 
-tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[0] == 'P3' and tokens[3] == '255'
-source_width, source_height = int(tokens[1]), int(tokens[2])
-source = list(map(int, tokens[4:]))
+source_width, source_height, source = read_ppm(sys.argv[1])
 assert (source_width, source_height) == (80, 80)
 assert len(source) == source_width * source_height * 3
 
@@ -116,11 +114,7 @@ for col, row, pixel_x, pixel_y in damaged_samples:
     pixel = (pixel_y * canvas_width + pixel_x) * 3
     canvas[pixel:pixel + 3] = [damaged_value] * 3
 
-Path(sys.argv[2]).write_text(
-    f'P3\n{canvas_width} {canvas_height}\n255\n' +
-    '\n'.join(f'{canvas[i]} {canvas[i + 1]} {canvas[i + 2]}'
-              for i in range(0, len(canvas), 3)) + '\n'
-)
+write_ppm(sys.argv[2], canvas_width, canvas_height, canvas)
 PY
 
 if ! "$makocode_bin" decode \

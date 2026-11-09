@@ -62,41 +62,8 @@ printf 'makocode' > "$work_dir/makocode.bin"
     --scale-x 3.2363636363636363 \
     --scale-y 3.2363636363636363
 
-# Put the 259x259 bilinear render at (7, 6) on the 278x278 white canvas.
-awk '
-    NR == 1 { if ($0 != "P3") exit 2; next }
-    /^[[:space:]]*#/ { next }
-    {
-        for (i = 1; i <= NF; ++i) {
-            if (!have_width) { source_width = $i; have_width = 1; continue }
-            if (!have_height) { source_height = $i; have_height = 1; continue }
-            if (!have_maxval) { if ($i != 255) exit 2; have_maxval = 1; continue }
-            pixels[++count] = $i
-        }
-    }
-    END {
-        if (!have_width || !have_height || !have_maxval || count != source_width * source_height * 3) exit 2
-        canvas_width = 278
-        canvas_height = 278
-        offset_x = 7
-        offset_y = 6
-        if (source_width != 259 || source_height != 259) exit 2
-        print "P3"
-        print canvas_width, canvas_height
-        print 255
-        for (y = 0; y < canvas_height; ++y) {
-            for (x = 0; x < canvas_width; ++x) {
-                if (x >= offset_x && x < offset_x + source_width &&
-                    y >= offset_y && y < offset_y + source_height) {
-                    source_index = ((y - offset_y) * source_width + (x - offset_x)) * 3
-                    printf "%d %d %d\n", pixels[source_index + 1], pixels[source_index + 2], pixels[source_index + 3]
-                } else {
-                    print "255 255 255"
-                }
-            }
-        }
-    }
-' "$work_dir/scaled.ppm" > "$work_dir/fixture.ppm"
+# Put the 259x259 binary render at (7, 6) on the white canvas.
+python3 "$script_dir/ppm_pad.py" "$work_dir/scaled.ppm" "$work_dir/fixture.ppm" 278 278 7 6
 
 if ! "$makocode_bin" decode \
     "--output-dir=$work_dir/decoded" \

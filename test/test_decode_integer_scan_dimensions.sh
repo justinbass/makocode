@@ -16,11 +16,11 @@ printf makocode > "$work_dir/payload.bin"
     "--output-dir=$work_dir/encoded" --prefix=source >/dev/null)
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan.ppm" <<'PYTHON'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_gray_ppm
 import math
 import sys
-source = Path(sys.argv[1]).read_text().split()
-assert source[:4] == ['P3', '80', '80', '255']
-pixels = list(map(int, source[4:]))
+source_width, source_height, pixels = read_ppm(sys.argv[1])
+assert (source_width, source_height) == (80, 80)
 assert len(pixels) == 80 * 80 * 3
 # Rasterize a fresh encode at 2 scan pixels/module, using 4x4 coverage.
 # No scanned image, measured scan pixels, or external fixture data are used.
@@ -45,8 +45,7 @@ for y in range(1, height - 1):
         i = y * width + x
         blurred[i] = round(.75 * canvas[i] + .0625 * sum(
             canvas[j] for j in (i-1, i+1, i-width, i+width)))
-Path(sys.argv[2]).write_text(f'P3\n{width} {height}\n255\n' + '\n'.join(
-    f'{value} {value} {value}' for value in blurred))
+write_gray_ppm(sys.argv[2], width, height, blurred)
 PYTHON
 "$makocode_bin" decode "--output-dir=$work_dir/control" "$work_dir/encoded/source.ppm" >"$work_dir/control.log" 2>&1
 cmp "$work_dir/payload.bin" "$work_dir/control/payload.bin"

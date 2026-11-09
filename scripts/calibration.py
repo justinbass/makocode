@@ -66,42 +66,30 @@ FOOTER_GLYPHS = {
 CALIBRATION_PREFIX = b"makocode"
 
 
-def read_p3_ppm(path):
-    def tokens_from_file():
-        with path.open("rb") as input_file:
-            for line in input_file:
-                yield from line.partition(b"#")[0].split()
-
-    tokens = iter(tokens_from_file())
-    try:
-        magic = next(tokens)
-        header = [next(tokens), next(tokens), next(tokens)]
-    except StopIteration as exc:
-        raise ValueError("PPM header is incomplete") from exc
-    if magic != b"P3":
-        raise ValueError("input must be an ASCII P3 PPM")
-    try:
-        width, height, max_value = (int(token) for token in header)
-    except ValueError as exc:
-        raise ValueError("PPM header has invalid dimensions or max value") from exc
+def read_p6_ppm(path):
+    with path.open("rb") as input_file:
+        if input_file.readline().strip() != b"P6":
+            raise ValueError("input must be a binary P6 PPM")
+        header = []
+        while len(header) < 3:
+            line = input_file.readline()
+            if not line:
+                raise ValueError("PPM header is incomplete")
+            header.extend(line.partition(b"#")[0].split())
+        try:
+            width, height, max_value = (int(token) for token in header[:3])
+        except ValueError as exc:
+            raise ValueError("PPM header has invalid dimensions or max value") from exc
+        if len(header) != 3:
+            raise ValueError("PPM header has data after max value")
+        pixels = bytearray(input_file.read())
 
     if width <= 0 or height <= 0 or max_value <= 0 or max_value > 65535:
         raise ValueError("PPM dimensions and max value must be positive (max value <= 65535)")
     expected = width * height * 3
 
-    pixels = bytearray()
-    for token in tokens:
-        if len(pixels) >= expected:
-            raise ValueError(f"PPM has more than {expected} color values")
-        try:
-            channel = int(token)
-        except ValueError as exc:
-            raise ValueError("PPM contains an invalid color value") from exc
-        if channel < 0 or channel > max_value:
-            raise ValueError("PPM channel value is outside its declared range")
-        pixels.append((channel * 255 + max_value // 2) // max_value)
-    if len(pixels) != expected:
-        raise ValueError(f"PPM has {len(pixels)} color values; expected {expected}")
+    if max_value != 255 or len(pixels) != expected:
+        raise ValueError(f"P6 pixel data has {len(pixels)} bytes; expected {expected} at max value 255")
 
     return width, height, pixels
 
@@ -154,12 +142,8 @@ def make_columns(page_width, page_height):
     return columns, samples, required_width, required_height
 
 
-def write_p3_pixel_row(output, pixels):
-    lines = (
-        f"{pixels[offset]} {pixels[offset + 1]} {pixels[offset + 2]}"
-        for offset in range(0, len(pixels), 3)
-    )
-    output.write("\n".join(lines) + "\n")
+def write_p6_pixel_row(output, pixels):
+    output.write(pixels)
 
 
 def write_sheet(path, source_images, page_width, page_height, columns, samples):
@@ -171,9 +155,8 @@ def write_sheet(path, source_images, page_width, page_height, columns, samples):
     footer_left = max(0, (page_width - footer_width) // 2)
     footer_top = page_height - FOOTER_GLYPH_HEIGHT
 
-    with path.open("w", encoding="ascii", newline="\n") as output:
-        output.write("P3\n")
-        output.write(f"{page_width} {page_height}\n255\n")
+    with path.open("wb") as output:
+        output.write(f"P6\n{page_width} {page_height}\n255\n".encode("ascii"))
 
         for page_y in range(page_height):
             pixels = bytearray([255]) * (page_width * 3)
@@ -201,7 +184,7 @@ def write_sheet(path, source_images, page_width, page_height, columns, samples):
                             pixel_offset = (glyph_left + glyph_x) * 3
                             pixels[pixel_offset:pixel_offset + 3] = b"\x00\x00\x00"
 
-            write_p3_pixel_row(output, pixels)
+            write_p6_pixel_row(output, pixels)
 
 
 def write_sample_crop(path, page_width, page_height, page_pixels, sample,
@@ -212,8 +195,8 @@ def write_sample_crop(path, page_width, page_height, page_pixels, sample,
     padding = 0
     crop_width = sample["width_px"] + padding * 2
     crop_height = sample["height_px"] + padding * 2
-    with path.open("w", encoding="ascii", newline="\n") as output:
-        output.write(f"P3\n{crop_width} {crop_height}\n255\n")
+    with path.open("wb") as output:
+        output.write(f"P6\n{crop_width} {crop_height}\n255\n".encode("ascii"))
         for crop_y in range(crop_height):
             pixels = bytearray([255]) * (crop_width * 3)
             sample_y = crop_y - padding
@@ -235,7 +218,7 @@ def write_sample_crop(path, page_width, page_height, page_pixels, sample,
                         pixels[destination_offset:destination_offset + 3] = (
                             page_pixels[source_offset:source_offset + 3]
                         )
-            write_p3_pixel_row(output, pixels)
+            write_p6_pixel_row(output, pixels)
 
 
 def make_calibration_layout(page_width, page_height):
@@ -610,7 +593,7 @@ def fit_calibration_scan(work_dir, columns, samples, source_images,
             reference_path, source_images, scan_width, scan_height,
             columns, samples,
         )
-        _, _, reference_pixels = read_p3_ppm(reference_path)
+        _, _, reference_pixels = read_p6_ppm(reference_path)
         if scan_pixels == reference_pixels:
             center_x = scan_width / 2
             center_y = scan_height / 2
@@ -629,7 +612,7 @@ def fit_calibration_scan(work_dir, columns, samples, source_images,
 
 
 def analyze_scan(makocode_bin, scan_path):
-    page_width, page_height, page_pixels = read_p3_ppm(scan_path)
+    page_width, page_height, page_pixels = read_p6_ppm(scan_path)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-decode-") as temporary_directory:
         work_dir = Path(temporary_directory)
         columns, samples, expected_width, expected_height = make_calibration_layout(
@@ -754,7 +737,7 @@ def analyze_scan(makocode_bin, scan_path):
 
 
 def crop_scan(makocode_bin, scan_path):
-    scan_width, scan_height, scan_pixels = read_p3_ppm(scan_path)
+    scan_width, scan_height, scan_pixels = read_p6_ppm(scan_path)
     with tempfile.TemporaryDirectory(prefix="makocode-calibration-source-") as temporary_directory:
         columns, samples, expected_width, expected_height = make_calibration_layout(
             scan_width, scan_height,
@@ -810,7 +793,7 @@ def parse_args(argv):
 
     decode_parser = commands.add_parser("decode", help="measure decode success from a scan")
     decode_parser.add_argument("scan", type=Path, metavar="SCAN.ppm",
-                               help="scanned calibration sheet as a P3 PPM")
+                               help="scanned calibration sheet as a P6 PPM")
     crop_parser = commands.add_parser("crop", help="crop calibration samples without decoding")
     crop_parser.add_argument("scan", type=Path, metavar="SCAN.ppm",
                              help="scanned calibration sheet to crop")
@@ -926,7 +909,7 @@ def encode_calibration_sources(makocode_bin, work_dir, samples):
         sample["expected_payload"] = (
             CALIBRATION_PREFIX + bytes(filler[:lower_length - len(CALIBRATION_PREFIX)])
         )
-        source_images.append(read_p3_ppm(source_path))
+        source_images.append(read_p6_ppm(source_path))
     return source_images
 
 

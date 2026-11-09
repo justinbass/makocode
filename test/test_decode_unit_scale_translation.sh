@@ -20,10 +20,10 @@ printf makocode > "$work_dir/payload.bin"
     "--output-dir=$work_dir/encoded" --prefix=source >/dev/null)
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan.ppm" "$edge_bleed" "$optical_blur" <<'PYTHON'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
-source = Path(sys.argv[1]).read_text().split()
-assert source[:4] == ['P3', '80', '80', '255']
-pixels = list(map(int, source[4:]))
+source_width, source_height, pixels = read_ppm(sys.argv[1])
+assert (source_width, source_height) == (80, 80)
 assert len(pixels) == 80 * 80 * 3
 # Unit-scale scan: off-center page, padding and reduced ink/paper contrast.
 # The even-sided metadata tile has a half-pixel center on this canvas.
@@ -50,8 +50,7 @@ if sys.argv[4] == '1':
             value = round(.65 * ink[i] + .0875 * sum(
                 ink[j] for j in (i - 3, i + 3, i - 180, i + 180)))
             canvas[i:i+3] = [value] * 3
-Path(sys.argv[2]).write_text('P3\n85 85\n255\n' + '\n'.join(
-    ' '.join(map(str, canvas[i:i+3])) for i in range(0, len(canvas), 3)))
+write_ppm(sys.argv[2], 85, 85, canvas)
 PYTHON
 "$makocode_bin" decode "--output-dir=$work_dir/control" "$work_dir/encoded/source.ppm" >"$work_dir/control.log" 2>&1
 cmp "$work_dir/payload.bin" "$work_dir/control/payload.bin"

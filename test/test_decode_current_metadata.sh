@@ -15,10 +15,10 @@ printf 'x' > "$work_dir/payload.bin"
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
 python3 - "$work_dir/encoded/page.ppm" "$work_dir/damaged.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
-source = Path(sys.argv[1]).read_text().split()
-assert source[:4] == ['P3', '80', '80', '255']
-pixels = list(map(int, source[4:]))
+width, height, pixels = read_ppm(sys.argv[1])
+assert (width, height) == (80, 80)
 assert len(pixels) == 80 * 80 * 3
 tile_x = tile_y = (80 - 48) // 2
 # The first payload module is inside the protected tile body, after the border
@@ -30,10 +30,7 @@ original = pixels[index:index + 3]
 assert original in ([0, 0, 0], [255, 255, 255])
 pixels[index:index + 3] = [255 - value for value in original]
 assert pixels[index:index + 3] != original
-with open(sys.argv[2], 'w') as out:
-    out.write('P3\n80 80\n255\n')
-    for offset in range(0, len(pixels), 3):
-        out.write(f'{pixels[offset]} {pixels[offset + 1]} {pixels[offset + 2]}\n')
+write_ppm(sys.argv[2], 80, 80, pixels)
 PY
 "$repo_root/makocode" decode --output-dir="$work_dir/decoded" \
     "$work_dir/damaged.ppm" >"$work_dir/decode.log" 2>&1 || {
@@ -46,20 +43,16 @@ cmp "$work_dir/payload.bin" "$work_dir/decoded/payload.bin"
 # cannot be established. Corrupt the full tile and require a clean decode error.
 python3 - "$work_dir/encoded/page.ppm" "$work_dir/no_bootstrap.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
 
-tokens = Path(sys.argv[1]).read_text().split()
-width, height = int(tokens[1]), int(tokens[2])
-pixels = list(map(int, tokens[4:]))
+width, height, pixels = read_ppm(sys.argv[1])
 tile_x = tile_y = (width - 48) // 2
 for y in range(tile_y, tile_y + 48):
     for x in range(tile_x, tile_x + 48):
         index = (y * width + x) * 3
         pixels[index:index + 3] = [127, 127, 127]
-with open(sys.argv[2], 'w') as out:
-    out.write(f'P3\n{width} {height}\n255\n')
-    for offset in range(0, len(pixels), 3):
-        out.write(f'{pixels[offset]} {pixels[offset + 1]} {pixels[offset + 2]}\n')
+write_ppm(sys.argv[2], width, height, pixels)
 PY
 if "$repo_root/makocode" decode --output-dir="$work_dir/no_bootstrap_out" \
     "$work_dir/no_bootstrap.ppm" >"$work_dir/no_bootstrap.log" 2>&1; then

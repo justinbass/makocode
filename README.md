@@ -110,7 +110,7 @@ lp -d HL-L3220CDW -o ppi=600 -o natural-scaling=100 -o sides=one-sided calibrati
 
 ### Converting Scans
 
-To turn a scanned image into a P3 `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -compress none scan.ppm`.
+To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -depth 8 -compress none scan.ppm`.
 
 ### Custom Palettes (Base-N Mode)
 

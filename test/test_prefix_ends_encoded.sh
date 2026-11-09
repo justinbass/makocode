@@ -110,19 +110,19 @@ fi
 # The 4x4 default marker at the upper-left fiducial location is white. Cyan and
 # black are the only payload colors, so this checks that the PPM contains the
 # fiducial grid rather than merely relying on successful decoding.
-if ! awk '
-    NR == 2 { width = $1; next }
-    NR >= 4 {
-        pixel = NR - 4
-        x = pixel % width
-        y = int(pixel / width)
-        if (x >= 10 && x < 14 && y >= 10 && y < 14) {
-            count++
-            if ($1 == 255 && $2 == 255 && $3 == 255) white++
-        }
-    }
-    END { exit !(count == 16 && white == 16) }
-' "$encoded_ppm"; then
+if ! python3 - "$script_dir" "$encoded_ppm" <<'PYTHON'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ppm_test_utils import read_ppm
+width, height, pixels = read_ppm(sys.argv[2])
+white = 0
+for y in range(10, 14):
+    for x in range(10, 14):
+        index = (y * width + x) * 3
+        white += pixels[index:index + 3] == [255, 255, 255]
+raise SystemExit(0 if width >= 14 and height >= 14 and white == 16 else 1)
+PYTHON
+then
     echo 'test_prefix_ends_encoded: expected the upper-left 4x4 fiducial marker to be white' >&2
     exit 1
 fi

@@ -50,12 +50,10 @@ for sample in 4_5x 5x; do
         "$sample" "$work_dir/encoded/small_scan.ppm" "$pitch" \
         "$work_dir/4_5x_hard_scan.ppm" "$work_dir/4_5x_soft_scan.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
 
-tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[0] == 'P3' and tokens[3] == '255'
-width, height = int(tokens[1]), int(tokens[2])
-pixels = list(map(int, tokens[4:]))
+width, height, pixels = read_ppm(sys.argv[1])
 assert len(pixels) == width * height * 3
 if sys.argv[3] == '4_5x':
     assert (width, height) == (179, 179)
@@ -82,9 +80,8 @@ for y in range(height):
 
 # Verify every logical cell still has its source value at the known geometric
 # center. The soft raster retains the bilinear gray edges produced by scaling.
-original = Path(sys.argv[4]).read_text().split()
-assert original[:4] == ['P3', '80', '80', '255']
-source_pixels = list(map(int, original[4:]))
+original_width, original_height, source_pixels = read_ppm(sys.argv[4])
+assert (original_width, original_height) == (80, 80)
 pitch = float(sys.argv[5])
 verification_canvas = soft_canvas if sys.argv[3] == '4_5x' else canvas
 for y in range(80):
@@ -97,22 +94,10 @@ for y in range(80):
                (sum(verification_canvas[canvas_index:canvas_index + 3]) < 384)
 
 if sys.argv[3] == '4_5x':
-    Path(sys.argv[6]).write_text(
-        f'P3\n{canvas_width} {canvas_height}\n255\n' +
-        '\n'.join(f'{hard_canvas[i]} {hard_canvas[i + 1]} {hard_canvas[i + 2]}'
-                  for i in range(0, len(hard_canvas), 3)) + '\n'
-    )
-    Path(sys.argv[7]).write_text(
-        f'P3\n{canvas_width} {canvas_height}\n255\n' +
-        '\n'.join(f'{soft_canvas[i]} {soft_canvas[i + 1]} {soft_canvas[i + 2]}'
-                  for i in range(0, len(soft_canvas), 3)) + '\n'
-    )
+    write_ppm(sys.argv[6], canvas_width, canvas_height, hard_canvas)
+    write_ppm(sys.argv[7], canvas_width, canvas_height, soft_canvas)
 else:
-    Path(sys.argv[2]).write_text(
-        f'P3\n{canvas_width} {canvas_height}\n255\n' +
-        '\n'.join(f'{canvas[i]} {canvas[i + 1]} {canvas[i + 2]}'
-                  for i in range(0, len(canvas), 3)) + '\n'
-    )
+    write_ppm(sys.argv[2], canvas_width, canvas_height, canvas)
 PY
 done
 

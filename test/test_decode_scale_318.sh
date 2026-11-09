@@ -54,42 +54,8 @@ printf '0' > "$work_dir/payload.bin"
     --scale-x 3.18 \
     --scale-y 3.18
 
-# Keep the rendered page at its exact scaled dimensions. The canonical tile
-# and fiducial grid need the larger source page; this retains the 3.18x scale.
-awk '
-    NR == 1 { if ($0 != "P3") exit 2; next }
-    /^[[:space:]]*#/ { next }
-    {
-        for (i = 1; i <= NF; ++i) {
-            if (!have_width) { source_width = $i; have_width = 1; continue }
-            if (!have_height) { source_height = $i; have_height = 1; continue }
-            if (!have_maxval) { if ($i != 255) exit 2; have_maxval = 1; continue }
-            pixels[++count] = $i
-        }
-    }
-    END {
-        if (!have_width || !have_height || !have_maxval || count != source_width * source_height * 3) exit 2
-        canvas_width = source_width
-        canvas_height = source_height
-        offset_x = 0
-        offset_y = 0
-        if (source_width > canvas_width || source_height > canvas_height) exit 2
-        print "P3"
-        print canvas_width, canvas_height
-        print 255
-        for (y = 0; y < canvas_height; ++y) {
-            for (x = 0; x < canvas_width; ++x) {
-                if (x >= offset_x && x < offset_x + source_width &&
-                    y >= offset_y && y < offset_y + source_height) {
-                    source_index = ((y - offset_y) * source_width + (x - offset_x)) * 3
-                    printf "%d %d %d\n", pixels[source_index + 1], pixels[source_index + 2], pixels[source_index + 3]
-                } else {
-                    print "255 255 255"
-                }
-            }
-        }
-    }
-' "$work_dir/scaled.ppm" > "$work_dir/fixture.ppm"
+# Keep the binary render at its exact scaled dimensions.
+cp "$work_dir/scaled.ppm" "$work_dir/fixture.ppm"
 
 if ! "$repo_root/makocode" decode \
     "--output-dir=$work_dir/decoded" \

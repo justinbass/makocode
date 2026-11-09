@@ -110,11 +110,12 @@ int main(int argc, char** argv) {
     u32 height = 0u;
     u32 max_value = 0u;
     if (!ppm_next_token(state, &token, &token_length) ||
-        !ascii_equals_token(token, token_length, "P3") ||
+        !ascii_equals_token(token, token_length, "P6") ||
         !parse_u32_token(state, width) ||
         !parse_u32_token(state, height) ||
         !parse_u32_token(state, max_value) ||
-        width != expected_width || height != expected_height || max_value != 255u) {
+        width != expected_width || height != expected_height || max_value != 255u ||
+        !ppm_consume_binary_separator(state)) {
         fprintf(stderr, "canonical tile: invalid PPM header\n");
         return 1;
     }

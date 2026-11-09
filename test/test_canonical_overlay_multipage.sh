@@ -105,31 +105,22 @@ page_summaries=("${ordered_summaries[@]}")
 # fail closed because its selector and ECC budgets are authoritative.
 python3 - "${pages[0]}" "$work/bad_tile.ppm" <<'PY'
 import sys
+from ppm_test_utils import read_ppm, write_ppm
 
-width = height = 1000
+width, height, pixels = read_ppm(sys.argv[1])
+assert (width, height) == (1000, 1000)
 stripe_x0 = width - (width + 7) // 8
 nonwhite = 0
 tile_x = tile_y = (width - 48) // 2
-with open(sys.argv[1], 'r', buffering=1024 * 1024) as source, \
-     open(sys.argv[2], 'w', buffering=1024 * 1024) as out:
-    assert [source.readline().strip() for _ in range(3)] == ['P3', '1000 1000', '255']
-    out.write('P3\n1000 1000\n255\n')
-    output_chunk = []
-    for y in range(height):
-        for x in range(width):
-            pixel_line = source.readline()
-            rgb = tuple(map(int, pixel_line.split()))
-            assert len(rgb) == 3
-            if x >= stripe_x0 and rgb != (255, 255, 255):
-                nonwhite += 1
-            if tile_x <= x < tile_x + 48 and tile_y <= y < tile_y + 48:
-                pixel_line = '127 127 127\n'
-            output_chunk.append(pixel_line)
-        if len(output_chunk) >= 65536:
-            out.writelines(output_chunk)
-            output_chunk.clear()
-    out.writelines(output_chunk)
-    assert source.read() == ''
+for y in range(height):
+    for x in range(width):
+        index = (y * width + x) * 3
+        rgb = tuple(pixels[index:index + 3])
+        if x >= stripe_x0 and rgb != (255, 255, 255):
+            nonwhite += 1
+        if tile_x <= x < tile_x + 48 and tile_y <= y < tile_y + 48:
+            pixels[index:index + 3] = (127, 127, 127)
+write_ppm(sys.argv[2], width, height, pixels)
 assert nonwhite > (width - stripe_x0) * height // 5, 'right edge is still an unused white stripe'
 PY
 if "$canonical_tile_harness_bin" "$work/bad_tile.ppm" 1000 1000 1 --report-page-direct \

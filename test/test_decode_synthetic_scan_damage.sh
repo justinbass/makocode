@@ -61,13 +61,13 @@ fi
 python3 - "$work_dir/encoded/synthetic.ppm" "$work_dir/damaged.ppm" \
     "$work_dir/recovered.ppm" "$work_dir/soft.ppm" "$margin_noise" "$off_center_noise" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm, write_gray_ppm
 import math
 import random
 import sys
 
-source = Path(sys.argv[1]).read_text().split()
-assert source[:4] == ['P3', '80', '80', '255']
-pixels = list(map(int, source[4:]))
+source_width, source_height, pixels = read_ppm(sys.argv[1])
+assert (source_width, source_height) == (80, 80)
 assert len(pixels) == 80 * 80 * 3
 modules = [int(sum(pixels[index:index + 3]) < 384)
            for index in range(0, len(pixels), 3)]
@@ -114,29 +114,19 @@ if sys.argv[6] == '1':
             if (x, y) not in centers and rng.random() < 0.03:
                 damaged[y][x] = 0
 
-with Path(sys.argv[2]).open('w', encoding='ascii') as output:
-    output.write(f'P3\n{width} {height}\n255\n')
-    for row in damaged:
-        for value in row:
-            output.write(f'{value} {value} {value}\n')
-
-with Path(sys.argv[4]).open('w', encoding='ascii') as output:
-    output.write(f'P3\n{width} {height}\n255\n')
-    for row in base:
-        for value in row:
-            output.write(f'{value} {value} {value}\n')
-
-with Path(sys.argv[3]).open('w', encoding='ascii') as output:
-    output.write('P3\n80 80\n255\n')
-    for y in range(80):
-        for x in range(80):
-            sample_x = round((x + 0.5) * pitch + offset_x - 0.5)
-            sample_y = round((y + 0.5) * pitch + offset_y - 0.5)
-            recovered = int(damaged[sample_y][sample_x] < 128)
-            original = modules[y * 80 + x]
-            assert recovered == original, (x, y)
-            value = 0 if recovered else 255
-            output.write(f'{value} {value} {value}\n')
+write_gray_ppm(sys.argv[2], width, height, [value for row in damaged for value in row])
+write_gray_ppm(sys.argv[4], width, height, [value for row in base for value in row])
+recovered_pixels = []
+for y in range(80):
+    for x in range(80):
+        sample_x = round((x + 0.5) * pitch + offset_x - 0.5)
+        sample_y = round((y + 0.5) * pitch + offset_y - 0.5)
+        recovered = int(damaged[sample_y][sample_x] < 128)
+        original = modules[y * 80 + x]
+        assert recovered == original, (x, y)
+        value = 0 if recovered else 255
+        recovered_pixels.extend((value, value, value))
+write_ppm(sys.argv[3], 80, 80, recovered_pixels)
 print('all 3025 generated modules remain recoverable at known centers')
 PY
 

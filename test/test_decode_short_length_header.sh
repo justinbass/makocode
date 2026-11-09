@@ -41,11 +41,11 @@ printf 'makocode' > "$work_dir/makocode.bin"
 python3 - "$work_dir/encoded/length_header.ppm" \
     "$work_dir/damaged/source.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
 
-tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[:4] == ['P3', '240', '240', '255']
-pixels = list(map(int, tokens[4:]))
+width, height, pixels = read_ppm(sys.argv[1])
+assert (width, height) == (240, 240)
 # Logical cell (4,0) flips a bit in the first RS-protected payload symbols.
 # The overall data length is read from the protected center metadata tile.
 index = (4 * 3)
@@ -53,11 +53,7 @@ original = pixels[index:index + 3]
 assert original in ([0, 0, 0], [255, 255, 255])
 pixels[index:index + 3] = [255 - value for value in original]
 assert pixels[index:index + 3] != original
-Path(sys.argv[2]).write_text(
-    'P3\n240 240\n255\n' +
-    '\n'.join(f'{pixels[i]} {pixels[i + 1]} {pixels[i + 2]}'
-              for i in range(0, len(pixels), 3)) + '\n'
-)
+write_ppm(sys.argv[2], 240, 240, pixels)
 PY
 
 for sample in clean damaged; do
@@ -74,15 +70,13 @@ done
 python3 - "$work_dir/clean/scaled.ppm" "$work_dir/clean/scan.ppm" \
     "$work_dir/damaged/scaled.ppm" "$work_dir/damaged/scan.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
 
 for source_name, output_name in ((sys.argv[1], sys.argv[2]),
                                 (sys.argv[3], sys.argv[4])):
-    tokens = Path(source_name).read_text().split()
-    assert tokens[0] == 'P3' and tokens[3] == '255'
-    width, height = int(tokens[1]), int(tokens[2])
+    width, height, source = read_ppm(source_name)
     assert (width, height) == (484, 484)
-    source = list(map(int, tokens[4:]))
     assert len(source) == width * height * 3
     canvas = [0] * (width * height * 3)
     for y in range(height):
@@ -91,22 +85,16 @@ for source_name, output_name in ((sys.argv[1], sys.argv[2]),
             dst = (y * width + x) * 3
             canvas[dst:dst + 3] = [30 + round(0.8 * value)
                                    for value in source[src:src + 3]]
-    Path(output_name).write_text(
-        f'P3\n{width} {height}\n255\n' +
-        '\n'.join(f'{canvas[i]} {canvas[i + 1]} {canvas[i + 2]}'
-                  for i in range(0, len(canvas), 3)) + '\n'
-    )
+    write_ppm(output_name, width, height, canvas)
 PY
 
 python3 - "$work_dir/clean/scan.ppm" "$work_dir/alias/scan.ppm" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_ppm
 import sys
 
-tokens = []
-for line in Path(sys.argv[1]).read_text().splitlines():
-    tokens.extend(line.split('#', 1)[0].split())
-assert tokens[:4] == ['P3', '484', '484', '255']
-pixels = list(map(int, tokens[4:]))
+width, height, pixels = read_ppm(sys.argv[1])
+assert (width, height) == (484, 484)
 scale = 2.018181818
 offset = -0.5
 
@@ -129,11 +117,7 @@ for cell_x, cell_y in ((0, 3), (9, 3), (2, 5), (10, 6), (0, 8), (3, 10)):
             index = (y * 484 + x) * 3
             pixels[index:index + 3] = opposite
 
-Path(sys.argv[2]).write_text(
-    'P3\n484 484\n255\n' +
-    '\n'.join(f'{pixels[i]} {pixels[i + 1]} {pixels[i + 2]}'
-              for i in range(0, len(pixels), 3)) + '\n'
-)
+write_ppm(sys.argv[2], 484, 484, pixels)
 PY
 
 "$makocode_bin" decode \

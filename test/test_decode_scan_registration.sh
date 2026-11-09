@@ -14,10 +14,10 @@ import math
 import random
 import sys
 from pathlib import Path
+from ppm_test_utils import read_ppm, write_gray_ppm
 
-tokens = Path(sys.argv[1]).read_text().split()
-assert tokens[:4] == ['P3', '80', '80', '255']
-pixels = list(map(int, tokens[4:]))
+source_width, source_height, pixels = read_ppm(sys.argv[1])
+assert (source_width, source_height) == (80, 80)
 pitch, ox, oy = 2.75, 2.5, 2.0
 width, height = 225, 226
 centers = {(round((x + .5) * pitch + ox - .5),
@@ -43,10 +43,7 @@ for y in range(80):
         cx = round((x + .5) * pitch + ox - .5)
         cy = round((y + .5) * pitch + oy - .5)
         assert (scan[cy * width + cx] < 128) == (pixels[3 * (y * 80 + x)] < 128)
-with Path(sys.argv[2]).open('w') as out:
-    out.write(f'P3\n{width} {height}\n255\n')
-    for value in scan:
-        out.write(f'{value} {value} {value}\n')
+write_gray_ppm(sys.argv[2], width, height, scan)
 PY
 "$bin" decode --decoded-stdout "$work/pages/page.ppm" >"$work/expected.txt" 2>"$work/control.log"
 "$bin" decode --decoded-stdout "$work/scan.ppm" >"$work/actual.txt" 2>"$work/scan.log" || { cat "$work/scan.log" >&2; exit 1; }

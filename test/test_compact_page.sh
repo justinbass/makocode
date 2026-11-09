@@ -113,9 +113,9 @@ fi
 ppm_magic=$(sed -n '1p' "${ppms[0]}")
 dimensions=$(sed -n '2p' "${ppms[0]}")
 read -r output_width output_height <<< "$dimensions"
-if [[ $ppm_magic != P3 || $output_width != "$page_width" || ! $output_height =~ ^[0-9]+$ ]] ||
+if [[ $ppm_magic != P6 || $output_width != "$page_width" || ! $output_height =~ ^[0-9]+$ ]] ||
    ((output_height <= 0 || output_height >= page_height)); then
-    echo "test_compact_page: expected a compact ${page_width}x<${page_height} P3 page, got '$ppm_magic' '$dimensions'" >&2
+    echo "test_compact_page: expected a compact ${page_width}x<${page_height} P6 page, got '$ppm_magic' '$dimensions'" >&2
     exit 1
 fi
 

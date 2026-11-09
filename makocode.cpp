@@ -12403,24 +12403,23 @@ static bool ppm_read_rgb_pixels(PpmParserState& state,
     if (total_bytes > (u64)USIZE_MAX_VALUE) {
         return false;
     }
-    if (!pixel_buffer.ensure((usize)total_bytes)) {
+    if (!pixel_buffer.ensure((usize)total_bytes) ||
+        state.cursor > state.size ||
+        (usize)total_bytes > state.size - state.cursor) {
         return false;
     }
-    for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
-        for (u32 channel = 0u; channel < 3u; ++channel) {
-            const char* token = 0;
-            usize length = 0u;
-            if (!ppm_next_token(state, &token, &length)) {
-                return false;
-            }
-            u64 value = 0u;
-            if (!ascii_to_u64(token, length, &value) || value > 255u) {
-                return false;
-            }
-            pixel_buffer.data[pixel * 3u + channel] = (u8)value;
-        }
-    }
+    memcpy(pixel_buffer.data, state.data + state.cursor, (usize)total_bytes);
+    state.cursor += (usize)total_bytes;
     pixel_buffer.size = (usize)total_bytes;
+    return true;
+}
+
+static bool ppm_consume_binary_separator(PpmParserState& state) {
+    if (state.cursor >= state.size || state.data[state.cursor] > ' ') return false;
+    u8 separator = state.data[state.cursor++];
+    if (separator == '\r' && state.cursor < state.size && state.data[state.cursor] == '\n') {
+        ++state.cursor;
+    }
     return true;
 }
 
@@ -14181,7 +14180,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         const char* token = 0;
         usize token_length = 0u;
         if (!ppm_next_token(state, &token, &token_length) ||
-            !ascii_equals_token(token, token_length, "P3") ||
+            !ascii_equals_token(token, token_length, "P6") ||
             !ppm_next_token(state, &token, &token_length) ||
             !ascii_to_u64(token, token_length, &width) || width == 0u ||
             !ppm_next_token(state, &token, &token_length) ||
@@ -14190,7 +14189,10 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             return false;
         }
         u64 max_value = 0u;
-        if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u) {
+        if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u ||
+            width > U64_MAX_VALUE / height ||
+            width * height > (u64)USIZE_MAX_VALUE / 3u ||
+            !ppm_consume_binary_separator(state)) {
             return false;
         }
         pixels_read = ppm_read_rgb_pixels(state, width * height, pixel_buffer);
@@ -21916,7 +21918,7 @@ static bool buffer_append_zero_padded(makocode::ByteBuffer& buffer,
 static bool ppm_write_metadata_header(const PpmParserState& state,
                                       makocode::ByteBuffer& output) {
     (void)state;
-    if (!output.append_ascii("P3\n")) {
+    if (!output.append_ascii("P6\n")) {
         return false;
     }
     return true;
@@ -21954,22 +21956,26 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     state.size = input.size;
     const char* token = 0;
     usize token_length = 0u;
-    ppm_next_token(state, &token, &token_length);
+    if (!ppm_next_token(state, &token, &token_length) ||
+        !ascii_equals_token(token, token_length, "P6")) return false;
     u64 width = 0u;
     if (!ppm_next_token(state, &token, &token_length) ||
-        !ascii_to_u64(token, token_length, &width)) {
+        !ascii_to_u64(token, token_length, &width) || width == 0u) {
         return false;
     }
     if (!ppm_next_token(state, &token, &token_length)) {
         return false;
     }
     u64 height = 0u;
-    ascii_to_u64(token, token_length, &height);
+    if (!ascii_to_u64(token, token_length, &height) || height == 0u) return false;
     if (!ppm_next_token(state, &token, &token_length)) {
         return false;
     }
     u64 max_value = 0u;
-    if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u) {
+    if (!ascii_to_u64(token, token_length, &max_value) || max_value != 255u ||
+        width > U64_MAX_VALUE / height ||
+        width * height > (u64)USIZE_MAX_VALUE / 3u ||
+        !ppm_consume_binary_separator(state)) {
         return false;
     }
     u64 pixel_count = width * height;
@@ -22085,25 +22091,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     if (!ppm_write_dimensions(width, height, output)) {
         return false;
     }
-    for (u64 row = 0u; row < height; ++row) {
-        for (u64 col = 0u; col < width; ++col) {
-            usize pixel_index = ((usize)row * (usize)width + (usize)col) * 3u;
-            for (u32 channel = 0u; channel < 3u; ++channel) {
-                if (channel) {
-                    if (!output.append_char(' ')) {
-                        return false;
-                    }
-                }
-                if (!buffer_append_number(output, (u64)pixel_data[pixel_index + channel])) {
-                    return false;
-                }
-            }
-            if (!output.append_char('\n')) {
-                return false;
-            }
-        }
-    }
-    return true;
+    return output.append_bytes(pixel_data, pixels.size);
 }
 
 static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
@@ -22119,7 +22107,7 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
     if (!ppm_next_token(state, &token, &token_length)) {
         return false;
     }
-    if (!ascii_equals_token(token, token_length, "P3")) {
+    if (!ascii_equals_token(token, token_length, "P6")) {
         return false;
     }
     ppm_next_token(state, &token, &token_length);
@@ -22748,7 +22736,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     u8 footer_background_rgb[3] = {255u, 255u, 255u};
     footer_select_colors(mapping, footer_text_rgb, footer_background_rgb);
     output.release();
-    if (!output.append_ascii("P3\n")) {
+    if (!output.append_ascii("P6\n")) {
         return false;
     }
     if (!buffer_append_number(output, (u64)width_pixels) || !output.append_char(' ')) {
@@ -23070,17 +23058,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     rgb[2] = footer_text_rgb[2];
                 }
             }
-            for (u8 channel = 0u; channel < 3u; ++channel) {
-                if (channel) {
-                    if (!output.append_char(' ')) {
-                        return false;
-                    }
-                }
-                if (!buffer_append_number(output, (u64)rgb[channel])) {
-                    return false;
-                }
-            }
-            if (!output.append_char('\n')) {
+            if (!output.append_bytes(rgb, sizeof(rgb))) {
                 return false;
             }
         }
@@ -26045,10 +26023,10 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
     const char* token = 0;
     usize token_length = 0u;
     if (!ppm_next_token(state, &token, &token_length) ||
-        !ascii_equals_token(token, token_length, "P3")) {
+        !ascii_equals_token(token, token_length, "P6")) {
         console_write(2, "overlay: ");
         console_write(2, path);
-        console_line(2, " is not a P3 ASCII PPM");
+        console_line(2, " is not a P6 binary PPM");
         return false;
     }
     u64 width_value = 0u;
@@ -26072,7 +26050,10 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
     u64 max_value = 0u;
     if (!ppm_next_token(state, &token, &token_length) ||
         !ascii_to_u64(token, token_length, &max_value) ||
-        max_value != 255u) {
+        max_value != 255u ||
+        width_value > U64_MAX_VALUE / height_value ||
+        width_value * height_value > (u64)USIZE_MAX_VALUE / 3u ||
+        !ppm_consume_binary_separator(state)) {
         console_write(2, "overlay: unsupported max pixel value in ");
         console_line(2, path);
         return false;
@@ -27277,24 +27258,8 @@ static bool serialize_overlay_page(const OverlayPage& page,
     if (!ppm_write_dimensions((u64)page.width, (u64)page.height, output)) {
         return false;
     }
-    usize total_pixels = (usize)page.width * (usize)page.height;
-    for (usize index = 0u; index < total_pixels; ++index) {
-        const u8* rgb = page.pixels.data + index * 3u;
-        for (u8 channel = 0u; channel < 3u; ++channel) {
-            if (channel) {
-                if (!output.append_char(' ')) {
-                    return false;
-                }
-            }
-            if (!buffer_append_number(output, (u64)rgb[channel])) {
-                return false;
-            }
-        }
-        if (!output.append_char('\n')) {
-            return false;
-        }
-    }
-    return true;
+    usize total_bytes = (usize)page.width * (usize)page.height * 3u;
+    return output.append_bytes(page.pixels.data, total_bytes);
 }
 
 static bool write_buffer_to_fd(int fd, const makocode::ByteBuffer& buffer) {

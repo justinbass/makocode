@@ -37,15 +37,15 @@ mkdir -p "$decoded_metadata_dir"
     --output-dir="$decoded_metadata_dir" "${pages[0]}" >/dev/null
 python3 - "${pages[0]}" "$decoded_metadata_dir" <<'PY'
 from pathlib import Path
+from ppm_test_utils import read_ppm
 import sys
 
 ppm_path = Path(sys.argv[1])
 metadata_dir = Path(sys.argv[2])
-tokens = ppm_path.read_text("ascii").split()
-assert tokens[0] == "P3"
-width, height, maxval = map(int, tokens[1:4])
+width, height, pixels = read_ppm(ppm_path)
+maxval = 255
 assert (width, height, maxval) == (320, 320, 255)
-values = iter(map(int, tokens[4:]))
+values = iter(pixels)
 tile_x0 = width // 2 - 24
 tile_x1 = tile_x0 + 48
 tile_y0 = height // 2 - 24

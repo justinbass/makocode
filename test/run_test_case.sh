@@ -13,6 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
+export PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}"
 
 usage() {
     cat <<'USAGE'
