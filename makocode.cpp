@@ -8250,7 +8250,7 @@ static void compute_default_fiducial_dimensions(u32 width_pixels,
     }
 }
 
-static const u32 CURRENT_TILE_SCHEMA_VERSION = 5u;
+static const u32 CURRENT_TILE_SCHEMA_VERSION = 6u;
 
 static bool compute_fiducial_reservation(u32 width_pixels,
                                          u32 height_pixels,
@@ -8275,7 +8275,6 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
                                          u32 margin_override);
 
 static const u8 OVERWRITE_MASK_PIXEL = 1u;
-static const u64 OVERLAY_SELECTOR_SEED = 0x4D4B4F5645524C59ull;
 
 struct FooterLayout {
     bool has_text;
@@ -8640,7 +8639,7 @@ namespace MetadataTile {
             !values.overwrite_layout ||
             (values.overlay_selector_present &&
              (!values.ecc_enabled || !values.ecc_parity || !values.ecc_block_count ||
-              !values.overlay_selector_seed || !values.overlay_erasure_budget)) ||
+              !values.overlay_erasure_budget)) ||
             (!values.overlay_selector_present &&
              (values.overlay_selector_seed != 0u || values.overlay_erasure_budget != 0u)) ||
             values.unknown_parity_budget > values.ecc_parity ||
@@ -8689,54 +8688,34 @@ namespace MetadataTile {
         return true;
     }
 
-    static bool write_limited_u64(BitWriter& writer, u64 value, u32 bits) {
-        u64 limit = (bits >= 64u) ? ~0ull : ((1ull << bits) - 1ull);
-        if (value > limit) {
-            return false;
-        }
-        return writer.write_bits(value, bits);
-    }
-
     static bool encode_metadata_payload_bytes(const Values& values, ByteBuffer& out) {
         out.release();
         BitWriter writer;
-        if (!writer.write_bits((u64)0x4D4B4E44u, 32u)) return false; // 'M''K''N''D'
         if (values.schema_version != TILE_SCHEMA_VERSION) return false;
 
-        // Core decode fields: compact payload bit count and uncompressed size,
-        // followed by page_count(32) and page_index(32).
+        // Schema 6 omits fixed identifiers and uses compact integers throughout.
         if (!write_compact_u64(writer, values.page_bits)) return false;
         if (!write_compact_u64(writer, values.lzma_uncompressed_bytes)) return false;
-        if (!write_limited_u64(writer, values.page_count, 32u)) return false;
-        if (!write_limited_u64(writer, values.page_index, 32u)) return false;
-
-        // Layout
-        if (!write_limited_u64(writer, (u64)values.page_width_pixels, 32u)) return false;
-        if (!write_limited_u64(writer, (u64)values.page_height_pixels, 32u)) return false;
-        if (!write_limited_u64(writer, (u64)values.footer_rows, 16u)) return false;
-        if (!write_limited_u64(writer, (u64)values.fiducial_marker_size_pixels, 8u)) return false;
-
-        // Complete data-region ECC header fields.
-        if (!writer.write_bits(values.ecc_enabled ? 1ull : 0ull, 1u)) return false;
-        if (values.ecc_enabled &&
-            (!write_limited_u64(writer, values.ecc_header_magic, 16u) ||
-             !write_limited_u64(writer, values.ecc_header_version, 8u) ||
-             !write_limited_u64(writer, values.ecc_header_flags, 8u) ||
-             !write_limited_u64(writer, values.ecc_block_data, 16u) ||
-             !write_limited_u64(writer, values.ecc_parity, 16u) ||
-             !write_limited_u64(writer, values.ecc_header_reserved, 16u) ||
-             !writer.write_bits(values.ecc_block_count, 64u) ||
-             !writer.write_bits(values.ecc_original_bytes, 64u))) return false;
-        if (!write_limited_u64(writer, values.fiducial_columns, 16u) ||
-            !write_limited_u64(writer, values.fiducial_rows, 16u) ||
-            !write_limited_u64(writer, values.fiducial_margin_pixels, 32u) ||
-            !writer.write_bits(1ull, 1u) ||
-            !writer.write_bits(values.overlay_selector_present ? 1ull : 0ull, 1u) ||
-            !writer.write_bits(values.overlay_selector_seed, 64u) ||
-            !writer.write_bits(values.unknown_parity_budget, 16u) ||
-            !writer.write_bits(values.overlay_erasure_budget, 16u)) {
+        if (!write_compact_u64(writer, values.page_count) ||
+            !write_compact_u64(writer, values.page_index) ||
+            !write_compact_u64(writer, (u64)values.page_width_pixels) ||
+            !write_compact_u64(writer, (u64)values.page_height_pixels) ||
+            !write_compact_u64(writer, (u64)values.footer_rows) ||
+            !write_compact_u64(writer, (u64)values.fiducial_marker_size_pixels) ||
+            !write_compact_u64(writer, (u64)values.ecc_block_data) ||
+            !write_compact_u64(writer, (u64)values.ecc_parity)) {
             return false;
         }
+        // Zero parity means no ECC. Header identity, version, flags, reserved
+        // bits, and an ECC-enabled flag are implicit in the tile schema.
+        if (values.ecc_parity > 0u &&
+            (!write_compact_u64(writer, values.ecc_block_count) ||
+             !write_compact_u64(writer, values.ecc_original_bytes))) return false;
+        if (!write_compact_u64(writer, (u64)values.fiducial_columns) ||
+            !write_compact_u64(writer, (u64)values.fiducial_rows) ||
+            !write_compact_u64(writer, (u64)values.fiducial_margin_pixels) ||
+            !write_compact_u64(writer, (u64)values.unknown_parity_budget) ||
+            !write_compact_u64(writer, (u64)values.overlay_erasure_budget)) return false;
 
         if (!writer.align_to_byte()) return false;
         usize bytes = writer.byte_size();
@@ -8807,46 +8786,83 @@ namespace MetadataTile {
         out_values.schema_version = schema_version;
         BitReader reader;
         reader.reset(data, (u64)byte_count * 8u);
-        u64 metadata_magic = reader.read_bits(32u);
-        if (metadata_magic != 0x4D4B4E44u || !tag_palette ||
-            tag_palette_count < 2u || tag_palette_count > MAX_CUSTOM_PALETTE_COLORS) return false;
+        if (schema_version < 6u && reader.read_bits(32u) != 0x4D4B4E44u) return false;
+        if (reader.failed || !tag_palette || tag_palette_count < 2u ||
+            tag_palette_count > MAX_CUSTOM_PALETTE_COLORS) return false;
         out_values.palette_background_first = true;
         out_values.palette_count = tag_palette_count;
         for (u32 i = 0u; i < tag_palette_count; ++i) {
             out_values.palette[i] = tag_palette[i];
         }
-        if (schema_version >= 2u) {
-            if (!read_compact_u64(reader, out_values.page_bits)) return false;
+        if (schema_version >= 6u) {
+            u64 value = 0u;
+            if (!read_compact_u64(reader, out_values.page_bits) ||
+                !read_compact_u64(reader, out_values.lzma_uncompressed_bytes) ||
+                !read_compact_u64(reader, out_values.page_count) ||
+                !read_compact_u64(reader, out_values.page_index) ||
+                !read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
+            out_values.page_width_pixels = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
+            out_values.page_height_pixels = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
+            out_values.footer_rows = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
+            out_values.fiducial_marker_size_pixels = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
+            out_values.ecc_block_data = (u16)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
+            out_values.ecc_parity = (u16)value;
+            out_values.ecc_enabled = out_values.ecc_parity > 0u;
+            if (out_values.ecc_enabled &&
+                (!read_compact_u64(reader, out_values.ecc_block_count) ||
+                 !read_compact_u64(reader, out_values.ecc_original_bytes))) return false;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
+            out_values.fiducial_columns = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
+            out_values.fiducial_rows = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
+            out_values.fiducial_margin_pixels = (u32)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
+            out_values.unknown_parity_budget = (u16)value;
+            if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
+            out_values.overlay_erasure_budget = (u16)value;
+            out_values.overlay_selector_present = out_values.overlay_erasure_budget > 0u;
+            out_values.overlay_selector_seed = 0u;
+            out_values.overwrite_layout = true;
         } else {
-            out_values.page_bits = reader.read_bits(64u);
+            if (schema_version >= 2u) {
+                if (!read_compact_u64(reader, out_values.page_bits)) return false;
+            } else {
+                out_values.page_bits = reader.read_bits(64u);
+            }
+            if (schema_version >= 3u &&
+                !read_compact_u64(reader, out_values.lzma_uncompressed_bytes)) return false;
+            out_values.page_count = reader.read_bits(32u);
+            out_values.page_index = reader.read_bits(32u);
+            out_values.page_width_pixels = (u32)reader.read_bits(32u);
+            out_values.page_height_pixels = (u32)reader.read_bits(32u);
+            out_values.footer_rows = (u32)reader.read_bits(16u);
+            out_values.fiducial_marker_size_pixels = (u32)reader.read_bits(8u);
+            out_values.ecc_enabled = reader.read_bit() ? true : false;
+            if (out_values.ecc_enabled) {
+                out_values.ecc_header_magic = (u16)reader.read_bits(16u);
+                out_values.ecc_header_version = (u8)reader.read_bits(8u);
+                out_values.ecc_header_flags = (u8)reader.read_bits(8u);
+                out_values.ecc_block_data = (u16)reader.read_bits(16u);
+                out_values.ecc_parity = (u16)reader.read_bits(16u);
+                out_values.ecc_header_reserved = (u16)reader.read_bits(16u);
+                out_values.ecc_block_count = reader.read_bits(64u);
+                out_values.ecc_original_bytes = reader.read_bits(64u);
+            }
+            out_values.fiducial_columns = (u32)reader.read_bits(16u);
+            out_values.fiducial_rows = (u32)reader.read_bits(16u);
+            out_values.fiducial_margin_pixels = (u32)reader.read_bits(32u);
+            out_values.overwrite_layout = reader.read_bit() ? true : false;
+            out_values.overlay_selector_present = reader.read_bit() ? true : false;
+            out_values.overlay_selector_seed = reader.read_bits(64u);
+            out_values.unknown_parity_budget = (u16)reader.read_bits(16u);
+            out_values.overlay_erasure_budget = (u16)reader.read_bits(16u);
         }
-        if (schema_version >= 3u &&
-            !read_compact_u64(reader, out_values.lzma_uncompressed_bytes)) return false;
-        out_values.page_count = reader.read_bits(32u);
-        out_values.page_index = reader.read_bits(32u);
-        out_values.page_width_pixels = (u32)reader.read_bits(32u);
-        out_values.page_height_pixels = (u32)reader.read_bits(32u);
-        out_values.footer_rows = (u32)reader.read_bits(16u);
-        out_values.fiducial_marker_size_pixels = (u32)reader.read_bits(8u);
-        out_values.ecc_enabled = reader.read_bit() ? true : false;
-        if (out_values.ecc_enabled) {
-            out_values.ecc_header_magic = (u16)reader.read_bits(16u);
-            out_values.ecc_header_version = (u8)reader.read_bits(8u);
-            out_values.ecc_header_flags = (u8)reader.read_bits(8u);
-            out_values.ecc_block_data = (u16)reader.read_bits(16u);
-            out_values.ecc_parity = (u16)reader.read_bits(16u);
-            out_values.ecc_header_reserved = (u16)reader.read_bits(16u);
-            out_values.ecc_block_count = reader.read_bits(64u);
-            out_values.ecc_original_bytes = reader.read_bits(64u);
-        }
-        out_values.fiducial_columns = (u32)reader.read_bits(16u);
-        out_values.fiducial_rows = (u32)reader.read_bits(16u);
-        out_values.fiducial_margin_pixels = (u32)reader.read_bits(32u);
-        out_values.overwrite_layout = reader.read_bit() ? true : false;
-        out_values.overlay_selector_present = reader.read_bit() ? true : false;
-        out_values.overlay_selector_seed = reader.read_bits(64u);
-        out_values.unknown_parity_budget = (u16)reader.read_bits(16u);
-        out_values.overlay_erasure_budget = (u16)reader.read_bits(16u);
         if (reader.failed || !metadata_values_sane(out_values)) return false;
         return build_palette_text_from_colors(out_values.palette,
                                               out_values.palette_count,
@@ -8871,7 +8887,7 @@ namespace MetadataTile {
         if (!read_compact_u16(reader, schema) ||
             !read_compact_u16(reader, encoded_parity_bytes) ||
             (schema != 1u && schema != 2u && schema != 3u && schema != 4u &&
-             schema != TILE_SCHEMA_VERSION) ||
+             schema != 5u && schema != TILE_SCHEMA_VERSION) ||
             encoded_parity_bytes != parity_bytes ||
             !reader.align_to_byte()) return false;
         if (reader.cursor >= reader.bit_count || ((reader.bit_count - reader.cursor) & 7u)) return false;
@@ -22574,9 +22590,7 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
     tile_values.overlay_erasure_budget = overlay_erasure_budget;
     tile_values.overlay_selector_present = tile_values.ecc_enabled &&
                                             overlay_erasure_budget > 0u;
-    tile_values.overlay_selector_seed = tile_values.overlay_selector_present
-                                            ? OVERLAY_SELECTOR_SEED
-                                            : 0u;
+    tile_values.overlay_selector_seed = 0u;
     if ((!tile_values.ecc_enabled && (unknown_parity_budget || overlay_erasure_budget)) ||
         (tile_values.ecc_enabled &&
          (unknown_parity_budget > tile_values.ecc_parity ||
@@ -24517,6 +24531,9 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
                       ? (u16)(block_parity / 2u)
                       : 0u;
     u16 unknown = (u16)(2u * ((u32)block_parity / 2u));
+    if (requested_redundancy > 0.0 && unknown < 32u) {
+        unknown = 32u;
+    }
     double encoded_redundancy = requested_redundancy;
     u32 required_parity = (u32)unknown + (u32)overlay;
     if (required_parity > block_parity) {
@@ -27483,8 +27500,7 @@ static int command_overlay(int arg_count, char** args) {
         overlay_selector.overlay_erasure_budget = tile.overlay_erasure_budget;
         overlay_selector.block_total = (u16)(tile.ecc_block_data + tile.ecc_parity);
         overlay_selector.block_count = tile.ecc_block_count;
-        if (overlay_selector.seed == 0u ||
-            (u32)overlay_selector.unknown_parity_budget +
+        if ((u32)overlay_selector.unknown_parity_budget +
                     (u32)overlay_selector.overlay_erasure_budget > tile.ecc_parity ||
             overlay_selector.block_count > (u64)USIZE_MAX_VALUE ||
             !overlay_selector.counts.ensure((usize)overlay_selector.block_count) ||
