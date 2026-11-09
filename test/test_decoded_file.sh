@@ -18,7 +18,7 @@ assert len(files) == 1 and re.fullmatch(r'makocode_decoded_\d{14}\.txt', files[0
 lines = files[0].read_text('ascii').splitlines()
 assert lines[0] == 'MAKOCODE-DECODED' and lines[-2:] == ['end-archive', 'end']
 assert 'metadata encryption_version 1' in lines and 'metadata ecc_version 1' in lines
-assert 'metadata tile_schema 6' in lines and 'metadata lzma_uncompressed_bytes ' in '\n'.join(lines)
+assert 'metadata tile_schema 0' in lines and 'metadata lzma_uncompressed_bytes ' in '\n'.join(lines)
 for field in ['tile_magic', 'metadata_magic', 'metadata_bytes', 'metadata_crc8', 'tile_header', 'tile_data', 'compression', 'lzma_properties']:
     assert not any(line.startswith('metadata ' + field + ' ') for line in lines), field
 for field, size in [('encryption_salt', 32), ('encryption_nonce', 24), ('encryption_tag', 32)]:

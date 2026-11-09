@@ -127,21 +127,45 @@ int main(int argc, char** argv) {
     }
 
     if (report_page_direct) {
-        MetadataTile::Placement direct_placement =
-            MetadataTile::compute_center_tile_placement(width, height);
         MetadataTile::Values direct_values = {};
         makocode::ByteBuffer direct_palette_text;
-        if (!direct_placement.valid ||
-            !MetadataTile::decode_tile(pixels.data,
-                                       width,
-                                       height,
-                                       height,
-                                       direct_placement,
-                                       direct_values,
-                                       direct_palette_text) ||
+        bool direct_tile_decoded = false;
+        for (u32 footer_rows = 0u; footer_rows <= 32u && footer_rows < height;
+             footer_rows += 8u) {
+            u32 data_height = height - footer_rows;
+            MetadataTile::Placement direct_placement =
+                MetadataTile::compute_center_tile_placement(width, data_height);
+            if (direct_placement.valid &&
+                MetadataTile::decode_tile(pixels.data,
+                                          width,
+                                          height,
+                                          data_height,
+                                          direct_placement,
+                                          direct_values,
+                                          direct_palette_text)) {
+                direct_tile_decoded = true;
+                break;
+            }
+        }
+        usize metadata_cells = 0u;
+        u32 expected_metadata_side = 0u;
+        if (!direct_tile_decoded ||
             direct_values.schema_version != MetadataTile::TILE_SCHEMA_VERSION ||
             !direct_values.overwrite_layout || !direct_values.ecc_enabled) {
             fprintf(stderr, "canonical tile: protected tile failed at expected placement\n");
+            return 1;
+        }
+        metadata_cells = (usize)direct_values.metadata_length_prefix_bits +
+                         (usize)direct_values.metadata_symbol_count;
+        expected_metadata_side = 1u;
+        while ((usize)expected_metadata_side * expected_metadata_side < metadata_cells) {
+            ++expected_metadata_side;
+        }
+        if (direct_values.schema_version != 0u ||
+            direct_values.metadata_length_prefix_bits != 24u ||
+            direct_values.metadata_square_side != expected_metadata_side ||
+            direct_values.metadata_square_side >= MetadataTile::TILE_SIDE) {
+            fprintf(stderr, "canonical tile: metadata is not a compact schema-0 square\n");
             return 1;
         }
         return 0;
@@ -391,7 +415,8 @@ int main(int argc, char** argv) {
                                          true,
                                          true,
                                          values.lzma_uncompressed_bytes,
-                                         values.schema_version < 4u)) {
+                                         values.schema_version != 0u &&
+                                             values.schema_version < 4u)) {
                     fprintf(stderr, "canonical tile: valid selector reserve did not decode before reserve mutation\n");
                     return 1;
                 }
