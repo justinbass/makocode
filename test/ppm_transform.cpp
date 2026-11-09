@@ -38,64 +38,39 @@ static int nearly_equal(double a, double b) {
     return fabs(a - b) < kEpsilon;
 }
 
-static bool canonical_metadata_tile_header(uint64_t header) {
-    if ((header >> 24u) != 0x4D43u) return false;
-    unsigned int cursor = 16u;
-    auto read_bit = [&](unsigned int& bit_out) -> bool {
-        if (cursor >= 40u) return false;
-        bit_out = (unsigned int)((header >> (39u - cursor)) & 1u);
-        ++cursor;
-        return true;
-    };
-    unsigned int bit = 0u;
-    if (!read_bit(bit)) return false;
-    unsigned int section_one_bits = bit << 1u;
-    if (!read_bit(bit)) return false;
-    section_one_bits = (section_one_bits | bit) + 1u;
-    unsigned int metadata_bits = 0u;
-    for (unsigned int i = 0u; i < section_one_bits; ++i) {
-        if (!read_bit(bit)) return false;
-        metadata_bits = (metadata_bits << 1u) | bit;
-    }
-    ++metadata_bits;
-    if (metadata_bits > 16u) return false;
-    unsigned int metadata_length = 0u;
-    for (unsigned int i = 0u; i < metadata_bits; ++i) {
-        if (!read_bit(bit)) return false;
-        metadata_length = (metadata_length << 1u) | bit;
-    }
-    return metadata_length > 0u && metadata_length <= 42u * 42u && (metadata_length & 7u) == 0u;
-}
-
-static bool read_canonical_metadata_tile_header(const int* pixels,
-                                                int width,
-                                                int tile_x0,
-                                                int tile_y0,
-                                                double threshold,
-                                                uint64_t& header_out) {
+static bool read_canonical_makocode_barcode(const int* pixels,
+                                           int width,
+                                           int tile_x0,
+                                           int tile_y0,
+                                           double threshold,
+                                           uint64_t& tag_out) {
     if (!pixels || width <= 0) return false;
-    const unsigned int header_bits = 40u;
-    const unsigned int header_repetitions = 3u;
-    const int header_x0 = (48 - (int)header_bits) / 2;
-    const int max_header_y = (48 - 1) / 2 - (int)header_repetitions;
-    for (int header_y0 = 0; header_y0 <= max_header_y; ++header_y0) {
-        uint64_t header = 0u;
-        for (unsigned int bit = 0u; bit < header_bits; ++bit) {
-            unsigned int dark_votes = 0u;
-            for (unsigned int repetition = 0u; repetition < header_repetitions; ++repetition) {
-                size_t pixel = (size_t)(tile_y0 + header_y0 + (int)repetition) * (size_t)width +
-                               (size_t)(tile_x0 + header_x0 + (int)bit);
-                size_t rgb = pixel * 3u;
-                double luminance = 0.2126 * (double)pixels[rgb] +
-                                   0.7152 * (double)pixels[rgb + 1u] +
-                                   0.0722 * (double)pixels[rgb + 2u];
-                if (luminance < threshold) ++dark_votes;
+    const unsigned char tag_digits[8] = {13u, 1u, 11u, 15u, 3u, 15u, 4u, 5u};
+    auto tag_bit = [&](unsigned int bit) -> bool {
+        return ((tag_digits[bit >> 2u] >> (3u - (bit & 3u))) & 1u) != 0u;
+    };
+    const int max_tag_y = (48 - 1) / 2 - 1;
+    for (int tag_y = 0; tag_y <= max_tag_y; ++tag_y) {
+        for (unsigned int colors = 2u; colors <= 16u; ++colors) {
+            for (unsigned int inversion = 0u; inversion < 2u; ++inversion) {
+                bool matches = true;
+                for (unsigned int bit = 0u; bit < 32u && matches; ++bit) {
+                    unsigned int x = bit < 16u ? bit : 16u + colors + bit - 16u;
+                    size_t pixel = (size_t)(tile_y0 + tag_y) * (size_t)width +
+                                   (size_t)(tile_x0 + (int)x);
+                    size_t rgb = pixel * 3u;
+                    double luminance = 0.2126 * (double)pixels[rgb] +
+                                       0.7152 * (double)pixels[rgb + 1u] +
+                                       0.0722 * (double)pixels[rgb + 2u];
+                    bool observed = luminance < threshold;
+                    if (inversion) observed = !observed;
+                    if (observed != tag_bit(bit)) matches = false;
+                }
+                if (matches) {
+                    tag_out = ((uint64_t)colors << 32u) | UINT64_C(0xD1BF3F45);
+                    return true;
+                }
             }
-            header = (header << 1u) | (dark_votes >= 2u ? 1u : 0u);
-        }
-        if (canonical_metadata_tile_header(header)) {
-            header_out = header;
-            return true;
         }
     }
     return false;
@@ -1225,13 +1200,13 @@ static void cmd_transform(int argc, char** argv) {
             die("ppm_transform: --preserve-canonical-control could not detect tile color endpoints");
         }
         double tile_threshold = (darkest_luminance + lightest_luminance) * 0.5;
-        uint64_t tile_header = 0u;
-        if (!read_canonical_metadata_tile_header(ppm.pixels.data,
-                                                 ppm.width,
-                                                 tile_x0,
-                                                 tile_y0,
-                                                 tile_threshold,
-                                                 tile_header)) {
+        uint64_t barcode_tag = 0u;
+        if (!read_canonical_makocode_barcode(ppm.pixels.data,
+                                             ppm.width,
+                                             tile_x0,
+                                             tile_y0,
+                                             tile_threshold,
+                                             barcode_tag)) {
             ppm_free(&ppm);
             die("ppm_transform: --preserve-canonical-control expects a centered canonical metadata tile");
         }
@@ -1430,13 +1405,13 @@ static void cmd_transform(int argc, char** argv) {
         if (w >= 48 && h >= 48) {
             int tile_x0 = (w - 48) / 2;
             int tile_y0 = (h - 48) / 2;
-            uint64_t tile_header = 0u;
-            canonical = read_canonical_metadata_tile_header(current.data,
-                                                             w,
-                                                             tile_x0,
-                                                             tile_y0,
-                                                             128.0,
-                                                             tile_header);
+            uint64_t barcode_tag = 0u;
+            canonical = read_canonical_makocode_barcode(current.data,
+                                                        w,
+                                                        tile_x0,
+                                                        tile_y0,
+                                                        128.0,
+                                                        barcode_tag);
         }
         if (!canonical) {
             die("ppm_transform: former-header-slot corruption expects a centered canonical metadata tile");
