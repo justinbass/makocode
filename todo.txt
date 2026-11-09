@@ -1,5 +1,4 @@
 TODO
-- Make linear barcode tag MAKOCODE with 4 bits per letter (1101 ... 0011). Used for positioning to speed up decoding. Between the MAKO and the CODE, it has the colors listed in order, 1 px per color starting with background color. Remove palette encoding completely.
 - Reorganize metadata in order of importance, trim/clip colors? Revisit it all.
 - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif . Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
