@@ -19,6 +19,154 @@ static bool parse_u32_token(PpmParserState& state, u32& value) {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-variable-fields")) {
+        const u64 expected[] = {0u, 1u, 65535u, 65536u, 0x123456789ABull, U64_MAX_VALUE};
+        for (usize i = 0u; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+            MetadataTile::BitWriter writer;
+            if (!MetadataTile::write_length_count(writer, expected[i])) return 1;
+            MetadataTile::BitReader reader;
+            reader.reset(writer.data(), writer.bit_size());
+            u64 actual = 0u;
+            if (!MetadataTile::read_length_count(reader, actual) || actual != expected[i] ||
+                reader.failed || reader.cursor != writer.bit_size()) return 1;
+        }
+        return 0;
+    }
+    if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-metadata-rs")) {
+        makocode::ByteBuffer data;
+        if (!data.ensure(1000u)) return 1;
+        data.size = 1000u;
+        for (usize i = 0u; i < data.size; ++i) data.data[i] = (u8)(i * 73u + 19u);
+        makocode::ByteBuffer codeword;
+        if (!MetadataTile::rs_encode_with_parity(data, 232u, codeword) ||
+            codeword.size != 11208u) return 1;
+        makocode::ByteBuffer damaged;
+        if (!damaged.ensure(codeword.size)) return 1;
+        damaged.size = codeword.size;
+        memcpy(damaged.data, codeword.data, codeword.size);
+        usize input_offset = 0u;
+        for (u32 block = 0u; block < 44u; ++block) {
+            usize count = block == 43u ? 11u : 23u;
+            damaged.data[input_offset + count / 2u] ^= (u8)(block + 1u);
+            input_offset += count + 232u;
+        }
+        u32 corrections = 0u;
+        if (!MetadataTile::rs_decode_with_parity(damaged, 1000u, 232u, corrections) ||
+            corrections != 44u || damaged.size != data.size ||
+            memcmp(damaged.data, data.data, data.size) != 0) return 1;
+        if (!damaged.ensure(codeword.size)) return 1;
+        damaged.size = codeword.size;
+        memcpy(damaged.data, codeword.data, codeword.size);
+        for (u32 i = 0u; i < 117u; ++i) damaged.data[i] ^= (u8)(i + 1u);
+        corrections = 0u;
+        if (MetadataTile::rs_decode_with_parity(damaged, 1000u, 232u, corrections)) return 1;
+        return 0;
+    }
+    if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-marker-layout")) {
+        for (u32 palette_case = 0u; palette_case < 4u; ++palette_case) {
+            MetadataTile::Values values;
+            values.page_bits = 1u;
+            values.page_count = 1u;
+            values.page_index = 1u;
+            values.page_width_pixels = MetadataTile::TILE_SIDE;
+            values.page_height_pixels = MetadataTile::TILE_SIDE;
+            values.fiducial_marker_size_pixels = 4u;
+            values.fiducial_columns = 1u;
+            values.fiducial_rows = 1u;
+            values.overwrite_layout = true;
+            values.palette_background_first = true;
+            values.palette_count = palette_case == 2u ? 4u :
+                                   palette_case == 3u ? 3u : 2u;
+            if (palette_case == 0u) {
+                values.palette[0] = PaletteColor{255u, 255u, 255u};
+                values.palette[1] = PaletteColor{0u, 255u, 255u};
+            } else if (palette_case == 1u) {
+                values.palette[0] = PaletteColor{0u, 255u, 255u};
+                values.palette[1] = PaletteColor{255u, 255u, 255u};
+            } else if (palette_case == 2u) {
+                values.palette[0] = PaletteColor{255u, 255u, 255u};
+                values.palette[1] = PaletteColor{0u, 255u, 255u};
+                values.palette[2] = PaletteColor{255u, 0u, 255u};
+                values.palette[3] = PaletteColor{255u, 255u, 0u};
+            } else {
+                values.palette[0] = PaletteColor{255u, 255u, 255u};
+                values.palette[1] = PaletteColor{0u, 255u, 255u};
+                values.palette[2] = PaletteColor{255u, 0u, 255u};
+            }
+            makocode::ByteBuffer bits;
+            makocode::ByteBuffer active;
+            if (!MetadataTile::build_tile_bits(values, bits, &active) ||
+                values.metadata_square_side < 8u || values.metadata_square_side < 9u ||
+                values.metadata_square_side > MetadataTile::TILE_MAX_METADATA_SQUARE_SIDE) {
+                fprintf(stderr, "marker build failed case=%u\n", palette_case); return 1;
+            }
+            usize metadata_cells = (usize)values.metadata_length_prefix_bits +
+                                   values.metadata_symbol_count;
+            usize square_cells = (usize)values.metadata_square_side * values.metadata_square_side;
+            if (metadata_cells > square_cells || metadata_cells <=
+                (usize)(values.metadata_square_side - 1u) * (values.metadata_square_side - 1u)) {
+                fprintf(stderr, "marker square failed case=%u\n", palette_case); return 1;
+            }
+            for (u32 x = 0u; x <= values.palette_count; ++x) {
+                u8 expected = x < values.palette_count ? (u8)x : 0u;
+                if (bits.data[(usize)values.metadata_tag_y0 * MetadataTile::TILE_SIDE + x] != expected) {
+                    fprintf(stderr, "palette row failed case=%u\n", palette_case); return 1;
+                }
+            }
+            for (u32 bit = 0u; bit < 32u; ++bit) {
+                usize index = (usize)(values.metadata_tag_y0 + 1u + bit / 8u) *
+                                  MetadataTile::TILE_SIDE + (bit & 7u);
+                u8 expected = MetadataTile::makocode_tag_bit(bit)
+                                  ? (u8)(values.palette_count - 1u) : 0u;
+                if (bits.data[index] != expected) { fprintf(stderr, "marker bits failed case=%u\n", palette_case); return 1; }
+            }
+            u8 tile_rgb[MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE * 3u];
+            double luminances[MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE];
+            for (usize cell = 0u; cell < bits.size; ++cell) {
+                u8 symbol = bits.data[cell];
+                if (symbol >= values.palette_count) { fprintf(stderr, "symbol range failed case=%u\n", palette_case); return 1; }
+                const PaletteColor& color = values.palette[symbol];
+                tile_rgb[cell * 3u] = color.r;
+                tile_rgb[cell * 3u + 1u] = color.g;
+                tile_rgb[cell * 3u + 2u] = color.b;
+                luminances[cell] = MetadataTile::rgb_luminance_u8(color.r, color.g, color.b);
+            }
+            MetadataTile::Values decoded;
+            makocode::ByteBuffer palette_text;
+            PaletteColor found_palette[MAX_CUSTOM_PALETTE_COLORS];
+            u32 found_palette_count = 0u;
+            double found_threshold = 0.0;
+            bool found_row = MetadataTile::decode_palette_tag_row(
+                tile_rgb + (usize)values.metadata_tag_y0 * MetadataTile::TILE_SIDE * 3u,
+                found_palette, found_palette_count, false, &found_threshold);
+            if (!found_row || found_palette_count != values.palette_count) {
+                fprintf(stderr, "palette row decode failed case=%u count=%u\n",
+                        palette_case, found_palette_count); return 1;
+            }
+            u32 marker_errors = 0u;
+            for (u32 bit = 0u; bit < 32u; ++bit) {
+                usize index = (usize)(values.metadata_tag_y0 + 1u + bit / 8u) *
+                                  MetadataTile::TILE_SIDE + (bit & 7u);
+                bool observed = luminances[index] < found_threshold;
+                if (observed != MetadataTile::makocode_tag_bit(bit)) ++marker_errors;
+            }
+            if (marker_errors) {
+                if (palette_case != 1u || marker_errors != 32u) {
+                    fprintf(stderr, "marker threshold errors case=%u count=%u threshold=%.2f\n",
+                            palette_case, marker_errors, found_threshold); return 1;
+                }
+            }
+            if (!MetadataTile::decode_tile_samples(tile_rgb, luminances, decoded, palette_text) ||
+                decoded.palette_count != values.palette_count ||
+                decoded.metadata_square_side != values.metadata_square_side) {
+                fprintf(stderr, "marker decode failed case=%u side=%u tag=%u bitcount=%u symbols=%u parity=%u\n",
+                        palette_case, values.metadata_square_side, values.metadata_tag_y0,
+                        values.metadata_bit_count, values.metadata_symbol_count,
+                        values.metadata_ecc_bytes); return 1;
+            }
+        }
+        return 0;
+    }
     if (argc == 4 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--capacity")) {
         u64 width_value = 0u;
         u64 height_value = 0u;
@@ -75,8 +223,10 @@ int main(int argc, char** argv) {
                        ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page");
     bool report_page_direct = argc == 6 &&
                               ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page-direct");
+    bool report_metadata_layout = argc == 6 &&
+                                  ascii_equals_token(argv[5], ascii_length(argv[5]), "--metadata-layout");
     if (argc != 5 && !check_ecc_budget && !check_reserve_reject && !check_structural &&
-        !report_page && !report_page_direct) {
+        !report_page && !report_page_direct && !report_metadata_layout) {
         fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-ecc-budget PERCENT | --check-reserve-reject | --check-structural | --report-page | --report-page-direct] | --capacity WIDTH HEIGHT\n");
         return 2;
     }
@@ -126,12 +276,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (report_page_direct) {
+    if (report_page_direct || report_metadata_layout) {
         MetadataTile::Values direct_values = {};
         makocode::ByteBuffer direct_palette_text;
         bool direct_tile_decoded = false;
         for (u32 footer_rows = 0u; footer_rows <= 32u && footer_rows < height;
-             footer_rows += 8u) {
+             ++footer_rows) {
             u32 data_height = height - footer_rows;
             MetadataTile::Placement direct_placement =
                 MetadataTile::compute_center_tile_placement(width, data_height);
@@ -155,9 +305,19 @@ int main(int argc, char** argv) {
             fprintf(stderr, "canonical tile: protected tile failed at expected placement\n");
             return 1;
         }
+        if (report_metadata_layout) {
+            printf("%u %u %u %u %u %u\n",
+                   direct_values.metadata_square_x0,
+                   direct_values.metadata_square_y0,
+                   direct_values.metadata_square_side,
+                   direct_values.metadata_length_prefix_bits,
+                   direct_values.metadata_tag_y0,
+                   direct_values.metadata_symbol_count);
+            return 0;
+        }
         metadata_cells = (usize)direct_values.metadata_length_prefix_bits +
                          (usize)direct_values.metadata_symbol_count;
-        expected_metadata_side = 1u;
+        expected_metadata_side = 8u;
         while ((usize)expected_metadata_side * expected_metadata_side < metadata_cells) {
             ++expected_metadata_side;
         }

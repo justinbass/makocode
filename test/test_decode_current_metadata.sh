@@ -4,7 +4,9 @@
 set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
-label=${1:-decode_current_metadata}
+label=decode_current_metadata
+if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
+[[ $# == 0 ]]
 work_dir="$repo_root/test_output/${label}_work"
 trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
 rm -rf "$work_dir"
@@ -13,7 +15,11 @@ printf 'x' > "$work_dir/payload.bin"
 (cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0 \
     --page-width=80 --page-height=80 --no-filename --no-page-count \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
-python3 - "$work_dir/encoded/page.ppm" "$work_dir/damaged.ppm" <<'PY'
+layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
+    "$work_dir/encoded/page.ppm" 80 80 1 --metadata-layout)
+read -r square_x square_y square_side prefix_bits tag_y symbol_count <<<"$layout"
+python3 - "$work_dir/encoded/page.ppm" "$work_dir/damaged.ppm" \
+    "$square_x" "$square_y" "$square_side" "$prefix_bits" <<'PY'
 from pathlib import Path
 from ppm_test_utils import read_ppm, write_ppm
 import sys
@@ -21,10 +27,11 @@ width, height, pixels = read_ppm(sys.argv[1])
 assert (width, height) == (80, 80)
 assert len(pixels) == 80 * 80 * 3
 tile_x = tile_y = (80 - 48) // 2
-# The first payload module is inside the protected tile body, after the border
-# and five repeated header rows. Flip that encoded module to exercise tile RS.
-x = tile_x + 1
-y = tile_y + 1 + 5
+# Flip a protected data module after the outer schema and parity fields.
+square_x, square_y, square_side, prefix_bits = map(int, sys.argv[3:7])
+cell = prefix_bits + 16
+x = tile_x + square_x + cell % square_side
+y = tile_y + square_y + cell // square_side
 index = (y * 80 + x) * 3
 original = pixels[index:index + 3]
 assert original in ([0, 0, 0], [255, 255, 255])

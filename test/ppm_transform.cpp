@@ -45,31 +45,65 @@ static bool read_canonical_makocode_barcode(const int* pixels,
                                            double threshold,
                                            uint64_t& tag_out) {
     if (!pixels || width <= 0) return false;
-    const unsigned char tag_digits[8] = {13u, 1u, 11u, 15u, 3u, 15u, 4u, 5u};
-    auto tag_bit = [&](unsigned int bit) -> bool {
-        return ((tag_digits[bit >> 2u] >> (3u - (bit & 3u))) & 1u) != 0u;
+    const unsigned char marker[4] = {0xD1u, 0xBFu, 0x3Fu, 0x45u};
+    auto marker_bit = [&](unsigned int bit) -> bool {
+        return ((marker[bit >> 3u] >> (7u - (bit & 7u))) & 1u) != 0u;
     };
-    const int max_tag_y = (48 - 1) / 2 - 1;
+    const int max_tag_y = (48 - 5) / 2 - 1;
     for (int tag_y = 0; tag_y <= max_tag_y; ++tag_y) {
-        for (unsigned int colors = 2u; colors <= 16u; ++colors) {
-            for (unsigned int inversion = 0u; inversion < 2u; ++inversion) {
-                bool matches = true;
-                for (unsigned int bit = 0u; bit < 32u && matches; ++bit) {
-                    unsigned int x = bit < 16u ? bit : 16u + colors + bit - 16u;
-                    size_t pixel = (size_t)(tile_y0 + tag_y) * (size_t)width +
-                                   (size_t)(tile_x0 + (int)x);
-                    size_t rgb = pixel * 3u;
-                    double luminance = 0.2126 * (double)pixels[rgb] +
-                                       0.7152 * (double)pixels[rgb + 1u] +
-                                       0.0722 * (double)pixels[rgb + 2u];
-                    bool observed = luminance < threshold;
-                    if (inversion) observed = !observed;
-                    if (observed != tag_bit(bit)) matches = false;
+        unsigned int colors = 0u;
+        uint64_t best_distance = UINT64_MAX;
+        for (unsigned int candidate = 2u; candidate <= 16u; ++candidate) {
+            size_t first = ((size_t)(tile_y0 + tag_y) * (size_t)width + (size_t)tile_x0) * 3u;
+            size_t end = first + (size_t)candidate * 3u;
+            long dr = (long)pixels[first] - pixels[end];
+            long dg = (long)pixels[first + 1u] - pixels[end + 1u];
+            long db = (long)pixels[first + 2u] - pixels[end + 2u];
+            uint64_t distance = (uint64_t)(dr * dr + dg * dg + db * db);
+            if (distance > 3u * 40u * 40u || distance >= best_distance) continue;
+            bool distinct = true;
+            for (unsigned int i = 1u; i < candidate && distinct; ++i) {
+                size_t left = first + (size_t)i * 3u;
+                for (unsigned int j = 0u; j < i; ++j) {
+                    size_t right = first + (size_t)j * 3u;
+                    long rr = (long)pixels[left] - pixels[right];
+                    long gg = (long)pixels[left + 1u] - pixels[right + 1u];
+                    long bb = (long)pixels[left + 2u] - pixels[right + 2u];
+                    if ((uint64_t)(rr * rr + gg * gg + bb * bb) < 3u * 12u * 12u) {
+                        distinct = false;
+                        break;
+                    }
                 }
-                if (matches) {
-                    tag_out = ((uint64_t)colors << 32u) | UINT64_C(0xD1BF3F45);
-                    return true;
-                }
+            }
+            if (distinct) { colors = candidate; best_distance = distance; }
+        }
+        if (!colors) continue;
+        double low = 255.0, high = 0.0;
+        double samples[32];
+        for (unsigned int bit = 0u; bit < 32u; ++bit) {
+            unsigned int x = bit & 7u;
+            unsigned int y = (unsigned int)tag_y + 1u + bit / 8u;
+            size_t rgb = ((size_t)(tile_y0 + (int)y) * (size_t)width +
+                          (size_t)(tile_x0 + (int)x)) * 3u;
+            samples[bit] = 0.2126 * (double)pixels[rgb] +
+                           0.7152 * (double)pixels[rgb + 1u] +
+                           0.0722 * (double)pixels[rgb + 2u];
+            if (samples[bit] < low) low = samples[bit];
+            if (samples[bit] > high) high = samples[bit];
+        }
+        if (high <= low + 12.0) continue;
+        double marker_threshold = (low + high) * 0.5;
+        for (unsigned int inversion = 0u; inversion < 2u; ++inversion) {
+            bool matches = true;
+            for (unsigned int bit = 0u; bit < 32u; ++bit) {
+                bool observed = samples[bit] < marker_threshold;
+                if (inversion) observed = !observed;
+                if (observed != marker_bit(bit)) { matches = false; break; }
+            }
+            if (matches) {
+                (void)threshold;
+                tag_out = ((uint64_t)colors << 32u) | UINT64_C(0xD1BF3F45);
+                return true;
             }
         }
     }

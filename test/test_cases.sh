@@ -399,3 +399,6 @@ test_case 0102_canonical_overlay_multipage script "Canonical overlay selectors m
 
 test_case 0103_palette_base5_capacity script "Base-5 palette uses black symbols and exceeds two bits per pixel" \
     test_palette_base5_capacity.sh
+
+test_case 0104_metadata_tile_format script "Variable metadata fields and multi-block tile Reed-Solomon framing" \
+    test_metadata_tile_format.sh
