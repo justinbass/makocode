@@ -2,16 +2,17 @@ TODO
 
 Features:
 - Reorganize metadata in order of importance, trim/clip colors? Revisit it all.
+- Fiducials should follow background color, see 0059
 - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
-- Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
-- Rotation 90, 180, 270 tests.
 - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Make metadata/fidicuals optional, fully damageable, or resizable
   - Optional fiducial markings and center code, use known error position to correct in place. Data could simply be linear across the page...
   - Metadata recovery mode to brute force guess it if missing, exponentially difficult
-    - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
-    - What if white/black or light/dark are inverted for the metadata?
+  - Hardcoded options for decoder params (powers of 2) for easier brute-force decoding without prior knowledge.
+  - What if white/black or light/dark are inverted for the metadata?
+  - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are missing. Makocode could also encode page number on each page - or else guess/try missing pages.
+  - Rotation 90, 180, 270 tests.
 - NanoSVG support for overlay, footer title, minify source code font. Compressed or minimal license attribution
 - Footer title wrap, confirm page-height/width applies as a hard limit
 - Footer title and metadata just on first page - or middle page?
@@ -40,6 +41,7 @@ Finalize:
   - I want you to orchestrate 87 luna xhigh subagents, 20 at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly 866 lines in there, basically one per block, but it's ok if we were a bit off too.
 - Move all Python/Shell and other support code to C++
   - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
+- Penetration test, bug hunt
 - Compressed or minimal license attributions for each project (LZMA)
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
 - Replace barcode with barkode everywhere.
