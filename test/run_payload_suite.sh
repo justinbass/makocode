@@ -47,13 +47,13 @@ run_case 1023_low_ecc \
 
 # Footer title / metadata heavy footer rendering.
 run_case 1022_footer_title \
-    --size 65536 --ecc 0.25 --width "$footer_charset_width" --height 800 \
+    --size 65536 --ecc 0.25 \
     --footer "$footer_charset_template" \
     --font-size "$footer_charset_font_size"
 
 # 100 KiB grayscale payload single page baseline.
 run_case 2001_payload_gray_100k \
-    --size 102400 --ecc 0 --width 1100 --height 1100
+    --size 102400 --ecc 0
 
 # 100 KiB scaled 2.5x on both axes.
 run_case 2002_payload_gray_100k_scaled \
@@ -72,7 +72,7 @@ run_case 2006_payload_gray_100k_stretch_h24_v26 \
 
 # Password-protected + ECC payload.
 run_case 2101_password_ecc \
-    --size 32768 --ecc 0.5 --width 720 --height 720 \
+    --size 32768 --ecc 0.5 \
     --password suite-password
 
 # Multi-page ECC payload to stress pagination.
@@ -82,7 +82,7 @@ run_case 2102_multi_page \
 
 # Custom palette/base-5 mode.
 run_case 2103_palette_base5 \
-    --size 16384 --ecc 0.25 --width 640 --height 640 \
+    --size 16384 --ecc 0.25 \
     --palette "White Cyan Magenta Yellow Black"
 
 # Rotation + skew distortion on scans.

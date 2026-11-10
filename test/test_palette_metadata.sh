@@ -133,8 +133,6 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
     --ecc=0.25
-    --page-width=640
-    --page-height=640
     --palette "$palette"
     "--output-dir=$work_dir"
     "--prefix=${label}_page"

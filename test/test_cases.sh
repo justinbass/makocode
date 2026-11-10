@@ -11,59 +11,59 @@
 # namespace the artifacts written under test_output/.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' encoded from stdin" \
-    --size 1 --ecc 0 --width 80 --height 80 \
+    --size 1 --ecc 0 \
     --stdin-payload \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \
-    --size 8 --ecc 0 --width 80 --height 80 \
+    --size 8 --ecc 0 \
     --payload-literal "makocode"
 
 test_case 0002_baseline_8k_ecc_050 roundtrip "8 KiB payload, ECC 0.5 baseline" \
-    --size 8192 --ecc 0.5 --width 500 --height 500
+    --size 8192 --ecc 0.5
 
 test_case 0003_baseline_8k_ecc_000 roundtrip "8 KiB payload, zero requested unknown-error budget with structural ECC" \
-    --size 8192 --ecc 0 --width 500 --height 500
+    --size 8192 --ecc 0
 
 test_case 0004_baseline_multi_page_ecc_100 roundtrip "128 KiB payload, ECC 1.0 multi-page" \
     --size 131072 --ecc 1.0 --width 700 --height 700 --multi-page
 
 test_case 0005_ecc_fill_moderate roundtrip "ECC fill saturates moderate payload" \
-    --size 12000 --ecc 0.5 --width 420 --height 420 --encode-opt "--ecc-fill"
+    --size 12000 --ecc 0.5 --encode-opt "--ecc-fill"
 
 test_case 0006_ecc_fill_sparse_large_page roundtrip "ECC fill small payload on large page" \
     --size 1024 --ecc 0.5 --width 1400 --height 1800 --encode-opt "--ecc-fill"
 
 test_case 0007_palette_white_black roundtrip "Two-color palette stress" \
-    --size 8192 --ecc 0.25 --width 360 --height 360 --palette "White Black"
+    --size 8192 --ecc 0.25 --palette "White Black"
 
 test_case 0008_palette_cmy roundtrip "Three-color palette stress" \
-    --size 8192 --ecc 0.25 --width 420 --height 420 --palette "White Cyan Magenta"
+    --size 8192 --ecc 0.25 --palette "White Cyan Magenta"
 
 test_case 0009_palette_cmyk roundtrip "Four-color palette stress" \
-    --size 8192 --ecc 0.25 --width 480 --height 480 --palette "White Cyan Magenta Yellow"
+    --size 8192 --ecc 0.25 --palette "White Cyan Magenta Yellow"
 
 test_case 0010_palette_cmykw roundtrip "Five-color palette stress" \
-    --size 8192 --ecc 0.25 --width 480 --height 480 --palette "White Cyan Magenta Yellow Black"
+    --size 8192 --ecc 0.25 --palette "White Cyan Magenta Yellow Black"
 
 test_case 0011_palette_hex_octet roundtrip "Expanded hex palette stress" \
-    --size 8192 --ecc 0.25 --width 480 --height 480 \
+    --size 8192 --ecc 0.25 --width 240 --height 240 \
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"
 
 test_case 0012_large_canvas_cmykw roundtrip "Large canvas CMYKW palette" \
-    --size 8192 --ecc 0.25 --width 1000 --height 1000 \
+    --size 8192 --ecc 0.25 \
     --palette "White Cyan Magenta Yellow Black"
 
 test_case 0013_low_ecc_fiducial roundtrip "Low ECC fiducial reservation, tiny pages" \
     --size 256 --ecc 0 --width 200 --height 64
 
 test_case 0014_footer_metadata roundtrip "Footer metadata rendering stress" \
-    --size 65536 --ecc 0.25 --width "$footer_charset_width" --height 800 \
+    --size 65536 --ecc 0.25 \
     --footer "$footer_charset_template" \
     --font-size "$footer_charset_font_size"
 
 test_case 0015_gray_100k_single roundtrip "100 KiB grayscale single page baseline" \
-    --size 102400 --ecc 0 --width 1100 --height 1100
+    --size 102400 --ecc 0
 
 test_case 0016_gray_100k_scaled roundtrip "100 KiB grayscale scaled 2.5x" \
     --size 102400 --ecc 0 --width 1100 --height 1100 --scale 2.5
@@ -97,7 +97,7 @@ test_case 0023_gray_rotate_skew_seeded roundtrip "Grayscale rotation combined wi
     --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
 
 test_case 0024_password_ecc roundtrip "Password-protected payload with ECC" \
-    --size 32768 --ecc 0.5 --width 720 --height 720 --password suite-password
+    --size 32768 --ecc 0.5 --password suite-password
 
 test_case 0025_ecc_multi_page_massive roundtrip "262 KiB ECC multi-page stress" \
     --size 262144 --ecc 0.25 --width 520 --height 520 --multi-page
@@ -107,7 +107,7 @@ test_case 0026_multi_page_distorted roundtrip "Multi-page payload with scale and
     --scale 2.10 --rotate 1 --transform-seed 7331
 
 test_case 0027_palette_base5_custom roundtrip "Custom palette/base-5 mode" \
-    --size 16384 --ecc 0.25 --width 640 --height 640 \
+    --size 16384 --ecc 0.25 \
     --palette "White Cyan Magenta Yellow Black"
 
 test_case 0028_border_dirt_dense roundtrip "Dense border-noise stress with deterministic seed" \
@@ -227,19 +227,19 @@ test_case 0050_overlay_ecc_target_gray_base_color overlay "Grayscale base with c
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
 test_case 0051_paper_offwhite_bw roundtrip "Slightly off-white, splotchy paper tint (BW)" \
-    --size 8192 --ecc 0.5 --width 600 --height 600 --palette "White Black" \
+    --size 8192 --ecc 0.5 --width 300 --height 300 --palette "White Black" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
 test_case 0052_paper_offwhite_cmyk roundtrip "Slightly off-white, splotchy paper tint (CMYK)" \
-    --size 8192 --ecc 0.5 --width 640 --height 640 --palette "White Cyan Magenta Yellow" \
+    --size 8192 --ecc 0.5 --width 320 --height 320 --palette "White Cyan Magenta Yellow" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
 test_case 0053_paper_offwhite_cmykwrbg roundtrip "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
-    --size 8192 --ecc 0.5 --width 720 --height 720 \
+    --size 8192 --ecc 0.5 --width 360 --height 360 \
     --palette "FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
@@ -269,8 +269,8 @@ test_case 0060_overlay_ecc_target script "Overlay ECC target happy path" \
 test_case 0061_archive_symlink_roundtrip script "Directory symlink target decodes as a regular file" \
     test_archive_symlink_roundtrip.sh
 
-test_case 0062_compact_page script "Compact single-page output happy path" \
-    test_compact_page.sh
+test_case 0062_page_fit script "Automatic page width and height fit independently" \
+    test_page_fit.sh
 
 test_case 0063_fiducials script "Custom fiducial dimensions happy path" \
     test_fiducials.sh

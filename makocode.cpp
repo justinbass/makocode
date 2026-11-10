@@ -8082,8 +8082,8 @@ struct DecoderContext {
 
 } // namespace makocode
 
-static const u32 DEFAULT_PAGE_WIDTH_PIXELS  = 2480u; // matches prior A4 default
-static const u32 DEFAULT_PAGE_HEIGHT_PIXELS = 3508u; // matches prior A4 default
+static const u32 DEFAULT_PAGE_WIDTH_PIXELS  = 2480u; // decode fallback and encode sizing seed
+static const u32 DEFAULT_PAGE_HEIGHT_PIXELS = 3508u; // decode fallback and encode sizing seed
 
 static void byte_buffer_move(makocode::ByteBuffer& dest, makocode::ByteBuffer& src) {
     dest.release();
@@ -25837,19 +25837,6 @@ static void write_usage() {
     console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
     console_line(1, "  makocode overlay BASE.ppm OVERLAY.ppm FRACTION (writes merged page to stdout)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
-    console_line(1, "Options:");
-    console_line(1, "  --palette \"Color ...\" (2-16 unique names from White/Cyan/Magenta/Yellow/Black; default palette is White Black)");
-    console_line(1, "  --page-width PX    (page width in pixels; default 2480)");
-    console_line(1, "  --page-height PX   (page height in pixels; default 3508)");
-    console_line(1, "  --fiducials S,D[,M] (marker size, spacing, optional margin; default 4,24,12)");
-    console_line(1, "  --input PATH       (encode: repeat to add files or directories)");
-    console_line(1, "  --output-dir PATH  (encode: PPM output directory; decode: output destination; default .)");
-    console_line(1, "  --prefix TEXT       (encode: base name for generated pages; default UTC timestamp, no '/' or '\\\\').");
-    console_line(1, "  --ecc RATIO        (requested unknown-error ECC; default 0.20, 0 reserves no unknown-error budget; structural parity remains required)");
-    console_line(1, "  --ecc-fill         Raise the requested ECC budget to the largest feasible value that fills the final page");
-    console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
-    console_line(1, "  --footer TEXT      (optional footer template: %page, %totalpages, \\% for literal %)");
-    console_line(1, "  --font-size PX     (footer font scale in pixels; default 1)");
     console_line(1, "");
     console_line(1, "Run 'makocode <command> --help' (or -h) for command-specific details.");
 }
@@ -25881,9 +25868,8 @@ static void write_encode_help() {
     console_line(1, "");
     console_line(1, "Layout:");
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
-    console_line(1, "  --page-width PX      Override page width in pixels (default 2480).");
-    console_line(1, "  --page-height PX     Override page height in pixels (default 3508).");
-    console_line(1, "  --compact-page       Shrink single-page output height to the minimum canonical layout that fits.");
+    console_line(1, "  --page-width PX      Page width in pixels; omitted width fits the encoded payload.");
+    console_line(1, "  --page-height PX     Page height in pixels; omitted height fits the encoded payload.");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
@@ -25915,8 +25901,8 @@ static void write_decode_help() {
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
-    console_line(1, "  --page-width PX      Page width in pixels (default 2480).");
-    console_line(1, "  --page-height PX     Page height in pixels (default 3508).");
+    console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable (default 2480).");
+    console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable (default 3508).");
     console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
     console_line(1, "  --debug              Write decode_fiducials.csv and decode_affine.csv under --output-dir.");
     console_line(1, "");
@@ -26113,6 +26099,70 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
         page_count = new_page_count;
     }
     return layout_converged;
+}
+
+static bool fit_page_dimensions(const ImageMappingConfig& mapping,
+                                const PageFooterConfig& footer_template,
+                                u64 frame_bit_count,
+                                bool fit_width,
+                                bool fit_height,
+                                u32& width_pixels,
+                                u32& height_pixels) {
+    if (!fit_width && !fit_height) return true;
+    const u32 MINIMUM_EDGE = MetadataTile::TILE_SIDE;
+    const u32 MAXIMUM_EDGE = 32768u;
+    auto fits = [&](u32 width, u32 height) -> bool {
+        PageFooterConfig footer = footer_template;
+        FooterLayout layout;
+        u32 data_height = 0u;
+        u64 bits_per_page = 0u;
+        u64 page_count = 0u;
+        return compute_page_layout(mapping,
+                                   footer,
+                                   frame_bit_count,
+                                   width,
+                                   height,
+                                   layout,
+                                   data_height,
+                                   bits_per_page,
+                                   page_count) &&
+               page_count == 1u;
+    };
+
+    u32 low = MINIMUM_EDGE;
+    u32 high = MINIMUM_EDGE;
+    if (fit_width && fit_height) {
+        while (!fits(high, high)) {
+            if (high >= MAXIMUM_EDGE) return false;
+            high = high > MAXIMUM_EDGE / 2u ? MAXIMUM_EDGE : high * 2u;
+        }
+        u32 left = low;
+        u32 right = high;
+        while (left < right) {
+            u32 middle = left + (right - left) / 2u;
+            if (fits(middle, middle)) right = middle;
+            else left = middle + 1u;
+        }
+        width_pixels = left;
+        height_pixels = left;
+        return true;
+    }
+
+    u32 fixed_dimension = fit_width ? height_pixels : width_pixels;
+    while (!(fit_width ? fits(high, fixed_dimension) : fits(fixed_dimension, high))) {
+        if (high >= MAXIMUM_EDGE) return false;
+        high = high > MAXIMUM_EDGE / 2u ? MAXIMUM_EDGE : high * 2u;
+    }
+    u32 left = low;
+    u32 right = high;
+    while (left < right) {
+        u32 middle = left + (right - left) / 2u;
+        if (fit_width ? fits(middle, fixed_dimension) : fits(fixed_dimension, middle)) right = middle;
+        else left = middle + 1u;
+    }
+    if (fit_width) width_pixels = left;
+    else height_pixels = left;
+    return true;
 }
 
 static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
@@ -26392,6 +26442,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         const PageFooterConfig& footer_template,
                                         u32 width_pixels,
                                         u32 height_pixels,
+                                        bool fit_width,
+                                        bool fit_height,
                                         double structural_erasure_fraction,
                                         bool reserve_overlay,
                                         EccFillCandidate& candidate) {
@@ -26413,6 +26465,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
     u64 bits_per_page = 0u;
     u64 page_count = 0u;
     bool exact_budget_valid = false;
+    u32 candidate_width = width_pixels;
+    u32 candidate_height = height_pixels;
     makocode::ByteBuffer dummy_frame;
     if (!dummy_frame.ensure(1u)) return false;
     dummy_frame.size = 1u;
@@ -26430,12 +26484,21 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
             candidate.block_data == 0u || candidate.parity == 0u) {
             return false;
         }
+        if (!fit_page_dimensions(mapping,
+                                 footer_template,
+                                 candidate.frame_bits,
+                                 fit_width,
+                                 fit_height,
+                                 candidate_width,
+                                 candidate_height)) {
+            return false;
+        }
         PageFooterConfig footer_copy = footer_template;
         if (!compute_page_layout(mapping,
                                  footer_copy,
                                  candidate.frame_bits,
-                                 width_pixels,
-                                 height_pixels,
+                                 candidate_width,
+                                 candidate_height,
                                  layout,
                                  layout_data_height,
                                  bits_per_page,
@@ -26453,8 +26516,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
         if (validate_overwrite_budget(mapping,
                                       dummy_frame,
                                       candidate.frame_bits,
-                                      width_pixels,
-                                      height_pixels,
+                                      candidate_width,
+                                      candidate_height,
                                       layout_data_height,
                                       bits_per_page,
                                       page_count,
@@ -26508,6 +26571,8 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                const PageFooterConfig& footer_config,
                                u32 width_pixels,
                                u32 height_pixels,
+                               bool fit_width,
+                               bool fit_height,
                                double structural_erasure_fraction,
                                bool reserve_overlay,
                                double& best_ratio,
@@ -26539,6 +26604,8 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                           footer_config,
                                           width_pixels,
                                           height_pixels,
+                                          fit_width,
+                                          fit_height,
                                           structural_erasure_fraction,
                                           reserve_overlay,
                                           local)) {
@@ -26574,6 +26641,8 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                           footer_config,
                                           width_pixels,
                                           height_pixels,
+                                          fit_width,
+                                          fit_height,
                                           structural_erasure_fraction,
                                           reserve_overlay,
                                           candidate)) {
@@ -26624,7 +26693,6 @@ static int command_encode(int arg_count, char** args) {
     bool have_prefix = false;
     bool ecc_fill_requested = false;
     bool reserve_overlay = true;
-    bool compact_page = false;
     bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
@@ -26730,10 +26798,6 @@ static int command_encode(int arg_count, char** args) {
             prefix_buffer.data[prefix_length] = 0u;
             prefix_buffer.size = prefix_length;
             have_prefix = true;
-            continue;
-        }
-        if (ascii_equals_token(arg, ascii_length(arg), "--compact-page")) {
-            compact_page = true;
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-overlay-reserve")) {
@@ -27137,6 +27201,8 @@ static int command_encode(int arg_count, char** args) {
                                 footer_config,
                                 width_pixels,
                                 height_pixels,
+                                !mapping.page_width_set,
+                                !mapping.page_height_set,
                                 structural_erasure_fraction,
                                 reserve_overlay,
                                 best_ratio,
@@ -27234,6 +27300,16 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: failed to build frame");
         return 1;
     }
+    if (!fit_page_dimensions(mapping,
+                             footer_config,
+                             frame_bit_count,
+                             !mapping.page_width_set,
+                             !mapping.page_height_set,
+                             width_pixels,
+                             height_pixels)) {
+        console_line(2, "encode: payload does not fit the maximum automatic page dimensions");
+        return 1;
+    }
     FooterLayout footer_layout;
     u32 layout_data_height = height_pixels;
     u64 bits_per_page = 0u;
@@ -27309,6 +27385,13 @@ static int command_encode(int arg_count, char** args) {
         encoder.config.ecc_redundancy = retry_redundancy;
         if (!encoder.build() ||
             !build_frame_bits(encoder, mapping, frame_bits, frame_bit_count) ||
+            !fit_page_dimensions(mapping,
+                                 footer_config,
+                                 frame_bit_count,
+                                 !mapping.page_width_set,
+                                 !mapping.page_height_set,
+                                 width_pixels,
+                                 height_pixels) ||
             !compute_page_layout(mapping,
                                  footer_config,
                                  frame_bit_count,
@@ -27365,86 +27448,6 @@ static int command_encode(int arg_count, char** args) {
         FooterLayout output_footer_layout = footer_layout;
         u32 output_data_height_pixels = layout_data_height;
         u64 output_bits_per_page = bits_per_page;
-
-        if (compact_page && footer_layout.has_text) {
-            console_line(2, "encode: --compact-page requires the footer text to be empty (omit --footer)");
-            return 1;
-        }
-
-        // For single-page outputs with no footer text, shrink to the minimum
-        // height needed for payload data.
-        if (compact_page && !footer_layout.has_text && layout_data_height > 0u) {
-            double bits_per_pixel = mapping_bits_per_data_pixel(mapping);
-            if (bits_per_pixel > 0.0) {
-                u32 max_data_height = layout_data_height;
-                if (max_data_height > 0u) {
-                    u32 low = 1u;
-                    u32 high = max_data_height;
-                    u32 best = max_data_height;
-                    u64 best_bits = 0u;
-                    while (low <= high) {
-                        u32 mid = low + (high - low) / 2u;
-                        u64 candidate_bits = 0u;
-                        if (compute_bits_per_page(mapping,
-                                                  width_pixels,
-                                                  height_pixels,
-                                                  mid,
-                                                  candidate_bits) &&
-                            candidate_bits >= frame_bit_count) {
-                            best = mid;
-                            best_bits = candidate_bits;
-                            high = mid - 1u;
-                        } else {
-                            low = mid + 1u;
-                        }
-                    }
-                    if (best_bits > 0u) {
-                        bool exact_budget_fit = false;
-                        for (u32 candidate_height = best;
-                             candidate_height <= max_data_height;
-                             ++candidate_height) {
-                            u64 candidate_bits = 0u;
-                            if (!compute_bits_per_page(mapping,
-                                                       width_pixels,
-                                                       height_pixels,
-                                                       candidate_height,
-                                                       candidate_bits) ||
-                                candidate_bits < frame_bit_count) {
-                                continue;
-                            }
-                            if (validate_overwrite_budget(mapping,
-                                                          frame_bits,
-                                                          frame_bit_count,
-                                                          width_pixels,
-                                                          candidate_height,
-                                                          candidate_height,
-                                                          candidate_bits,
-                                                          1u,
-                                                          encoder.ecc_info(),
-                                                          metadata_ecc_redundancy,
-                                                          unknown_parity_budget,
-                                                          overlay_erasure_budget,
-                                                          (u16*)0)) {
-                                best = candidate_height;
-                                best_bits = candidate_bits;
-                                exact_budget_fit = true;
-                                break;
-                            }
-                        }
-                        if (!exact_budget_fit) best_bits = 0u;
-                    }
-                    // Only apply if it meaningfully reduces the unused band.
-                    if (best_bits > 0u && best + 4u < layout_data_height) {
-                        output_height_pixels = best;
-                        output_footer_layout.data_height_pixels = best;
-                        output_data_height_pixels = best;
-                        // Bits-per-page depends on data_height; keep it consistent with
-                        // the chosen data height even when we shrink the output image.
-                        output_bits_per_page = best_bits;
-                    }
-                }
-            }
-        }
         makocode::ByteBuffer page_output;
         if (!footer_build_page_text(footer_config, 1u, page_count, footer_text_buffer)) {
             console_line(2, "encode: failed to build footer text");

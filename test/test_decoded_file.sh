@@ -8,7 +8,7 @@ rm -rf "$work"
 mkdir -p "$work/input/empty" "$work/input/sub" "$work/pages" "$work/out"
 printf 'hello\nback\\slash\000\377' > "$work/input/sub/a b"
 : > "$work/input/blank"
-(cd "$work" && "$bin" encode --input=input --page-width=200 --page-height=200 --ecc=0.5 --password=secret --prefix=page --output-dir=pages >/dev/null)
+(cd "$work" && "$bin" encode --input=input --ecc=0.5 --password=secret --prefix=page --output-dir=pages >/dev/null)
 "$bin" decode --decoded-file --password=secret --output-dir="$work/out" "$work"/pages/*.ppm >/dev/null
 python3 - "$work" <<'PY'
 import pathlib, re, sys
@@ -55,6 +55,7 @@ import random, sys
 random.seed(42)
 open(sys.argv[1], 'wb').write(bytes(random.randrange(256) for _ in range(3000)))
 PY
+# A fixed small page is required here to exercise multi-page decoded-file output.
 (cd "$work" && "$bin" encode --input=plain.bin --page-width=160 --page-height=160 --ecc=0 --prefix=page --output-dir=plain_pages >/dev/null)
 "$bin" decode --decoded-file --output-dir="$work/plain_out" "$work"/plain_pages/*.ppm >/dev/null
 python3 - "$work" <<'PY'

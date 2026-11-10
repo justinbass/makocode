@@ -64,8 +64,6 @@ encode_cmd=(
     "$makocode_bin" encode
     --input=payload.bin
     --ecc=0
-    --page-width=160
-    --page-height=160
     --palette='Cyan Black'
     "--output-dir=$pages_dir"
     --debug

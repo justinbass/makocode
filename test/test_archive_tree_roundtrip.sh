@@ -94,8 +94,6 @@ encode_cmd=(
     --input=tree
     --input=empty_only
     --ecc=0
-    --page-width=400
-    --page-height=240
     --prefix=archive_tree
     --debug
     "--output-dir=$page_dir"

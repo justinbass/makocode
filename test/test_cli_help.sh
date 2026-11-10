@@ -99,5 +99,20 @@ run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" dec
 run_expect_help overlay-help 'Usage: makocode overlay' '--overlay-ecc-target TARGET' "$makocode_bin" overlay --help
 run_expect_help minify-help 'Usage: makocode minify' 'Strips comments/whitespace' "$makocode_bin" minify --help
 
+if grep -Eq '^  --' "$tmp_dir/top-level.txt"; then
+    echo 'test_cli_help: top-level help lists command-specific options' >&2
+    cat "$tmp_dir/top-level.txt" >&2
+    exit 1
+fi
+if ! grep -Fq -- 'omitted width fits the encoded payload' "$tmp_dir/encode-help.txt" ||
+   ! grep -Fq -- 'omitted height fits the encoded payload' "$tmp_dir/encode-help.txt" ||
+   grep -Fq -- '--compact-page' "$tmp_dir/encode-help.txt" ||
+   grep -Fq -- '--footer' "$tmp_dir/decode-help.txt" ||
+   grep -Fq -- '--ecc-fill' "$tmp_dir/decode-help.txt"; then
+    echo 'test_cli_help: command-specific layout options are incorrect' >&2
+    cat "$tmp_dir/encode-help.txt" "$tmp_dir/decode-help.txt" >&2
+    exit 1
+fi
+
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS CLI usage and command help\n' "$label_fmt"

@@ -110,8 +110,6 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=$payload_source_name"
     --ecc=0.5
-    --page-width=200
-    --page-height=100
     "--output-dir=$work_dir"
     "--prefix=$encode_prefix"
     --debug
