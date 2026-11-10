@@ -12,7 +12,6 @@
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' encoded from stdin" \
     --size 1 --ecc 0 \
-    --stdin-payload \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \

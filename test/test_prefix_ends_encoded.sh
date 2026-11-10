@@ -13,7 +13,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 label="0059_prefix_ends_encoded"
 while [[ $# -gt 0 ]]; do
@@ -91,7 +90,6 @@ if [[ ! -f $encode_csv ]]; then
     echo 'test_prefix_ends_encoded: encode did not write fiducial CSV' >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$pages_dir"/*.ppm)
@@ -128,17 +126,15 @@ if [[ ! -f $decode_csv ]]; then
     echo 'test_prefix_ends_encoded: decode did not write fiducial CSV' >&2
     exit 1
 fi
-cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$decode_csv" \
     "$label"
 if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; then
     echo 'test_prefix_ends_encoded: decoded payload differs from input' >&2
     exit 1
 fi
-visual_ppm="$test_dir/${label}_prefix_encoded.ppm"
-cp "$encoded_ppm" "$visual_ppm"
-mako_register_visual_artifacts "$repo_root" "$visual_ppm"
+retained_ppm="$test_dir/${label}_prefix_encoded.ppm"
+cp "$encoded_ppm" "$retained_ppm"
 
 printf '%s SUCCESS prefix filename, fiducials, and payload round-trip\n' "$(mako_format_label "$label")"

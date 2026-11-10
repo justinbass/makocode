@@ -43,9 +43,11 @@ The `archive` section gives `entries COUNT`, followed by `directory PATH` and `f
 Test artifacts are written to `test_output/` using the labels defined in each
 case registration (e.g., `0002_baseline_8k_ecc_050_*`,
 `0015_gray_100k_single_*`).
-After a passing run, final round-trip images (transformed where applicable) and
-the CLI output image remain in `test_output/` and are linked from `test_output/visual/` with
-relative symlinks.
+Encoded PPM pages remain directly in `test_output/`. Standard round-trip tests
+pipe payloads into `encode` and compare `decode --decoded-stdout`; dedicated
+file and directory tests keep their filesystem fixtures and outputs. Each test
+run clears prior output before writing fresh artifacts. No visual-link directory
+is created.
 
 Test cases are registered in `test/test_cases.sh`. Run independent cases in
 parallel with GNU Make using `make -j test`. Each completed case prints one

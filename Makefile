@@ -15,7 +15,7 @@ TEST_CASES := $(shell bash ./test/run_test_case.sh --list)
 TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
 export CANONICAL_TILE_HARNESS_BIN := $(CURDIR)/test/canonical_tile_harness
 
-.PHONY: all clean test test-setup test-finalize coverage $(TEST_CASE_TARGETS)
+.PHONY: all clean test test-setup coverage $(TEST_CASE_TARGETS)
 
 ifeq ($(COVERAGE),1)
 CXXFLAGS += --coverage -O0 -g
@@ -33,7 +33,7 @@ test/ppm_transform: test/ppm_transform.cpp
 test/canonical_tile_harness: test/test_canonical_tile_harness.cpp makocode
 	@$(STATUS) build "compile canonical tile harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test: test-finalize
+test: $(TEST_CASE_TARGETS)
 
 test-setup:
 	@$(STATUS) test "prepare test suite" bash ./test/run_test_suite.sh --prepare
@@ -55,9 +55,6 @@ $(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform test/c
 			exit "$$status"; \
 		fi; \
 	fi
-
-test-finalize: $(TEST_CASE_TARGETS)
-	@$(STATUS) test "collect visual artifacts" bash ./test/run_test_suite.sh --finalize
 
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'

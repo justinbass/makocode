@@ -14,7 +14,6 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -103,7 +102,7 @@ export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_password_work"
-payload="$test_dir/${label}_payload.bin"
+payload="$work_dir/payload.bin"
 ppm_target="$test_dir/${label}_encoded.ppm"
 
 cleanup() {
@@ -123,7 +122,7 @@ trap 'on_exit' EXIT
 
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
-rm -f "$payload" "$ppm_target"
+rm -f "$ppm_target"
 
 "$ppm_transform_bin" bytes --output "$payload" --size 32768 --seed "$payload_seed"
 password="suite-password"
@@ -146,7 +145,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_password_failures: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -173,10 +171,9 @@ if [[ ! -f $missing_password_csv ]]; then
     echo "test_password_failures: missing-password decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$missing_password_csv" "$test_dir/${label}_missing_password_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_missing_password_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$missing_password_csv" \
     "$label missing password"
 
 run_expect_failure "decode-wrong-password" \
@@ -186,12 +183,10 @@ if [[ ! -f $wrong_password_csv ]]; then
     echo "test_password_failures: wrong-password decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$wrong_password_csv" "$test_dir/${label}_wrong_password_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_wrong_password_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$wrong_password_csv" \
     "$label wrong password"
-mako_register_visual_artifacts "$repo_root" "$ppm_target"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS password failures enforced\n' "$label_fmt"

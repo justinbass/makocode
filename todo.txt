@@ -1,7 +1,6 @@
 TODO
 
 Features:
-- Make most tests use stdin most, remove most files from test output? To clean it up. May not need visual dir in that case.
 - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
 - Make metadata/fidicuals optional, fully damageable, or resizable
   - Optional fiducial markings and center code, use known error position to correct in place. Data could simply be linear across the page...

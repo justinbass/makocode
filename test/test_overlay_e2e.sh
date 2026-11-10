@@ -14,7 +14,6 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 makocode_bin="$repo_root/makocode"
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
@@ -41,10 +40,8 @@ export MAKOCODE_TEST_SEED
 test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_overlay_work"
 canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
-payload_path="$test_dir/${label}_overlay_payload.bin"
-payload_work="$work_dir/payload.bin"
+payload_path="$work_dir/payload.bin"
 overlay_path="$test_dir/${label}_overlay_mask.ppm"
-decoded_path="$test_dir/${label}_overlay_decoded.bin"
 encoded_dir="$work_dir/encoded_pages"
 merged_dir="$work_dir/merged_pages"
 
@@ -71,7 +68,7 @@ trap 'on_exit' EXIT
 
 rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir" "$encoded_dir" "$merged_dir"
-rm -f "$payload_path" "$overlay_path" "$decoded_path"
+rm -f "$payload_path" "$overlay_path"
 if [[ ! -x $canonical_tile_harness_bin ]]; then
     canonical_tile_harness_bin="$work_dir/canonical_tile_harness"
     "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
@@ -79,7 +76,6 @@ if [[ ! -x $canonical_tile_harness_bin ]]; then
 fi
 
 "$ppm_transform_bin" bytes --output "$payload_path" --size 32768 --seed "$payload_seed"
-cp "$payload_path" "$payload_work"
 
 encode_cmd=(
     "$makocode_bin" encode
@@ -109,7 +105,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_overlay_e2e: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$encoded_dir"/*.ppm)
@@ -242,10 +237,9 @@ if [[ ! -f $decode_csv ]]; then
     echo "test_overlay_e2e: decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$decode_csv" \
     "$label overlay"
 decoded_source="$decoded_dir/payload.bin"
 if [[ ! -f $decoded_source ]]; then
@@ -253,13 +247,11 @@ if [[ ! -f $decoded_source ]]; then
     exit 1
 fi
 cmp --silent "$payload_path" "$decoded_source"
-mv "$decoded_source" "$decoded_path"
 
 skip_grayscale="${MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK:-0}"
 for index in "${!ppms[@]}"; do
     "$ppm_transform_bin" overlay-check --base "${ppms[$index]}" \
         --merged "${merged_pages[$index]}" --skip-grayscale "$skip_grayscale"
 done
-mako_register_visual_artifacts "$repo_root" "${merged_pages[0]}"
 
 echo "overlay e2e ok (label=$label, artifacts prefix ${label}_overlay_*)"

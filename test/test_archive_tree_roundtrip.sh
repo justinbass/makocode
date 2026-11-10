@@ -13,7 +13,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -107,7 +106,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_archive_tree_roundtrip: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$page_dir"/*.ppm)
@@ -125,10 +123,9 @@ if [[ ! -f $decode_csv ]]; then
     echo "test_archive_tree_roundtrip: decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$decode_csv" \
     "$label"
 
 for tree_name in tree empty_only; do
@@ -156,15 +153,12 @@ for relative_path in root.txt nested/leaf.txt zero.bin; do
 done
 
 page_index=0
-visual_targets=()
 for ppm in "${ppms[@]}"; do
     page_index=$((page_index + 1))
     printf -v page_suffix '%02d' "$page_index"
     dest="$test_dir/${label}_archive_tree_encoded_${page_suffix}.ppm"
     mv -f "$ppm" "$dest"
-    visual_targets+=("$dest")
 done
-mako_register_visual_artifacts "$repo_root" "${visual_targets[@]}"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS archive directory tree roundtrip (%d page(s))\n' "$label_fmt" "$page_index"

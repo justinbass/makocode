@@ -14,7 +14,6 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -114,7 +113,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_decode_stdin: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppm_paths=("$work_dir"/*.ppm)
@@ -133,10 +131,9 @@ if [[ ! -f $decode_csv ]]; then
     echo "test_decode_stdin: stdin decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$decode_csv" \
     "$label stdin"
 
 decoded_payload="$decoded_dir/payload.bin"
@@ -148,9 +145,8 @@ if ! cmp --silent "$payload" "$decoded_payload"; then
     echo "test_decode_stdin: stdin decode payload differs from encoded payload" >&2
     exit 1
 fi
-visual_ppm="$test_dir/${label}_stdin_encoded.ppm"
-cp "${ppm_paths[0]}" "$visual_ppm"
-mako_register_visual_artifacts "$repo_root" "$visual_ppm"
+retained_ppm="$test_dir/${label}_stdin_encoded.ppm"
+cp "${ppm_paths[0]}" "$retained_ppm"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS stdin payload matched byte-for-byte\n' "$label_fmt"

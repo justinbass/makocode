@@ -14,7 +14,6 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 ppm_transform_bin="$repo_root/test/ppm_transform"
 
@@ -66,15 +65,15 @@ fi
 
 test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_work"
-payload_final="$test_dir/${label}_payload.bin"
+payload_final="$work_dir/random.bin"
 encoded_ppm="$test_dir/${label}_encoded.ppm"
 
 rm -rf "$work_dir"
 mkdir -p "$work_dir"
-rm -f "$payload_final" "$encoded_ppm"
+trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
+rm -f "$encoded_ppm"
 
 "$ppm_transform_bin" bytes --output "$payload_final" --size 4096 --seed "$payload_seed"
-cp "$payload_final" "$work_dir/random.bin"
 
 encode_prefix="${label}_page"
 encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
@@ -84,7 +83,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_header_copy_corruption: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppm_paths=("$work_dir"/*.ppm)
@@ -104,9 +102,9 @@ run_decode_expect() {
     local scenario=$1
     local expect_success=$2
     local corrupt_count=$3
-    local output_dir="$test_dir/${label}_${scenario}_decoded"
+    local output_dir="$work_dir/${scenario}_decoded"
     local damaged_ppm="$test_dir/${label}_${scenario}_corrupted.ppm"
-    local decode_log="$test_dir/${label}_${scenario}_decode.log"
+    local decode_log="$work_dir/${scenario}_decode.log"
     rm -rf "$output_dir"
     mkdir -p "$output_dir"
     rm -f "$damaged_ppm"
@@ -137,10 +135,9 @@ run_decode_expect() {
         echo "test_header_copy_corruption: decode ${scenario} did not write fiducial CSV" >&2
         exit 1
     fi
-    cp "$fiducial_csv" "$test_dir/${label}_${scenario}_decode_fiducials.csv"
     mako_check_fiducials \
-        "$test_dir/${label}_encode_fiducials.csv" \
-        "$test_dir/${label}_${scenario}_decode_fiducials.csv" \
+        "$encode_csv" \
+        "$fiducial_csv" \
         "$label $scenario"
     if [[ $expect_success -eq 1 ]]; then
         if [[ ! -f "$output_dir/random.bin" ]]; then
@@ -156,7 +153,6 @@ run_decode_expect "two_groups" 1 2
 # These former in-band header slots now contain ordinary RS-protected payload.
 # Damage one, two, and three six-symbol groups and require exact recovery.
 run_decode_expect "three_groups" 1 3
-mako_register_visual_artifacts "$repo_root" "$encoded_ppm"
 
 label_fmt="$label"
 printf '%s SUCCESS ECC payload recovery at former header slots\n' "$label_fmt"

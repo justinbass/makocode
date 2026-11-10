@@ -13,7 +13,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -124,8 +123,7 @@ if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; 
     echo 'test_fiducials: decoded payload differs from encoded payload' >&2
     exit 1
 fi
-visual_ppm="$test_dir/${label}_fiducials_page.ppm"
-cp "$encoded_ppm" "$visual_ppm"
-mako_register_visual_artifacts "$repo_root" "$visual_ppm"
+retained_ppm="$test_dir/${label}_fiducials_page.ppm"
+cp "$encoded_ppm" "$retained_ppm"
 
 printf '%s SUCCESS custom fiducial grid and payload round-trip\n' "$(mako_format_label "$label")"

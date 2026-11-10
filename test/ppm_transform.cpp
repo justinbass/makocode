@@ -297,7 +297,8 @@ static void write_ppm_p6(const char* path,
                                int height,
                                const IntVec* pixels,
                                int row_compact) {
-    FILE* f = fopen(path, "wb");
+    bool write_stdout = strcmp(path, "-") == 0;
+    FILE* f = write_stdout ? stdout : fopen(path, "wb");
     if (!f) die2("ppm_transform: failed to write ", path);
 
     fprintf(f, "P6\n");
@@ -309,7 +310,11 @@ static void write_ppm_p6(const char* path,
 
     (void)row_compact;
     for (size_t i = 0; i < pixels->size; ++i) fputc(pixels->data[i], f);
-    fclose(f);
+    if (write_stdout) {
+        if (fflush(f) != 0) die("ppm_transform: failed to flush stdout");
+    } else {
+        fclose(f);
+    }
 }
 
 static void bilinear_sample(const int* pixels, int width, int height, double fx, double fy, int out_rgb[3]) {
@@ -758,7 +763,7 @@ static int u32_cmp(const void* a, const void* b) {
 static void usage() {
     fprintf(stderr,
             "Usage:\n"
-            "  ppm_transform transform --input IN --output OUT [--scale-x F] [--scale-y F] [--rotate DEG]\n"
+            "  ppm_transform transform --input IN --output OUT|- [--scale-x F] [--scale-y F] [--rotate DEG]\n"
             "                       [--skew-x PX] [--skew-y PX] [--border-thickness PX] [--border-density R]\n"
             "                       [--seed N] [--ink-blot-radius PX] [--ink-blot-color C]\n"
             "                       [--paper-color C] [--paper-alpha A] [--paper-splotch-alpha A]\n"
@@ -771,7 +776,7 @@ static void usage() {
             "  ppm_transform corrupt-footer-valid-data-too-corrupt --input IN --output OUT [--seed N] [--footer-height-px N] [--border-keep N]\n"
             "  ppm_transform overlay-mask --output OUT --circle-color \"R G B\" --background-color \"R G B\" [--width W] [--height H]\n"
             "  ppm_transform overlay-check --base IN --merged IN [--skip-grayscale 0|1]\n"
-            "  ppm_transform bytes --output OUT --size N --seed N\n"
+            "  ppm_transform bytes --output OUT|- --size N --seed N\n"
             "  ppm_transform bytes-len TEXT\n");
 }
 
@@ -1618,7 +1623,8 @@ int main(int argc, char** argv) {
         }
         uint32_t rng = (uint32_t)seed ^ 0xC0FFEEu;
         if (rng == 0u) rng = 0xA341316Cu;
-        FILE* file = fopen(output, "wb");
+        bool write_stdout = strcmp(output, "-") == 0;
+        FILE* file = write_stdout ? stdout : fopen(output, "wb");
         if (!file) die2("ppm_transform: unable to open ", output);
         unsigned char buffer[4096];
         int remaining = byte_count;
@@ -1626,12 +1632,16 @@ int main(int argc, char** argv) {
             size_t count = remaining < (int)sizeof(buffer) ? (size_t)remaining : sizeof(buffer);
             for (size_t i = 0; i < count; i++) buffer[i] = (unsigned char)rand_u8(&rng);
             if (fwrite(buffer, 1, count, file) != count) {
-                fclose(file);
+                if (!write_stdout) fclose(file);
                 die2("ppm_transform: unable to write ", output);
             }
             remaining -= (int)count;
         }
-        if (fclose(file) != 0) die2("ppm_transform: unable to close ", output);
+        if (write_stdout) {
+            if (fflush(file) != 0) die2("ppm_transform: unable to flush ", output);
+        } else if (fclose(file) != 0) {
+            die2("ppm_transform: unable to close ", output);
+        }
         return 0;
     }
     if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 || strcmp(cmd, "help") == 0) {

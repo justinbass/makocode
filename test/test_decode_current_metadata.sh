@@ -13,10 +13,10 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'x' > "$work_dir/payload.bin"
 (cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0.25 \
-    --page-width=80 --page-height=80 \
+    --page-width=64 --page-height=64 \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
 layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
-    "$work_dir/encoded/page.ppm" 80 80 1 --metadata-layout)
+    "$work_dir/encoded/page.ppm" 64 64 1 --metadata-layout)
 read -r square_x square_y square_side prefix_bits tag_y symbol_count <<<"$layout"
 python3 - "$work_dir/encoded/page.ppm" "$work_dir/damaged.ppm" \
     "$square_x" "$square_y" "$square_side" "$prefix_bits" <<'PY'
@@ -24,20 +24,20 @@ from pathlib import Path
 from ppm_test_utils import read_ppm, write_ppm
 import sys
 width, height, pixels = read_ppm(sys.argv[1])
-assert (width, height) == (80, 80)
-assert len(pixels) == 80 * 80 * 3
-tile_x = tile_y = (80 - 48) // 2
+assert (width, height) == (64, 64)
+assert len(pixels) == 64 * 64 * 3
+tile_x = tile_y = (64 - 48) // 2
 # Flip a protected data module after the outer schema and parity fields.
 square_x, square_y, square_side, prefix_bits = map(int, sys.argv[3:7])
 cell = prefix_bits + 16
 x = tile_x + square_x + cell % square_side
 y = tile_y + square_y + cell // square_side
-index = (y * 80 + x) * 3
+index = (y * 64 + x) * 3
 original = pixels[index:index + 3]
 assert original in ([0, 0, 0], [255, 255, 255])
 pixels[index:index + 3] = [255 - value for value in original]
 assert pixels[index:index + 3] != original
-write_ppm(sys.argv[2], 80, 80, pixels)
+write_ppm(sys.argv[2], width, height, pixels)
 PY
 "$repo_root/makocode" decode --output-dir="$work_dir/decoded" \
     "$work_dir/damaged.ppm" >"$work_dir/decode.log" 2>&1 || {

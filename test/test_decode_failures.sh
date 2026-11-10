@@ -102,20 +102,6 @@ run_expect_failure() {
     fi
 }
 
-save_decode_fiducials() {
-    local source_csv=$1
-    local suffix=$2
-    local target_csv="$test_dir/${label}_${suffix}_decode_fiducials.csv"
-    if [[ ! -f $source_csv ]]; then
-        echo "test_decode_failures: decode did not write fiducial CSV ($source_csv)" >&2
-        exit 1
-    fi
-    cp "$source_csv" "$target_csv"
-    if [[ -f $test_dir/${label}_encode_fiducials.csv ]]; then
-        mako_check_fiducials "$test_dir/${label}_encode_fiducials.csv" "$target_csv" "$label $suffix"
-    fi
-}
-
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
@@ -142,6 +128,7 @@ footer_data_destroyed="$test_dir/${label}_footer_present_data_destroyed.ppm"
 footer_valid_data_too_corrupt="$test_dir/${label}_footer_valid_data_too_corrupt.ppm"
 work_dir="$test_dir/${label}_work"
 payload_path="$work_dir/payload.bin"
+trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
 rm -f "$wrong_depth" "$invalid_magic" "$all_black" "$all_white" "$random_noise" "$footer_data_destroyed" "$footer_valid_data_too_corrupt"
 rm -rf "$work_dir"
 
@@ -153,8 +140,7 @@ P6
 
 PPM
     local decode_dir="$work_dir/wrong_depth_decode"
-    run_expect_failure "decode-wrong-depth" "$makocode_bin" decode "$wrong_depth" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" wrong_depth
+    run_expect_failure "decode-wrong-depth" "$makocode_bin" decode "$wrong_depth" "--output-dir=$decode_dir"
 }
 
 run_case_invalid_magic() {
@@ -164,8 +150,7 @@ P6
 255
 PPM
     local decode_dir="$work_dir/invalid_magic_decode"
-    run_expect_failure "decode-invalid-magic" "$makocode_bin" decode "$invalid_magic" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" invalid_magic
+    run_expect_failure "decode-invalid-magic" "$makocode_bin" decode "$invalid_magic" "--output-dir=$decode_dir"
 }
 
 write_solid_ppm() {
@@ -182,16 +167,14 @@ write_solid_ppm() {
 run_case_all_black() {
     write_solid_ppm "$all_black" 256 256 0 0 0
     local decode_dir="$work_dir/all_black_decode"
-    run_expect_failure "decode-all-black" "$makocode_bin" decode "$all_black" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" all_black
+    run_expect_failure "decode-all-black" "$makocode_bin" decode "$all_black" "--output-dir=$decode_dir"
 }
 
 # 2) Totally white, no barcode present.
 run_case_all_white() {
     write_solid_ppm "$all_white" 256 256 255 255 255
     local decode_dir="$work_dir/all_white_decode"
-    run_expect_failure "decode-all-white" "$makocode_bin" decode "$all_white" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" all_white
+    run_expect_failure "decode-all-white" "$makocode_bin" decode "$all_white" "--output-dir=$decode_dir"
 }
 
 write_noise_ppm() {
@@ -206,8 +189,7 @@ write_noise_ppm() {
 run_case_random_noise() {
     write_noise_ppm "$random_noise" 256 256 1337
     local decode_dir="$work_dir/random_noise_decode"
-    run_expect_failure "decode-random-noise" "$makocode_bin" decode "$random_noise" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" random_noise
+    run_expect_failure "decode-random-noise" "$makocode_bin" decode "$random_noise" "--output-dir=$decode_dir"
 }
 
 # 4) Footer stripe present, but data region destroyed with noise.
@@ -240,7 +222,6 @@ run_case_footer_data_destroyed() {
         echo "test_decode_failures: footer corruption encode did not write fiducial CSV" >&2
         exit 1
     fi
-    cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
     shopt -s nullglob
     ppm_paths=("$work_dir"/*.ppm)
@@ -278,7 +259,7 @@ run_case_footer_data_destroyed() {
         echo "test_decode_failures: footer corruption decode did not write fiducial CSV" >&2
         exit 1
     fi
-    cp "$decode_dir/decode_fiducials.csv" "$test_dir/${label}_footer_data_destroyed_decode_fiducials.csv"
+    mako_check_fiducials "$encode_csv" "$decode_dir/decode_fiducials.csv" "$label footer_data_destroyed"
     rm -rf "$work_dir"
 }
 
@@ -313,7 +294,6 @@ run_case_footer_valid_data_too_corrupt() {
         echo "test_decode_failures: ECC corruption encode did not write fiducial CSV" >&2
         exit 1
     fi
-    cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
     shopt -s nullglob
     ppm_paths=("$work_dir"/*.ppm)
@@ -332,7 +312,11 @@ run_case_footer_valid_data_too_corrupt() {
 
     local decode_dir="$work_dir/footer_valid_data_too_corrupt_decode"
     run_expect_failure "decode-footer-valid-data-too-corrupt" "$makocode_bin" decode "$footer_valid_data_too_corrupt" --debug "--output-dir=$decode_dir"
-    save_decode_fiducials "$decode_dir/decode_fiducials.csv" footer_valid_data_too_corrupt
+    if [[ ! -f $decode_dir/decode_fiducials.csv ]]; then
+        echo "test_decode_failures: footer corruption decode did not write fiducial CSV" >&2
+        exit 1
+    fi
+    mako_check_fiducials "$encode_csv" "$decode_dir/decode_fiducials.csv" "$label footer_valid_data_too_corrupt"
     rm -rf "$work_dir"
 }
 

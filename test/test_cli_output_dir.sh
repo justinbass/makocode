@@ -13,7 +13,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -124,7 +123,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_cli_output_dir: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -145,10 +143,9 @@ if [[ ! -f $decode_csv ]]; then
     echo "test_cli_output_dir: decode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
 mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$test_dir/${label}_decode_fiducials.csv" \
+    "$encode_csv" \
+    "$decode_csv" \
     "$label"
 
 decoded_source="$decode_dir/$payload_source_name"
@@ -158,7 +155,6 @@ if [[ ! -f $decoded_source ]]; then
 fi
 cmp --silent "$payload" "$decoded_source"
 mv "$decoded_source" "$decoded_payload"
-mako_register_visual_artifacts "$repo_root" "$ppm_target"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS CLI output-dir workflow\n' "$label_fmt"

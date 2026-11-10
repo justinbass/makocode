@@ -10,7 +10,6 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -53,16 +52,13 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-source_dir="$test_dir/${label}_fit_source"
-decoded_root="$test_dir/${label}_fit_decoded"
 cleanup() {
     local exit_code=${1:-0}
     if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$source_dir" "$decoded_root" \
+        rm -rf \
             "$test_dir/${label}_fit_both_pages" \
             "$test_dir/${label}_fit_height_pages" \
             "$test_dir/${label}_fit_width_pages" \
-            "$test_dir/${label}_margin_source" \
             "$test_dir/${label}_margin_pages"
     fi
 }
@@ -71,28 +67,22 @@ on_exit() {
 }
 trap on_exit EXIT
 
-rm -rf "$source_dir" "$decoded_root"
-mkdir -p "$source_dir" "$decoded_root"
 mako_test_seed_init "$repo_root"
 payload_seed=$(mako_test_case_seed "page_fit/$label")
-"$repo_root/test/ppm_transform" bytes \
-    --output "$source_dir/payload.bin" \
-    --size 8192 \
-    --seed "$payload_seed"
 
 for mode in both height width; do
     local_page_dir="$test_dir/${label}_fit_${mode}_pages"
-    local_decode_dir="$decoded_root/$mode"
-    rm -rf "$local_page_dir" "$local_decode_dir"
-    mkdir -p "$local_page_dir" "$local_decode_dir"
-    encode_cmd=("$makocode_bin" encode --input=payload.bin --ecc=0 \
+    rm -rf "$local_page_dir"
+    mkdir -p "$local_page_dir"
+    encode_cmd=("$makocode_bin" encode --ecc=0 \
         "--output-dir=$local_page_dir" "--prefix=${label}_${mode}")
     if [[ $mode == height ]]; then
         encode_cmd+=(--page-width=500)
     elif [[ $mode == width ]]; then
         encode_cmd+=(--page-height=500)
     fi
-    (cd "$source_dir" && "${encode_cmd[@]}") >/dev/null
+    "$repo_root/test/ppm_transform" bytes --output - --size 8192 --seed "$payload_seed" |
+        "${encode_cmd[@]}" >/dev/null
     shopt -s nullglob
     ppms=("$local_page_dir"/*.ppm)
     shopt -u nullglob
@@ -107,9 +97,8 @@ for mode in both height width; do
                 echo "test_page_fit: automatic dimensions did not fit the payload: ${output_width}x${output_height}" >&2
                 exit 1
             fi
-            visual_ppm="$test_dir/${label}_fit.ppm"
-            cp "${ppms[0]}" "$visual_ppm"
-            mako_register_visual_artifacts "$repo_root" "$visual_ppm"
+            retained_ppm="$test_dir/${label}_fit.ppm"
+            cp "${ppms[0]}" "$retained_ppm"
             ;;
         height)
             if ((output_width != 500 || output_height >= 3508)); then
@@ -124,21 +113,18 @@ for mode in both height width; do
             fi
             ;;
     esac
-    "$makocode_bin" decode "${ppms[0]}" "--output-dir=$local_decode_dir" >/dev/null
-    cmp --silent "$source_dir/payload.bin" "$local_decode_dir/payload.bin"
+    cat "${ppms[0]}" |
+        "$makocode_bin" decode --decoded-stdout 2>/dev/null |
+        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+            --size 8192 --seed "$payload_seed" --label "$label $mode fit"
 done
 
-margin_source="$test_dir/${label}_margin_source"
 margin_pages="$test_dir/${label}_margin_pages"
-margin_decoded="$decoded_root/margin"
-mkdir -p "$margin_source" "$margin_pages" "$margin_decoded"
-printf 'makocode' > "$margin_source/payload.bin"
-(
-    cd "$margin_source"
-    "$makocode_bin" encode --input=payload.bin --ecc=0 \
+mkdir -p "$margin_pages"
+printf 'makocode' |
+    "$makocode_bin" encode --ecc=0 \
         --page-width=160 --page-height=160 \
-        "--output-dir=$margin_pages" "--prefix=${label}_margin"
-) >/dev/null
+        "--output-dir=$margin_pages" "--prefix=${label}_margin" >/dev/null
 shopt -s nullglob
 margin_ppms=("$margin_pages"/*.ppm)
 shopt -u nullglob
@@ -162,12 +148,13 @@ if ! awk -v white_fraction="$white_fraction" 'BEGIN { exit !(white_fraction > 0.
     echo "test_page_fit: small fixed page lacks a large white margin (white fraction $white_fraction)" >&2
     exit 1
 fi
-"$makocode_bin" decode "${margin_ppms[0]}" "--output-dir=$margin_decoded" >/dev/null
-cmp --silent "$margin_source/payload.bin" "$margin_decoded/payload.bin"
-visual_ppm="$test_dir/${label}_small_page_white_margin.ppm"
-cp "${margin_ppms[0]}" "$visual_ppm"
-mako_register_visual_artifacts "$repo_root" "$visual_ppm"
-rm -rf "$margin_source" "$margin_pages"
+cat "${margin_ppms[0]}" |
+    "$makocode_bin" decode --decoded-stdout 2>/dev/null |
+    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+        --literal makocode --label "$label small-page margin"
+retained_ppm="$test_dir/${label}_small_page_white_margin.ppm"
+cp "${margin_ppms[0]}" "$retained_ppm"
+rm -rf "$margin_pages"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS automatic fitting and small-page white margin\n' "$label_fmt"

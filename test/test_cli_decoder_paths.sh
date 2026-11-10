@@ -14,7 +14,6 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -108,7 +107,6 @@ for ecc in 0 0.5; do
         echo "test_cli_decoder_paths: encode did not write fiducial CSV for ECC $ecc" >&2
         exit 1
     fi
-    cp "$encode_csv" "$test_dir/${label}_ecc_${ecc}_encode_fiducials.csv"
 
     shopt -s nullglob
     ppm_paths=("$ppm_dir"/*.ppm)
@@ -145,25 +143,21 @@ for ecc in 0 0.5; do
         echo "test_cli_decoder_paths: decode did not write fiducial CSV for ECC $ecc" >&2
         exit 1
     fi
-    cp "$decode_csv" "$test_dir/${label}_ecc_${ecc}_decode_fiducials.csv"
     mako_check_fiducials \
-        "$test_dir/${label}_ecc_${ecc}_encode_fiducials.csv" \
-        "$test_dir/${label}_ecc_${ecc}_decode_fiducials.csv" \
+        "$encode_csv" \
+        "$decode_csv" \
         "$label ECC $ecc"
     decoded_payload="$decoded_dir/payload.bin"
     if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; then
         echo "test_cli_decoder_paths: decoded payload mismatch for ECC $ecc" >&2
         exit 1
     fi
-    visual_targets=()
     page_index=0
     for ppm in "${ppm_paths[@]}"; do
         page_index=$((page_index + 1))
-        visual_ppm="$test_dir/${label}_ecc_${ecc}_page_${page_index}.ppm"
-        cp "$ppm" "$visual_ppm"
-        visual_targets+=("$visual_ppm")
+        retained_ppm="$test_dir/${label}_ecc_${ecc}_page_${page_index}.ppm"
+        cp "$ppm" "$retained_ppm"
     done
-    mako_register_visual_artifacts "$repo_root" "${visual_targets[@]}"
 done
 
 label_fmt=$(mako_format_label "$label")

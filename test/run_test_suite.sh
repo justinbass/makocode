@@ -17,23 +17,18 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 
 usage() {
     cat <<'USAGE'
-Usage: run_test_suite.sh --prepare | --finalize
+Usage: run_test_suite.sh --prepare
 
-  --prepare    Initialize the master seed and clear visual symlinks.
-  --finalize   Collect links to final visual artifacts.
+  --prepare    Clear prior output and initialize the master seed.
 USAGE
 }
 
 prepare_suite() {
     unset MAKO_TEST_SEED_REPORTED
+    rm -rf "$repo_root/test_output"
+    mkdir -p "$repo_root/test_output"
     mako_test_seed_init "$repo_root"
-    rm -rf "$repo_root/test_output/visual"
     mkdir -p "$repo_root/test_output/test_logs"
-}
-
-finalize_suite() {
-    local visual_dir="$repo_root/test_output/visual"
-    mkdir -p "$visual_dir"
 }
 
 if [[ $# -ne 1 ]]; then
@@ -44,9 +39,6 @@ fi
 case $1 in
     --prepare)
         prepare_suite
-        ;;
-    --finalize)
-        finalize_suite
         ;;
     *)
         usage >&2

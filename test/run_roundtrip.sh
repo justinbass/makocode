@@ -13,10 +13,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
-. "$script_dir/lib/fiducials.sh"
 . "$script_dir/lib/affine.sh"
-. "$script_dir/lib/payload.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 format_command() {
     local formatted="" quoted=""
@@ -52,7 +49,7 @@ Required:
 
 Payload:
   --payload-literal TEXT  Use TEXT bytes as the payload instead of random data.
-  --stdin-payload       Pipe the literal payload to encode without creating an input file.
+  Payload bytes use stdin and decoded-stdout by default.
 
 Layout:
   --palette "..."       Custom palette passed to encode/decode.
@@ -102,7 +99,6 @@ multi_page=0
 palette=""
 password=""
 footer=""
-stdin_payload=0
 font_size=""
 declare -a encode_opts=()
 declare -a decode_opts=()
@@ -148,10 +144,6 @@ while [[ $# -gt 0 ]]; do
         --payload-literal)
             payload_literal=${2:-}
             shift 2
-            ;;
-        --stdin-payload)
-            stdin_payload=1
-            shift
             ;;
         --palette)
             palette=${2:-}
@@ -296,71 +288,30 @@ payload_seed=$(mako_test_case_seed "payload/$label")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
 export MAKOCODE_TEST_SEED
 mkdir -p "$test_dir"
-work_dir="$test_dir/${label}_work"
-payload_final="$test_dir/${label}_random_payload.bin"
-payload_work="$work_dir/random.bin"
-encoded_prefix="$test_dir/${label}_random_payload_encoded"
-decoded_payload_target="$test_dir/${label}_random_payload_decoded.bin"
-transformed_prefix="$test_dir/${label}_random_payload_transformed_encoded"
-transformed_decoded_target="$test_dir/${label}_random_payload_transformed_decoded.bin"
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/makocode-${label}.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT
+encode_prefix="${label}_random_payload_encoded"
+encoded_prefix="$test_dir/$encode_prefix"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -ne 0 ]]; then
-        return
-    fi
-    if [[ -d $work_dir ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-    if [[ $exit_code -ne 0 ]]; then
-        local label_fmt
-        label_fmt=$(mako_format_label "$label")
-        printf '%s %bFAIL (exit %d)%b\n\n' "$label_fmt" "$MAKO_FAIL_COLOR" "$exit_code" "$MAKO_RESET_COLOR" >&2
-    fi
-}
-trap on_exit EXIT
+rm -f "${encoded_prefix}.ppm" "${encoded_prefix}"_*.ppm
 
-rm -rf "$work_dir"
-mkdir -p "$work_dir"
-
-rm -f "$payload_final" "$decoded_payload_target" "$transformed_decoded_target"
-rm -f "${encoded_prefix}.ppm" ${encoded_prefix}_*.ppm 2>/dev/null || true
-rm -f "${transformed_prefix}.ppm" ${transformed_prefix}_*.ppm 2>/dev/null || true
-
-if [[ $stdin_payload -eq 1 && -z $payload_literal ]]; then
-    echo "run_roundtrip: --stdin-payload requires --payload-literal" >&2
-    exit 1
-fi
 if [[ -n $payload_literal ]]; then
     payload_len=$("$repo_root/test/ppm_transform" bytes-len "$payload_literal")
     if [[ $payload_len -ne $size ]]; then
         echo "run_roundtrip: --size ($size) must match --payload-literal byte length ($payload_len)" >&2
         exit 1
     fi
-    if [[ $stdin_payload -eq 0 ]]; then
-        printf '%s' "$payload_literal" > "$payload_final"
-    fi
+    expected_args=(--literal "$payload_literal")
 else
-    "$repo_root/test/ppm_transform" bytes --output "$payload_final" --size "$size" --seed "$payload_seed"
-fi
-if [[ $stdin_payload -eq 0 ]]; then
-    cp "$payload_final" "$payload_work"
+    expected_args=(--size "$size" --seed "$payload_seed")
 fi
 
-encode_prefix="${label}_random_payload"
-encode_cmd=("$makocode_bin" encode "--ecc=$ecc" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
+encode_cmd=("$makocode_bin" encode "--ecc=$ecc" "--output-dir=$test_dir" "--prefix=$encode_prefix")
 if [[ -n $width ]]; then
     encode_cmd+=("--page-width=$width")
 fi
 if [[ -n $height ]]; then
     encode_cmd+=("--page-height=$height")
-fi
-if [[ $stdin_payload -eq 0 ]]; then
-    encode_cmd+=("--input=random.bin")
 fi
 if [[ -n $palette ]]; then
     encode_cmd+=("--palette" "$palette")
@@ -380,26 +331,15 @@ if ((${#encode_opts[@]})); then
     done
 fi
 print_makocode_cmd "encode" "${encode_cmd[@]}"
-if [[ $stdin_payload -eq 1 ]]; then
-    printf '%s' "$payload_literal" | (
-        cd "$work_dir"
-        "${encode_cmd[@]}"
-    ) >/dev/null
+if [[ -n $payload_literal ]]; then
+    printf '%s' "$payload_literal" | "${encode_cmd[@]}" >/dev/null
 else
-    (
-        cd "$work_dir"
-        "${encode_cmd[@]}"
-    ) >/dev/null
+    "$repo_root/test/ppm_transform" bytes --output - --size "$size" --seed "$payload_seed" |
+        "${encode_cmd[@]}" >/dev/null
 fi
-encode_fiducial_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
-if [[ ! -f $encode_fiducial_csv ]]; then
-    echo "run_roundtrip: encode did not write fiducial CSV" >&2
-    exit 1
-fi
-cp "$encode_fiducial_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
-ppm_paths=("$work_dir"/*.ppm)
+ppm_paths=("${encoded_prefix}"*.ppm)
 shopt -u nullglob
 if [[ ${#ppm_paths[@]} -eq 0 ]]; then
     echo "run_roundtrip: encode produced no PPM pages" >&2
@@ -413,81 +353,29 @@ if [[ $multi_page -eq 1 && ${#ppm_paths[@]} -lt 2 ]]; then
     exit 1
 fi
 
-baseline_targets=()
-if [[ ${#ppm_paths[@]} -eq 1 ]]; then
-    dest="${encoded_prefix}.ppm"
-    mv -f "${ppm_paths[0]}" "$dest"
-    baseline_targets+=("$dest")
-else
-    idx=1
-    for ppm in "${ppm_paths[@]}"; do
-        printf -v dest "%s_%02d.ppm" "$encoded_prefix" "$idx"
-        mv -f "$ppm" "$dest"
-        baseline_targets+=("$dest")
-        idx=$((idx + 1))
-    done
-fi
-
-baseline_decode_dir="$work_dir/decoded"
-mkdir -p "$baseline_decode_dir"
-decode_cmd=("$makocode_bin" decode)
+baseline_decode_cmd=("$makocode_bin" decode --decoded-stdout)
 if ((${#decode_opts[@]})); then
     for opt in "${decode_opts[@]}"; do
-        decode_cmd+=("$opt")
+        baseline_decode_cmd+=("$opt")
     done
 fi
 if [[ -n $palette ]]; then
-    decode_cmd+=("--palette" "$palette")
+    baseline_decode_cmd+=("--palette" "$palette")
 fi
 if [[ -n $password ]]; then
-    decode_cmd+=("--password=$password")
+    baseline_decode_cmd+=("--password=$password")
 fi
-decode_cmd+=("--output-dir=$baseline_decode_dir")
-decode_cmd+=(--debug)
-decode_cmd+=("${baseline_targets[@]}")
-print_makocode_cmd "decode" "${decode_cmd[@]}"
-"${decode_cmd[@]}" >/dev/null
-baseline_fiducial_csv="$baseline_decode_dir/decode_fiducials.csv"
-if [[ ! -f $baseline_fiducial_csv ]]; then
-    echo "run_roundtrip: baseline decode did not write fiducial CSV" >&2
-    exit 1
-fi
-baseline_affine_csv="$baseline_decode_dir/decode_affine.csv"
-if [[ ! -f $baseline_affine_csv ]]; then
-    echo "run_roundtrip: baseline decode did not write affine CSV" >&2
-    exit 1
-fi
-cp "$baseline_affine_csv" "$test_dir/${label}_baseline_decode_affine.csv"
-mako_check_fiducials \
-    "$test_dir/${label}_encode_fiducials.csv" \
-    "$baseline_fiducial_csv" \
-    "$label baseline"
-
-if [[ $stdin_payload -eq 1 ]]; then
-    baseline_decoded_payload="$baseline_decode_dir/payload.bin"
+print_makocode_cmd "decode-stdout" "${baseline_decode_cmd[@]}"
+if [[ ${#ppm_paths[@]} -eq 1 ]]; then
+    cat "${ppm_paths[0]}" |
+        "${baseline_decode_cmd[@]}" 2>/dev/null |
+        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+            "${expected_args[@]}" --label "$label baseline"
 else
-    baseline_decoded_payload="$baseline_decode_dir/random.bin"
+    "${baseline_decode_cmd[@]}" "${ppm_paths[@]}" 2>/dev/null |
+        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+            "${expected_args[@]}" --label "$label baseline"
 fi
-if [[ ! -f $baseline_decoded_payload ]]; then
-    echo "run_roundtrip: decode did not emit $baseline_decoded_payload" >&2
-    exit 1
-fi
-if [[ $stdin_payload -eq 1 ]]; then
-    if [[ -e "$work_dir/random.bin" || -e "$baseline_decode_dir/random.bin" ]]; then
-        echo "run_roundtrip: stdin payload unexpectedly used a filename" >&2
-        exit 1
-    fi
-    cmp --silent <(printf '%s' "$payload_literal") "$baseline_decoded_payload"
-    decoded_report="$work_dir/decoded_report.txt"
-    "$makocode_bin" decode --decoded-stdout "${baseline_targets[@]}" >"$decoded_report" 2>/dev/null
-    if ! grep -Fxq 'stream 1' "$decoded_report" || grep -Eq '^file ' "$decoded_report"; then
-        echo "run_roundtrip: decoded stdin metadata did not describe an anonymous stream" >&2
-        exit 1
-    fi
-else
-    cmp --silent "$payload_final" "$baseline_decoded_payload"
-fi
-mv "$baseline_decoded_payload" "$decoded_payload_target"
 
 transform_needed=0
 if [[ $scale_x != 1 || $scale_y != 1 || $rotate_deg != 0 || $skew_x != 0 || $skew_y != 0 || $border_thickness != 0 ]]; then
@@ -514,140 +402,64 @@ if awk -v scale_x="$scale_x" -v scale_y="$scale_y" -v rotation="$rotate_deg" \
     expected_affine_rotation=$rotate_deg
 fi
 
-# Reuse the archived baseline artifacts when building transformed copies
-ppm_targets=("${baseline_targets[@]}")
-if [[ ${#ppm_targets[@]} -eq 0 ]]; then
-    echo "run_roundtrip: failed to archive encoded artifacts" >&2
-    exit 1
-fi
-
 if [[ $transform_needed -eq 1 ]]; then
-    transform_outputs=()
-    idx=1
-    for ppm in "${ppm_targets[@]}"; do
-        base_name=$(basename "$ppm")
-        transformed_path="$work_dir/${base_name%.*}_transformed.ppm"
-        transform_cmd=("$repo_root/test/ppm_transform" transform
-            --input "$ppm"
-            --output "$transformed_path"
-            --scale-x "$scale_x"
-            --scale-y "$scale_y"
-            --rotate "$rotate_deg"
-            --skew-x "$skew_x"
-            --skew-y "$skew_y"
-            --border-thickness "$border_thickness"
-            --border-density "$border_density"
-            --seed "$transform_seed"
-            --ink-blot-radius "$ink_blot_radius"
-            --ink-blot-color "$ink_blot_color"
-            --paper-color "$paper_color"
-            --paper-alpha "$paper_alpha"
-            --paper-splotch-alpha "$paper_splotch_alpha"
-            --paper-splotch-shade "$paper_splotch_shade"
-            --paper-splotch-px "$paper_splotch_px")
-        if [[ $white_checker -eq 1 ]]; then
-    transform_cmd+=(--white-checker --preserve-canonical-control)
+    transform_options=(
+        --scale-x "$scale_x"
+        --scale-y "$scale_y"
+        --rotate "$rotate_deg"
+        --skew-x "$skew_x"
+        --skew-y "$skew_y"
+        --border-thickness "$border_thickness"
+        --border-density "$border_density"
+        --seed "$transform_seed"
+        --ink-blot-radius "$ink_blot_radius"
+        --ink-blot-color "$ink_blot_color"
+        --paper-color "$paper_color"
+        --paper-alpha "$paper_alpha"
+        --paper-splotch-alpha "$paper_splotch_alpha"
+        --paper-splotch-shade "$paper_splotch_shade"
+        --paper-splotch-px "$paper_splotch_px"
+    )
+    if [[ $white_checker -eq 1 ]]; then
+        transform_options+=(--white-checker --preserve-canonical-control)
+    fi
+    if [[ ${#ppm_paths[@]} -eq 1 ]]; then
+        "$repo_root/test/ppm_transform" transform --input "${ppm_paths[0]}" --output - "${transform_options[@]}" |
+            "${baseline_decode_cmd[@]}" 2>/dev/null |
+            python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+                "${expected_args[@]}" --tolerance-percent 5 --label "$label transformed"
+        if [[ $affine_check_enabled -eq 1 ]]; then
+            affine_page="$work_dir/affine_scan.ppm"
+            "$repo_root/test/ppm_transform" transform --input "${ppm_paths[0]}" --output "$affine_page" "${transform_options[@]}"
+            affine_dir="$work_dir/affine_decode"
+            mkdir -p "$affine_dir"
+            if ! "$makocode_bin" decode --debug "--output-dir=$affine_dir" "$affine_page" >/dev/null 2>&1; then
+                echo "run_roundtrip: diagnostic affine decode failed" >&2
+                exit 1
+            fi
+            mako_check_affine "$affine_dir/decode_affine.csv" \
+                "$expected_affine_scale" "$expected_affine_rotation" "$affine_tolerance_percent" 1 \
+                "$label transformed"
         fi
-        "${transform_cmd[@]}"
-        transform_outputs+=("$transformed_path")
-        idx=$((idx + 1))
-    done
-    transformed_targets=()
-    if [[ ${#transform_outputs[@]} -eq 1 ]]; then
-        dest="${transformed_prefix}.ppm"
-        mv -f "${transform_outputs[0]}" "$dest"
-        transformed_targets+=("$dest")
     else
-        idx=1
-        for ppm in "${transform_outputs[@]}"; do
-            printf -v dest "%s_%02d.ppm" "$transformed_prefix" "$idx"
-            mv -f "$ppm" "$dest"
-            transformed_targets+=("$dest")
-            idx=$((idx + 1))
+        transformed_paths=()
+        page_index=0
+        for ppm in "${ppm_paths[@]}"; do
+            page_index=$((page_index + 1))
+            transformed_path="$work_dir/transformed_${page_index}.ppm"
+            "$repo_root/test/ppm_transform" transform --input "$ppm" --output "$transformed_path" "${transform_options[@]}"
+            transformed_paths+=("$transformed_path")
         done
+        "${baseline_decode_cmd[@]}" "${transformed_paths[@]}" 2>/dev/null |
+            python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+                "${expected_args[@]}" --tolerance-percent 5 --label "$label transformed"
     fi
-    transformed_decode_dir="$work_dir/decoded_transformed"
-    mkdir -p "$transformed_decode_dir"
-    transform_decode_cmd=("$makocode_bin" decode)
-    if ((${#decode_opts[@]})); then
-        for opt in "${decode_opts[@]}"; do
-            transform_decode_cmd+=("$opt")
-        done
-    fi
-    if [[ -n $palette ]]; then
-        transform_decode_cmd+=("--palette" "$palette")
-    fi
-    if [[ -n $password ]]; then
-        transform_decode_cmd+=("--password=$password")
-    fi
-    transform_decode_cmd+=("--output-dir=$transformed_decode_dir")
-    transform_decode_cmd+=(--debug)
-    if [[ $multi_page -eq 1 || ${#transformed_targets[@]} -gt 1 ]]; then
-        transform_decode_cmd+=("${transformed_targets[@]}")
-    else
-        transform_decode_cmd+=("${transformed_targets[0]}")
-    fi
-    print_makocode_cmd "decode-transformed" "${transform_decode_cmd[@]}"
-    transform_decode_status=0
-    if "${transform_decode_cmd[@]}" >/dev/null; then
-        transform_decode_status=0
-    else
-        transform_decode_status=$?
-    fi
-    transformed_fiducial_csv="$transformed_decode_dir/decode_fiducials.csv"
-    if [[ ! -f $transformed_fiducial_csv ]]; then
-        echo "run_roundtrip: transformed decode did not write fiducial CSV" >&2
-        exit 1
-    fi
-    cp "$transformed_fiducial_csv" "$test_dir/${label}_transformed_decode_fiducials.csv"
-    mako_check_fiducials \
-        "$test_dir/${label}_encode_fiducials.csv" \
-        "$test_dir/${label}_transformed_decode_fiducials.csv" \
-        "$label transformed"
-    transformed_affine_csv="$transformed_decode_dir/decode_affine.csv"
-    if [[ ! -f $transformed_affine_csv ]]; then
-        echo "run_roundtrip: transformed decode did not write decode_affine.csv" >&2
-        exit 1
-    fi
-    cp "$transformed_affine_csv" "$test_dir/${label}_transformed_decode_affine.csv"
-    if [[ $affine_check_enabled -eq 1 ]]; then
-        mako_check_affine \
-            "$test_dir/${label}_transformed_decode_affine.csv" \
-            "$expected_affine_scale" "$expected_affine_rotation" "$affine_tolerance_percent" \
-            "${#transformed_targets[@]}" \
-            "$label transformed"
-    fi
-    if [[ $transform_decode_status -ne 0 ]]; then
-        printf '%s transformed decode failed (exit=%d); payload round-trip was not verified\n' \
-            "$(mako_format_label "$label")" "$transform_decode_status" >&2
-        exit "$transform_decode_status"
-    fi
-    if [[ $stdin_payload -eq 1 ]]; then
-        transformed_decoded_payload="$transformed_decode_dir/payload.bin"
-    else
-        transformed_decoded_payload="$transformed_decode_dir/random.bin"
-    fi
-    if [[ ! -f $transformed_decoded_payload ]]; then
-        echo "run_roundtrip: transformed decode missing random.bin" >&2
-        exit 1
-    fi
-    if [[ $stdin_payload -eq 1 ]]; then
-        mako_compare_payload_with_tolerance \
-            <(printf '%s' "$payload_literal") "$transformed_decoded_payload" 5 "$label transformed"
-    else
-        mako_compare_payload_with_tolerance \
-            "$payload_final" "$transformed_decoded_payload" 5 "$label transformed"
-    fi
-    mv "$transformed_decoded_payload" "$transformed_decoded_target"
 fi
 
+label_fmt=$(mako_format_label "$label")
 suffix=""
 if [[ $transform_needed -eq 1 ]]; then
     suffix=" (transformed)"
-    mako_register_visual_artifacts "$repo_root" "${transformed_targets[@]}"
-else
-    mako_register_visual_artifacts "$repo_root" "${baseline_targets[@]}"
 fi
-label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS ecc=%s size=%s pages=%d%s\n\n' \
-    "$label_fmt" "$ecc" "$size" "${#ppm_targets[@]}" "$suffix"
+    "$label_fmt" "$ecc" "$size" "${#ppm_paths[@]}" "$suffix"

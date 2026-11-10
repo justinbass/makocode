@@ -14,7 +14,6 @@ script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 . "$script_dir/lib/colors.sh"
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
-. "$script_dir/lib/visual_artifacts.sh"
 
 usage() {
     cat <<'USAGE'
@@ -101,10 +100,8 @@ export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test_output"
 work_dir="$test_dir/${label}_palette_work"
-payload="$test_dir/${label}_payload.bin"
-payload_work="$work_dir/payload.bin"
+payload="$work_dir/payload.bin"
 ppm_target="$test_dir/${label}_encoded.ppm"
-decoded_target="$test_dir/${label}_decoded.bin"
 
 cleanup() {
     local exit_code=${1:-0}
@@ -123,10 +120,9 @@ trap 'on_exit' EXIT
 
 rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir"
-rm -f "$payload" "$ppm_target" "$decoded_target"
+rm -f "$payload" "$ppm_target"
 
 "$ppm_transform_bin" bytes --output "$payload" --size 16384 --seed "$payload_seed"
-cp "$payload" "$payload_work"
 palette="White Cyan Magenta Yellow"
 
 encode_cmd=(
@@ -148,7 +144,6 @@ if [[ ! -f $encode_csv ]]; then
     echo "test_palette_metadata: encode did not write fiducial CSV" >&2
     exit 1
 fi
-cp "$encode_csv" "$test_dir/${label}_encode_fiducials.csv"
 
 shopt -s nullglob
 ppms=("$work_dir"/*.ppm)
@@ -174,10 +169,9 @@ case "$mode" in
             echo "test_palette_metadata: auto decode did not write fiducial CSV" >&2
             exit 1
         fi
-        cp "$decode_csv" "$test_dir/${label}_decode_fiducials.csv"
         mako_check_fiducials \
-            "$test_dir/${label}_encode_fiducials.csv" \
-            "$test_dir/${label}_decode_fiducials.csv" \
+            "$encode_csv" \
+            "$decode_csv" \
             "$label auto"
         if [[ ! -f $decoded_payload ]]; then
             echo "test_palette_metadata: decode missing payload.bin in auto mode" >&2
@@ -207,14 +201,8 @@ case "$mode" in
             echo "test_palette_metadata: wrong-palette decode did not write fiducial CSV" >&2
             exit 1
         fi
-        cp "$wrong_decode_csv" "$test_dir/${label}_wrong_decode_fiducials.csv"
         ;;
 esac
-
-if [[ -f $decoded_payload ]]; then
-    mv "$decoded_payload" "$decoded_target"
-fi
-mako_register_visual_artifacts "$repo_root" "$ppm_target"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS mode=%s\n' "$label_fmt" "$mode"
