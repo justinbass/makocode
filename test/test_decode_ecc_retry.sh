@@ -60,7 +60,7 @@ decode_log="$work_dir/decode.log"
 # Exercise the parser retry path with the sole current page format.
 "$makocode_bin" encode \
     "--input=$payload" \
-    --ecc=0 \
+    --ecc=0.25 \
     --page-width=500 \
     --page-height=500 \
     --no-filename \

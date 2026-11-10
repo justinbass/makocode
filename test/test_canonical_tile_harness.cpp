@@ -107,15 +107,18 @@ int main(int argc, char** argv) {
                 (usize)(values.metadata_square_side - 1u) * (values.metadata_square_side - 1u)) {
                 fprintf(stderr, "marker square failed case=%u\n", palette_case); return 1;
             }
+            u32 palette_tag_x0 = MetadataTile::palette_tag_x0(values.palette_count);
             for (u32 x = 0u; x <= values.palette_count; ++x) {
                 u8 expected = x < values.palette_count ? (u8)x : 0u;
-                if (bits.data[(usize)values.metadata_tag_y0 * MetadataTile::TILE_SIDE + x] != expected) {
+                if (bits.data[(usize)values.metadata_tag_y0 * MetadataTile::TILE_SIDE +
+                              palette_tag_x0 + x] != expected) {
                     fprintf(stderr, "palette row failed case=%u\n", palette_case); return 1;
                 }
             }
+            u32 marker_x0 = MetadataTile::tag_marker_x0();
             for (u32 bit = 0u; bit < 32u; ++bit) {
                 usize index = (usize)(values.metadata_tag_y0 + 1u + bit / 8u) *
-                                  MetadataTile::TILE_SIDE + (bit & 7u);
+                                  MetadataTile::TILE_SIDE + marker_x0 + (bit & 7u);
                 u8 expected = MetadataTile::makocode_tag_bit(bit)
                                   ? (u8)(values.palette_count - 1u) : 0u;
                 if (bits.data[index] != expected) { fprintf(stderr, "marker bits failed case=%u\n", palette_case); return 1; }
@@ -146,7 +149,7 @@ int main(int argc, char** argv) {
             u32 marker_errors = 0u;
             for (u32 bit = 0u; bit < 32u; ++bit) {
                 usize index = (usize)(values.metadata_tag_y0 + 1u + bit / 8u) *
-                                  MetadataTile::TILE_SIDE + (bit & 7u);
+                                  MetadataTile::TILE_SIDE + marker_x0 + (bit & 7u);
                 bool observed = luminances[index] < found_threshold;
                 if (observed != MetadataTile::makocode_tag_bit(bit)) ++marker_errors;
             }
@@ -380,6 +383,7 @@ int main(int argc, char** argv) {
         placement.y0 != (data_height - MetadataTile::TILE_SIDE) / 2u ||
         values.schema_version != MetadataTile::TILE_SCHEMA_VERSION || !values.overwrite_layout ||
         !values.ecc_enabled || values.ecc_parity == 0u ||
+        (check_structural && values.metadata_ecc_bytes != 0u) ||
         values.page_index == 0u || values.page_index > values.page_count ||
         (check_structural && (values.page_count != 1u || values.page_index != 1u ||
                               values.overlay_selector_present))) {

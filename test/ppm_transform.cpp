@@ -49,18 +49,19 @@ static bool read_canonical_makocode_barcode(const int* pixels,
     auto marker_bit = [&](unsigned int bit) -> bool {
         return ((marker[bit >> 3u] >> (7u - (bit & 7u))) & 1u) != 0u;
     };
-    const int max_tag_y = (48 - 5) / 2 - 1;
+    const int max_tag_y = (48 - 4) / 2 - 1;
     for (int tag_y = 0; tag_y <= max_tag_y; ++tag_y) {
         unsigned int colors = 0u;
-        uint64_t best_distance = UINT64_MAX;
         for (unsigned int candidate = 2u; candidate <= 16u; ++candidate) {
-            size_t first = ((size_t)(tile_y0 + tag_y) * (size_t)width + (size_t)tile_x0) * 3u;
+            unsigned int color_x0 = (48u - (candidate + 1u)) / 2u;
+            size_t first = ((size_t)(tile_y0 + tag_y) * (size_t)width +
+                            (size_t)(tile_x0 + (int)color_x0)) * 3u;
             size_t end = first + (size_t)candidate * 3u;
             long dr = (long)pixels[first] - pixels[end];
             long dg = (long)pixels[first + 1u] - pixels[end + 1u];
             long db = (long)pixels[first + 2u] - pixels[end + 2u];
             uint64_t distance = (uint64_t)(dr * dr + dg * dg + db * db);
-            if (distance > 3u * 40u * 40u || distance >= best_distance) continue;
+            if (distance > 3u * 64u * 64u) continue;
             bool distinct = true;
             for (unsigned int i = 1u; i < candidate && distinct; ++i) {
                 size_t left = first + (size_t)i * 3u;
@@ -75,13 +76,13 @@ static bool read_canonical_makocode_barcode(const int* pixels,
                     }
                 }
             }
-            if (distinct) { colors = candidate; best_distance = distance; }
+            if (distinct) { colors = candidate; break; }
         }
         if (!colors) continue;
         double low = 255.0, high = 0.0;
         double samples[32];
         for (unsigned int bit = 0u; bit < 32u; ++bit) {
-            unsigned int x = bit & 7u;
+            unsigned int x = (48u - 8u) / 2u + (bit & 7u);
             unsigned int y = (unsigned int)tag_y + 1u + bit / 8u;
             size_t rgb = ((size_t)(tile_y0 + (int)y) * (size_t)width +
                           (size_t)(tile_x0 + (int)x)) * 3u;

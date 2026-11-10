@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
                             page_count,
                             bits_per_page,
                             &encoder.ecc_info(),
+                            0.0,
                             0,
                             0u,
                             footer_layout,

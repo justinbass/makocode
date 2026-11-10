@@ -1,7 +1,6 @@
 TODO
 
 Features:
-- Reorganize metadata in order of importance, trim/clip colors? Revisit it all.
 - Fiducials should follow background color, see 0059
 - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
 - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?

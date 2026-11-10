@@ -12,7 +12,7 @@ trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$wo
 rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'x' > "$work_dir/payload.bin"
-(cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0 \
+(cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0.25 \
     --page-width=80 --page-height=80 --no-filename --no-page-count \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
 layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
