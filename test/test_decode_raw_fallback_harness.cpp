@@ -77,7 +77,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     makocode::ByteBuffer with_fiducials;
-    if (!apply_default_fiducial_grid(page, with_fiducials, data_height, 0, 1u)) {
+    const u8 background_rgb[3] = {255u, 255u, 255u};
+    if (!apply_default_fiducial_grid(page,
+                                    with_fiducials,
+                                    data_height,
+                                    background_rgb,
+                                    0,
+                                    1u)) {
         fprintf(stderr, "raw fallback harness: failed to add fiducials\n");
         return 1;
     }

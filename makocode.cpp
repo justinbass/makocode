@@ -12754,6 +12754,7 @@ static bool write_bytes_to_file(const char* path, const u8* data, usize length) 
 
 static bool write_ppm_with_fiducials_to_file(const char* path,
                                              const makocode::ByteBuffer& buffer,
+                                             const u8* fiducial_rgb,
                                              makocode::ByteBuffer* debug_csv = 0,
                                              u64 debug_page = 1u,
                                              u32 data_height_pixels = 0u);
@@ -12792,10 +12793,12 @@ static bool write_buffer_to_file(const char* path,
                                  const makocode::ByteBuffer& buffer,
                                  makocode::ByteBuffer* debug_csv = 0,
                                  u64 debug_page = 1u,
-                                 u32 data_height_pixels = 0u) {
+                                 u32 data_height_pixels = 0u,
+                                 const u8* fiducial_rgb = 0) {
     if (should_embed_fiducials_for_path(path)) {
         return write_ppm_with_fiducials_to_file(path,
                                                 buffer,
+                                                fiducial_rgb,
                                                 debug_csv,
                                                 debug_page,
                                                 data_height_pixels);
@@ -23792,10 +23795,11 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      u32 grid_rows,
                                      u32 margin_pixels,
                                      u32 grid_height_limit,
+                                     const u8* fiducial_rgb,
                                      makocode::ByteBuffer& output,
                                      makocode::ByteBuffer* debug_csv = 0,
                                      u64 debug_page = 1u) {
-    if (!input.data) {
+    if (!input.data || !fiducial_rgb) {
         return false;
     }
     PpmParserState state;
@@ -23879,9 +23883,9 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                         continue;
                     }
                     usize index = ((usize)pixel_y * (usize)width_px + (usize)pixel_x) * 3u;
-                    pixel_data[index + 0u] = 255u;
-                    pixel_data[index + 1u] = 255u;
-                    pixel_data[index + 2u] = 255u;
+                    pixel_data[index + 0u] = fiducial_rgb[0];
+                    pixel_data[index + 1u] = fiducial_rgb[1];
+                    pixel_data[index + 2u] = fiducial_rgb[2];
                 }
             }
             int visibility_radius = (int)marker_size;
@@ -23907,9 +23911,9 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                         continue;
                     }
                     usize index = ((usize)ring_y * (usize)width_px + (usize)ring_x) * 3u;
-                    if (pixel_data[index + 0u] < 255u ||
-                        pixel_data[index + 1u] < 255u ||
-                        pixel_data[index + 2u] < 255u) {
+                    if (pixel_data[index + 0u] != fiducial_rgb[0] ||
+                        pixel_data[index + 1u] != fiducial_rgb[1] ||
+                        pixel_data[index + 2u] != fiducial_rgb[2]) {
                         marker_visible = true;
                         break;
                     }
@@ -23983,6 +23987,7 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
 static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                         makocode::ByteBuffer& output,
                                         u32 data_height_pixels = 0u,
+                                        const u8* fiducial_rgb = 0,
                                         makocode::ByteBuffer* debug_csv = 0,
                                         u64 debug_page = 1u) {
     u32 width_pixels = 0u;
@@ -24009,6 +24014,7 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                     fiducial_rows,
                                     fiducial_margin,
                                     grid_height,
+                                    fiducial_rgb,
                                     output,
                                     debug_csv,
                                     debug_page);
@@ -24016,6 +24022,7 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
 
 static bool write_ppm_with_fiducials_to_file(const char* path,
                                              const makocode::ByteBuffer& buffer,
+                                             const u8* fiducial_rgb,
                                              makocode::ByteBuffer* debug_csv,
                                              u64 debug_page,
                                              u32 data_height_pixels) {
@@ -24023,6 +24030,7 @@ static bool write_ppm_with_fiducials_to_file(const char* path,
     if (!apply_default_fiducial_grid(buffer,
                                      fiducial_buffer,
                                      data_height_pixels,
+                                     fiducial_rgb,
                                      debug_csv,
                                      debug_page)) {
         return false;
@@ -24807,9 +24815,9 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     } else if (reserved_pixel ||
                                (use_base_palette && reserved_data_pixel &&
                                 !metadata_tile_contains_pixel(tile_placement, column, row))) {
-                        rgb[0] = 255u;
-                        rgb[1] = 255u;
-                        rgb[2] = 255u;
+                        rgb[0] = background_rgb[0];
+                        rgb[1] = background_rgb[1];
+                        rgb[2] = background_rgb[2];
                     } else {
                         rgb[0] = payload_rgb[0];
                         rgb[1] = payload_rgb[1];
@@ -27376,6 +27384,9 @@ static int command_encode(int arg_count, char** args) {
     }
     bool debug_reapplied_by_filename = debug_requested &&
                                        path_contains_substring(page_name_prefix, "_encoded");
+    u8 fiducial_text_rgb[3] = {0u, 0u, 0u};
+    u8 fiducial_rgb[3] = {255u, 255u, 255u};
+    footer_select_colors(mapping, fiducial_text_rgb, fiducial_rgb);
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
     if (debug_requested) {
@@ -27512,6 +27523,7 @@ static int command_encode(int arg_count, char** args) {
         if (!apply_default_fiducial_grid(page_output,
                                          fiducial_page,
                                          output_data_height_pixels,
+                                         fiducial_rgb,
                                          (debug_requested && !debug_reapplied_by_filename)
                                              ? &debug_fiducial_csv
                                              : (makocode::ByteBuffer*)0,
@@ -27538,7 +27550,8 @@ static int command_encode(int arg_count, char** args) {
                                   page_output,
                                   debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
                                   1u,
-                                  output_data_height_pixels)) {
+                                  output_data_height_pixels,
+                                  fiducial_rgb)) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
@@ -27582,6 +27595,7 @@ static int command_encode(int arg_count, char** args) {
             if (!apply_default_fiducial_grid(page_output,
                                              fiducial_page,
                                              footer_layout.data_height_pixels,
+                                             fiducial_rgb,
                                              (debug_requested && !debug_reapplied_by_filename)
                                                  ? &debug_fiducial_csv
                                                  : (makocode::ByteBuffer*)0,
@@ -27606,7 +27620,8 @@ static int command_encode(int arg_count, char** args) {
                                       page_output,
                                       debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
                                       page + 1u,
-                                      footer_layout.data_height_pixels)) {
+                                      footer_layout.data_height_pixels,
+                                      fiducial_rgb)) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }

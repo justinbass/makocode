@@ -107,23 +107,22 @@ if [[ ${#ppms[@]} -ne 1 || ${ppms[0]} != "$encoded_ppm" ]]; then
     exit 1
 fi
 
-# The 4x4 default marker at the upper-left fiducial location is white. Cyan and
-# black are the only payload colors, so this checks that the PPM contains the
-# fiducial grid rather than merely relying on successful decoding.
+# The 4x4 default marker at the upper-left fiducial location follows the
+# brightest palette color, cyan. This checks the marker color directly.
 if ! python3 - "$script_dir" "$encoded_ppm" <<'PYTHON'
 import sys
 sys.path.insert(0, sys.argv[1])
 from ppm_test_utils import read_ppm
 width, height, pixels = read_ppm(sys.argv[2])
-white = 0
+background = 0
 for y in range(10, 14):
     for x in range(10, 14):
         index = (y * width + x) * 3
-        white += pixels[index:index + 3] == [255, 255, 255]
-raise SystemExit(0 if width >= 14 and height >= 14 and white == 16 else 1)
+        background += pixels[index:index + 3] == [0, 255, 255]
+raise SystemExit(0 if width >= 14 and height >= 14 and background == 16 else 1)
 PYTHON
 then
-    echo 'test_prefix_ends_encoded: expected the upper-left 4x4 fiducial marker to be white' >&2
+    echo 'test_prefix_ends_encoded: expected the upper-left 4x4 fiducial marker to match the cyan background' >&2
     exit 1
 fi
 
