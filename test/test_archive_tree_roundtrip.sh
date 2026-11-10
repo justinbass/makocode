@@ -96,8 +96,6 @@ encode_cmd=(
     --ecc=0
     --page-width=400
     --page-height=240
-    --no-filename
-    --no-page-count
     --prefix=archive_tree
     --debug
     "--output-dir=$page_dir"

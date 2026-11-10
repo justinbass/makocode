@@ -21,11 +21,14 @@ fi
 footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
 footer_charset_font_size=2
 footer_charset_filename="random.bin"
-footer_charset_page_stub="Page 1/1"
+footer_charset_page_stub="Page 999/999"
+footer_charset_percent_stub=" | 100% done"
+footer_charset_template="$footer_charset_title | $footer_charset_filename | Page %page/%totalpages | 100\\% done"
 footer_charset_title_len=${#footer_charset_title}
 footer_charset_filename_len=${#footer_charset_filename}
 footer_charset_page_len=${#footer_charset_page_stub}
-footer_charset_text_len=$((footer_charset_title_len + 3 + footer_charset_filename_len + 3 + footer_charset_page_len))
+footer_charset_percent_len=${#footer_charset_percent_stub}
+footer_charset_text_len=$((footer_charset_title_len + 3 + footer_charset_filename_len + 3 + footer_charset_page_len + footer_charset_percent_len))
 footer_charset_glyph_width=$((5 * footer_charset_font_size))
 footer_charset_char_spacing=$((footer_charset_font_size))
 footer_charset_text_px=$((footer_charset_text_len * footer_charset_glyph_width + (footer_charset_text_len - 1) * footer_charset_char_spacing))
@@ -40,14 +43,12 @@ run_case() {
 
 # Low ECC fiducial reservation on tiny pages.
 run_case 1023_low_ecc \
-    --size 256 --ecc 0 --width 64 --height 64 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count"
+    --size 256 --ecc 0 --width 64 --height 64
 
 # Footer title / metadata heavy footer rendering.
 run_case 1022_footer_title \
     --size 65536 --ecc 0.25 --width "$footer_charset_width" --height 800 \
-    --title "$footer_charset_title" \
+    --footer "$footer_charset_template" \
     --font-size "$footer_charset_font_size"
 
 # 100 KiB grayscale payload single page baseline.

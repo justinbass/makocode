@@ -8,7 +8,7 @@ trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$wo
 rm -rf "$work"
 mkdir -p "$work/pages"
 printf 'registration regression' > "$work/input.bin"
-(cd "$work" && "$bin" encode --input=input.bin --ecc=0 --page-width=80 --page-height=80 --no-filename --no-page-count --output-dir=pages --prefix=page >/dev/null)
+(cd "$work" && "$bin" encode --input=input.bin --ecc=0 --page-width=80 --page-height=80 --output-dir=pages --prefix=page >/dev/null)
 python3 - "$work/pages/page.ppm" "$work/scan.ppm" <<'PY'
 import math
 import random

@@ -97,7 +97,7 @@ for ecc in 0 0.5; do
     done
 
     encode_prefix="${label}_ecc_${ecc}"
-    encode_cmd=("$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --page-width=500 --page-height=500 --no-filename --no-page-count "--output-dir=$ppm_dir" "--prefix=$encode_prefix" --debug)
+    encode_cmd=("$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --page-width=500 --page-height=500 "--output-dir=$ppm_dir" "--prefix=$encode_prefix" --debug)
     printf '%s encode (ECC %s):' "$(mako_format_label "$label")" "$ecc"
     printf ' %q' "${encode_cmd[@]}"
     printf '\n'

@@ -50,8 +50,6 @@ printf 'makocode' > "$work_dir/makocode.bin"
         --ecc-fill \
         --page-width=80 \
         --page-height=80 \
-        --no-filename \
-        --no-page-count \
         "--output-dir=$work_dir/encoded" \
         "--prefix=$label" >/dev/null
 )

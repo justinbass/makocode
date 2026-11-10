@@ -10,16 +10,13 @@
 # Case registry consumed by run_test_case.sh. Keep case IDs unique: they also
 # namespace the artifacts written under test_output/.
 
-test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' baseline" \
+test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' encoded from stdin" \
     --size 1 --ecc 0 --width 80 --height 80 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count" \
+    --stdin-payload \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \
     --size 8 --ecc 0 --width 80 --height 80 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count" \
     --payload-literal "makocode"
 
 test_case 0002_baseline_8k_ecc_050 roundtrip "8 KiB payload, ECC 0.5 baseline" \
@@ -58,13 +55,11 @@ test_case 0012_large_canvas_cmykw roundtrip "Large canvas CMYKW palette" \
     --palette "White Cyan Magenta Yellow Black"
 
 test_case 0013_low_ecc_fiducial roundtrip "Low ECC fiducial reservation, tiny pages" \
-    --size 256 --ecc 0 --width 200 --height 64 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count"
+    --size 256 --ecc 0 --width 200 --height 64
 
 test_case 0014_footer_metadata roundtrip "Footer metadata rendering stress" \
     --size 65536 --ecc 0.25 --width "$footer_charset_width" --height 800 \
-    --title "$footer_charset_title" \
+    --footer "$footer_charset_template" \
     --font-size "$footer_charset_font_size"
 
 test_case 0015_gray_100k_single roundtrip "100 KiB grayscale single page baseline" \
@@ -226,7 +221,7 @@ test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obe
 test_case 0050_overlay_ecc_target_gray_base_color overlay "Grayscale base with color overlay exercises pixel candidate counting" \
     MAKO_OVERLAY_ECC_TARGET=0.25 \
     MAKO_OVERLAY_FRACTION=0.1 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill --no-filename --no-page-count" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill" \
     "MAKO_OVERLAY_CIRCLE_COLOR=255 0 0" \
     "MAKO_OVERLAY_BACKGROUND_COLOR=0 255 0" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
@@ -312,24 +307,18 @@ test_case 0072_decode_scale_4701 roundtrip "Fractional affine scan scale 4.701x"
 
 test_case 0073_tiny_palette_2_white_checker roundtrip "Two-color tiny page with white checker overwrite at 2.701x" \
     --size 8 --ecc 0.25 --width 160 --height 160 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count" \
     --palette "White Black" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
 test_case 0074_tiny_palette_4_white_checker roundtrip "Four-color tiny page with white checker overwrite at 2.701x" \
     --size 8 --ecc 0.25 --width 160 --height 160 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count" \
     --palette "White Cyan Magenta Yellow" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
 test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payload with diagonal white damage at 2.701x" \
     --size 8 --ecc 0.25 --width 480 --height 480 \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count" \
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701

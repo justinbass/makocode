@@ -8194,27 +8194,15 @@ static const u32 FOOTER_BASE_GLYPH_WIDTH  = 5u;
 static const u32 FOOTER_BASE_GLYPH_HEIGHT = 8u;
 
 struct PageFooterConfig {
-    const char* title_text;
-    usize title_length;
-    const char* filename_text;
-    usize filename_length;
+    const char* text;
+    usize text_length;
     u32 font_size;
     usize max_text_length;
-    bool has_title;
-    bool has_filename;
-    bool display_page_info;
-    bool display_filename;
     PageFooterConfig()
-        : title_text(0),
-          title_length(0u),
-          filename_text(0),
-          filename_length(0u),
+        : text(0),
+          text_length(0u),
           font_size(1u),
-          max_text_length(0u),
-          has_title(false),
-          has_filename(false),
-          display_page_info(true),
-          display_filename(true) {}
+          max_text_length(0u) {}
 };
 
 struct FiducialGridDefaults {
@@ -25105,18 +25093,21 @@ struct ArchiveBuildContext {
     makocode::BitWriter entries;
     makocode::ByteBuffer path_registry;
     u64 entry_count;
+    bool raw_stream;
 
     ArchiveBuildContext()
         : buffer(),
           entries(),
           path_registry(),
-          entry_count(0u) {}
+          entry_count(0u),
+          raw_stream(false) {}
 
     ~ArchiveBuildContext() {
         buffer.release();
         entries.reset();
         path_registry.release();
         entry_count = 0u;
+        raw_stream = false;
     }
 };
 
@@ -25125,6 +25116,7 @@ static bool archive_init(ArchiveBuildContext& ctx) {
     ctx.entries.reset();
     ctx.path_registry.release();
     ctx.entry_count = 0u;
+    ctx.raw_stream = false;
     return true;
 }
 
@@ -25232,7 +25224,7 @@ static bool archive_add_file(ArchiveBuildContext& ctx,
 }
 
 static bool archive_finalize(ArchiveBuildContext& ctx) {
-    if (ctx.entry_count == 0u) return false;
+    if (ctx.entry_count == 0u && !ctx.raw_stream) return false;
     makocode::BitWriter archive;
     if (!MetadataTile::write_compact_u64(archive, ctx.entry_count)) return false;
     const u8* entry_data = ctx.entries.data();
@@ -25578,11 +25570,40 @@ static bool archive_parse(const makocode::ByteBuffer& archive,
     makocode::BitReader reader;
     reader.reset(archive.data, archive.size * 8u);
     u64 entry_count = 0u;
-    if (!MetadataTile::read_compact_u64(reader, entry_count) ||
-        entry_count == 0u || entry_count > (u64)((reader.bit_count - reader.cursor) / 14u)) {
+    if (!MetadataTile::read_compact_u64(reader, entry_count)) {
         return false;
     }
     if (entry_count_out) *entry_count_out = entry_count;
+    if (entry_count == 0u) {
+        u64 stream_size_value = 0u;
+        if (!MetadataTile::read_compact_u64(reader, stream_size_value) ||
+            stream_size_value > (u64)USIZE_MAX_VALUE ||
+            stream_size_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
+            return false;
+        }
+        usize stream_size = (usize)stream_size_value;
+        makocode::ByteBuffer stream_data;
+        if (stream_size && !stream_data.ensure(stream_size)) return false;
+        stream_data.size = stream_size;
+        for (usize i = 0u; i < stream_size; ++i) {
+            stream_data.data[i] = (u8)reader.read_bits(8u);
+            if (reader.failed) return false;
+        }
+        usize remaining_bits = reader.bit_count - reader.cursor;
+        if (remaining_bits > 7u) return false;
+        while (reader.cursor < reader.bit_count) {
+            if (reader.read_bit() != 0u) return false;
+        }
+        return !reader.failed &&
+               (!callback || callback(2u,
+                                      (const char*)0,
+                                      0u,
+                                      stream_data.data,
+                                      stream_size,
+                                      0u,
+                                      callback_context));
+    }
+    if (entry_count > (u64)((reader.bit_count - reader.cursor) / 14u)) return false;
     for (u64 entry = 0u; entry < entry_count; ++entry) {
         u8 entry_type = reader.read_bit();
         u64 path_length_value = 0u;
@@ -25774,6 +25795,15 @@ static bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
                            void* context) -> bool {
         const char* destination = (const char*)context;
         makocode::ByteBuffer output_path;
+        if (entry_type == 2u) {
+            if (!join_output_path(destination, "payload.bin", output_path) ||
+                !ensure_parent_directories((const char*)output_path.data) ||
+                !write_bytes_to_file((const char*)output_path.data, file_data, file_size)) {
+                console_line(2, "decode: failed to write anonymous payload.bin");
+                return false;
+            }
+            return true;
+        }
         if (!join_output_path(destination, entry_path, output_path)) return false;
         if (entry_type == 1u) {
             if (!ensure_directory_tree((const char*)output_path.data)) {
@@ -25803,7 +25833,7 @@ static bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
 static void write_usage() {
     console_line(1, "MakoCode CLI");
     console_line(1, "Usage:");
-    console_line(1, "  makocode encode [options]   (reads payload from file; emits PPM pages)");
+    console_line(1, "  makocode encode [options]   (reads files or stdin; emits PPM pages)");
     console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
     console_line(1, "  makocode overlay BASE.ppm OVERLAY.ppm FRACTION (writes merged page to stdout)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
@@ -25818,9 +25848,7 @@ static void write_usage() {
     console_line(1, "  --ecc RATIO        (requested unknown-error ECC; default 0.20, 0 reserves no unknown-error budget; structural parity remains required)");
     console_line(1, "  --ecc-fill         Raise the requested ECC budget to the largest feasible value that fills the final page");
     console_line(1, "  --password TEXT    (encrypt payload with ChaCha20-Poly1305 using TEXT)");
-    console_line(1, "  --no-filename      (omit payload filename from footer text)");
-    console_line(1, "  --no-page-count    (omit page index/total from footer text)");
-    console_line(1, "  --title TEXT       (optional footer title; letters, digits, common symbols)");
+    console_line(1, "  --footer TEXT      (optional footer template: %page, %totalpages, \\% for literal %)");
     console_line(1, "  --font-size PX     (footer font scale in pixels; default 1)");
     console_line(1, "");
     console_line(1, "Run 'makocode <command> --help' (or -h) for command-specific details.");
@@ -25840,10 +25868,11 @@ static bool arguments_request_help(int arg_count, char** args) {
 
 static void write_encode_help() {
     console_line(1, "makocode encode");
-    console_line(1, "Usage: makocode encode --input PATH [--input PATH ...] [options]");
+    console_line(1, "Usage: makocode encode [--input PATH ...] [options]");
     console_line(1, "Packages files/directories into fiducial-marked printable PPM pages.");
+    console_line(1, "When no --input paths are supplied, reads one anonymous payload from stdin.");
     console_line(1, "");
-    console_line(1, "Required:");
+    console_line(1, "Inputs:");
     console_line(1, "  --input PATH         Add a file or directory to the archive (repeatable).");
     console_line(1, "");
     console_line(1, "Output:");
@@ -25865,10 +25894,8 @@ static void write_encode_help() {
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
     console_line(1, "");
     console_line(1, "Footer customization:");
-    console_line(1, "  --title TEXT         Footer title (letters/digits/common symbols).");
+    console_line(1, "  --footer TEXT        Footer template; %page and %totalpages expand per page, \\% is literal %.");
     console_line(1, "  --font-size PX       Footer font scaling (default 1, max 2048).");
-    console_line(1, "  --no-filename        Remove payload filename from footer text.");
-    console_line(1, "  --no-page-count      Remove page index/total from footer text.");
     console_line(1, "");
     console_line(1, "General:");
     console_line(1, "  --help               Show this message.");
@@ -25915,7 +25942,7 @@ static void write_minify_help() {
     console_line(1, "Strips comments/whitespace from makocode.cpp and emits makocode_minified.cpp.");
 }
 
-static bool title_char_is_allowed(char c) {
+static bool footer_char_is_allowed(char c) {
     bool is_digit = (c >= '0' && c <= '9');
     bool is_upper = (c >= 'A' && c <= 'Z');
     bool is_lower = (c >= 'a' && c <= 'z');
@@ -25963,39 +25990,37 @@ static bool title_char_is_allowed(char c) {
     return false;
 }
 
-static usize decimal_digit_count(u64 value) {
-    usize digits = 0u;
-    while (value) {
-        value /= 10u;
-        ++digits;
-    }
-    return digits ? digits : 1u;
-}
-
 static usize footer_compute_page_text_length(const PageFooterConfig& footer,
                                              u64 page_index,
                                              u64 page_count) {
+    char page_number[32];
+    char total_number[32];
+    u64_to_ascii(page_index, page_number, sizeof(page_number));
+    u64_to_ascii(page_count, total_number, sizeof(total_number));
+    usize page_length = ascii_length(page_number);
+    usize total_length = ascii_length(total_number);
     usize length = 0u;
-    bool need_separator = false;
-    if (footer.has_title && footer.title_text && footer.title_length) {
-        length += footer.title_length;
-        need_separator = true;
-    }
-    if (footer.display_filename && footer.has_filename && footer.filename_text && footer.filename_length) {
-        if (need_separator) {
-            length += 3u; // " | "
+    for (usize i = 0u; i < footer.text_length;) {
+        if (footer.text[i] == '\\' && i + 1u < footer.text_length && footer.text[i + 1u] == '%') {
+            ++length;
+            i += 2u;
+        } else if (footer.text[i] == '%' && i + 4u < footer.text_length &&
+                   footer.text[i + 1u] == 'p' && footer.text[i + 2u] == 'a' &&
+                   footer.text[i + 3u] == 'g' && footer.text[i + 4u] == 'e') {
+            length += page_length;
+            i += 5u;
+        } else if (footer.text[i] == '%' && i + 10u < footer.text_length &&
+                   footer.text[i + 1u] == 't' && footer.text[i + 2u] == 'o' &&
+                   footer.text[i + 3u] == 't' && footer.text[i + 4u] == 'a' &&
+                   footer.text[i + 5u] == 'l' && footer.text[i + 6u] == 'p' &&
+                   footer.text[i + 7u] == 'a' && footer.text[i + 8u] == 'g' &&
+                   footer.text[i + 9u] == 'e' && footer.text[i + 10u] == 's') {
+            length += total_length;
+            i += 11u;
+        } else {
+            ++length;
+            ++i;
         }
-        length += footer.filename_length;
-        need_separator = true;
-    }
-    if (footer.display_page_info) {
-        if (need_separator) {
-            length += 3u; // " | "
-        }
-        length += 5u; // "Page "
-        length += decimal_digit_count(page_index);
-        length += 1u; // '/'
-        length += decimal_digit_count(page_count);
     }
     return length;
 }
@@ -26017,55 +26042,36 @@ static bool footer_build_page_text(const PageFooterConfig& footer,
                                    u64 page_count,
                                    makocode::ByteBuffer& buffer) {
     usize length = footer_compute_page_text_length(footer, page_index, page_count);
-    if (!buffer.ensure(length + 1u)) {
-        return false;
-    }
+    if (length == USIZE_MAX_VALUE || !buffer.ensure(length + 1u)) return false;
+    char page_number[32];
+    char total_number[32];
+    u64_to_ascii(page_index, page_number, sizeof(page_number));
+    u64_to_ascii(page_count, total_number, sizeof(total_number));
     usize cursor = 0u;
-    bool need_separator = false;
-    if (footer.has_title && footer.title_text && footer.title_length) {
-        for (usize i = 0u; i < footer.title_length; ++i) {
-            buffer.data[cursor++] = (u8)footer.title_text[i];
-        }
-        need_separator = true;
-    }
-    if (footer.display_filename && footer.has_filename && footer.filename_text && footer.filename_length) {
-        if (need_separator) {
-            buffer.data[cursor++] = ' ';
-            buffer.data[cursor++] = '|';
-            buffer.data[cursor++] = ' ';
-        }
-        for (usize i = 0u; i < footer.filename_length; ++i) {
-            buffer.data[cursor++] = (u8)footer.filename_text[i];
-        }
-        need_separator = true;
-    }
-    if (footer.display_page_info) {
-        if (need_separator) {
-            buffer.data[cursor++] = ' ';
-            buffer.data[cursor++] = '|';
-            buffer.data[cursor++] = ' ';
-        }
-        buffer.data[cursor++] = 'P';
-        buffer.data[cursor++] = 'a';
-        buffer.data[cursor++] = 'g';
-        buffer.data[cursor++] = 'e';
-        buffer.data[cursor++] = ' ';
-        char number[32];
-        u64_to_ascii(page_index, number, sizeof(number));
-        usize digits = 0u;
-        while (number[digits]) {
-            buffer.data[cursor++] = (u8)number[digits++];
-        }
-        buffer.data[cursor++] = '/';
-        u64_to_ascii(page_count, number, sizeof(number));
-        digits = 0u;
-        while (number[digits]) {
-            buffer.data[cursor++] = (u8)number[digits++];
+    for (usize i = 0u; i < footer.text_length;) {
+        if (footer.text[i] == '\\' && i + 1u < footer.text_length && footer.text[i + 1u] == '%') {
+            buffer.data[cursor++] = '%';
+            i += 2u;
+        } else if (footer.text[i] == '%' && i + 4u < footer.text_length &&
+                   footer.text[i + 1u] == 'p' && footer.text[i + 2u] == 'a' &&
+                   footer.text[i + 3u] == 'g' && footer.text[i + 4u] == 'e') {
+            for (usize j = 0u; page_number[j]; ++j) buffer.data[cursor++] = (u8)page_number[j];
+            i += 5u;
+        } else if (footer.text[i] == '%' && i + 10u < footer.text_length &&
+                   footer.text[i + 1u] == 't' && footer.text[i + 2u] == 'o' &&
+                   footer.text[i + 3u] == 't' && footer.text[i + 4u] == 'a' &&
+                   footer.text[i + 5u] == 'l' && footer.text[i + 6u] == 'p' &&
+                   footer.text[i + 7u] == 'a' && footer.text[i + 8u] == 'g' &&
+                   footer.text[i + 9u] == 'e' && footer.text[i + 10u] == 's') {
+            for (usize j = 0u; total_number[j]; ++j) buffer.data[cursor++] = (u8)total_number[j];
+            i += 11u;
+        } else {
+            buffer.data[cursor++] = (u8)footer.text[i++];
         }
     }
-    buffer.data[length] = 0u;
-    buffer.size = length;
-    return true;
+    buffer.data[cursor] = 0u;
+    buffer.size = cursor;
+    return cursor == length;
 }
 
 static bool compute_page_layout(const ImageMappingConfig& mapping,
@@ -26083,8 +26089,7 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
     const u32 MAX_FOOTER_LAYOUT_PASSES = 16u;
     bool layout_converged = false;
     for (u32 pass = 0u; pass < MAX_FOOTER_LAYOUT_PASSES; ++pass) {
-        u64 text_page_count = footer_config.display_page_info ? page_count : 1u;
-        footer_config.max_text_length = footer_compute_max_text_length(footer_config, text_page_count);
+        footer_config.max_text_length = footer_compute_max_text_length(footer_config, page_count);
         if (!compute_footer_layout(width_pixels, height_pixels, footer_config, footer_layout)) {
             return false;
         }
@@ -26100,7 +26105,7 @@ static bool compute_page_layout(const ImageMappingConfig& mapping,
         if (new_page_count == 0u) {
             new_page_count = 1u;
         }
-        if (!footer_config.display_page_info || new_page_count == page_count) {
+        if (new_page_count == page_count) {
             page_count = new_page_count;
             layout_converged = true;
             break;
@@ -26608,12 +26613,12 @@ static int command_encode(int arg_count, char** args) {
     static const usize MAX_INPUT_ITEMS = 512u;
     const char* input_paths[MAX_INPUT_ITEMS];
     usize input_count = 0u;
-    makocode::ByteBuffer title_buffer;
-    makocode::ByteBuffer filename_buffer;
+    makocode::ByteBuffer footer_buffer;
     makocode::ByteBuffer password_buffer;
     makocode::ByteBuffer output_dir_buffer;
     makocode::ByteBuffer prefix_buffer;
     bool have_password = false;
+    bool have_footer = false;
     const char* output_dir = ".";
     bool have_output_dir = false;
     bool have_prefix = false;
@@ -26727,14 +26732,6 @@ static int command_encode(int arg_count, char** args) {
             have_prefix = true;
             continue;
         }
-        if (ascii_equals_token(arg, ascii_length(arg), "--no-filename")) {
-            footer_config.display_filename = false;
-            continue;
-        }
-        if (ascii_equals_token(arg, ascii_length(arg), "--no-page-count")) {
-            footer_config.display_page_info = false;
-            continue;
-        }
         if (ascii_equals_token(arg, ascii_length(arg), "--compact-page")) {
             compact_page = true;
             continue;
@@ -26807,43 +26804,47 @@ static int command_encode(int arg_count, char** args) {
             input_paths[input_count++] = input_value;
             continue;
         }
-        const char title_prefix[] = "--title=";
-        const char* title_value = 0;
-        usize title_length = 0u;
-        if (ascii_equals_token(arg, ascii_length(arg), "--title")) {
+        const char footer_prefix[] = "--footer=";
+        const char* footer_value = 0;
+        usize footer_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--footer")) {
+            if (have_footer) {
+                console_line(2, "encode: --footer specified multiple times");
+                return 1;
+            }
             if ((i + 1) >= arg_count) {
-                console_line(2, "encode: --title requires a non-empty value");
+                console_line(2, "encode: --footer requires a value");
                 return 1;
             }
-            title_value = args[i + 1];
-            title_length = ascii_length(title_value);
+            footer_value = args[i + 1];
+            footer_length = ascii_length(footer_value);
             i += 1;
-        } else if (ascii_starts_with(arg, title_prefix)) {
-            title_value = arg + (sizeof(title_prefix) - 1u);
-            title_length = ascii_length(title_value);
+        } else if (ascii_starts_with(arg, footer_prefix)) {
+            if (have_footer) {
+                console_line(2, "encode: --footer specified multiple times");
+                return 1;
+            }
+            footer_value = arg + (sizeof(footer_prefix) - 1u);
+            footer_length = ascii_length(footer_value);
         }
-        if (title_value) {
-            if (title_length == 0u) {
-                console_line(2, "encode: --title requires a non-empty value");
+        if (footer_value) {
+            if (!footer_buffer.ensure(footer_length + 1u)) {
+                console_line(2, "encode: failed to allocate footer buffer");
                 return 1;
             }
-            if (!title_buffer.ensure(title_length + 1u)) {
-                console_line(2, "encode: failed to allocate title buffer");
-                return 1;
-            }
-            for (usize j = 0u; j < title_length; ++j) {
-                char c = title_value[j];
-                if (!title_char_is_allowed(c)) {
-                    console_line(2, "encode: title supports letters, digits, space, and !@#$%^&*()_+-={}[]:\";'<>?,./`~|\\");
+            for (usize j = 0u; j < footer_length; ++j) {
+                char c = footer_value[j];
+                if (!footer_char_is_allowed(c)) {
+                    console_line(2, "encode: footer contains an unsupported character");
                     return 1;
                 }
-                title_buffer.data[j] = (u8)c;
+                footer_buffer.data[j] = (u8)c;
             }
-            title_buffer.data[title_length] = 0u;
-            title_buffer.size = title_length;
-            footer_config.has_title = true;
-            footer_config.title_length = title_length;
-            footer_config.title_text = (const char*)title_buffer.data;
+            footer_buffer.data[footer_length] = 0u;
+            footer_buffer.size = footer_length;
+            footer_config.text = (const char*)footer_buffer.data;
+            footer_config.text_length = footer_length;
+            have_footer = true;
             continue;
         }
         const char font_prefix[] = "--font-size=";
@@ -26988,18 +26989,24 @@ static int command_encode(int arg_count, char** args) {
             }
         }
     }
-    if (input_count == 0u) {
-        console_line(2, "encode: at least one --input PATH is required");
-        return 1;
-    }
     ArchiveBuildContext archive;
     if (!archive_init(archive)) {
         console_line(2, "encode: failed to initialize archive buffer");
         return 1;
     }
-    bool single_input = (input_count == 1u);
-    makocode::ByteBuffer single_normalized;
-    bool have_single_normalized = false;
+    if (input_count == 0u) {
+        makocode::ByteBuffer stdin_data;
+        if (!read_entire_stdin(stdin_data)) {
+            console_line(2, "encode: failed to read stdin");
+            return 1;
+        }
+        if (!MetadataTile::write_compact_u64(archive.entries, (u64)stdin_data.size) ||
+            !archive_append_bytes(archive.entries, stdin_data.data, stdin_data.size)) {
+            console_line(2, "encode: failed to buffer stdin payload");
+            return 1;
+        }
+        archive.raw_stream = true;
+    }
     for (usize path_index = 0u; path_index < input_count; ++path_index) {
         const char* input_path = input_paths[path_index];
         struct stat path_info;
@@ -27036,67 +27043,14 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, input_path);
             return 1;
         }
-        if (single_input && !have_single_normalized) {
-            if (!single_normalized.ensure(normalized_path.size + 1u)) {
-                console_line(2, "encode: failed to record normalized path");
-                return 1;
-            }
-            for (usize j = 0u; j < normalized_path.size; ++j) {
-                single_normalized.data[j] = normalized_path.data[j];
-            }
-            single_normalized.data[normalized_path.size] = 0u;
-            single_normalized.size = normalized_path.size;
-            have_single_normalized = true;
-        }
     }
-    if (archive.entry_count == 0u) {
+    if (archive.entry_count == 0u && !archive.raw_stream) {
         console_line(2, "encode: no files or directories to encode");
         return 1;
     }
     if (!archive_finalize(archive)) {
         console_line(2, "encode: failed to finalize archive");
         return 1;
-    }
-    footer_config.filename_text = 0;
-    footer_config.filename_length = 0u;
-    footer_config.has_filename = false;
-    if (footer_config.display_filename) {
-        if (single_input && have_single_normalized) {
-            const char* base_name = find_last_path_component((const char*)single_normalized.data);
-            usize base_length = ascii_length(base_name);
-            if (!filename_buffer.ensure(base_length + 1u)) {
-                console_line(2, "encode: failed to allocate filename buffer");
-                return 1;
-            }
-            for (usize j = 0u; j < base_length; ++j) {
-                char c = base_name[j];
-                if (!title_char_is_allowed(c)) {
-                    console_line(2, "encode: filename contains unsupported characters for footer text");
-                    return 1;
-                }
-                filename_buffer.data[j] = (u8)c;
-            }
-            filename_buffer.data[base_length] = 0u;
-            filename_buffer.size = base_length;
-            footer_config.filename_text = (const char*)filename_buffer.data;
-            footer_config.filename_length = base_length;
-            footer_config.has_filename = true;
-        } else {
-            const char bundle_label[] = "bundle";
-            usize label_length = (usize)(sizeof(bundle_label) - 1u);
-            if (!filename_buffer.ensure(label_length + 1u)) {
-                console_line(2, "encode: failed to allocate filename buffer");
-                return 1;
-            }
-            for (usize j = 0u; j < label_length; ++j) {
-                filename_buffer.data[j] = (u8)bundle_label[j];
-            }
-            filename_buffer.data[label_length] = 0u;
-            filename_buffer.size = label_length;
-            footer_config.filename_text = (const char*)filename_buffer.data;
-            footer_config.filename_length = label_length;
-            footer_config.has_filename = true;
-        }
     }
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
@@ -27413,7 +27367,7 @@ static int command_encode(int arg_count, char** args) {
         u64 output_bits_per_page = bits_per_page;
 
         if (compact_page && footer_layout.has_text) {
-            console_line(2, "encode: --compact-page requires the footer text to be disabled (use --no-filename and --no-page-count, and omit --title)");
+            console_line(2, "encode: --compact-page requires the footer text to be empty (omit --footer)");
             return 1;
         }
 
@@ -30831,6 +30785,22 @@ retry_decode:
                     return false;
                 }
                 output->started = true;
+            }
+            if (type == 2u) {
+                u64_to_ascii((u64)file_size, number_buffer, sizeof(number_buffer));
+                if (!target.append_ascii("stream ") || !target.append_ascii(number_buffer) ||
+                    !target.append_char('\n')) return false;
+                for (usize i = 0u; i < file_size; ++i) {
+                    u8 c = file_data[i];
+                    if (c >= 32u && c <= 126u && c != '\\') {
+                        if (!target.append_char((char)c)) return false;
+                    } else if (!target.append_ascii("\\x") ||
+                               !target.append_char(hex_digits[c >> 4u]) ||
+                               !target.append_char(hex_digits[c & 15u])) {
+                        return false;
+                    }
+                }
+                return target.append_char('\n');
             }
             if (!target.append_ascii(type == 1u ? "directory " : "file ")) return false;
             const u8* path_bytes = (const u8*)path;

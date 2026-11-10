@@ -52,10 +52,11 @@ Required:
 
 Payload:
   --payload-literal TEXT  Use TEXT bytes as the payload instead of random data.
+  --stdin-payload       Pipe the literal payload to encode without creating an input file.
 
 Layout:
   --palette "..."       Custom palette passed to encode/decode.
-  --title TEXT          Footer title (forwarded to encode).
+  --footer TEXT         Footer template (forwarded to encode).
   --font-size PX        Footer font size.
   --multi-page          Require multiple encoded pages and decode all PPMs in order.
   --encode-opt OPT      Extra flag forwarded verbatim to `makocode encode` (repeatable).
@@ -100,7 +101,8 @@ payload_literal=""
 multi_page=0
 palette=""
 password=""
-title=""
+footer=""
+stdin_payload=0
 font_size=""
 declare -a encode_opts=()
 declare -a decode_opts=()
@@ -147,6 +149,10 @@ while [[ $# -gt 0 ]]; do
             payload_literal=${2:-}
             shift 2
             ;;
+        --stdin-payload)
+            stdin_payload=1
+            shift
+            ;;
         --palette)
             palette=${2:-}
             shift 2
@@ -155,8 +161,8 @@ while [[ $# -gt 0 ]]; do
             password=${2:-}
             shift 2
             ;;
-        --title)
-            title=${2:-}
+        --footer)
+            footer=${2:-}
             shift 2
             ;;
         --font-size)
@@ -325,28 +331,39 @@ rm -f "$payload_final" "$decoded_payload_target" "$transformed_decoded_target"
 rm -f "${encoded_prefix}.ppm" ${encoded_prefix}_*.ppm 2>/dev/null || true
 rm -f "${transformed_prefix}.ppm" ${transformed_prefix}_*.ppm 2>/dev/null || true
 
+if [[ $stdin_payload -eq 1 && -z $payload_literal ]]; then
+    echo "run_roundtrip: --stdin-payload requires --payload-literal" >&2
+    exit 1
+fi
 if [[ -n $payload_literal ]]; then
     payload_len=$("$repo_root/test/ppm_transform" bytes-len "$payload_literal")
     if [[ $payload_len -ne $size ]]; then
         echo "run_roundtrip: --size ($size) must match --payload-literal byte length ($payload_len)" >&2
         exit 1
     fi
-    printf '%s' "$payload_literal" > "$payload_final"
+    if [[ $stdin_payload -eq 0 ]]; then
+        printf '%s' "$payload_literal" > "$payload_final"
+    fi
 else
     "$repo_root/test/ppm_transform" bytes --output "$payload_final" --size "$size" --seed "$payload_seed"
 fi
-cp "$payload_final" "$payload_work"
+if [[ $stdin_payload -eq 0 ]]; then
+    cp "$payload_final" "$payload_work"
+fi
 
 encode_prefix="${label}_random_payload"
-encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=$ecc" "--page-width=$width" "--page-height=$height" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
+encode_cmd=("$makocode_bin" encode "--ecc=$ecc" "--page-width=$width" "--page-height=$height" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
+if [[ $stdin_payload -eq 0 ]]; then
+    encode_cmd+=("--input=random.bin")
+fi
 if [[ -n $palette ]]; then
     encode_cmd+=("--palette" "$palette")
 fi
 if [[ -n $password ]]; then
     encode_cmd+=("--password=$password")
 fi
-if [[ -n $title ]]; then
-    encode_cmd+=("--title" "$title")
+if [[ -n $footer ]]; then
+    encode_cmd+=("--footer" "$footer")
 fi
 if [[ -n $font_size ]]; then
     encode_cmd+=("--font-size" "$font_size")
@@ -357,10 +374,17 @@ if ((${#encode_opts[@]})); then
     done
 fi
 print_makocode_cmd "encode" "${encode_cmd[@]}"
-(
-    cd "$work_dir"
-    "${encode_cmd[@]}"
-) >/dev/null
+if [[ $stdin_payload -eq 1 ]]; then
+    printf '%s' "$payload_literal" | (
+        cd "$work_dir"
+        "${encode_cmd[@]}"
+    ) >/dev/null
+else
+    (
+        cd "$work_dir"
+        "${encode_cmd[@]}"
+    ) >/dev/null
+fi
 encode_fiducial_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
 if [[ ! -f $encode_fiducial_csv ]]; then
     echo "run_roundtrip: encode did not write fiducial CSV" >&2
@@ -433,12 +457,30 @@ mako_check_fiducials \
     "$baseline_fiducial_csv" \
     "$label baseline"
 
-baseline_decoded_payload="$baseline_decode_dir/random.bin"
+if [[ $stdin_payload -eq 1 ]]; then
+    baseline_decoded_payload="$baseline_decode_dir/payload.bin"
+else
+    baseline_decoded_payload="$baseline_decode_dir/random.bin"
+fi
 if [[ ! -f $baseline_decoded_payload ]]; then
-    echo "run_roundtrip: decode did not emit random.bin" >&2
+    echo "run_roundtrip: decode did not emit $baseline_decoded_payload" >&2
     exit 1
 fi
-cmp --silent "$payload_final" "$baseline_decoded_payload"
+if [[ $stdin_payload -eq 1 ]]; then
+    if [[ -e "$work_dir/random.bin" || -e "$baseline_decode_dir/random.bin" ]]; then
+        echo "run_roundtrip: stdin payload unexpectedly used a filename" >&2
+        exit 1
+    fi
+    cmp --silent <(printf '%s' "$payload_literal") "$baseline_decoded_payload"
+    decoded_report="$work_dir/decoded_report.txt"
+    "$makocode_bin" decode --decoded-stdout "${baseline_targets[@]}" >"$decoded_report" 2>/dev/null
+    if ! grep -Fxq 'stream 1' "$decoded_report" || grep -Eq '^file ' "$decoded_report"; then
+        echo "run_roundtrip: decoded stdin metadata did not describe an anonymous stream" >&2
+        exit 1
+    fi
+else
+    cmp --silent "$payload_final" "$baseline_decoded_payload"
+fi
 mv "$baseline_decoded_payload" "$decoded_payload_target"
 
 transform_needed=0
@@ -574,13 +616,22 @@ if [[ $transform_needed -eq 1 ]]; then
             "$(mako_format_label "$label")" "$transform_decode_status" >&2
         exit "$transform_decode_status"
     fi
-    transformed_decoded_payload="$transformed_decode_dir/random.bin"
+    if [[ $stdin_payload -eq 1 ]]; then
+        transformed_decoded_payload="$transformed_decode_dir/payload.bin"
+    else
+        transformed_decoded_payload="$transformed_decode_dir/random.bin"
+    fi
     if [[ ! -f $transformed_decoded_payload ]]; then
         echo "run_roundtrip: transformed decode missing random.bin" >&2
         exit 1
     fi
-    mako_compare_payload_with_tolerance \
-        "$payload_final" "$transformed_decoded_payload" 5 "$label transformed"
+    if [[ $stdin_payload -eq 1 ]]; then
+        mako_compare_payload_with_tolerance \
+            <(printf '%s' "$payload_literal") "$transformed_decoded_payload" 5 "$label transformed"
+    else
+        mako_compare_payload_with_tolerance \
+            "$payload_final" "$transformed_decoded_payload" 5 "$label transformed"
+    fi
     mv "$transformed_decoded_payload" "$transformed_decoded_target"
 fi
 

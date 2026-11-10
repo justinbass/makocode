@@ -12,7 +12,7 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/control" "$work_dir/decoded"
 printf makocode > "$work_dir/payload.bin"
 (cd "$work_dir"; "$makocode_bin" encode --input=payload.bin --ecc=0 \
-    --page-width=80 --page-height=80 --no-filename --no-page-count \
+    --page-width=80 --page-height=80 \
     "--output-dir=$work_dir/encoded" --prefix=source >/dev/null)
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan.ppm" <<'PYTHON'
 from pathlib import Path

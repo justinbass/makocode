@@ -13,7 +13,7 @@ rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'x' > "$work_dir/payload.bin"
 (cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0.25 \
-    --page-width=80 --page-height=80 --no-filename --no-page-count \
+    --page-width=80 --page-height=80 \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
 layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
     "$work_dir/encoded/page.ppm" 80 80 1 --metadata-layout)

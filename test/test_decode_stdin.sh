@@ -103,7 +103,7 @@ mkdir -p "$work_dir"
 printf '\000stdin coverage payload\377\n' > "$payload"
 
 encode_prefix="${label}_stdin"
-encode_cmd=("$makocode_bin" encode --input=payload.bin --ecc=0.5 --page-width=500 --page-height=500 "--output-dir=$work_dir" --no-filename --no-page-count "--prefix=$encode_prefix" --debug)
+encode_cmd=("$makocode_bin" encode --input=payload.bin --ecc=0.5 --page-width=500 --page-height=500 "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
 print_labelled "encode" "${encode_cmd[@]}"
 (
     cd "$work_dir"

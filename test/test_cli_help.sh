@@ -94,6 +94,7 @@ run_expect_help top-level-short-help 'Usage:' 'makocode encode [options]' \
     "$makocode_bin" -h
 run_expect_help unknown-command 'Usage:' 'makocode encode [options]' "$makocode_bin" unknown-command
 run_expect_help encode-help 'Usage: makocode encode' '--input PATH' "$makocode_bin" encode --help
+run_expect_help encode-footer-help 'Usage: makocode encode' '--footer TEXT' "$makocode_bin" encode --help
 run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" decode --help
 run_expect_help overlay-help 'Usage: makocode overlay' '--overlay-ecc-target TARGET' "$makocode_bin" overlay --help
 run_expect_help minify-help 'Usage: makocode minify' 'Strips comments/whitespace' "$makocode_bin" minify --help

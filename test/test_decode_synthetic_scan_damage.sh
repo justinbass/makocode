@@ -49,7 +49,6 @@ fi
     "$makocode_bin" encode \
         "--input=$payload_path" \
         --ecc=0 --page-width=80 --page-height=80 \
-        --no-filename --no-page-count \
         "--output-dir=$work_dir/encoded" --prefix=synthetic > /dev/null
 )
 

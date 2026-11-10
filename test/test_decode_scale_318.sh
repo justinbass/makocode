@@ -42,8 +42,6 @@ printf '0' > "$work_dir/payload.bin"
         --ecc=0.25 \
         --page-width=160 \
         --page-height=160 \
-        --no-filename \
-        --no-page-count \
         "--output-dir=$work_dir/encoded" \
         "--prefix=$label" >/dev/null
 )

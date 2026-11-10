@@ -112,8 +112,6 @@ encode_cmd=(
     --ecc=0.5
     --page-width=200
     --page-height=100
-    --no-filename
-    --no-page-count
     "--output-dir=$work_dir"
     "--prefix=$encode_prefix"
     --debug

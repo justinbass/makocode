@@ -19,8 +19,6 @@ bash "$script_dir/run_roundtrip.sh" \
     --width 320 \
     --height 320 \
     --palette "$palette" \
-    --encode-opt "--no-filename" \
-    --encode-opt "--no-page-count"
 
 shopt -s nullglob
 pages=("$repo_root/test_output/${label}_random_payload_encoded"*.ppm)

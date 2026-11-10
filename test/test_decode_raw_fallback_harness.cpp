@@ -35,8 +35,6 @@ int main(int argc, char** argv) {
     const u32 width = 500u;
     const u32 height = 500u;
     PageFooterConfig footer_config;
-    footer_config.display_filename = false;
-    footer_config.display_page_info = false;
     makocode::ByteBuffer frame_bits;
     u64 frame_bit_count = 0u;
     FooterLayout footer_layout;

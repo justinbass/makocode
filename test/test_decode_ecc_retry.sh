@@ -63,8 +63,6 @@ decode_log="$work_dir/decode.log"
     --ecc=0.25 \
     --page-width=500 \
     --page-height=500 \
-    --no-filename \
-    --no-page-count \
     "--prefix=$label" \
     "--output-dir=$work_dir/encoded" >/dev/null
 "$ppm_transform_bin" corrupt-footer-valid-data-too-corrupt \

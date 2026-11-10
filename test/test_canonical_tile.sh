@@ -23,7 +23,7 @@ for dimensions in '1000 1000 1 payload.bin'; do
     mkdir -p "$work/$label/pages"
     (cd "$work" && "$bin" encode --input="$input_name" --ecc=0 \
         --page-width="$width" --page-height="$height" \
-        --no-filename --no-page-count --prefix=page \
+        --prefix=page \
         --output-dir="$work/$label/pages" >/dev/null)
     page=$(find "$work/$label/pages" -maxdepth 1 -type f -name '*.ppm' -print -quit)
     page_count=$(find "$work/$label/pages" -maxdepth 1 -type f -name '*.ppm' -print | wc -l | tr -d '[:space:]')
@@ -41,7 +41,7 @@ done
 # after adding structural erasure and overlay reserves to the actual parity.
 mkdir -p "$work/ecc_budget/pages"
 (cd "$work" && "$bin" encode --input=payload.bin --ecc=0.25 \
-    --page-width=1200 --page-height=1200 --no-filename --no-page-count \
+    --page-width=1200 --page-height=1200 \
     --prefix=budget --output-dir="$work/ecc_budget/pages" >/dev/null)
 shopt -s nullglob
 budget_pages=("$work"/ecc_budget/pages/*.ppm)
@@ -57,7 +57,7 @@ fi
 # from one carrying deterministic overlay erasures.
 mkdir -p "$work/no_overlay_reserve/pages"
 (cd "$work" && "$bin" encode --input=payload.bin --ecc=0.25 --no-overlay-reserve \
-    --page-width=1000 --page-height=1000 --no-filename --no-page-count \
+    --page-width=1000 --page-height=1000 \
     --prefix=no_overlay_reserve --output-dir="$work/no_overlay_reserve/pages" >/dev/null)
 no_overlay_page=$(find "$work/no_overlay_reserve/pages" -maxdepth 1 -type f -name '*.ppm' -print -quit)
 "$root/test/ppm_transform" overlay-mask --output "$work/overlay_mask.ppm" \
@@ -77,7 +77,7 @@ fi
 # decode that the encoder used when padding structural parity.
 mkdir -p "$work/custom_fiducials/pages" "$work/custom_fiducials/out"
 (cd "$work" && "$bin" encode --input=payload.bin --ecc=0 \
-    --page-width=1000 --page-height=1000 --no-filename --no-page-count \
+    --page-width=1000 --page-height=1000 \
     --fiducials=6,30,15 --prefix=custom --output-dir="$work/custom_fiducials/pages" >/dev/null)
 shopt -s nullglob
 custom_pages=("$work"/custom_fiducials/pages/*.ppm)
@@ -98,7 +98,7 @@ done
 mkdir -p "$work/80x80/pages" "$work/80x80/out"
 (cd "$work" && "$bin" encode --input=tiny.bin --ecc=0 \
     --page-width=80 --page-height=80 \
-    --no-filename --no-page-count --prefix=page \
+    --prefix=page \
     --output-dir="$work/80x80/pages" >/dev/null)
 page=$(find "$work/80x80/pages" -maxdepth 1 -type f -name '*.ppm' -print -quit)
 page_count=$(find "$work/80x80/pages" -maxdepth 1 -type f -name '*.ppm' -print | wc -l | tr -d '[:space:]')

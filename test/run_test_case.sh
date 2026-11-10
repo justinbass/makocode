@@ -50,15 +50,18 @@ case $# in
         ;;
 esac
 
-# These values are shared with the footer metadata round-trip case.
+# These values are shared with the footer template round-trip case.
 footer_charset_title=$' !"#$%&\\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy'
 footer_charset_font_size=2
 footer_charset_filename="random.bin"
-footer_charset_page_stub="Page 1/1"
+footer_charset_page_stub="Page 999/999"
+footer_charset_percent_stub=" | 100% done"
+footer_charset_template="$footer_charset_title | $footer_charset_filename | Page %page/%totalpages | 100\\% done"
 footer_charset_title_len=${#footer_charset_title}
 footer_charset_filename_len=${#footer_charset_filename}
 footer_charset_page_len=${#footer_charset_page_stub}
-footer_charset_text_len=$((footer_charset_title_len + 3 + footer_charset_filename_len + 3 + footer_charset_page_len))
+footer_charset_percent_len=${#footer_charset_percent_stub}
+footer_charset_text_len=$((footer_charset_title_len + 3 + footer_charset_filename_len + 3 + footer_charset_page_len + footer_charset_percent_len))
 footer_charset_glyph_width=$((5 * footer_charset_font_size))
 footer_charset_char_spacing=$((footer_charset_font_size))
 footer_charset_text_px=$((footer_charset_text_len * footer_charset_glyph_width + (footer_charset_text_len - 1) * footer_charset_char_spacing))

@@ -28,7 +28,7 @@ PY
 
 mkdir -p "$work/pages"
 (cd "$work" && "$bin" encode --input=payload.bin --ecc=0.15 \
-    --page-width=1000 --page-height=1000 --no-filename --no-page-count \
+    --page-width=1000 --page-height=1000 \
     --prefix=page --output-dir="$work/pages" >/dev/null)
 shopt -s nullglob
 pages=("$work"/pages/*.ppm)
@@ -48,10 +48,10 @@ with open(sys.argv[1], 'wb') as stream:
 PY
 mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
 (cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.25 \
-    --page-width=1000 --page-height=1000 --no-filename --no-page-count \
+    --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
 (cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.25 --no-overlay-reserve \
-    --page-width=1000 --page-height=1000 --no-filename --no-page-count \
+    --page-width=1000 --page-height=1000 \
     --prefix=plain --output-dir="$work/mixed_plain" >/dev/null)
 reserved_page=$(find "$work/mixed_reserved" -maxdepth 1 -type f -name '*.ppm' -print -quit)
 plain_page=$(find "$work/mixed_plain" -maxdepth 1 -type f -name '*.ppm' -print -quit)

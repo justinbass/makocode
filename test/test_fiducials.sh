@@ -85,8 +85,6 @@ encode_cmd=(
     --ecc=0
     --page-width=240
     --page-height=240
-    --no-filename
-    --no-page-count
     --fiducials=6,30,15
     "--prefix=${label}_fiducials"
     "--output-dir=$pages_dir"

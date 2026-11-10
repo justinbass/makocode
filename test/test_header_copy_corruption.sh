@@ -77,7 +77,7 @@ rm -f "$payload_final" "$encoded_ppm"
 cp "$payload_final" "$work_dir/random.bin"
 
 encode_prefix="${label}_page"
-encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--no-filename" "--no-page-count" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
+encode_cmd=("$makocode_bin" encode "--input=random.bin" "--ecc=0.5" "--page-width=600" "--page-height=600" "--output-dir=$work_dir" "--prefix=$encode_prefix" --debug)
 (cd "$work_dir" && "${encode_cmd[@]}") >/dev/null
 encode_csv="$work_dir/${encode_prefix}_encode_fiducials.csv"
 if [[ ! -f $encode_csv ]]; then

@@ -77,8 +77,6 @@ encode_cmd=(
     --page-width=160
     --page-height=160
     --palette='Cyan Black'
-    --no-filename
-    --no-page-count
     "--prefix=$prefix"
     "--output-dir=$pages_dir"
     --debug

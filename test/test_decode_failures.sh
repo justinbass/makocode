@@ -221,8 +221,6 @@ run_case_footer_data_destroyed() {
         "--input=payload.bin" \
         "--page-width=260" \
         "--page-height=260" \
-        "--no-filename" \
-        "--no-page-count" \
         "--prefix=${label}_footer_data_destroyed" \
         --debug \
         "--output-dir=$work_dir"
@@ -232,8 +230,6 @@ run_case_footer_data_destroyed() {
             --input=payload.bin \
             --page-width=260 \
             --page-height=260 \
-            --no-filename \
-            --no-page-count \
             --prefix="${label}_footer_data_destroyed" \
             --debug \
             --output-dir="$work_dir" \
@@ -297,8 +293,6 @@ run_case_footer_valid_data_too_corrupt() {
         "--ecc=0.25" \
         "--page-width=1000" \
         "--page-height=1000" \
-        "--no-filename" \
-        "--no-page-count" \
         "--prefix=${label}_footer_valid_data_too_corrupt" \
         --debug \
         "--output-dir=$work_dir"
@@ -309,8 +303,6 @@ run_case_footer_valid_data_too_corrupt() {
             --ecc=0.25 \
             --page-width=1000 \
             --page-height=1000 \
-            --no-filename \
-            --no-page-count \
             --prefix="${label}_footer_valid_data_too_corrupt" \
             --debug \
             --output-dir="$work_dir" \

@@ -53,5 +53,5 @@ export MAKO_OVERLAY_CIRCLE_COLOR='255 0 0'
 export MAKO_OVERLAY_BACKGROUND_COLOR='0 255 0'
 export MAKO_OVERLAY_IGNORE_COLORS='#FF0000'
 export MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
-export MAKO_OVERLAY_ENCODE_OPTS='--ecc-fill --no-filename --no-page-count'
+export MAKO_OVERLAY_ENCODE_OPTS='--ecc-fill'
 exec "$script_dir/test_overlay_e2e.sh" "$label"

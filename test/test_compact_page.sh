@@ -91,8 +91,6 @@ encode_cmd=(
     --ecc=0
     "--page-width=$page_width"
     "--page-height=$page_height"
-    --no-filename
-    --no-page-count
     --compact-page
     "--output-dir=$page_dir"
     "--prefix=${label}_compact"
