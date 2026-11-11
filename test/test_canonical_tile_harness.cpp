@@ -119,10 +119,13 @@ int main(int argc, char** argv) {
                 }
             }
             u32 marker_x0 = MetadataTile::tag_marker_x0();
+            u32 marker_magic = is_power_of_two_u32(values.palette_count)
+                                   ? MetadataTile::LEGACY_TAG_MAGIC
+                                   : MetadataTile::BALANCED_GROUPED_PALETTE_TAG_MAGIC;
             for (u32 bit = 0u; bit < 32u; ++bit) {
                 usize index = (usize)(values.metadata_tag_y0 + 1u + bit / 8u) *
                                   MetadataTile::TILE_SIDE + marker_x0 + (bit & 7u);
-                u8 expected = MetadataTile::makocode_tag_bit(bit)
+                u8 expected = MetadataTile::makocode_tag_bit(bit, marker_magic)
                                   ? (u8)(values.palette_count - 1u) : 0u;
                 if (bits.data[index] != expected) { fprintf(stderr, "marker bits failed case=%u\n", palette_case); return 1; }
             }
@@ -154,13 +157,13 @@ int main(int argc, char** argv) {
                 usize index = (usize)(values.metadata_tag_y0 + 1u + bit / 8u) *
                                   MetadataTile::TILE_SIDE + marker_x0 + (bit & 7u);
                 bool observed = luminances[index] < found_threshold;
-                if (observed != MetadataTile::makocode_tag_bit(bit)) ++marker_errors;
+                bool expected = MetadataTile::makocode_tag_bit(bit, marker_magic);
+                if (palette_case == 1u) expected = !expected;
+                if (observed != expected) ++marker_errors;
             }
             if (marker_errors) {
-                if (palette_case != 1u || marker_errors != 32u) {
-                    fprintf(stderr, "marker threshold errors case=%u count=%u threshold=%.2f\n",
-                            palette_case, marker_errors, found_threshold); return 1;
-                }
+                fprintf(stderr, "marker threshold errors case=%u count=%u threshold=%.2f\n",
+                        palette_case, marker_errors, found_threshold); return 1;
             }
             if (!MetadataTile::decode_tile_samples(tile_rgb, luminances, decoded, palette_text) ||
                 decoded.palette_count != values.palette_count ||

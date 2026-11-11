@@ -8504,10 +8504,12 @@ namespace MetadataTile {
         return true;
     }
 
-    static bool makocode_tag_bit(u32 index) {
-        static const u8 marker[] = {0xD1u, 0xBFu, 0x3Fu, 0x45u};
+    static const u32 LEGACY_TAG_MAGIC = 0xD1BF3F45u;
+    static const u32 BALANCED_GROUPED_PALETTE_TAG_MAGIC = 0x2E40C0BAu;
+
+    static bool makocode_tag_bit(u32 index, u32 marker_value = LEGACY_TAG_MAGIC) {
         if (index >= 32u) return false;
-        return ((marker[index >> 3u] >> (7u - (index & 7u))) & 1u) != 0u;
+        return ((marker_value >> (31u - index)) & 1u) != 0u;
     }
 
     static bool decode_palette_tag_row(const u8* row_rgb,
@@ -9255,7 +9257,11 @@ namespace MetadataTile {
             u32 x = marker_x0 + (bit & 7u);
             u32 y = tag_y0 + 1u + bit / 8u;
             usize cell = (usize)y * (usize)TILE_SIDE + x;
-            out_bits.data[cell] = makocode_tag_bit(bit) ?
+            out_bits.data[cell] = makocode_tag_bit(
+                                      bit,
+                                      is_power_of_two_u32(values.palette_count)
+                                          ? LEGACY_TAG_MAGIC
+                                          : BALANCED_GROUPED_PALETTE_TAG_MAGIC) ?
                                       (u8)(values.palette_count - 1u) : 0u;
             if (out_active_mask) out_active_mask->data[cell] = 1u;
         }
@@ -9285,7 +9291,10 @@ namespace MetadataTile {
             out_bits.data[cell] = metadata_symbols.data[symbol_cursor];
             if (out_active_mask) out_active_mask->data[cell] = 1u;
         }
-        values.encoded_tag = ((u64)values.palette_count << 32u) | 0xD1BF3F45u;
+        u32 tag_magic = is_power_of_two_u32(values.palette_count)
+                            ? LEGACY_TAG_MAGIC
+                            : BALANCED_GROUPED_PALETTE_TAG_MAGIC;
+        values.encoded_tag = ((u64)values.palette_count << 32u) | tag_magic;
         values.encoded_metadata_size = (u32)codeword.size;
         values.metadata_bit_count = metadata_bit_count;
         values.metadata_ecc_bytes = parity_bytes;
@@ -9351,16 +9360,27 @@ namespace MetadataTile {
                 double threshold = 0.0;
                 if (!decode_palette_tag_row(tag_row, tag_palette, tag_palette_count,
                                             inversion != 0u, &threshold)) continue;
-                u32 tag_errors = 0u;
-                double marker_margin = 0.0;
+                u32 legacy_errors = 0u;
+                u32 balanced_errors = 0u;
                 u32 marker_x0 = tag_marker_x0();
                 for (u32 bit = 0u; bit < 32u; ++bit) {
                     double luminance = module_luminance(marker_x0 + (bit & 7u),
                                                         tag_y + 1u + bit / 8u);
                     bool observed = luminance < threshold;
                     if (inversion) observed = !observed;
-                    bool expected = makocode_tag_bit(bit);
-                    if (observed != expected) ++tag_errors;
+                    if (observed != makocode_tag_bit(bit)) ++legacy_errors;
+                    if (observed != makocode_tag_bit(bit, BALANCED_GROUPED_PALETTE_TAG_MAGIC)) ++balanced_errors;
+                }
+                bool balanced_tag = balanced_errors < legacy_errors;
+                u32 marker_magic = balanced_tag ? BALANCED_GROUPED_PALETTE_TAG_MAGIC : LEGACY_TAG_MAGIC;
+                u32 tag_errors = balanced_tag ? balanced_errors : legacy_errors;
+                double marker_margin = 0.0;
+                for (u32 bit = 0u; bit < 32u; ++bit) {
+                    double luminance = module_luminance(marker_x0 + (bit & 7u),
+                                                        tag_y + 1u + bit / 8u);
+                    bool observed = luminance < threshold;
+                    if (inversion) observed = !observed;
+                    bool expected = makocode_tag_bit(bit, marker_magic);
                     bool raw_expected_dark = expected != (inversion != 0u);
                     marker_margin += (raw_expected_dark
                                           ? threshold - luminance
@@ -9613,7 +9633,7 @@ namespace MetadataTile {
                             }
                         }
 
-                        out_values.encoded_tag = ((u64)tag_palette_count << 32u) | 0xD1BF3F45u;
+                        out_values.encoded_tag = ((u64)tag_palette_count << 32u) | marker_magic;
                         out_values.encoded_metadata_size = (u32)encoded_bytes;
                         out_values.metadata_bit_count = metadata_bit_count;
                         out_values.metadata_ecc_bytes = parity_bytes;
@@ -9869,8 +9889,8 @@ namespace MetadataTile {
                                             rgb_luminance_u8(palette[palette_count - 1u].r,
                                                              palette[palette_count - 1u].g,
                                                              palette[palette_count - 1u].b));
-                u32 errors = 0u;
-                double marker_margin = 0.0;
+                u32 legacy_errors = 0u;
+                u32 balanced_errors = 0u;
                 for (u32 bit = 0u; bit < 32u; ++bit) {
                     u32 module_x = tag_marker_x0() + (bit & 7u);
                     u32 module_y = tag_y + 1u + bit / 8u;
@@ -9893,11 +9913,24 @@ namespace MetadataTile {
                     }
                     bool value = luminance < tag_threshold;
                     if (inversion) value = !value;
-                    bool expected = makocode_tag_bit(bit);
-                    if (value != expected) {
-                        ++errors;
-                        if (errors > max_tag_errors) break;
-                    }
+                    if (value != makocode_tag_bit(bit)) ++legacy_errors;
+                    if (value != makocode_tag_bit(bit, BALANCED_GROUPED_PALETTE_TAG_MAGIC)) ++balanced_errors;
+                }
+                bool balanced_tag = balanced_errors < legacy_errors;
+                u32 tag_magic = balanced_tag ? BALANCED_GROUPED_PALETTE_TAG_MAGIC : LEGACY_TAG_MAGIC;
+                u32 errors = balanced_tag ? balanced_errors : legacy_errors;
+                if (errors > max_tag_errors) continue;
+                double marker_margin = 0.0;
+                for (u32 bit = 0u; bit < 32u; ++bit) {
+                    u32 module_x = tag_marker_x0() + (bit & 7u);
+                    u32 module_y = tag_y + 1u + bit / 8u;
+                    double sx = (double)module_x - half;
+                    double sy = (double)module_y - half;
+                    double sample_x = affine.center_x + vx_x * sx + vy_x * sy;
+                    double sample_y = affine.center_y + vx_y * sx + vy_y * sy;
+                    double luminance = sample_luminance_bilinear(
+                        pixel_data_rgb, width_pixels, height_pixels, sample_x, sample_y);
+                    bool expected = makocode_tag_bit(bit, tag_magic);
                     bool raw_expected_dark = expected != (inversion != 0u);
                     marker_margin += (raw_expected_dark
                                           ? tag_threshold - luminance
@@ -9991,7 +10024,7 @@ namespace MetadataTile {
                     best_errors = errors;
                     best_contrast = tag_contrast;
                     best_marker_margin = marker_margin;
-                    best_tag = ((u64)palette_count << 32u) | 0xD1BF3F45u;
+                    best_tag = ((u64)palette_count << 32u) | tag_magic;
                     best_inverted = inversion != 0u;
                     best_tag_y = tag_y;
                     best_metadata_bit_count = metadata_bit_count;
@@ -10475,13 +10508,15 @@ namespace MetadataTile {
                 if (high <= low + 12.0) continue;
                 double threshold = (low + high) * 0.5;
                 for (u32 inversion = 0u; inversion < 2u; ++inversion) {
-                    u32 marker_errors = 0u;
+                    u32 legacy_errors = 0u;
+                    u32 balanced_errors = 0u;
                     for (u32 bit = 0u; bit < 32u; ++bit) {
                         bool decoded = tag_samples[bit] < threshold;
                         if (inversion) decoded = !decoded;
-                        if (decoded != makocode_tag_bit(bit)) ++marker_errors;
+                        if (decoded != makocode_tag_bit(bit)) ++legacy_errors;
+                        if (decoded != makocode_tag_bit(bit, BALANCED_GROUPED_PALETTE_TAG_MAGIC)) ++balanced_errors;
                     }
-                    if (marker_errors <= 12u) return true;
+                    if (legacy_errors <= 12u || balanced_errors <= 12u) return true;
                 }
             }
             return false;
@@ -15686,7 +15721,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                         u32 module_x = MetadataTile::tag_marker_x0() + (bit & 7u);
                         u32 module_y = tag_y + 1u + bit / 8u;
                         double luminance = sample_module(module_x, module_y);
-                        bool expected_dark = MetadataTile::makocode_tag_bit(bit) != inverted;
+                        u32 marker_magic = (u32)(tag & 0xFFFFFFFFu);
+                        bool expected_dark = MetadataTile::makocode_tag_bit(bit, marker_magic) != inverted;
                         if (expected_dark) {
                             dark_sum += luminance;
                             ++dark_count;
@@ -15704,7 +15740,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                         u32 module_x = MetadataTile::tag_marker_x0() + (bit & 7u);
                         u32 module_y = tag_y + 1u + bit / 8u;
                         bool actual_dark = sample_module(module_x, module_y) < threshold;
-                        if (actual_dark != (MetadataTile::makocode_tag_bit(bit) != inverted)) {
+                        if (actual_dark != (MetadataTile::makocode_tag_bit(
+                                                bit,
+                                                (u32)(tag & 0xFFFFFFFFu)) != inverted)) {
                             ++mismatches;
                         }
                         ++samples;
@@ -22765,6 +22803,12 @@ struct RotationEstimateCandidate {
                 for (u32 digit = 4u; digit > 0u; --digit) {
                     u32 symbol = custom_digits.data[(usize)(group * 4u + digit - 1u)];
                     if (symbol >= custom_palette_base) return false;
+                    if ((u32)(state.encoded_tile.encoded_tag & 0xFFFFFFFFu) ==
+                        MetadataTile::BALANCED_GROUPED_PALETTE_TAG_MAGIC) {
+                        u32 phase = (u32)(group % custom_palette_base);
+                        symbol = (symbol + custom_palette_base - phase) %
+                                 custom_palette_base;
+                    }
                     value = value * custom_palette_base + symbol;
                 }
                 if (bit_count < 64u && value >= ((u64)1u << bit_count)) return false;
@@ -23210,7 +23254,11 @@ struct RotationEstimateCandidate {
                             for (u32 bit = 0u; bit < 32u && markers_match; ++bit) {
                                 bool decoded = tag_samples[bit] < threshold;
                                 if (inversion) decoded = !decoded;
-                                if (decoded != MetadataTile::makocode_tag_bit(bit)) markers_match = false;
+                                if (decoded != MetadataTile::makocode_tag_bit(
+                                                   bit,
+                                                   (u32)(tile_values.encoded_tag & 0xFFFFFFFFu))) {
+                                    markers_match = false;
+                                }
                             }
                             if (markers_match) {
                                 markers_match_any = true;
@@ -24840,9 +24888,12 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     value |= (u64)1u << bit;
                 }
             }
+            // Spread base-conversion bias over palette colors, rather than pinning it to one digit position.
             for (u32 digit = 0u; digit < 4u; ++digit) {
+                u32 phase = (u32)(group % mapping.custom_palette_count);
                 base_digits.data[(usize)(group * 4u + digit)] =
-                    (u8)(value % mapping.custom_palette_count);
+                    (u8)((value % mapping.custom_palette_count + phase) %
+                         mapping.custom_palette_count);
                 value /= mapping.custom_palette_count;
             }
             if (value != 0u) return false;
