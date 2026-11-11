@@ -345,6 +345,19 @@ fi
 IFS=$'\n' ppm_paths=($(printf '%s\n' "${ppm_paths[@]}" | LC_ALL=C sort))
 unset IFS
 
+if [[ $label == "0000_tiny_0" ]]; then
+    {
+        read -r tiny_magic
+        read -r tiny_width tiny_height
+        read -r tiny_max_value
+    } < "${ppm_paths[0]}"
+    if [[ $tiny_magic != "P6" || $tiny_max_value != "255" ||
+          $tiny_width -ge 48 || $tiny_height -ge 48 ]]; then
+        echo "run_roundtrip: one-byte metadata tile was not clamped below 48x48" >&2
+        exit 1
+    fi
+fi
+
 if [[ $multi_page -eq 1 && ${#ppm_paths[@]} -lt 2 ]]; then
     echo "run_roundtrip: --multi-page requested but encode produced only ${#ppm_paths[@]} PPM page(s)" >&2
     exit 1

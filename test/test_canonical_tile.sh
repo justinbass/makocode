@@ -89,7 +89,7 @@ fi
 "$bin" decode --output-dir="$work/custom_fiducials/out" "${custom_pages[0]}" >/dev/null
 cmp "$work/payload.bin" "$work/custom_fiducials/out/payload.bin"
 
-for dimensions in '48 48' '49 48' '64 48'; do
+for dimensions in '23 23' '48 48' '49 48' '64 48'; do
     read -r width height <<<"$dimensions"
     "$harness" --capacity "$width" "$height"
 done

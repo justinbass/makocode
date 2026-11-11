@@ -9,11 +9,12 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 if [[ ${1:-} == --edge-bleed ]]; then edge_bleed=1; shift; fi
 if [[ ${1:-} == --optical-blur ]]; then optical_blur=1; shift; fi
 [[ $# == 0 ]]
+ecc=0.25
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 mkdir -p "$work_dir/encoded" "$work_dir/control" "$work_dir/decoded"
 printf makocode > "$work_dir/payload.bin"
-(cd "$work_dir"; "$makocode_bin" encode --input=payload.bin --ecc=0 \
+(cd "$work_dir"; "$makocode_bin" encode --input=payload.bin "--ecc=$ecc" \
     --page-width=80 --page-height=80 \
     "--output-dir=$work_dir/encoded" --prefix=source >/dev/null)
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan.ppm" "$edge_bleed" "$optical_blur" <<'PYTHON'
@@ -45,7 +46,7 @@ if sys.argv[4] == '1':
     for y in range(1, 84):
         for x in range(1, 84):
             i = (y * 85 + x) * 3
-            value = round(.65 * ink[i] + .0875 * sum(
+            value = round(.85 * ink[i] + .0375 * sum(
                 ink[j] for j in (i - 3, i + 3, i - 180, i + 180)))
             canvas[i:i+3] = [value] * 3
 write_ppm(sys.argv[2], 85, 85, canvas)

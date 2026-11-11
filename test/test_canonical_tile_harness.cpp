@@ -96,15 +96,18 @@ int main(int argc, char** argv) {
             makocode::ByteBuffer bits;
             makocode::ByteBuffer active;
             if (!MetadataTile::build_tile_bits(values, bits, &active) ||
-                values.metadata_square_side < 8u || values.metadata_square_side < 9u ||
+                values.metadata_square_side == 0u ||
                 values.metadata_square_side > MetadataTile::TILE_MAX_METADATA_SQUARE_SIDE) {
                 fprintf(stderr, "marker build failed case=%u\n", palette_case); return 1;
             }
             usize metadata_cells = (usize)values.metadata_length_prefix_bits +
                                    values.metadata_symbol_count;
             usize square_cells = (usize)values.metadata_square_side * values.metadata_square_side;
-            if (metadata_cells > square_cells || metadata_cells <=
-                (usize)(values.metadata_square_side - 1u) * (values.metadata_square_side - 1u)) {
+            u32 expected_side = 1u;
+            while ((usize)expected_side * expected_side < metadata_cells) ++expected_side;
+            if (metadata_cells > square_cells || values.metadata_square_side != expected_side ||
+                values.metadata_square_y0 != values.metadata_tag_y0 + MetadataTile::TILE_HEADER_ROWS ||
+                values.metadata_tile_height != values.metadata_square_side + MetadataTile::TILE_HEADER_ROWS) {
                 fprintf(stderr, "marker square failed case=%u\n", palette_case); return 1;
             }
             u32 palette_tag_x0 = MetadataTile::palette_tag_x0(values.palette_count);
@@ -175,8 +178,8 @@ int main(int argc, char** argv) {
         u64 height_value = 0u;
         if (!ascii_to_u64(argv[2], ascii_length(argv[2]), &width_value) ||
             !ascii_to_u64(argv[3], ascii_length(argv[3]), &height_value) ||
-            width_value < MetadataTile::TILE_SIDE ||
-            height_value < MetadataTile::TILE_SIDE ||
+            width_value == 0u ||
+            height_value == 0u ||
             width_value > 0xFFFFFFFFull || height_value > 0xFFFFFFFFull) {
             fprintf(stderr, "canonical tile: invalid capacity dimensions\n");
             return 2;
@@ -208,8 +211,16 @@ int main(int argc, char** argv) {
             }
         }
         MetadataTile::Placement center = MetadataTile::compute_center_tile_placement(width, height);
-        if (!center.valid || center.x0 != (width - MetadataTile::TILE_SIDE) / 2u ||
-            center.y0 != (height - MetadataTile::TILE_SIDE) / 2u ||
+        u32 expected_x0 = width >= MetadataTile::TILE_SIDE
+                              ? (width - MetadataTile::TILE_SIDE) / 2u : 0u;
+        u32 expected_y0 = height >= MetadataTile::TILE_SIDE
+                              ? (height - MetadataTile::TILE_SIDE) / 2u : 0u;
+        u32 expected_offset_x = width < MetadataTile::TILE_SIDE
+                                    ? (MetadataTile::TILE_SIDE - width) / 2u : 0u;
+        u32 expected_offset_y = height < MetadataTile::TILE_SIDE
+                                    ? (MetadataTile::TILE_SIDE - height) / 2u : 0u;
+        if (!center.valid || center.x0 != expected_x0 || center.y0 != expected_y0 ||
+            center.offset_x != expected_offset_x || center.offset_y != expected_offset_y ||
             overwrite_slots != reserved_pixels || overwrite_slots > (u64)width * height) {
             fprintf(stderr, "canonical tile: invalid centered layout capacity\n");
             return 1;
@@ -320,14 +331,16 @@ int main(int argc, char** argv) {
         }
         metadata_cells = (usize)direct_values.metadata_length_prefix_bits +
                          (usize)direct_values.metadata_symbol_count;
-        expected_metadata_side = 8u;
+        expected_metadata_side = 1u;
         while ((usize)expected_metadata_side * expected_metadata_side < metadata_cells) {
             ++expected_metadata_side;
         }
         if (direct_values.schema_version != 0u ||
-            direct_values.metadata_length_prefix_bits != 24u ||
             direct_values.metadata_square_side != expected_metadata_side ||
-            direct_values.metadata_square_side >= MetadataTile::TILE_SIDE) {
+            direct_values.metadata_square_y0 != direct_values.metadata_tag_y0 + MetadataTile::TILE_HEADER_ROWS ||
+            direct_values.metadata_tile_height != direct_values.metadata_square_side + MetadataTile::TILE_HEADER_ROWS ||
+            direct_values.metadata_tile_width >= MetadataTile::TILE_SIDE ||
+            direct_values.metadata_tile_height >= MetadataTile::TILE_SIDE) {
             fprintf(stderr, "canonical tile: metadata is not a compact schema-0 square\n");
             return 1;
         }

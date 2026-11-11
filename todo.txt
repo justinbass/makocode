@@ -16,6 +16,8 @@ Features:
 - Overlay picture across multiple images, so they can be lined up as a block like a mosaic. 
 - Given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
 - Overlay can apply to only the internal region of the page when there's margins
+- Steganography
+- Hidden volume for plausible deniability?
 
 Improvements:
 - Increase all distortions until decoding breaks, make improvements
