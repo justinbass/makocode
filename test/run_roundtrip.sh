@@ -290,7 +290,7 @@ export MAKOCODE_TEST_SEED
 mkdir -p "$test_dir"
 work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 encode_prefix="${label}_random_payload_encoded"
-encoded_prefix="$test_dir/$encode_prefix"
+encoded_prefix="$work_dir/$encode_prefix"
 
 if [[ -n $payload_literal ]]; then
     payload_len=$("$repo_root/test/ppm_transform" bytes-len "$payload_literal")
@@ -303,7 +303,7 @@ else
     expected_args=(--size "$size" --seed "$payload_seed")
 fi
 
-encode_cmd=("$makocode_bin" encode "--ecc=$ecc" "--output-dir=$test_dir" "--prefix=$encode_prefix")
+encode_cmd=("$makocode_bin" encode "--ecc=$ecc" "--output-dir=$work_dir" "--prefix=$encode_prefix")
 if [[ -n $width ]]; then
     encode_cmd+=("--page-width=$width")
 fi

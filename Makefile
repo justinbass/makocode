@@ -2,7 +2,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 LDFLAGS ?=
 
-LCOV_REPORT ?= test_output/makocode.info
+LCOV_REPORT ?= test_output/coverage/makocode.info
 LCOV_HTML_DIR ?= test_output/coverage
 LCOV_FLAGS ?= --ignore-errors inconsistent,unsupported,format
 LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
@@ -60,6 +60,7 @@ coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
 	@$(STATUS) coverage "check genhtml" sh -c 'command -v genhtml >/dev/null 2>&1'
 	@$(STATUS) coverage "run tests (COVERAGE=1)" $(MAKE) COVERAGE=1 test
+	@mkdir -p "$(dir $(LCOV_REPORT))"
 	@$(STATUS) coverage "capture lcov" lcov --capture --no-external --directory . --output-file $(LCOV_REPORT) $(LCOV_FLAGS) $(LCOV_RC)
 	@$(STATUS) coverage "generate html" genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS) --branch-coverage
 

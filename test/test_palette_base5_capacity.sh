@@ -21,14 +21,15 @@ bash "$script_dir/run_roundtrip.sh" \
     --palette "$palette" \
 
 shopt -s nullglob
-pages=("$repo_root/test_output/${label}_random_payload_encoded"*.ppm)
+pages=("$repo_root"/test_output/"${label}_work."*/"${label}_random_payload_encoded"*.ppm)
 shopt -u nullglob
 if [[ ${#pages[@]} -ne 1 ]]; then
     echo "base-5 palette expected one page, got ${#pages[@]}" >&2
     exit 1
 fi
 
-decoded_metadata_dir=$(mktemp -d "$repo_root/test_output/${label}_metadata.XXXXXX")
+decoded_metadata_dir="${pages[0]%/*}/metadata"
+mkdir -p "$decoded_metadata_dir"
 "$repo_root/makocode" decode --decoded-file --palette "$palette" \
     --output-dir="$decoded_metadata_dir" "${pages[0]}" >/dev/null
 python3 - "${pages[0]}" "$decoded_metadata_dir" <<'PY'

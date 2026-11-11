@@ -35,8 +35,8 @@ mako_test_seed_init() {
 
     export MAKO_TEST_SEED
     if [[ ${MAKO_TEST_SEED_REPORTED:-0} != 1 ]]; then
-        mkdir -p "$repo_root/test_output"
-        printf '%s\n' "$MAKO_TEST_SEED" > "$repo_root/test_output/test_seed.txt"
+        mkdir -p "$repo_root/test_output/test_logs"
+        printf '%s\n' "$MAKO_TEST_SEED" > "$repo_root/test_output/test_logs/test_seed.txt"
         printf 'Test seed: %s\n' "$MAKO_TEST_SEED"
         if [[ -z ${NO_COLOR:-} && -t 1 ]]; then
             printf '\033[1;34m[test]\033[0m Repeat with: MAKO_TEST_SEED=%s make test\n' "$MAKO_TEST_SEED"
