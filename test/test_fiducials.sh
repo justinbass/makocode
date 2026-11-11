@@ -54,7 +54,7 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_fiducials_work"
+work_dir=$(mktemp -d "$test_dir/${label}_fiducials_work.XXXXXX")
 pages_dir="$work_dir/pages"
 decoded_dir="$work_dir/decoded"
 payload="$work_dir/payload.bin"
@@ -62,19 +62,6 @@ encoded_ppm="$pages_dir/${label}_fiducials.ppm"
 encode_csv="$pages_dir/${label}_fiducials_encode_fiducials.csv"
 decoded_payload="$decoded_dir/payload.bin"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap 'on_exit' EXIT
-
-rm -rf "$work_dir"
 mkdir -p "$pages_dir" "$decoded_dir"
 printf '\000fiducials custom grid payload\377\n' > "$payload"
 
@@ -123,7 +110,7 @@ if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; 
     echo 'test_fiducials: decoded payload differs from encoded payload' >&2
     exit 1
 fi
-retained_ppm="$test_dir/${label}_fiducials_page.ppm"
+retained_ppm="$work_dir/${label}_fiducials_page.ppm"
 cp "$encoded_ppm" "$retained_ppm"
 
 printf '%s SUCCESS custom fiducial grid and payload round-trip\n' "$(mako_format_label "$label")"

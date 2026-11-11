@@ -55,7 +55,7 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_archive_work"
+work_dir=$(mktemp -d "$test_dir/${label}_archive_work.XXXXXX")
 source_dir="$work_dir/source"
 page_dir="$work_dir/pages"
 decoded_dir="$work_dir/decoded"
@@ -64,21 +64,7 @@ if [[ $label == *[!a-zA-Z0-9_.-]* ]]; then
     exit 1
 fi
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap 'on_exit' EXIT
-
 mkdir -p "$test_dir"
-rm -rf "$work_dir"
-rm -f "$test_dir/${label}_archive_tree_encoded_"*.ppm
 mkdir -p \
     "$source_dir/tree/empty" \
     "$source_dir/tree/nested/deep_empty" \
@@ -156,7 +142,7 @@ page_index=0
 for ppm in "${ppms[@]}"; do
     page_index=$((page_index + 1))
     printf -v page_suffix '%02d' "$page_index"
-    dest="$test_dir/${label}_archive_tree_encoded_${page_suffix}.ppm"
+    dest="$work_dir/${label}_archive_tree_encoded_${page_suffix}.ppm"
     mv -f "$ppm" "$dest"
 done
 

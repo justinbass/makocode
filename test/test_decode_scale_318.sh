@@ -23,15 +23,7 @@ if [[ $# -ne 0 ]]; then
     exit 2
 fi
 
-work_dir="$repo_root/test_output/${label}_scale_318_work"
-cleanup() {
-    local status=$?
-    if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-trap cleanup EXIT
-rm -rf "$work_dir"
+work_dir=$(mktemp -d "$repo_root/test_output/${label}_scale_318_work.XXXXXX")
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf '0' > "$work_dir/payload.bin"
 

@@ -116,21 +116,17 @@ if [[ ! -x $ppm_transform_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
+work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label/$case_name")
 export MAKOCODE_TEST_SEED
-mkdir -p "$test_dir"
-wrong_depth="$test_dir/${label}_wrong_depth.ppm"
-invalid_magic="$test_dir/${label}_invalid_magic.ppm"
-all_black="$test_dir/${label}_all_black.ppm"
-all_white="$test_dir/${label}_all_white.ppm"
-random_noise="$test_dir/${label}_random_noise.ppm"
-footer_data_destroyed="$test_dir/${label}_footer_present_data_destroyed.ppm"
-footer_valid_data_too_corrupt="$test_dir/${label}_footer_valid_data_too_corrupt.ppm"
-work_dir="$test_dir/${label}_work"
+wrong_depth="$work_dir/${label}_wrong_depth.ppm"
+invalid_magic="$work_dir/${label}_invalid_magic.ppm"
+all_black="$work_dir/${label}_all_black.ppm"
+all_white="$work_dir/${label}_all_white.ppm"
+random_noise="$work_dir/${label}_random_noise.ppm"
+footer_data_destroyed="$work_dir/${label}_footer_present_data_destroyed.ppm"
+footer_valid_data_too_corrupt="$work_dir/${label}_footer_valid_data_too_corrupt.ppm"
 payload_path="$work_dir/payload.bin"
-trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
-rm -f "$wrong_depth" "$invalid_magic" "$all_black" "$all_white" "$random_noise" "$footer_data_destroyed" "$footer_valid_data_too_corrupt"
-rm -rf "$work_dir"
 
 run_case_wrong_depth() {
     cat > "$wrong_depth" <<'PPM'
@@ -260,7 +256,6 @@ run_case_footer_data_destroyed() {
         exit 1
     fi
     mako_check_fiducials "$encode_csv" "$decode_dir/decode_fiducials.csv" "$label footer_data_destroyed"
-    rm -rf "$work_dir"
 }
 
 run_case_footer_valid_data_too_corrupt() {
@@ -317,7 +312,6 @@ run_case_footer_valid_data_too_corrupt() {
         exit 1
     fi
     mako_check_fiducials "$encode_csv" "$decode_dir/decode_fiducials.csv" "$label footer_valid_data_too_corrupt"
-    rm -rf "$work_dir"
 }
 
 case "${case_name}" in

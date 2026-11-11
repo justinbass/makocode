@@ -45,7 +45,7 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_prefix_work"
+work_dir=$(mktemp -d "$test_dir/${label}_prefix_work.XXXXXX")
 pages_dir="$work_dir/pages"
 decoded_dir="$work_dir/decoded"
 payload="$work_dir/payload.bin"
@@ -53,19 +53,6 @@ prefix="${label}_payload_encoded"
 encoded_ppm="$pages_dir/$prefix.ppm"
 decoded_payload="$decoded_dir/payload.bin"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap on_exit EXIT
-
-rm -rf "$work_dir"
 mkdir -p "$pages_dir" "$decoded_dir"
 printf '\000prefix-encoded roundtrip payload\377\n' > "$payload"
 
@@ -134,7 +121,7 @@ if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; 
     echo 'test_prefix_ends_encoded: decoded payload differs from input' >&2
     exit 1
 fi
-retained_ppm="$test_dir/${label}_prefix_encoded.ppm"
+retained_ppm="$work_dir/${label}_prefix_encoded.ppm"
 cp "$encoded_ppm" "$retained_ppm"
 
 printf '%s SUCCESS prefix filename, fiducials, and payload round-trip\n' "$(mako_format_label "$label")"

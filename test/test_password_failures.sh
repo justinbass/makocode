@@ -101,28 +101,9 @@ MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
 export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_password_work"
+work_dir=$(mktemp -d "$test_dir/${label}_password_work.XXXXXX")
 payload="$work_dir/payload.bin"
-ppm_target="$test_dir/${label}_encoded.ppm"
-
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -ne 0 ]]; then
-        return
-    fi
-    if [[ -d $work_dir ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap 'on_exit' EXIT
-
-rm -rf "$work_dir"
-mkdir -p "$work_dir"
-rm -f "$ppm_target"
+ppm_target="$work_dir/${label}_encoded.ppm"
 
 "$ppm_transform_bin" bytes --output "$payload" --size 32768 --seed "$payload_seed"
 password="suite-password"

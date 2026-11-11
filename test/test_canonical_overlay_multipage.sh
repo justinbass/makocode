@@ -6,8 +6,7 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 ppm_transform_bin="$repo_root/test/ppm_transform"
 canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
-work=$(mktemp -d "${TMPDIR:-/tmp}/makocode-canonical-overlay.XXXXXX")
-trap 'status=$?; rm -rf "$work"; exit "$status"' EXIT
+work=$(mktemp -d "$repo_root/test_output/canonical_overlay_work.XXXXXX")
 
 if [[ ! -x "$bin" || ! -x "$ppm_transform_bin" ]]; then
     echo "canonical overlay: required binaries are missing" >&2

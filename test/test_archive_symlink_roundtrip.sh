@@ -55,20 +55,11 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_symlink_work"
+work_dir=$(mktemp -d "$test_dir/${label}_symlink_work.XXXXXX")
 source_dir="$work_dir/source"
 encode_dir="$source_dir/input"
 page_dir="$work_dir/pages"
 decoded_dir="$work_dir/decoded"
-cleanup() {
-    local exit_code=$?
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-trap cleanup EXIT
-
-rm -rf "$work_dir"
 mkdir -p "$encode_dir" "$page_dir" "$decoded_dir"
 printf 'target contents from above the encoded directory\n' > "$source_dir/program"
 ln -s ../program "$encode_dir/program"

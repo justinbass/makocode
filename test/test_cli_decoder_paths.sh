@@ -55,16 +55,12 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_decoder_work"
+work_dir=$(mktemp -d "$test_dir/${label}_decoder_work.XXXXXX")
 harness_src="$script_dir/test_cli_decoder_paths_harness.cpp"
 if [[ ! -f $harness_src ]]; then
     echo "test_cli_decoder_paths: decoder paths harness not found at $harness_src" >&2
     exit 1
 fi
-trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
-
-rm -rf "$work_dir"
-mkdir -p "$work_dir"
 harness_bin="$work_dir/decoder_paths_harness"
 harness_inputs="$work_dir/harness_inputs"
 harness_output="$work_dir/archive_output"
@@ -155,7 +151,7 @@ for ecc in 0 0.5; do
     page_index=0
     for ppm in "${ppm_paths[@]}"; do
         page_index=$((page_index + 1))
-        retained_ppm="$test_dir/${label}_ecc_${ecc}_page_${page_index}.ppm"
+        retained_ppm="$work_dir/${label}_ecc_${ecc}_page_${page_index}.ppm"
         cp "$ppm" "$retained_ppm"
     done
 done

@@ -3,9 +3,7 @@ set -euo pipefail
 root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$root/makocode"}
 label=${2:-decode_scan_registration}
-work="$root/test_output/${label}_work"
-trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work"; fi' EXIT
-rm -rf "$work"
+work=$(mktemp -d "$root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work/pages"
 printf 'registration regression' > "$work/input.bin"
 (cd "$work" && "$bin" encode --input=input.bin --ecc=0 --page-width=80 --page-height=80 --output-dir=pages --prefix=page >/dev/null)

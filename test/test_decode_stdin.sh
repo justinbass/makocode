@@ -76,19 +76,12 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_stdin_work"
+work_dir=$(mktemp -d "$test_dir/${label}_stdin_work.XXXXXX")
 payload="$work_dir/payload.bin"
 decoded_dir="$work_dir/decoded"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
 on_exit() {
     local exit_code=$?
-    cleanup "$exit_code"
     if [[ $exit_code -ne 0 ]]; then
         local label_fmt
         label_fmt=$(mako_format_label "$label")
@@ -97,8 +90,6 @@ on_exit() {
 }
 trap on_exit EXIT
 
-rm -rf "$work_dir"
-mkdir -p "$work_dir"
 printf '\000stdin coverage payload\377\n' > "$payload"
 
 encode_prefix="${label}_stdin"
@@ -145,7 +136,7 @@ if ! cmp --silent "$payload" "$decoded_payload"; then
     echo "test_decode_stdin: stdin decode payload differs from encoded payload" >&2
     exit 1
 fi
-retained_ppm="$test_dir/${label}_stdin_encoded.ppm"
+retained_ppm="$work_dir/${label}_stdin_encoded.ppm"
 cp "${ppm_paths[0]}" "$retained_ppm"
 
 label_fmt=$(mako_format_label "$label")

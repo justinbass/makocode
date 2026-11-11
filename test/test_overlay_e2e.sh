@@ -38,10 +38,10 @@ MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
 export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_overlay_work"
+work_dir=$(mktemp -d "$test_dir/${label}_overlay_work.XXXXXX")
 canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
 payload_path="$work_dir/payload.bin"
-overlay_path="$test_dir/${label}_overlay_mask.ppm"
+overlay_path="$work_dir/${label}_overlay_mask.ppm"
 encoded_dir="$work_dir/encoded_pages"
 merged_dir="$work_dir/merged_pages"
 
@@ -51,24 +51,7 @@ ecc_target="${MAKO_OVERLAY_ECC_TARGET:-}"
 page_width="${MAKO_OVERLAY_PAGE_WIDTH:-1000}"
 page_height="${MAKO_OVERLAY_PAGE_HEIGHT:-1000}"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -ne 0 ]]; then
-        return
-    fi
-    if [[ -d $work_dir ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap 'on_exit' EXIT
-
-rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir" "$encoded_dir" "$merged_dir"
-rm -f "$payload_path" "$overlay_path"
 if [[ ! -x $canonical_tile_harness_bin ]]; then
     canonical_tile_harness_bin="$work_dir/canonical_tile_harness"
     "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \

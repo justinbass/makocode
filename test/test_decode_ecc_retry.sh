@@ -36,7 +36,7 @@ if [[ -z $label || $label == *[!a-zA-Z0-9_.-]* ]]; then
     exit 1
 fi
 
-work_dir="$test_dir/${label}_work"
+work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 if [[ ! -x $makocode_bin ]]; then
         echo "test_decode_ecc_retry: makocode binary not found at $makocode_bin" >&2
@@ -48,9 +48,7 @@ if [[ ! -x $ppm_transform_bin ]]; then
     exit 1
 fi
 
-rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/output"
-trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
 
 payload="$work_dir/payload.bin"
 encoded_ppm="$work_dir/encoded/${label}.ppm"

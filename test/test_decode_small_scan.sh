@@ -19,9 +19,7 @@ if [[ $# -ne 0 ]]; then
     exit 2
 fi
 
-work_dir="$repo_root/test_output/${label}_work"
-trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
-rm -rf "$work_dir"
+work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work_dir/encoded" "$work_dir/decoded_5x" \
     "$work_dir/decoded_4_5x_hard" "$work_dir/decoded_4_5x_soft"
 printf 'makocode' > "$work_dir/makocode.bin"

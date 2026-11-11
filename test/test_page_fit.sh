@@ -52,27 +52,13 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf \
-            "$test_dir/${label}_fit_both_pages" \
-            "$test_dir/${label}_fit_height_pages" \
-            "$test_dir/${label}_fit_width_pages" \
-            "$test_dir/${label}_margin_pages"
-    fi
-}
-on_exit() {
-    cleanup "$?"
-}
-trap on_exit EXIT
+work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 
 mako_test_seed_init "$repo_root"
 payload_seed=$(mako_test_case_seed "page_fit/$label")
 
 for mode in both height width; do
-    local_page_dir="$test_dir/${label}_fit_${mode}_pages"
-    rm -rf "$local_page_dir"
+    local_page_dir="$work_dir/${label}_fit_${mode}_pages"
     mkdir -p "$local_page_dir"
     encode_cmd=("$makocode_bin" encode --ecc=0 \
         "--output-dir=$local_page_dir" "--prefix=${label}_${mode}")
@@ -97,7 +83,7 @@ for mode in both height width; do
                 echo "test_page_fit: automatic dimensions did not fit the payload: ${output_width}x${output_height}" >&2
                 exit 1
             fi
-            retained_ppm="$test_dir/${label}_fit.ppm"
+            retained_ppm="$work_dir/${label}_fit.ppm"
             cp "${ppms[0]}" "$retained_ppm"
             ;;
         height)
@@ -119,7 +105,7 @@ for mode in both height width; do
             --size 8192 --seed "$payload_seed" --label "$label $mode fit"
 done
 
-margin_pages="$test_dir/${label}_margin_pages"
+margin_pages="$work_dir/${label}_margin_pages"
 mkdir -p "$margin_pages"
 printf 'makocode' |
     "$makocode_bin" encode --ecc=0 \
@@ -152,9 +138,8 @@ cat "${margin_ppms[0]}" |
     "$makocode_bin" decode --decoded-stdout 2>/dev/null |
     python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
         --literal makocode --label "$label small-page margin"
-retained_ppm="$test_dir/${label}_small_page_white_margin.ppm"
+retained_ppm="$work_dir/${label}_small_page_white_margin.ppm"
 cp "${margin_ppms[0]}" "$retained_ppm"
-rm -rf "$margin_pages"
 
 label_fmt=$(mako_format_label "$label")
 printf '%s SUCCESS automatic fitting and small-page white margin\n' "$label_fmt"

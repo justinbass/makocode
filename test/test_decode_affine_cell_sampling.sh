@@ -19,7 +19,7 @@ if [[ $# -ne 0 ]]; then
     exit 2
 fi
 
-work_dir="$repo_root/test_output/${label}_work"
+work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 ppm_transform_bin="$repo_root/test/ppm_transform"
 if [[ ! -x $makocode_bin ]]; then
@@ -31,14 +31,6 @@ if [[ ! -x $ppm_transform_bin ]]; then
     exit 1
 fi
 
-cleanup() {
-    local status=$?
-    if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-trap cleanup EXIT
-rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'makocode' > "$work_dir/makocode.bin"
 

@@ -28,9 +28,7 @@ if [[ ${#pages[@]} -ne 1 ]]; then
     exit 1
 fi
 
-decoded_metadata_dir="$repo_root/test_output/${label}_metadata"
-rm -rf "$decoded_metadata_dir"
-mkdir -p "$decoded_metadata_dir"
+decoded_metadata_dir=$(mktemp -d "$repo_root/test_output/${label}_metadata.XXXXXX")
 "$repo_root/makocode" decode --decoded-file --palette "$palette" \
     --output-dir="$decoded_metadata_dir" "${pages[0]}" >/dev/null
 python3 - "${pages[0]}" "$decoded_metadata_dir" <<'PY'

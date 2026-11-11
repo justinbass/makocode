@@ -9,10 +9,8 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 if [[ ${1:-} == --edge-bleed ]]; then edge_bleed=1; shift; fi
 if [[ ${1:-} == --optical-blur ]]; then optical_blur=1; shift; fi
 [[ $# == 0 ]]
-work_dir="$repo_root/test_output/${label}_work"
+work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
-rm -rf "$work_dir"
 mkdir -p "$work_dir/encoded" "$work_dir/control" "$work_dir/decoded"
 printf makocode > "$work_dir/payload.bin"
 (cd "$work_dir"; "$makocode_bin" encode --input=payload.bin --ecc=0 \

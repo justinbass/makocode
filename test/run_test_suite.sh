@@ -19,13 +19,12 @@ usage() {
     cat <<'USAGE'
 Usage: run_test_suite.sh --prepare
 
-  --prepare    Clear prior output and initialize the master seed.
+  --prepare    Prepare output and initialize the master seed.
 USAGE
 }
 
 prepare_suite() {
     unset MAKO_TEST_SEED_REPORTED
-    rm -rf "$repo_root/test_output"
     mkdir -p "$repo_root/test_output"
     mako_test_seed_init "$repo_root"
     mkdir -p "$repo_root/test_output/test_logs"

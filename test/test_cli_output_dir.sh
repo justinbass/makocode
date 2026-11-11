@@ -76,32 +76,15 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_cli_work"
-payload="$test_dir/${label}_cli_payload.bin"
+work_dir=$(mktemp -d "$test_dir/${label}_cli_work.XXXXXX")
+payload="$work_dir/${label}_cli_payload.bin"
 payload_source_name="cli_payload.bin"
 payload_work="$work_dir/$payload_source_name"
 encode_prefix="${label}_cli_payload"
-ppm_target="$test_dir/${label}_cli_payload_encoded.ppm"
-decoded_payload="$test_dir/${label}_cli_payload_decoded.bin"
+ppm_target="$work_dir/${label}_cli_payload_encoded.ppm"
+decoded_payload="$work_dir/${label}_cli_payload_decoded.bin"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -ne 0 ]]; then
-        return
-    fi
-    if [[ -d $work_dir ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap 'on_exit' EXIT
-
-rm -rf "$work_dir"
 mkdir -p "$test_dir" "$work_dir"
-rm -f "$payload" "$ppm_target" "$decoded_payload"
 
 printf '%s' "encode-decode-cli test payload" > "$payload"
 cp "$payload" "$payload_work"

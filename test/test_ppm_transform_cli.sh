@@ -36,7 +36,6 @@ fi
 
 mkdir -p "$test_output_dir"
 work_dir=$(mktemp -d "$test_output_dir/${label}_work.XXXXXX")
-trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
 
 if "$ppm_transform_bin" --help >"$work_dir/help.out" 2>"$work_dir/help.err"; then
     help_status=0

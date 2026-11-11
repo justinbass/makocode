@@ -64,14 +64,11 @@ if [[ ! -x $ppm_transform_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_work"
+work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 payload_final="$work_dir/random.bin"
-encoded_ppm="$test_dir/${label}_encoded.ppm"
+encoded_ppm="$work_dir/${label}_encoded.ppm"
 
-rm -rf "$work_dir"
 mkdir -p "$work_dir"
-trap 'status=$?; if [[ $status -eq 0 ]]; then rm -rf "$work_dir"; fi' EXIT
-rm -f "$encoded_ppm"
 
 "$ppm_transform_bin" bytes --output "$payload_final" --size 4096 --seed "$payload_seed"
 
@@ -103,12 +100,9 @@ run_decode_expect() {
     local expect_success=$2
     local corrupt_count=$3
     local output_dir="$work_dir/${scenario}_decoded"
-    local damaged_ppm="$test_dir/${label}_${scenario}_corrupted.ppm"
+    local damaged_ppm="$work_dir/${label}_${scenario}_corrupted.ppm"
     local decode_log="$work_dir/${scenario}_decode.log"
-    rm -rf "$output_dir"
     mkdir -p "$output_dir"
-    rm -f "$damaged_ppm"
-    rm -f "$decode_log"
 
     "$ppm_transform_bin" transform \
         --input "$encoded_ppm" \

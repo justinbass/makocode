@@ -30,8 +30,7 @@ if [[ -z $label || $label == *[!a-zA-Z0-9_.-]* ]]; then
     exit 1
 fi
 
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/makocode-rs-erasures.${label}.XXXXXX")
-trap 'status=$?; rm -rf "$work_dir"; exit "$status"' EXIT
+work_dir=$(mktemp -d "$script_dir/../test_output/${label}_work.XXXXXX")
 harness_bin="$work_dir/rs_erasures_harness"
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
     "$script_dir/test_rs_erasures_harness.cpp" -o "$harness_bin"

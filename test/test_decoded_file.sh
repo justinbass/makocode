@@ -3,8 +3,7 @@ set -euo pipefail
 root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$root/makocode"}
 label=${2:-decoded_file}
-work="$root/test_output/${label}_work"
-rm -rf "$work"
+work=$(mktemp -d "$root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work/input/empty" "$work/input/sub" "$work/pages" "$work/out"
 printf 'hello\nback\\slash\000\377' > "$work/input/sub/a b"
 : > "$work/input/blank"

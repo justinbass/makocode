@@ -40,23 +40,10 @@ if [[ ! -x $makocode_bin ]]; then
 fi
 
 test_dir="$repo_root/test_output"
-work_dir="$test_dir/${label}_work"
+work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 pages_dir="$work_dir/pages"
 payload="$work_dir/payload.bin"
 
-cleanup() {
-    local exit_code=${1:-0}
-    if [[ $exit_code -eq 0 ]]; then
-        rm -rf "$work_dir"
-    fi
-}
-on_exit() {
-    local exit_code=$?
-    cleanup "$exit_code"
-}
-trap on_exit EXIT
-
-rm -rf "$work_dir"
 mkdir -p "$pages_dir"
 printf '\000default timestamp naming payload\377\n' > "$payload"
 

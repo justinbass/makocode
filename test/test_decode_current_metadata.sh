@@ -7,9 +7,7 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 label=decode_current_metadata
 if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 [[ $# == 0 ]]
-work_dir="$repo_root/test_output/${label}_work"
-trap 'status=$?; if [[ $status -eq 0 && ${COVERAGE:-0} != 1 ]]; then rm -rf "$work_dir"; fi' EXIT
-rm -rf "$work_dir"
+work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'x' > "$work_dir/payload.bin"
 (cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0.25 \

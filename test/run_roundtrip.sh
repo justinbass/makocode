@@ -288,12 +288,9 @@ payload_seed=$(mako_test_case_seed "payload/$label")
 MAKOCODE_TEST_SEED=$(mako_test_case_seed "crypto/$label")
 export MAKOCODE_TEST_SEED
 mkdir -p "$test_dir"
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/makocode-${label}.XXXXXX")
-trap 'rm -rf "$work_dir"' EXIT
+work_dir=$(mktemp -d "$test_dir/${label}_work.XXXXXX")
 encode_prefix="${label}_random_payload_encoded"
 encoded_prefix="$test_dir/$encode_prefix"
-
-rm -f "${encoded_prefix}.ppm" "${encoded_prefix}"_*.ppm
 
 if [[ -n $payload_literal ]]; then
     payload_len=$("$repo_root/test/ppm_transform" bytes-len "$payload_literal")

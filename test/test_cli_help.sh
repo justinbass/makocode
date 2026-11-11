@@ -53,8 +53,7 @@ if [[ ! -x $makocode_bin ]]; then
     exit 1
 fi
 
-tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/${label}_help.XXXXXX")
-trap 'rm -rf "$tmp_dir"' EXIT
+tmp_dir=$(mktemp -d "$repo_root/test_output/${label}_help.XXXXXX")
 
 run_expect_help() {
     local phase=$1

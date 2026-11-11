@@ -48,14 +48,8 @@ if ! command -v "$compiler" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [[ ${COVERAGE:-0} == 1 ]]; then
-    mkdir -p "$repo_root/test_output"
-    work_dir=$(mktemp -d "$repo_root/test_output/${label}_minify.XXXXXX")
-    trap 'status=$?; if [[ $status -ne 0 ]]; then rm -rf "$work_dir"; fi' EXIT
-else
-    work_dir=$(mktemp -d "/tmp/$label.XXXXXX")
-    trap 'rm -rf "$work_dir"' EXIT
-fi
+mkdir -p "$repo_root/test_output"
+work_dir=$(mktemp -d "$repo_root/test_output/${label}_minify.XXXXXX")
 cat > "$work_dir/makocode.cpp" <<'CPP'
   #define MINIFY_DIRECTIVE_SWITCH 1
 #if MINIFY_DIRECTIVE_SWITCH
