@@ -59,7 +59,7 @@ printf '\000prefix-encoded roundtrip payload\377\n' > "$payload"
 encode_cmd=(
     "$makocode_bin" encode
     --input=payload.bin
-    --ecc=0.72
+
     --page-width=80
     --page-height=80
     --palette='Cyan Black'

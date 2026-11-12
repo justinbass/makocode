@@ -11,106 +11,106 @@
 # namespace the artifacts written under test_output/.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' encoded from stdin" \
-    --size 1 --ecc 2.47 \
+    --size 1  \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \
-    --size 8 --ecc 1.92 \
+    --size 8  \
     --payload-literal "makocode"
 
-test_case 0002_baseline_8k_ecc_050 roundtrip "8 KiB payload, ECC 0.5 baseline" \
-    --size 8192 --ecc 0.5
+test_case 0002_baseline_8k_auto roundtrip "8 KiB payload with automatically selected ECC" \
+    --size 8192
 
-test_case 0003_baseline_8k_ecc_002 roundtrip "8 KiB payload at minimum metadata ECC" \
-    --size 8192 --ecc 0.02
+test_case 0003_baseline_8k_auto_seeded roundtrip "8 KiB payload with automatic ECC and an independent seed" \
+    --size 8192
 
-test_case 0004_baseline_multi_page_ecc_100 roundtrip "128 KiB payload, ECC 1.0 multi-page" \
-    --size 131072 --ecc 1.0 --width 700 --height 700 --multi-page
+test_case 0004_baseline_multi_page_auto roundtrip "128 KiB payload with automatic ECC across multiple pages" \
+    --size 131072  --width 700 --height 700 --multi-page
 
 test_case 0005_ecc_fill_moderate roundtrip "ECC fill saturates moderate payload" \
-    --size 12000 --ecc 0.01 --encode-opt "--ecc-fill"
+    --size 12000  --ecc fill
 
 test_case 0006_ecc_fill_sparse_large_page roundtrip "ECC fill small payload on large page" \
-    --size 1024 --ecc 0.01 --width 1400 --height 1800 --encode-opt "--ecc-fill"
+    --size 1024  --width 1400 --height 1800 --ecc fill
 
 test_case 0007_palette_white_black roundtrip "Two-color palette stress" \
-    --size 8192 --ecc 0.02 --palette "White Black"
+    --size 8192  --palette "White Black"
 
 test_case 0008_palette_cmy roundtrip "Three-color palette stress" \
-    --size 8192 --ecc 0.02 --palette "White Cyan Magenta"
+    --size 8192  --palette "White Cyan Magenta"
 
 test_case 0009_palette_cmyk roundtrip "Four-color palette stress" \
-    --size 8192 --ecc 0.02 --palette "White Cyan Magenta Yellow"
+    --size 8192  --palette "White Cyan Magenta Yellow"
 
 test_case 0010_palette_cmykw roundtrip "Five-color palette stress" \
-    --size 8192 --ecc 0.02 --palette "White Cyan Magenta Yellow Black"
+    --size 8192  --palette "White Cyan Magenta Yellow Black"
 
 test_case 0011_palette_hex_octet roundtrip "Expanded hex palette stress" \
-    --size 8192 --ecc 0.03 --width 240 --height 240 \
+    --size 8192  --width 240 --height 240 \
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"
 
 test_case 0012_large_canvas_cmykw roundtrip "Large canvas CMYKW palette" \
-    --size 8192 --ecc 0.02 \
+    --size 8192  \
     --palette "White Cyan Magenta Yellow Black"
 
 test_case 0013_fiducial_minimum_ecc roundtrip "Minimum ECC with fiducial reservation" \
-    --size 256 --ecc 0.10 --width 200 --height 64
+    --size 256  --width 200 --height 64
 
 test_case 0014_footer_metadata roundtrip "Footer metadata rendering stress" \
-    --size 65536 --ecc 0.01 \
+    --size 65536  \
     --footer "$footer_charset_template" \
     --font-size "$footer_charset_font_size"
 
 test_case 0015_gray_100k_single roundtrip "100 KiB grayscale single page baseline" \
-    --size 102400 --ecc 0.01
+    --size 102400
 
 test_case 0016_gray_100k_scaled roundtrip "100 KiB grayscale scaled 2.5x" \
-    --size 102400 --ecc 0.01 --width 1100 --height 1100 --scale 2.5
+    --size 102400  --width 1100 --height 1100 --scale 2.5
 
 test_case 0017_gray_100k_stretch_h26_v24 roundtrip "Grayscale stretch horizontal 2.6 / vertical 2.4" \
-    --size 102400 --ecc 0.01 --width 1100 --height 1100 \
+    --size 102400  --width 1100 --height 1100 \
     --scale-x 2.6 --scale-y 2.4
 
 test_case 0018_gray_100k_stretch_h24_v26 roundtrip "Grayscale stretch horizontal 2.4 / vertical 2.6" \
-    --size 102400 --ecc 0.01 --width 1100 --height 1100 \
+    --size 102400  --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
 test_case 0019_gray_scale_303_blur roundtrip "Grayscale upsample 3.03x (blur/no-rotation stress)" \
-    --size 65536 --ecc 0.01 --width 900 --height 900 \
+    --size 65536  --width 900 --height 900 \
     --scale 3.03
 
 test_case 0020_gray_rotate_seeded roundtrip "Grayscale rotation with deterministic seed" \
-    --size 65536 --ecc 0.01 --width 900 --height 900 \
+    --size 65536  --width 900 --height 900 \
     --scale 3.0 --rotate 1 --transform-seed 1337
 
 test_case 0021_gray_skew_xy_seeded roundtrip "Grayscale horizontal and vertical skew with deterministic seed" \
-    --size 65536 --ecc 0.01 --width 900 --height 900 \
+    --size 65536  --width 900 --height 900 \
     --scale 3.0 --skew-x 5 --skew-y -5 --transform-seed 1337
 
 test_case 0022_gray_skew_xy_reverse_seeded roundtrip "Grayscale horizontal and vertical skew in reverse directions" \
-    --size 65536 --ecc 0.01 --width 900 --height 900 \
+    --size 65536  --width 900 --height 900 \
     --scale 3.0 --skew-x -5 --skew-y 5 --transform-seed 7331
 
 test_case 0023_gray_rotate_skew_seeded roundtrip "Grayscale rotation combined with horizontal and vertical skew" \
-    --size 65536 --ecc 0.12 --width 900 --height 900 \
+    --size 65536 --width 900 --height 900 --ecc fill \
     --scale 3.0 --rotate 1 --skew-x 5 --skew-y -5 --transform-seed 1337
 
 test_case 0024_password_ecc roundtrip "Password-protected payload with ECC" \
-    --size 32768 --ecc 0.01 --password suite-password
+    --size 32768  --password suite-password
 
 test_case 0025_ecc_multi_page_massive roundtrip "262 KiB ECC multi-page stress" \
-    --size 262144 --ecc 0.02 --width 520 --height 520 --multi-page
+    --size 262144  --width 520 --height 520 --multi-page
 
 test_case 0026_multi_page_distorted roundtrip "Multi-page payload with scale and rotation distortions" \
-    --size 32768 --ecc 0.41 --width 620 --height 620 --multi-page \
+    --size 32768 --width 620 --height 620 --multi-page --ecc 0.41 \
     --scale 2.10 --rotate 1 --transform-seed 7331
 
 test_case 0027_palette_base5_custom roundtrip "Custom palette/base-5 mode" \
-    --size 16384 --ecc 0.01 \
+    --size 16384  \
     --palette "White Cyan Magenta Yellow Black"
 
 test_case 0028_border_dirt_dense roundtrip "Dense border-noise stress with deterministic seed" \
-    --size 32768 --ecc 0.01 --width 640 --height 640 \
+    --size 32768  --width 640 --height 640 \
     --border-thickness 12 --border-density 0.15 --transform-seed 8675309
 
 test_case 0029_cli_output_dir cli "CLI respects explicit output directory"
@@ -149,28 +149,28 @@ test_case 0040_header_copy_corruption script "Payload ECC repairs damage at form
     test_header_copy_corruption.sh
 
 test_case 0041_palette_white_black_blot_black roundtrip "High-ECC black blot recovery on White/Black page" \
-    --size 4096 --ecc 0.01 --width 600 --height 600 --palette "White Black" \
-    --encode-opt "--ecc-fill" \
+    --size 4096  --width 600 --height 600 --palette "White Black" \
+    --ecc fill \
     --ink-blot-radius 180 --ink-blot-color black
 
 test_case 0042_palette_white_black_blot_white roundtrip "High-ECC white blot recovery on White/Black page" \
-    --size 4096 --ecc 0.01 --width 600 --height 600 --palette "White Black" \
-    --encode-opt "--ecc-fill" \
+    --size 4096  --width 600 --height 600 --palette "White Black" \
+    --ecc fill \
     --ink-blot-radius 180 --ink-blot-color white
 
 test_case 0043_overlay_e2e overlay "Overlay CLI merges masks and decodes" \
-    MAKO_OVERLAY_FRACTION=0.35 MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill
+    MAKO_OVERLAY_FRACTION=0.35 MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill
 
 test_case 0044_overlay_palette_cmyy overlay "Overlay CLI respects CMY+Yellow palette with yellow mask" \
     MAKO_OVERLAY_FRACTION=0.10 \
-    MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill \
+    MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill \
     "MAKO_OVERLAY_PALETTE=White Cyan Magenta Yellow" \
     "MAKO_OVERLAY_CIRCLE_COLOR=255 255 0" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
 test_case 0045_overlay_bw_base_color_cmwy overlay "Black/white base with CMYW circle overlay" \
     MAKO_OVERLAY_FRACTION=0.05 \
-    MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill \
+    MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_MASK_PALETTE_BASE=4 \
     "MAKO_OVERLAY_MASK_PALETTE_TEXT=White Cyan Magenta Yellow" \
@@ -181,14 +181,14 @@ test_case 0045_overlay_bw_base_color_cmwy overlay "Black/white base with CMYW ci
 
 test_case 0046_overlay_cmy_base_bw overlay "CMYW base with black/white circle overlay" \
     MAKO_OVERLAY_FRACTION=0.1 \
-    MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill \
+    MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill \
     "MAKO_OVERLAY_PALETTE=White Cyan Magenta Yellow" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1 \
     "MAKO_OVERLAY_ALLOWED_COLORS=0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
 test_case 0047_overlay_e2e_ignore_colors overlay "Overlay CLI skips white background when merging" \
     MAKO_OVERLAY_FRACTION=0.35 \
-    MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill \
+    MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill \
     MAKO_OVERLAY_IGNORE_COLORS=White
 
 test_case 0048_overlay_bw_ecc_target_025 overlay "Black/white circle overlay obeys ECC target 0.25" \
@@ -197,7 +197,7 @@ test_case 0048_overlay_bw_ecc_target_025 overlay "Black/white circle overlay obe
     MAKO_OVERLAY_PAGE_HEIGHT=1840 \
     MAKO_OVERLAY_EXPECT_PAGES=1 \
     MAKO_OVERLAY_ECC_TARGET=0.25 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill --fiducials=4,60,12" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducials=4,60,12" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
@@ -210,7 +210,7 @@ test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obe
     MAKO_OVERLAY_PAGE_HEIGHT=1840 \
     MAKO_OVERLAY_EXPECT_PAGES=1 \
     MAKO_OVERLAY_ECC_TARGET=0.5 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill --fiducials=4,60,12" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducials=4,60,12" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
@@ -220,25 +220,25 @@ test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obe
 test_case 0050_overlay_ecc_target_gray_base_color overlay "Grayscale base with color overlay exercises pixel candidate counting" \
     MAKO_OVERLAY_ECC_TARGET=0.25 \
     MAKO_OVERLAY_FRACTION=0.1 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc-fill" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill" \
     "MAKO_OVERLAY_CIRCLE_COLOR=255 0 0" \
     "MAKO_OVERLAY_BACKGROUND_COLOR=0 255 0" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
 test_case 0051_paper_offwhite_bw roundtrip "Slightly off-white, splotchy paper tint (BW)" \
-    --size 8192 --ecc 0.02 --width 300 --height 300 --palette "White Black" \
+    --size 8192  --width 300 --height 300 --palette "White Black" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
 test_case 0052_paper_offwhite_cmyk roundtrip "Slightly off-white, splotchy paper tint (CMYK)" \
-    --size 8192 --ecc 0.02 --width 320 --height 320 --palette "White Cyan Magenta Yellow" \
+    --size 8192  --width 320 --height 320 --palette "White Cyan Magenta Yellow" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
     --paper-splotch-alpha 0.15 --paper-splotch-shade 0.06 --paper-splotch-px 96
 
 test_case 0053_paper_offwhite_cmykwrbg roundtrip "Slightly off-white, splotchy paper tint (CMYKWRBG)" \
-    --size 8192 --ecc 0.02 --width 360 --height 360 \
+    --size 8192  --width 360 --height 360 \
     --palette "FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00" \
     --transform-seed 424242 \
     --paper-color "FFF3D6" --paper-alpha 0.105 \
@@ -293,31 +293,31 @@ test_case 0069_decode_scale_318 script "Decode a 160x160 page rendered at 3.18 p
     test_decode_scale_318.sh
 
 test_case 0070_decode_scale_2071 roundtrip "Fractional affine scan scale 2.071x" \
-    --size 4096 --ecc 0.02 --width 620 --height 620 \
+    --size 4096  --width 620 --height 620 \
     --scale 2.071 --transform-seed 2071
 
 test_case 0071_decode_scale_2701 roundtrip "Fractional affine scan scale 2.701x" \
-    --size 4096 --ecc 0.02 --width 620 --height 620 \
+    --size 4096  --width 620 --height 620 \
     --scale 2.701 --transform-seed 2701
 
 test_case 0072_decode_scale_4701 roundtrip "Fractional affine scan scale 4.701x" \
-    --size 4096 --ecc 0.02 --width 620 --height 620 \
+    --size 4096  --width 620 --height 620 \
     --scale 4.701 --transform-seed 4701
 
 test_case 0073_tiny_palette_2_white_checker roundtrip "Two-color tiny page with white checker overwrite at 2.701x" \
-    --size 8 --ecc 1.71 --width 160 --height 160 \
+    --size 8  --width 160 --height 160 \
     --palette "White Black" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
 test_case 0074_tiny_palette_4_white_checker roundtrip "Four-color tiny page with white checker overwrite at 2.701x" \
-    --size 8 --ecc 2.09 --width 160 --height 160 \
+    --size 8 --width 160 --height 160 --ecc fill \
     --palette "White Cyan Magenta Yellow" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
 test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payload with diagonal white damage at 2.701x" \
-    --size 8 --ecc 2.51 --width 480 --height 480 \
+    --size 8 --width 480 --height 480 --ecc fill \
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
@@ -392,10 +392,9 @@ test_case 0104_metadata_tile_format script "Variable metadata fields and multi-b
     test_metadata_tile_format.sh
 
 test_case 0105_footer_geometry roundtrip "Page with a footer taller than 32 rows round-trips without footer OCR" \
-    --size 4096 --ecc 0.03 --width 640 --height 400 \
+    --size 4096  --width 640 --height 400 \
     --footer "Archive title" --font-size 5
 
 test_case 0106_overlay_footer_geometry overlay "Overlay preserves a page with a 40-row human footer" \
     MAKO_OVERLAY_PAGE_WIDTH=640 MAKO_OVERLAY_PAGE_HEIGHT=400 \
-    MAKO_OVERLAY_SIZE=4096 MAKO_OVERLAY_ECC=0.15 \
-    "MAKO_OVERLAY_FOOTER=Archive title" MAKO_OVERLAY_FONT_SIZE=5
+    MAKO_OVERLAY_SIZE=4096     "MAKO_OVERLAY_FOOTER=Archive title" MAKO_OVERLAY_FONT_SIZE=5

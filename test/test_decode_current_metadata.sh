@@ -10,7 +10,7 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'x' > "$work_dir/payload.bin"
-(cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=1.38 \
+(cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin  \
     --page-width=64 --page-height=64 \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
 layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \

@@ -7,7 +7,7 @@ work=$(mktemp -d "$root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work/input/empty" "$work/input/sub" "$work/pages" "$work/out"
 printf 'hello\nback\\slash\000\377' > "$work/input/sub/a b"
 : > "$work/input/blank"
-(cd "$work" && "$bin" encode --input=input --ecc=0.29 --password=secret --prefix=page --output-dir=pages >/dev/null)
+(cd "$work" && "$bin" encode --input=input  --password=secret --prefix=page --output-dir=pages >/dev/null)
 "$bin" decode --decoded-file --password=secret --output-dir="$work/out" "$work"/pages/*.ppm >/dev/null
 python3 - "$work" <<'PY'
 import pathlib, re, sys
@@ -17,7 +17,7 @@ assert len(files) == 1 and re.fullmatch(r'makocode_decoded_\d{14}\.txt', files[0
 lines = files[0].read_text('ascii').splitlines()
 assert lines[0] == 'MAKOCODE-DECODED' and lines[-2:] == ['end-archive', 'end']
 assert 'metadata encryption_version 1' in lines and 'metadata ecc_enabled 1' in lines
-assert 'metadata tile_schema 9' in lines and 'metadata lzma_uncompressed_bytes ' in '\n'.join(lines)
+assert 'metadata tile_schema 0' in lines and 'metadata lzma_uncompressed_bytes ' in '\n'.join(lines)
 for field in ['tile_magic', 'metadata_magic', 'metadata_bytes', 'metadata_crc8', 'tile_header', 'tile_data', 'compression', 'lzma_properties']:
     assert not any(line.startswith('metadata ' + field + ' ') for line in lines), field
 for field, size in [('encryption_salt', 32), ('encryption_nonce', 24), ('encryption_tag', 32)]:
@@ -55,7 +55,7 @@ random.seed(42)
 open(sys.argv[1], 'wb').write(bytes(random.randrange(256) for _ in range(3000)))
 PY
 # A fixed small page is required here to exercise multi-page decoded-file output.
-(cd "$work" && "$bin" encode --input=plain.bin --page-width=160 --page-height=160 --ecc=0.03 --prefix=page --output-dir=plain_pages >/dev/null)
+(cd "$work" && "$bin" encode --input=plain.bin --page-width=160 --page-height=160  --prefix=page --output-dir=plain_pages >/dev/null)
 "$bin" decode --decoded-file --output-dir="$work/plain_out" "$work"/plain_pages/*.ppm >/dev/null
 python3 - "$work" <<'PY'
 import pathlib, re, sys

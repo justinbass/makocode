@@ -110,7 +110,7 @@ palette="White Cyan Magenta Yellow"
 encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
-    --ecc=0.01
+
     --palette "$palette"
     "--output-dir=$work_dir"
     "--prefix=${label}_page"

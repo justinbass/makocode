@@ -1,7 +1,7 @@
 TODO
 
 Features:
-- If --ecc is not supplied, it should just select the minimum amount to cover metadata/fiducials/others. If it's specified, it fails unless there's enough for it to be readable.
+- Fiducials should always be 2px.
 - Investigate large white space in metadata section
 - Ecc/overlay compact_u16, make sure fill cases zero pad. Or increase to u64, but at high data (2^64) there might be zero padding anyways.
   - Algorithm might be improved to optimize for "most settings won't be used" - e.g. 1 bit to start, 0 for not enabled, 1 for enabled -> 2 bits, ...

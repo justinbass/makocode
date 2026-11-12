@@ -45,7 +45,7 @@ overlay_path="$work_dir/${label}_overlay_mask.ppm"
 encoded_dir="$work_dir/encoded_pages"
 merged_dir="$work_dir/merged_pages"
 
-ecc="${MAKO_OVERLAY_ECC:-0.10}"
+ecc="${MAKO_OVERLAY_ECC:-}"
 fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 ignore_colors="${MAKO_OVERLAY_IGNORE_COLORS:-}"
 ecc_target="${MAKO_OVERLAY_ECC_TARGET:-}"
@@ -67,7 +67,6 @@ fi
 encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
-    "--ecc=$ecc"
     "--overlay-fraction=$fraction"
     "--page-width=$page_width"
     "--page-height=$page_height"
@@ -75,6 +74,9 @@ encode_cmd=(
     "--prefix=${label}_overlay"
     --debug
 )
+if [[ -n "$ecc" ]]; then
+    encode_cmd+=("--ecc=$ecc")
+fi
 if [[ -n "$footer" ]]; then
     encode_cmd+=(--footer "$footer")
 fi

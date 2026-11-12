@@ -15,7 +15,7 @@ palette="White Cyan Magenta Yellow Black"
 bash "$script_dir/run_roundtrip.sh" \
     --label "$label" \
     --size 34000 \
-    --ecc 0.01 \
+     \
     --width 360 \
     --height 360 \
     --palette "$palette" \

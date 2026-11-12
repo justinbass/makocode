@@ -111,7 +111,7 @@ password="suite-password"
 encode_cmd=(
     "$makocode_bin" encode
     "--input=$payload"
-    --ecc=0.01
+
     --page-width=1000
     --page-height=1000
     "--password=$password"

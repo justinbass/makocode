@@ -23,11 +23,11 @@ int main(int argc, char** argv) {
         const u64 expected[] = {0u, 1u, 65535u, 65536u, 0x123456789ABull, U64_MAX_VALUE};
         for (usize i = 0u; i < sizeof(expected) / sizeof(expected[0]); ++i) {
             MetadataTile::BitWriter writer;
-            if (!MetadataTile::write_length_count(writer, expected[i])) return 1;
+            if (!MetadataTile::write_compact_u64(writer, expected[i])) return 1;
             MetadataTile::BitReader reader;
             reader.reset(writer.data(), writer.bit_size());
             u64 actual = 0u;
-            if (!MetadataTile::read_length_count(reader, actual) || actual != expected[i] ||
+            if (!MetadataTile::read_compact_u64(reader, actual) || actual != expected[i] ||
                 reader.failed || reader.cursor != writer.bit_size()) return 1;
         }
         const u32 ecc_targets[] = {0u, 1u, 65535u};
@@ -49,16 +49,8 @@ int main(int argc, char** argv) {
                     reader.failed || reader.cursor != writer.bit_size()) return 1;
             }
         }
-        MetadataTile::Values legacy_values;
-        legacy_values.schema_version = 7u;
-        legacy_values.payload_bytes = 1000u;
-        legacy_values.ecc_target_hundredths = 50u;
-        legacy_values.overlay_fraction_value = 50u;
-        if (!MetadataTile::derive_schema_payload_layout(legacy_values) ||
-            legacy_values.overlay_erasure_budget !=
-                (u16)(((u32)legacy_values.ecc_parity * 50u + 99u) / 100u)) return 1;
         MetadataTile::Values current_values;
-        current_values.schema_version = 9u;
+        current_values.schema_version = CURRENT_TILE_SCHEMA_VERSION;
         current_values.payload_bytes = 1000u;
         current_values.ecc_target_hundredths = 50u;
         current_values.overlay_fraction_value = 13107u;
@@ -270,8 +262,8 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
-    bool check_ecc_budget = argc == 7 &&
-                            ascii_equals_token(argv[5], ascii_length(argv[5]), "--check-ecc-budget");
+    bool check_overlay_budget = argc == 6 &&
+                            ascii_equals_token(argv[5], ascii_length(argv[5]), "--check-overlay-budget");
     bool check_reserve_reject = argc == 6 &&
                                 ascii_equals_token(argv[5], ascii_length(argv[5]), "--check-reserve-reject");
     bool check_structural = argc == 6 &&
@@ -285,9 +277,9 @@ int main(int argc, char** argv) {
                               ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page-direct");
     bool report_metadata_layout = argc == 6 &&
                                   ascii_equals_token(argv[5], ascii_length(argv[5]), "--metadata-layout");
-    if (argc != 5 && !check_ecc_budget && !check_reserve_reject && !check_structural &&
+    if (argc != 5 && !check_overlay_budget && !check_reserve_reject && !check_structural &&
         !report_page && !report_ecc_settings && !report_page_direct && !report_metadata_layout) {
-        fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-ecc-budget PERCENT | --check-reserve-reject | --check-structural | --report-page | --report-ecc-settings | --report-page-direct] | --capacity WIDTH HEIGHT\n");
+        fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-overlay-budget | --check-reserve-reject | --check-structural | --report-page | --report-ecc-settings | --report-page-direct] | --capacity WIDTH HEIGHT\n");
         return 2;
     }
     u32 expected_width = 0u;
@@ -489,43 +481,23 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    if (check_ecc_budget || check_reserve_reject || check_structural || report_page ||
+    if (check_overlay_budget || check_reserve_reject || check_structural || report_page ||
         report_ecc_settings) {
-        u64 requested_percent = 0u;
-        if ((check_ecc_budget &&
-             (!ascii_to_u64(argv[6], ascii_length(argv[6]), &requested_percent) ||
-              requested_percent == 0u || requested_percent > 10000u)) ||
-            !values.ecc_enabled ||
-            ((check_ecc_budget || check_reserve_reject || check_structural) && values.page_count != 1u)) {
+        if (!values.ecc_enabled ||
+            ((check_overlay_budget || check_reserve_reject || check_structural) && values.page_count != 1u)) {
             fprintf(stderr, "canonical tile: invalid ECC budget check arguments or tile metadata\n");
             return 2;
         }
-        u16 baseline_data = 0u;
-        u16 baseline_parity = 0u;
-        u64 baseline_blocks = 0u;
-        if (check_ecc_budget &&
-            !makocode::compute_ecc_layout((usize)values.ecc_original_bytes,
-                                          (double)requested_percent / 100.0,
-                                          baseline_data,
-                                          baseline_parity,
-                                          baseline_blocks)) {
-            fprintf(stderr, "canonical tile: failed to derive requested ECC baseline\n");
-            return 1;
-        }
-        (void)baseline_data;
-        (void)baseline_blocks;
         u16 expected_unknown_budget = 0u;
-        u32 overlay_basis = values.schema_version >= 8u
-                                ? (u32)values.ecc_block_data + (u32)values.ecc_parity
-                                : (u32)baseline_parity;
-        u32 overlay_denominator = values.schema_version >= 8u ? 65536u : 100u;
-        u16 expected_overlay_budget = check_ecc_budget
+        u32 overlay_basis = (u32)values.ecc_block_data + (u32)values.ecc_parity;
+        u32 overlay_denominator = 65536u;
+        u16 expected_overlay_budget = check_overlay_budget
                                           ? (u16)((overlay_basis *
                                                    values.overlay_fraction_value +
                                                    overlay_denominator - 1u) /
                                                   overlay_denominator)
                                           : 0u;
-        if ((check_ecc_budget && (unknown_budget != expected_unknown_budget ||
+        if ((check_overlay_budget && (unknown_budget != expected_unknown_budget ||
                                   overlay_budget != expected_overlay_budget)) ||
             (values.overlay_selector_present
                  ? selector_counts.size != values.ecc_block_count
@@ -661,8 +633,7 @@ int main(int argc, char** argv) {
                                          true,
                                          true,
                                          MetadataTile::LZMA_SIZE_FROM_HEADER,
-                                         values.schema_version != 0u &&
-                                             values.schema_version < 4u)) {
+                                         false)) {
                     fprintf(stderr, "canonical tile: valid selector reserve did not decode before reserve mutation\n");
                     return 1;
                 }

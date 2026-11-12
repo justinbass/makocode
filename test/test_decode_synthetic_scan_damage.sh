@@ -35,23 +35,18 @@ mkdir -p "$work_dir/encoded" "$work_dir/decoded_control" \
     "$work_dir/decoded_soft" "$work_dir/decoded_damage" \
     "$work_dir/tmp/makocode_probe_enc"
 payload_path=tmp/makocode_probe_enc/makocode.bin
-ecc_target=0.84
 if [[ $margin_noise == 1 ]]; then
     payload_path=payload.bin
     printf 'scan-test' > "$work_dir/$payload_path"
-    ecc_target=1.16
 else
     printf makocode > "$work_dir/$payload_path"
-fi
-if [[ $off_center_noise == 1 ]]; then
-    ecc_target=0.84
 fi
 
 (
     cd "$work_dir"
     "$makocode_bin" encode \
         "--input=$payload_path" \
-        "--ecc=$ecc_target" --page-width=80 --page-height=80 \
+        --page-width=80 --page-height=80 \
         "--output-dir=$work_dir/encoded" --prefix=synthetic > /dev/null
 )
 

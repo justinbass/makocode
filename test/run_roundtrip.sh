@@ -38,12 +38,13 @@ print_makocode_cmd() {
 
 usage() {
     cat <<'USAGE'
-Usage: run_roundtrip.sh --label NAME --size BYTES --ecc VALUE [--width PX] [--height PX] [options]
+Usage: run_roundtrip.sh --label NAME --size BYTES [--ecc VALUE|fill] [--width PX] [--height PX] [options]
 
 Required:
   --label NAME          Artifact prefix under test_output/ (e.g., 3001_demo).
   --size BYTES          Payload size fed to the encoder.
-  --ecc VALUE           Payload ECC parity/data target (0.00-655.35; 2 decimals; 0 disables payload ECC).
+  --ecc VALUE|fill      Optional payload ECC target (0.00-655.35; 2 decimals); fill maximizes page use.
+                        Omit to select the minimum ECC for metadata, fiducials, and configured overlay erasures.
   --width PX            Optional fixed page width; omitted dimensions fit the payload.
   --height PX           Optional fixed page height; omitted dimensions fit the payload.
 
@@ -264,8 +265,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z $label || -z $size || -z $ecc ]]; then
-    echo "run_roundtrip: --label, --size, and --ecc are required" >&2
+if [[ -z $label || -z $size ]]; then
+    echo "run_roundtrip: --label and --size are required" >&2
     usage >&2
     exit 1
 fi
@@ -303,7 +304,10 @@ else
     expected_args=(--size "$size" --seed "$payload_seed")
 fi
 
-encode_cmd=("$makocode_bin" encode "--ecc=$ecc" "--output-dir=$work_dir" "--prefix=$encode_prefix")
+encode_cmd=("$makocode_bin" encode "--output-dir=$work_dir" "--prefix=$encode_prefix")
+if [[ -n $ecc ]]; then
+    encode_cmd+=("--ecc=$ecc")
+fi
 if [[ -n $width ]]; then
     encode_cmd+=("--page-width=$width")
 fi

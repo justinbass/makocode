@@ -68,7 +68,7 @@ printf '\000fiducials custom grid payload\377\n' > "$payload"
 encode_cmd=(
     "$makocode_bin" encode
     --input=payload.bin
-    --ecc=0.78
+
     --page-width=240
     --page-height=240
     --fiducials=6,30,15
