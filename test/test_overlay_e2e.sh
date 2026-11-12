@@ -45,7 +45,8 @@ overlay_path="$work_dir/${label}_overlay_mask.ppm"
 encoded_dir="$work_dir/encoded_pages"
 merged_dir="$work_dir/merged_pages"
 
-ecc="${MAKO_OVERLAY_ECC:-1.0}"
+ecc="${MAKO_OVERLAY_ECC:-0.10}"
+fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 ignore_colors="${MAKO_OVERLAY_IGNORE_COLORS:-}"
 ecc_target="${MAKO_OVERLAY_ECC_TARGET:-}"
 payload_size="${MAKO_OVERLAY_SIZE:-32768}"
@@ -67,6 +68,7 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
     "--ecc=$ecc"
+    "--overlay-fraction=$fraction"
     "--page-width=$page_width"
     "--page-height=$page_height"
     "--output-dir=$encoded_dir"
@@ -162,7 +164,6 @@ background_color="${MAKO_OVERLAY_BACKGROUND_COLOR:-255 255 255}"
     --width "$page_width" \
     --height "$page_height"
 
-fraction="${MAKO_OVERLAY_FRACTION:-0.1}"
 overlay_cmd=("$makocode_bin" overlay)
 overlay_cmd+=(--debug)
 if [[ -n "$ignore_colors" ]]; then

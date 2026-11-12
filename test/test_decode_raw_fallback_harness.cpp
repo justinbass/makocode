@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     // Centered payload placement concentrates the fixture's fiducial erasures.
     encoder.config.ecc_redundancy = 0.5;
     encoder.config.ecc_target_hundredths = 50u;
-    encoder.config.overlay_fraction_hundredths = 0u;
+    encoder.config.overlay_fraction_q16 = 0u;
     if (!encoder.set_payload(payload.data, payload.size) || !encoder.build()) {
         fprintf(stderr, "raw fallback harness: failed to encode payload\n");
         return 1;

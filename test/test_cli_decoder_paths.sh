@@ -79,7 +79,7 @@ fi
 printf '%s compile test-only decoder paths harness\n' "$(mako_format_label "$label")"
 "${CXX:-g++}" "${cxx_flags[@]}" "$harness_src" -o "$harness_bin"
 "$harness_bin" "$p5_fixture" "$p6_fixture" "$bad_format_fixture" "$harness_output"
-for ecc in 1.0 1.5; do
+for ecc in 0.00 0.11; do
     mode_dir="$work_dir/ecc_$ecc"
     input_dir="$mode_dir/input"
     ppm_dir="$mode_dir/ppm"
@@ -93,7 +93,7 @@ for ecc in 1.0 1.5; do
 
     encode_prefix="${label}_ecc_${ecc}"
     # Keep room around this diagnostic page so fiducial offsets stay measurable.
-    encode_cmd=("$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --overlay-fraction=0.00 --page-width=500 --page-height=500 "--output-dir=$ppm_dir" "--prefix=$encode_prefix" --debug)
+    encode_cmd=("$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --page-width=500 --page-height=500 "--output-dir=$ppm_dir" "--prefix=$encode_prefix" --debug)
     printf '%s encode (ECC %s):' "$(mako_format_label "$label")" "$ecc"
     printf ' %q' "${encode_cmd[@]}"
     printf '\n'
@@ -116,7 +116,7 @@ for ecc in 1.0 1.5; do
     printf ' %q' "${decode_cmd[@]}"
     printf '\n'
     "${decode_cmd[@]}" >/dev/null
-    if [[ $ecc == 1.0 ]]; then
+    if [[ $ecc == 0.00 ]]; then
         password_decode_dir="$mode_dir/decoded_with_ignored_password"
         mkdir -p "$password_decode_dir"
         password_decode_output="$mode_dir/decode_with_ignored_password_output.txt"

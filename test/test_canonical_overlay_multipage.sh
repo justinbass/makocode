@@ -26,7 +26,7 @@ with open(sys.argv[1], 'wb') as stream:
 PY
 
 mkdir -p "$work/pages"
-(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.40 \
+(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.05 --overlay-fraction=0.01 \
     --page-width=1000 --page-height=1000 \
     --prefix=page --output-dir="$work/pages" >/dev/null)
 shopt -s nullglob
@@ -46,10 +46,10 @@ with open(sys.argv[1], 'wb') as stream:
     stream.write(bytes(rng.randrange(256) for _ in range(4096)))
 PY
 mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
-(cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.25 \
+(cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.03 --overlay-fraction=0.01 \
     --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
-(cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.25 --no-overlay-reserve \
+(cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.00 \
     --page-width=1000 --page-height=1000 \
     --prefix=plain --output-dir="$work/mixed_plain" >/dev/null)
 reserved_page=$(find "$work/mixed_reserved" -maxdepth 1 -type f -name '*.ppm' -print -quit)

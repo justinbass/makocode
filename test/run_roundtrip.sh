@@ -43,7 +43,7 @@ Usage: run_roundtrip.sh --label NAME --size BYTES --ecc VALUE [--width PX] [--he
 Required:
   --label NAME          Artifact prefix under test_output/ (e.g., 3001_demo).
   --size BYTES          Payload size fed to the encoder.
-  --ecc VALUE           ECC redundancy ratio (floating point).
+  --ecc VALUE           Payload ECC parity/data target (0.00-655.35; 2 decimals; 0 disables payload ECC).
   --width PX            Optional fixed page width; omitted dimensions fit the payload.
   --height PX           Optional fixed page height; omitted dimensions fit the payload.
 

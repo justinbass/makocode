@@ -31,8 +31,7 @@ printf '0' > "$work_dir/payload.bin"
     cd "$work_dir"
     "$repo_root/makocode" encode \
         --input=payload.bin \
-        --ecc=2.00 \
-        --overlay-fraction=0.00 \
+        --ecc=0.00 \
         --page-width=160 \
         --page-height=160 \
         "--output-dir=$work_dir/encoded" \

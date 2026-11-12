@@ -31,13 +31,13 @@ int main(int argc, char** argv) {
                 reader.failed || reader.cursor != writer.bit_size()) return 1;
         }
         const u32 ecc_targets[] = {0u, 1u, 65535u};
-        const u32 overlay_fractions[] = {0u, 1u, 50u, 64u, 100u};
+        const u32 overlay_q16_values[] = {0u, 1u, 655u, 13107u, 32768u};
         for (usize i = 0u; i < sizeof(ecc_targets) / sizeof(ecc_targets[0]); ++i) {
-            for (usize j = 0u; j < sizeof(overlay_fractions) / sizeof(overlay_fractions[0]); ++j) {
+            for (usize j = 0u; j < sizeof(overlay_q16_values) / sizeof(overlay_q16_values[0]); ++j) {
                 MetadataTile::BitWriter writer;
                 if (!MetadataTile::write_compact_u16(writer, ecc_targets[i], true) ||
-                    !MetadataTile::write_compact_u16(writer, overlay_fractions[j], true) ||
-                    (ecc_targets[i] == 0u && overlay_fractions[j] == 0u &&
+                    !MetadataTile::write_compact_u16(writer, overlay_q16_values[j], true) ||
+                    (ecc_targets[i] == 0u && overlay_q16_values[j] == 0u &&
                      writer.bit_size() != 6u)) return 1;
                 MetadataTile::BitReader reader;
                 reader.reset(writer.data(), writer.bit_size());
@@ -45,10 +45,27 @@ int main(int argc, char** argv) {
                 if (!MetadataTile::read_compact_u16(reader, actual_target, true) ||
                     actual_target != ecc_targets[i] ||
                     !MetadataTile::read_compact_u16(reader, actual_target, true) ||
-                    actual_target != overlay_fractions[j] ||
+                    actual_target != overlay_q16_values[j] ||
                     reader.failed || reader.cursor != writer.bit_size()) return 1;
             }
         }
+        MetadataTile::Values legacy_values;
+        legacy_values.schema_version = 7u;
+        legacy_values.payload_bytes = 1000u;
+        legacy_values.ecc_target_hundredths = 50u;
+        legacy_values.overlay_fraction_value = 50u;
+        if (!MetadataTile::derive_schema_payload_layout(legacy_values) ||
+            legacy_values.overlay_erasure_budget !=
+                (u16)(((u32)legacy_values.ecc_parity * 50u + 99u) / 100u)) return 1;
+        MetadataTile::Values current_values;
+        current_values.schema_version = 8u;
+        current_values.payload_bytes = 1000u;
+        current_values.ecc_target_hundredths = 50u;
+        current_values.overlay_fraction_value = 13107u;
+        if (!MetadataTile::derive_schema_payload_layout(current_values) ||
+            current_values.overlay_erasure_budget !=
+                (u16)(((u32)(current_values.ecc_block_data + current_values.ecc_parity) *
+                       13107u + 65535u) / 65536u)) return 1;
         return 0;
     }
     if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-metadata-rs")) {
@@ -87,7 +104,7 @@ int main(int argc, char** argv) {
             values.payload_bytes = 1u;
             values.page_index = 1u;
             values.ecc_target_hundredths = 100u;
-            values.overlay_fraction_hundredths = 0u;
+            values.overlay_fraction_value = 0u;
             values.page_width_pixels = MetadataTile::TILE_SIDE;
             values.page_height_pixels = MetadataTile::TILE_SIDE;
             values.fiducial_marker_size_pixels = 4u;
@@ -95,7 +112,7 @@ int main(int argc, char** argv) {
             values.fiducial_rows = 1u;
             values.overwrite_layout = true;
             values.palette_background_first = true;
-            if (!MetadataTile::derive_schema7_payload_layout(values)) {
+            if (!MetadataTile::derive_schema_payload_layout(values)) {
                 fprintf(stderr, "marker layout derivation failed case=%u\n", palette_case); return 1;
             }
             values.palette_count = palette_case == 2u ? 4u :
@@ -261,13 +278,16 @@ int main(int argc, char** argv) {
                             ascii_equals_token(argv[5], ascii_length(argv[5]), "--check-structural");
     bool report_page = argc == 6 &&
                        ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page");
+    bool report_ecc_settings = argc == 6 &&
+                               ascii_equals_token(argv[5], ascii_length(argv[5]),
+                                                  "--report-ecc-settings");
     bool report_page_direct = argc == 6 &&
                               ascii_equals_token(argv[5], ascii_length(argv[5]), "--report-page-direct");
     bool report_metadata_layout = argc == 6 &&
                                   ascii_equals_token(argv[5], ascii_length(argv[5]), "--metadata-layout");
     if (argc != 5 && !check_ecc_budget && !check_reserve_reject && !check_structural &&
-        !report_page && !report_page_direct && !report_metadata_layout) {
-        fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-ecc-budget PERCENT | --check-reserve-reject | --check-structural | --report-page | --report-page-direct] | --capacity WIDTH HEIGHT\n");
+        !report_page && !report_ecc_settings && !report_page_direct && !report_metadata_layout) {
+        fprintf(stderr, "canonical tile: usage: harness PPM WIDTH HEIGHT EXPECT_CURRENT [--check-ecc-budget PERCENT | --check-reserve-reject | --check-structural | --report-page | --report-ecc-settings | --report-page-direct] | --capacity WIDTH HEIGHT\n");
         return 2;
     }
     u32 expected_width = 0u;
@@ -341,7 +361,8 @@ int main(int argc, char** argv) {
         u32 expected_metadata_side = 0u;
         if (!direct_tile_decoded ||
             direct_values.schema_version != MetadataTile::TILE_SCHEMA_VERSION ||
-            !direct_values.overwrite_layout || !direct_values.ecc_enabled) {
+            !direct_values.overwrite_layout ||
+            (!report_metadata_layout && !direct_values.ecc_enabled)) {
             fprintf(stderr, "canonical tile: protected tile failed at expected placement\n");
             return 1;
         }
@@ -468,7 +489,8 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    if (check_ecc_budget || check_reserve_reject || check_structural || report_page) {
+    if (check_ecc_budget || check_reserve_reject || check_structural || report_page ||
+        report_ecc_settings) {
         u64 requested_percent = 0u;
         if ((check_ecc_budget &&
              (!ascii_to_u64(argv[6], ascii_length(argv[6]), &requested_percent) ||
@@ -493,9 +515,15 @@ int main(int argc, char** argv) {
         (void)baseline_data;
         (void)baseline_blocks;
         u16 expected_unknown_budget = 0u;
+        u32 overlay_basis = values.schema_version >= 8u
+                                ? (u32)values.ecc_block_data + (u32)values.ecc_parity
+                                : (u32)baseline_parity;
+        u32 overlay_denominator = values.schema_version >= 8u ? 65536u : 100u;
         u16 expected_overlay_budget = check_ecc_budget
-                                          ? (u16)(((u32)baseline_parity *
-                                                   values.overlay_fraction_hundredths + 99u) / 100u)
+                                          ? (u16)((overlay_basis *
+                                                   values.overlay_fraction_value +
+                                                   overlay_denominator - 1u) /
+                                                  overlay_denominator)
                                           : 0u;
         if ((check_ecc_budget && (unknown_budget != expected_unknown_budget ||
                                   overlay_budget != expected_overlay_budget)) ||
@@ -509,7 +537,7 @@ int main(int argc, char** argv) {
                     (unsigned)overlay_budget,
                     (unsigned)expected_overlay_budget,
                     (unsigned)values.ecc_parity,
-                    (unsigned)values.overlay_fraction_hundredths);
+                    (unsigned)values.overlay_fraction_value);
             return 1;
         }
         for (usize block = 0u; !report_page && values.overlay_selector_present &&
@@ -735,6 +763,11 @@ int main(int argc, char** argv) {
                 printf("%u", (unsigned)selector_counts.data[block]);
             }
             putchar('\n');
+        }
+        if (report_ecc_settings) {
+            printf("%u\t%u\n",
+                   (unsigned)values.ecc_target_hundredths,
+                   (unsigned)values.overlay_fraction_value);
         }
         (void)payload_bits;
         (void)selector_seed;

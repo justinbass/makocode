@@ -36,6 +36,12 @@ The decoded file uses ASCII lines, begins with `MAKOCODE-DECODED`, and ends with
 
 The `archive` section gives `entries COUNT`, followed by `directory PATH` and `file PATH SIZE` entries in archive order, and ends with `end-archive`. A file's next line is its complete content; `SIZE` is its original byte count. Backslash, nonprintable bytes, and spaces in paths are encoded as `\xHH` with two uppercase hexadecimal digits. Content spaces are literal. All lines end in LF; even an empty file has a content line. Escaping applies to bytes, so UTF-8 and binary contents can be reconstructed exactly. Footer text is rendered in the image and is not recovered into the decoded file.
 
+### Error correction and overlays
+
+`encode --ecc RATIO` sets the requested Reed–Solomon parity/data ratio on the compressed, then optionally encrypted, payload. The CLI accepts `0.00` through `655.35` in hundredths; the default is `0.10`. `0.00` disables payload ECC. A positive target rounds up to an integer parity-symbol count per block, with at least two parity symbols. Small pages can require a higher base target because their metadata tile overwrites payload positions and those structural erasures must be covered; configured overlays add their own erasure budget. The encoder rejects an insufficient target and reports a sufficient base `--ecc` value for the current payload and page layout. This covers known structural and configured overlay erasures; image damage can still require more ECC. GF(256) blocks contain at most 255 total symbols, so the realized ratio cannot exceed 254 parity symbols for one data symbol. `--ecc-fill` searches for the largest feasible target that fills the final page.
+
+`encode --overlay-fraction F` sets the maximum overlay amount used to derive per-block erasure selectors. CLI values use two decimal places from `0.00` through `0.99`; `1.00` is invalid. Schema 8 stores this value as Q0.16: the compact `u16` value divided by 65536. For example, `0.20` is stored as 13107, and the largest representable wire value, 65535, means `65535/65536` (about `0.9999847`), never `1.00`. The decoder derives each block's selector count as the ceiling of this fraction times the block's data-plus-parity symbols. Encoding rejects a target when that count exceeds the available parity. The positional fraction on `makocode overlay` is the requested raster change amount; the encoded selector count bounds how many codeword positions can be changed.
+
 ## Tests
 
 `make test` now drives the CLI end-to-end through the shell scripts in `test/`

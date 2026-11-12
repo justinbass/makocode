@@ -266,7 +266,7 @@ run_case_footer_valid_data_too_corrupt() {
     print_makocode_cmd "encode-ecc-overwhelmed" \
         "$makocode_bin" encode \
         "--input=payload.bin" \
-        "--ecc=0.25" \
+        "--ecc=0.01" \
         "--page-width=1000" \
         "--page-height=1000" \
         "--prefix=${label}_footer_valid_data_too_corrupt" \
@@ -276,7 +276,7 @@ run_case_footer_valid_data_too_corrupt() {
         cd "$work_dir"
         "$makocode_bin" encode \
             --input=payload.bin \
-            --ecc=0.25 \
+            --ecc=0.01 \
             --page-width=1000 \
             --page-height=1000 \
             --prefix="${label}_footer_valid_data_too_corrupt" \

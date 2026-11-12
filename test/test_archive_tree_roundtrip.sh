@@ -78,8 +78,7 @@ encode_cmd=(
     "$makocode_bin" encode
     --input=tree
     --input=empty_only
-    --ecc=0.30
-    --overlay-fraction=0.00
+    --ecc=0.00
     --prefix=archive_tree
     --debug
     "--output-dir=$page_dir"
