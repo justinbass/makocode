@@ -11,18 +11,18 @@
 # namespace the artifacts written under test_output/.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' encoded from stdin" \
-    --size 1 --ecc 0 \
+    --size 1 --ecc 0.00 --encode-opt "--overlay-fraction=0.00" \
     --payload-literal "0"
 
 test_case 0001_tiny_makocode roundtrip "8 byte payload literal 'makocode' baseline" \
-    --size 8 --ecc 0 \
+    --size 8 --ecc 0.00 --encode-opt "--overlay-fraction=0.00" \
     --payload-literal "makocode"
 
 test_case 0002_baseline_8k_ecc_050 roundtrip "8 KiB payload, ECC 0.5 baseline" \
     --size 8192 --ecc 0.5
 
-test_case 0003_baseline_8k_ecc_000 roundtrip "8 KiB payload, zero requested unknown-error budget with structural ECC" \
-    --size 8192 --ecc 0
+test_case 0003_baseline_8k_ecc_025 roundtrip "8 KiB payload, ECC 0.25 with overlay reservation disabled" \
+    --size 8192 --ecc 0.25 --encode-opt "--overlay-fraction=0.00"
 
 test_case 0004_baseline_multi_page_ecc_100 roundtrip "128 KiB payload, ECC 1.0 multi-page" \
     --size 131072 --ecc 1.0 --width 700 --height 700 --multi-page
@@ -54,7 +54,7 @@ test_case 0012_large_canvas_cmykw roundtrip "Large canvas CMYKW palette" \
     --palette "White Cyan Magenta Yellow Black"
 
 test_case 0013_low_ecc_fiducial roundtrip "Low ECC fiducial reservation, tiny pages" \
-    --size 256 --ecc 0 --width 200 --height 64
+    --size 256 --ecc 0.10 --encode-opt "--overlay-fraction=0.00" --width 200 --height 64
 
 test_case 0014_footer_metadata roundtrip "Footer metadata rendering stress" \
     --size 65536 --ecc 0.25 \
@@ -62,17 +62,17 @@ test_case 0014_footer_metadata roundtrip "Footer metadata rendering stress" \
     --font-size "$footer_charset_font_size"
 
 test_case 0015_gray_100k_single roundtrip "100 KiB grayscale single page baseline" \
-    --size 102400 --ecc 0
+    --size 102400 --ecc 0.01 --encode-opt "--overlay-fraction=0.00"
 
 test_case 0016_gray_100k_scaled roundtrip "100 KiB grayscale scaled 2.5x" \
-    --size 102400 --ecc 0 --width 1100 --height 1100 --scale 2.5
+    --size 102400 --ecc 0.01 --encode-opt "--overlay-fraction=0.00" --width 1100 --height 1100 --scale 2.5
 
 test_case 0017_gray_100k_stretch_h26_v24 roundtrip "Grayscale stretch horizontal 2.6 / vertical 2.4" \
-    --size 102400 --ecc 0 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.01 --encode-opt "--overlay-fraction=0.00" --width 1100 --height 1100 \
     --scale-x 2.6 --scale-y 2.4
 
 test_case 0018_gray_100k_stretch_h24_v26 roundtrip "Grayscale stretch horizontal 2.4 / vertical 2.6" \
-    --size 102400 --ecc 0 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.01 --encode-opt "--overlay-fraction=0.00" --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
 test_case 0019_gray_scale_303_blur roundtrip "Grayscale upsample 3.03x (blur/no-rotation stress)" \
@@ -305,19 +305,22 @@ test_case 0072_decode_scale_4701 roundtrip "Fractional affine scan scale 4.701x"
     --scale 4.701 --transform-seed 4701
 
 test_case 0073_tiny_palette_2_white_checker roundtrip "Two-color tiny page with white checker overwrite at 2.701x" \
-    --size 8 --ecc 0.25 --width 160 --height 160 \
+    --size 8 --ecc 2.50 --width 160 --height 160 \
+    --encode-opt "--overlay-fraction=0.00" \
     --palette "White Black" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
 test_case 0074_tiny_palette_4_white_checker roundtrip "Four-color tiny page with white checker overwrite at 2.701x" \
-    --size 8 --ecc 0.25 --width 160 --height 160 \
+    --size 8 --ecc 2.50 --width 160 --height 160 \
+    --encode-opt "--overlay-fraction=0.00" \
     --palette "White Cyan Magenta Yellow" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
 
 test_case 0075_tiny_palette_8_white_checker roundtrip "Eight-color 8-byte payload with diagonal white damage at 2.701x" \
-    --size 8 --ecc 0.25 --width 480 --height 480 \
+    --size 8 --ecc 3.00 --width 480 --height 480 \
+    --encode-opt "--overlay-fraction=0.00" \
     --palette "FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000" \
     --payload-literal "makocode" \
     --scale 2.701 --white-checker --transform-seed 2701
@@ -390,3 +393,12 @@ test_case 0103_palette_base5_capacity script "Base-5 palette uses black symbols 
 
 test_case 0104_metadata_tile_format script "Variable metadata fields and multi-block tile Reed-Solomon framing" \
     test_metadata_tile_format.sh
+
+test_case 0105_footer_geometry roundtrip "Page with a footer taller than 32 rows round-trips without footer OCR" \
+    --size 4096 --ecc 0.25 --width 640 --height 400 \
+    --footer "Archive title" --font-size 5
+
+test_case 0106_overlay_footer_geometry overlay "Overlay preserves a page with a 40-row human footer" \
+    MAKO_OVERLAY_PAGE_WIDTH=640 MAKO_OVERLAY_PAGE_HEIGHT=400 \
+    MAKO_OVERLAY_SIZE=4096 MAKO_OVERLAY_ECC=0.25 \
+    "MAKO_OVERLAY_FOOTER=Archive title" MAKO_OVERLAY_FONT_SIZE=5

@@ -50,7 +50,8 @@ printf '\000default timestamp naming payload\377\n' > "$payload"
 encode_cmd=(
     "$makocode_bin" encode
     --input=payload.bin
-    --ecc=0
+    --ecc=0.90
+    --overlay-fraction=0.00
     --palette='Cyan Black'
     "--output-dir=$pages_dir"
     --debug

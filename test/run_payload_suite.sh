@@ -43,7 +43,7 @@ run_case() {
 
 # Low ECC fiducial reservation on tiny pages.
 run_case 1023_low_ecc \
-    --size 256 --ecc 0 --width 64 --height 64
+    --size 256 --ecc 4.00 --encode-opt "--overlay-fraction=0.00" --width 64 --height 64
 
 # Footer title / metadata heavy footer rendering.
 run_case 1022_footer_title \
@@ -53,21 +53,21 @@ run_case 1022_footer_title \
 
 # 100 KiB grayscale payload single page baseline.
 run_case 2001_payload_gray_100k \
-    --size 102400 --ecc 0
+    --size 102400 --ecc 0.25 --encode-opt "--overlay-fraction=0.00"
 
 # 100 KiB scaled 2.5x on both axes.
 run_case 2002_payload_gray_100k_scaled \
-    --size 102400 --ecc 0 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.25 --encode-opt "--overlay-fraction=0.00" --width 1100 --height 1100 \
     --scale 2.5
 
 # 100 KiB stretched horizontally (2.6) and vertically (2.4).
 run_case 2005_payload_gray_100k_stretch_h26_v24 \
-    --size 102400 --ecc 0 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.25 --encode-opt "--overlay-fraction=0.00" --width 1100 --height 1100 \
     --scale-x 2.6 --scale-y 2.4
 
 # 100 KiB stretched vertically (2.6) and horizontally (2.4).
 run_case 2006_payload_gray_100k_stretch_h24_v26 \
-    --size 102400 --ecc 0 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.25 --encode-opt "--overlay-fraction=0.00" --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
 # Password-protected + ECC payload.

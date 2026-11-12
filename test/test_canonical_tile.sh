@@ -20,7 +20,7 @@ for dimensions in '1000 1000 1 payload.bin'; do
     read -r width height expect_canonical input_name <<<"$dimensions"
     label="${width}x${height}"
     mkdir -p "$work/$label/pages"
-    (cd "$work" && "$bin" encode --input="$input_name" --ecc=0 \
+    (cd "$work" && "$bin" encode --input="$input_name" --ecc=0.50 \
         --page-width="$width" --page-height="$height" \
         --prefix=page \
         --output-dir="$work/$label/pages" >/dev/null)
@@ -36,10 +36,10 @@ for dimensions in '1000 1000 1 payload.bin'; do
     cmp "$work/$input_name" "$work/$label/out/$input_name"
 done
 
-# Confirm the centered tile preserves the requested unknown-error budget
-# after adding structural erasure and overlay reserves to the actual parity.
+# Confirm the tile uses the requested total ECC ratio and derives its overlay
+# erasure count from the configured fraction.
 mkdir -p "$work/ecc_budget/pages"
-(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.25 \
+(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.50 \
     --page-width=1200 --page-height=1200 \
     --prefix=budget --output-dir="$work/ecc_budget/pages" >/dev/null)
 shopt -s nullglob
@@ -49,7 +49,7 @@ if [[ ${#budget_pages[@]} -ne 1 ]]; then
     echo "canonical tile: ECC budget case expected one page, found ${#budget_pages[@]}" >&2
     exit 1
 fi
-"$harness" "${budget_pages[0]}" 1200 1200 1 --check-ecc-budget 25
+"$harness" "${budget_pages[0]}" 1200 1200 1 --check-ecc-budget 50
 "$harness" "${budget_pages[0]}" 1200 1200 1 --check-reserve-reject
 
 # A page encoded without overlay reserve must remain visibly distinguishable
@@ -75,7 +75,7 @@ fi
 # A non-default marker geometry must produce the same known-erasure map on
 # decode that the encoder used when padding structural parity.
 mkdir -p "$work/custom_fiducials/pages" "$work/custom_fiducials/out"
-(cd "$work" && "$bin" encode --input=payload.bin --ecc=0 \
+(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.25 \
     --page-width=1000 --page-height=1000 \
     --fiducials=6,30,15 --prefix=custom --output-dir="$work/custom_fiducials/pages" >/dev/null)
 shopt -s nullglob
@@ -95,7 +95,7 @@ for dimensions in '23 23' '48 48' '49 48' '64 48'; do
 done
 
 mkdir -p "$work/80x80/pages" "$work/80x80/out"
-(cd "$work" && "$bin" encode --input=tiny.bin --ecc=0 \
+(cd "$work" && "$bin" encode --input=tiny.bin --ecc=4.00 --overlay-fraction=0.00 \
     --page-width=80 --page-height=80 \
     --prefix=page \
     --output-dir="$work/80x80/pages" >/dev/null)

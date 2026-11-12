@@ -48,8 +48,11 @@ merged_dir="$work_dir/merged_pages"
 ecc="${MAKO_OVERLAY_ECC:-1.0}"
 ignore_colors="${MAKO_OVERLAY_IGNORE_COLORS:-}"
 ecc_target="${MAKO_OVERLAY_ECC_TARGET:-}"
+payload_size="${MAKO_OVERLAY_SIZE:-32768}"
 page_width="${MAKO_OVERLAY_PAGE_WIDTH:-1000}"
 page_height="${MAKO_OVERLAY_PAGE_HEIGHT:-1000}"
+footer="${MAKO_OVERLAY_FOOTER:-}"
+font_size="${MAKO_OVERLAY_FONT_SIZE:-}"
 
 mkdir -p "$test_dir" "$work_dir" "$encoded_dir" "$merged_dir"
 if [[ ! -x $canonical_tile_harness_bin ]]; then
@@ -58,7 +61,7 @@ if [[ ! -x $canonical_tile_harness_bin ]]; then
         "$script_dir/test_canonical_tile_harness.cpp" -o "$canonical_tile_harness_bin"
 fi
 
-"$ppm_transform_bin" bytes --output "$payload_path" --size 32768 --seed "$payload_seed"
+"$ppm_transform_bin" bytes --output "$payload_path" --size "$payload_size" --seed "$payload_seed"
 
 encode_cmd=(
     "$makocode_bin" encode
@@ -70,6 +73,12 @@ encode_cmd=(
     "--prefix=${label}_overlay"
     --debug
 )
+if [[ -n "$footer" ]]; then
+    encode_cmd+=(--footer "$footer")
+fi
+if [[ -n "$font_size" ]]; then
+    encode_cmd+=(--font-size "$font_size")
+fi
 if [[ -n "${MAKO_OVERLAY_PALETTE:-}" ]]; then
     encode_cmd+=(--palette "${MAKO_OVERLAY_PALETTE}")
 fi

@@ -91,7 +91,8 @@ cp "$payload" "$payload_work"
 encode_cmd=(
     "$makocode_bin" encode
     "--input=$payload_source_name"
-    --ecc=0.5
+    --ecc=1.00
+    --overlay-fraction=0.00
     "--output-dir=$work_dir"
     "--prefix=$encode_prefix"
     --debug

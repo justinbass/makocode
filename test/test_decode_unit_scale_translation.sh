@@ -9,12 +9,12 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 if [[ ${1:-} == --edge-bleed ]]; then edge_bleed=1; shift; fi
 if [[ ${1:-} == --optical-blur ]]; then optical_blur=1; shift; fi
 [[ $# == 0 ]]
-ecc=0.25
+ecc=1.60
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 mkdir -p "$work_dir/encoded" "$work_dir/control" "$work_dir/decoded"
 printf makocode > "$work_dir/payload.bin"
-(cd "$work_dir"; "$makocode_bin" encode --input=payload.bin "--ecc=$ecc" \
+(cd "$work_dir"; "$makocode_bin" encode --input=payload.bin "--ecc=$ecc" --overlay-fraction=0.00 \
     --page-width=80 --page-height=80 \
     "--output-dir=$work_dir/encoded" --prefix=source >/dev/null)
 python3 - "$work_dir/encoded/source.ppm" "$work_dir/scan.ppm" "$edge_bleed" "$optical_blur" <<'PYTHON'

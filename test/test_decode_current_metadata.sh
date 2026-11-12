@@ -10,7 +10,7 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work_dir/encoded" "$work_dir/decoded"
 printf 'x' > "$work_dir/payload.bin"
-(cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=0.25 \
+(cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin --ecc=2.00 --overlay-fraction=0.00 \
     --page-width=64 --page-height=64 \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
 layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
@@ -25,9 +25,9 @@ width, height, pixels = read_ppm(sys.argv[1])
 assert (width, height) == (64, 64)
 assert len(pixels) == 64 * 64 * 3
 tile_x = tile_y = (64 - 48) // 2
-# Flip a protected data module after the outer schema and parity fields.
+# Flip a protected data module after the bootstrap schema and parity fields.
 square_x, square_y, square_side, prefix_bits = map(int, sys.argv[3:7])
-cell = prefix_bits + 16
+cell = prefix_bits + 128
 x = tile_x + square_x + cell % square_side
 y = tile_y + square_y + cell // square_side
 index = (y * 64 + x) * 3

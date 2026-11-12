@@ -26,7 +26,7 @@ with open(sys.argv[1], 'wb') as stream:
 PY
 
 mkdir -p "$work/pages"
-(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.15 \
+(cd "$work" && "$bin" encode --input=payload.bin --ecc=0.40 \
     --page-width=1000 --page-height=1000 \
     --prefix=page --output-dir="$work/pages" >/dev/null)
 shopt -s nullglob

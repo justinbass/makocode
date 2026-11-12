@@ -86,6 +86,25 @@ run_expect_help() {
     fi
 }
 
+run_expect_reject() {
+    local phase=$1
+    local expected=$2
+    shift 2
+    local output="$tmp_dir/$phase.txt"
+    local status=0
+    if "$@" >"$output" 2>&1; then
+        echo "test_cli_help: $phase unexpectedly succeeded" >&2
+        return 1
+    else
+        status=$?
+    fi
+    if [[ $status -eq 0 ]] || ! grep -Fq -- "$expected" "$output"; then
+        echo "test_cli_help: $phase did not reject the value for the expected reason" >&2
+        cat "$output" >&2
+        return 1
+    fi
+}
+
 run_expect_help top-level 'Usage:' 'makocode encode [options]' "$makocode_bin"
 run_expect_help top-level-long-help 'Usage:' 'makocode encode [options]' \
     "$makocode_bin" --help
@@ -97,6 +116,10 @@ run_expect_help encode-footer-help 'Usage: makocode encode' '--footer TEXT' "$ma
 run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" decode --help
 run_expect_help overlay-help 'Usage: makocode overlay' '--overlay-ecc-target TARGET' "$makocode_bin" overlay --help
 run_expect_help minify-help 'Usage: makocode minify' 'Strips comments/whitespace' "$makocode_bin" minify --help
+run_expect_reject ecc-precision '--ecc must be 0.00 to 655.35 with at most 2 decimal places' \
+    "$makocode_bin" encode --ecc=0.001
+run_expect_reject overlay-fraction-precision '--overlay-fraction must be 0.00 to 1.00 with at most 2 decimal places' \
+    "$makocode_bin" encode --overlay-fraction=0.001
 
 if grep -Eq '^  --' "$tmp_dir/top-level.txt"; then
     echo 'test_cli_help: top-level help lists command-specific options' >&2

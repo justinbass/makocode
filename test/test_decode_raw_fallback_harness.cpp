@@ -26,6 +26,8 @@ int main(int argc, char** argv) {
     makocode::EncoderContext encoder;
     // Centered payload placement concentrates the fixture's fiducial erasures.
     encoder.config.ecc_redundancy = 0.5;
+    encoder.config.ecc_target_hundredths = 50u;
+    encoder.config.overlay_fraction_hundredths = 0u;
     if (!encoder.set_payload(payload.data, payload.size) || !encoder.build()) {
         fprintf(stderr, "raw fallback harness: failed to encode payload\n");
         return 1;
@@ -63,7 +65,6 @@ int main(int argc, char** argv) {
                             width,
                             height,
                             1u,
-                            page_count,
                             bits_per_page,
                             &encoder.ecc_info(),
                             0.0,

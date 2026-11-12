@@ -46,7 +46,7 @@ fi
     cd "$work_dir"
     "$makocode_bin" encode \
         "--input=$payload_path" \
-        --ecc=0 --page-width=80 --page-height=80 \
+        --ecc=2.00 --overlay-fraction=0.00 --page-width=80 --page-height=80 \
         "--output-dir=$work_dir/encoded" --prefix=synthetic > /dev/null
 )
 

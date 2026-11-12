@@ -15,9 +15,9 @@ palette="White Cyan Magenta Yellow Black"
 bash "$script_dir/run_roundtrip.sh" \
     --label "$label" \
     --size 26000 \
-    --ecc 0 \
-    --width 320 \
-    --height 320 \
+    --ecc 0.25 \
+    --width 360 \
+    --height 360 \
     --palette "$palette" \
 
 shopt -s nullglob
@@ -41,7 +41,7 @@ mkdir -p "$decoded_metadata_dir"
 "$repo_root/makocode" decode --decoded-file --palette "$palette" \
     --output-dir="$decoded_metadata_dir" "${pages[0]}" >/dev/null
 tile_layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
-    "${pages[0]}" 320 320 1 --metadata-layout)
+    "${pages[0]}" 360 360 1 --metadata-layout)
 python3 - "${pages[0]}" "$decoded_metadata_dir" "$tile_layout" <<'PY'
 from pathlib import Path
 from ppm_test_utils import read_ppm
@@ -51,7 +51,7 @@ ppm_path = Path(sys.argv[1])
 metadata_dir = Path(sys.argv[2])
 width, height, pixels = read_ppm(ppm_path)
 maxval = 255
-assert (width, height, maxval) == (320, 320, 255)
+assert (width, height, maxval) == (360, 360, 255)
 square_x0, square_y0, square_side, _, tag_y0, _ = map(int, sys.argv[3].split())
 values = iter(pixels)
 tile_x0 = width // 2 - 24 + square_x0

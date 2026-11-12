@@ -30,6 +30,25 @@ int main(int argc, char** argv) {
             if (!MetadataTile::read_length_count(reader, actual) || actual != expected[i] ||
                 reader.failed || reader.cursor != writer.bit_size()) return 1;
         }
+        const u32 ecc_targets[] = {0u, 1u, 65535u};
+        const u32 overlay_fractions[] = {0u, 1u, 50u, 64u, 100u};
+        for (usize i = 0u; i < sizeof(ecc_targets) / sizeof(ecc_targets[0]); ++i) {
+            for (usize j = 0u; j < sizeof(overlay_fractions) / sizeof(overlay_fractions[0]); ++j) {
+                MetadataTile::BitWriter writer;
+                if (!MetadataTile::write_compact_u16(writer, ecc_targets[i], true) ||
+                    !MetadataTile::write_compact_u16(writer, overlay_fractions[j], true) ||
+                    (ecc_targets[i] == 0u && overlay_fractions[j] == 0u &&
+                     writer.bit_size() != 6u)) return 1;
+                MetadataTile::BitReader reader;
+                reader.reset(writer.data(), writer.bit_size());
+                u32 actual_target = 0u;
+                if (!MetadataTile::read_compact_u16(reader, actual_target, true) ||
+                    actual_target != ecc_targets[i] ||
+                    !MetadataTile::read_compact_u16(reader, actual_target, true) ||
+                    actual_target != overlay_fractions[j] ||
+                    reader.failed || reader.cursor != writer.bit_size()) return 1;
+            }
+        }
         return 0;
     }
     if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-metadata-rs")) {
@@ -65,9 +84,10 @@ int main(int argc, char** argv) {
     if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-marker-layout")) {
         for (u32 palette_case = 0u; palette_case < 4u; ++palette_case) {
             MetadataTile::Values values;
-            values.page_bits = 1u;
-            values.page_count = 1u;
+            values.payload_bytes = 1u;
             values.page_index = 1u;
+            values.ecc_target_hundredths = 100u;
+            values.overlay_fraction_hundredths = 0u;
             values.page_width_pixels = MetadataTile::TILE_SIDE;
             values.page_height_pixels = MetadataTile::TILE_SIDE;
             values.fiducial_marker_size_pixels = 4u;
@@ -75,6 +95,9 @@ int main(int argc, char** argv) {
             values.fiducial_rows = 1u;
             values.overwrite_layout = true;
             values.palette_background_first = true;
+            if (!MetadataTile::derive_schema7_payload_layout(values)) {
+                fprintf(stderr, "marker layout derivation failed case=%u\n", palette_case); return 1;
+            }
             values.palette_count = palette_case == 2u ? 4u :
                                    palette_case == 3u ? 3u : 2u;
             if (palette_case == 0u) {
@@ -338,13 +361,13 @@ int main(int argc, char** argv) {
         while ((usize)expected_metadata_side * expected_metadata_side < metadata_cells) {
             ++expected_metadata_side;
         }
-        if (direct_values.schema_version != 0u ||
+        if (direct_values.schema_version != MetadataTile::TILE_SCHEMA_VERSION ||
             direct_values.metadata_square_side != expected_metadata_side ||
             direct_values.metadata_square_y0 != direct_values.metadata_tag_y0 + MetadataTile::TILE_HEADER_ROWS ||
             direct_values.metadata_tile_height != direct_values.metadata_square_side + MetadataTile::TILE_HEADER_ROWS ||
             direct_values.metadata_tile_width >= MetadataTile::TILE_SIDE ||
             direct_values.metadata_tile_height >= MetadataTile::TILE_SIDE) {
-            fprintf(stderr, "canonical tile: metadata is not a compact schema-0 square\n");
+            fprintf(stderr, "canonical tile: metadata is not a compact current-schema square\n");
             return 1;
         }
         return 0;
@@ -395,15 +418,24 @@ int main(int argc, char** argv) {
         fprintf(stderr, "canonical tile: protected tile failed at expected placement\n");
         return 1;
     }
+    values.page_count = extracted_metadata.encoded_tile.page_count;
     if (placement.x0 != (width - MetadataTile::TILE_SIDE) / 2u ||
         placement.y0 != (data_height - MetadataTile::TILE_SIDE) / 2u ||
         values.schema_version != MetadataTile::TILE_SCHEMA_VERSION || !values.overwrite_layout ||
         !values.ecc_enabled || values.ecc_parity == 0u ||
-        (check_structural && values.metadata_ecc_bytes != 0u) ||
+        (check_structural && values.metadata_ecc_bytes == 0u) ||
         values.page_index == 0u || values.page_index > values.page_count ||
         (check_structural && (values.page_count != 1u || values.page_index != 1u ||
                               values.overlay_selector_present))) {
-        fprintf(stderr, "canonical tile: expected centered current-format tile with structural ECC\n");
+        fprintf(stderr,
+                "canonical tile: unexpected tile state (schema=%u, ECC=%u, parity=%u, page=%llu/%llu, overlay=%u, tile_ECC=%u)\n",
+                values.schema_version,
+                values.ecc_enabled ? 1u : 0u,
+                (unsigned)values.ecc_parity,
+                (unsigned long long)values.page_index,
+                (unsigned long long)values.page_count,
+                values.overlay_selector_present ? 1u : 0u,
+                (unsigned)values.metadata_ecc_bytes);
         return 1;
     }
     if (check_structural) {
@@ -460,18 +492,24 @@ int main(int argc, char** argv) {
         }
         (void)baseline_data;
         (void)baseline_blocks;
-        u16 expected_unknown_budget = check_ecc_budget
-                                          ? (u16)(2u * ((u32)baseline_parity / 2u))
-                                          : 0u;
+        u16 expected_unknown_budget = 0u;
         u16 expected_overlay_budget = check_ecc_budget
-                                          ? (u16)((u32)baseline_parity / 2u)
+                                          ? (u16)(((u32)baseline_parity *
+                                                   values.overlay_fraction_hundredths + 99u) / 100u)
                                           : 0u;
         if ((check_ecc_budget && (unknown_budget != expected_unknown_budget ||
                                   overlay_budget != expected_overlay_budget)) ||
             (values.overlay_selector_present
                  ? selector_counts.size != values.ecc_block_count
                  : selector_counts.size != 0u)) {
-            fprintf(stderr, "canonical tile: tile selector and ECC budgets do not preserve requested baseline\n");
+            fprintf(stderr,
+                    "canonical tile: selector mismatch (unknown=%u/%u, overlay=%u/%u, parity=%u, fraction=%u)\n",
+                    (unsigned)unknown_budget,
+                    (unsigned)expected_unknown_budget,
+                    (unsigned)overlay_budget,
+                    (unsigned)expected_overlay_budget,
+                    (unsigned)values.ecc_parity,
+                    (unsigned)values.overlay_fraction_hundredths);
             return 1;
         }
         for (usize block = 0u; !report_page && values.overlay_selector_present &&
@@ -524,7 +562,7 @@ int main(int argc, char** argv) {
                                            : 0u;
                 if (structural_erasures + overlay_erasures +
                         (u32)unknown_budget > values.ecc_parity) {
-                    fprintf(stderr, "canonical tile: structural erasures consumed unknown-error ECC reserve\n");
+                    fprintf(stderr, "canonical tile: structural and overlay erasures exceed requested ECC parity\n");
                     return 1;
                 }
                 if (check_reserve_reject) {
@@ -594,7 +632,7 @@ int main(int argc, char** argv) {
                                          overlay_budget,
                                          true,
                                          true,
-                                         values.lzma_uncompressed_bytes,
+                                         MetadataTile::LZMA_SIZE_FROM_HEADER,
                                          values.schema_version != 0u &&
                                              values.schema_version < 4u)) {
                     fprintf(stderr, "canonical tile: valid selector reserve did not decode before reserve mutation\n");
@@ -627,7 +665,7 @@ int main(int argc, char** argv) {
                                           overlay_budget,
                                           true,
                                           true,
-                                          values.lzma_uncompressed_bytes) ||
+                                          MetadataTile::LZMA_SIZE_FROM_HEADER) ||
                     !partial_decoder.ecc_correction_failed()) {
                     fprintf(stderr, "canonical tile: parser accepted a partial fixed selector map\n");
                     return 1;
@@ -651,7 +689,7 @@ int main(int argc, char** argv) {
                                                    overlay_budget,
                                                    true,
                                                    true,
-                                                   values.lzma_uncompressed_bytes) ||
+                                                   MetadataTile::LZMA_SIZE_FROM_HEADER) ||
                     !missing_selector_decoder.ecc_correction_failed()) {
                     fprintf(stderr, "canonical tile: parser accepted a missing fixed selector map\n");
                     return 1;
@@ -670,7 +708,7 @@ int main(int argc, char** argv) {
                                           (u16)reserve_reject_budget,
                                           true,
                                           true,
-                                          values.lzma_uncompressed_bytes) ||
+                                          MetadataTile::LZMA_SIZE_FROM_HEADER) ||
                     !invalid_decoder.ecc_correction_failed()) {
                     fprintf(stderr, "canonical tile: parser accepted impossible declared overlay reserve\n");
                     return 1;
