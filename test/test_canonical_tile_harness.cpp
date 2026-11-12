@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
             legacy_values.overlay_erasure_budget !=
                 (u16)(((u32)legacy_values.ecc_parity * 50u + 99u) / 100u)) return 1;
         MetadataTile::Values current_values;
-        current_values.schema_version = 8u;
+        current_values.schema_version = 9u;
         current_values.payload_bytes = 1000u;
         current_values.ecc_target_hundredths = 50u;
         current_values.overlay_fraction_value = 13107u;

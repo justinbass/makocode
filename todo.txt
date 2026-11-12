@@ -76,4 +76,4 @@ Finalize:
 - Hard reset git history to Initial Commit, save locally but don't publish it
 - Makocode for ca cert install on Android phone (needs Android app)
 - Prompt
-  - ~ADV, feedback loop until the criteria is met, make clean ; make -j4 test passes 3 times in a row. If tests take > 1 min then focus on performance improvement so there's no regression. Do NOT relax tests or the idea behind them, avoid touching tests unless absolutely necessary.
+  - ~ADV, feedback loop until the criteria is met, make clean ; make -j4 test passes 3 times in a row. If tests take > 1 min then focus on performance improvement so there's no regression. Do NOT relax tests or the idea behind them, avoid touching tests unless absolutely necessary. DO NOT increment version, version is always 0, we do not support backwards compatibility for any changes (yet) delete all old code pathways.

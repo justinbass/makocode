@@ -9,8 +9,7 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 if [[ ${1:-} == --edge-bleed ]]; then edge_bleed=1; shift; fi
 if [[ ${1:-} == --optical-blur ]]; then optical_blur=1; shift; fi
 [[ $# == 0 ]]
-ecc=0.00
-if [[ $optical_blur == 1 ]]; then ecc=1.17; fi
+ecc=1.19
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 mkdir -p "$work_dir/encoded" "$work_dir/control" "$work_dir/decoded"

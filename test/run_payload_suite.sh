@@ -47,27 +47,27 @@ run_case 1023_low_ecc \
 
 # Footer title / metadata heavy footer rendering.
 run_case 1022_footer_title \
-    --size 65536 --ecc 0.00 \
+    --size 65536 --ecc 0.01 \
     --footer "$footer_charset_template" \
     --font-size "$footer_charset_font_size"
 
 # 100 KiB grayscale payload single page baseline.
 run_case 2001_payload_gray_100k \
-    --size 102400 --ecc 0.00
+    --size 102400 --ecc 0.01
 
 # 100 KiB scaled 2.5x on both axes.
 run_case 2002_payload_gray_100k_scaled \
-    --size 102400 --ecc 0.00 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.01 --width 1100 --height 1100 \
     --scale 2.5
 
 # 100 KiB stretched horizontally (2.6) and vertically (2.4).
 run_case 2005_payload_gray_100k_stretch_h26_v24 \
-    --size 102400 --ecc 0.00 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.01 --width 1100 --height 1100 \
     --scale-x 2.6 --scale-y 2.4
 
 # 100 KiB stretched vertically (2.6) and horizontally (2.4).
 run_case 2006_payload_gray_100k_stretch_h24_v26 \
-    --size 102400 --ecc 0.00 --width 1100 --height 1100 \
+    --size 102400 --ecc 0.01 --width 1100 --height 1100 \
     --scale-x 2.4 --scale-y 2.6
 
 # Password-protected + ECC payload.
@@ -82,12 +82,12 @@ run_case 2102_multi_page \
 
 # Custom palette/base-5 mode.
 run_case 2103_palette_base5 \
-    --size 16384 --ecc 0.00 \
+    --size 16384 --ecc 0.01 \
     --palette "White Cyan Magenta Yellow Black"
 
 # Rotation + skew distortion on scans.
 run_case 2104_border_dirt \
-    --size 32768 --ecc 0.00 --width 640 --height 640 \
+    --size 32768 --ecc 0.01 --width 640 --height 640 \
     --border-thickness 12 --border-density 0.15
 
 echo "run_payload_suite: complete"

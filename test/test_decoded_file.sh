@@ -7,7 +7,7 @@ work=$(mktemp -d "$root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work/input/empty" "$work/input/sub" "$work/pages" "$work/out"
 printf 'hello\nback\\slash\000\377' > "$work/input/sub/a b"
 : > "$work/input/blank"
-(cd "$work" && "$bin" encode --input=input --ecc=0.00 --password=secret --prefix=page --output-dir=pages >/dev/null)
+(cd "$work" && "$bin" encode --input=input --ecc=0.29 --password=secret --prefix=page --output-dir=pages >/dev/null)
 "$bin" decode --decoded-file --password=secret --output-dir="$work/out" "$work"/pages/*.ppm >/dev/null
 python3 - "$work" <<'PY'
 import pathlib, re, sys
@@ -16,8 +16,8 @@ files = list((work / 'out').iterdir())
 assert len(files) == 1 and re.fullmatch(r'makocode_decoded_\d{14}\.txt', files[0].name)
 lines = files[0].read_text('ascii').splitlines()
 assert lines[0] == 'MAKOCODE-DECODED' and lines[-2:] == ['end-archive', 'end']
-assert 'metadata encryption_version 1' in lines and 'metadata ecc_enabled 0' in lines
-assert 'metadata tile_schema 8' in lines and 'metadata lzma_uncompressed_bytes ' in '\n'.join(lines)
+assert 'metadata encryption_version 1' in lines and 'metadata ecc_enabled 1' in lines
+assert 'metadata tile_schema 9' in lines and 'metadata lzma_uncompressed_bytes ' in '\n'.join(lines)
 for field in ['tile_magic', 'metadata_magic', 'metadata_bytes', 'metadata_crc8', 'tile_header', 'tile_data', 'compression', 'lzma_properties']:
     assert not any(line.startswith('metadata ' + field + ' ') for line in lines), field
 for field, size in [('encryption_salt', 32), ('encryption_nonce', 24), ('encryption_tag', 32)]:

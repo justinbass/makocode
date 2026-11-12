@@ -49,7 +49,7 @@ mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
 (cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.03 --overlay-fraction=0.01 \
     --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
-(cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.00 \
+(cd "$work" && "$bin" encode --input=mixed_payload.bin --ecc=0.02 \
     --page-width=1000 --page-height=1000 \
     --prefix=plain --output-dir="$work/mixed_plain" >/dev/null)
 reserved_page=$(find "$work/mixed_reserved" -maxdepth 1 -type f -name '*.ppm' -print -quit)

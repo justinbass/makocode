@@ -72,7 +72,7 @@ if [[ ${#entries[@]} -ne 1 || ! -L ${entries[0]} ]]; then
     exit 1
 fi
 
-encode_cmd=("$makocode_bin" encode --input=input --ecc=0.00 "--output-dir=$page_dir")
+encode_cmd=("$makocode_bin" encode --input=input --ecc=0.46 "--output-dir=$page_dir")
 (cd "$source_dir" && "${encode_cmd[@]}") >/dev/null
 
 shopt -s nullglob

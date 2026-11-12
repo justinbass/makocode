@@ -60,7 +60,7 @@ payload_seed=$(mako_test_case_seed "page_fit/$label")
 for mode in both height width; do
     local_page_dir="$work_dir/${label}_fit_${mode}_pages"
     mkdir -p "$local_page_dir"
-    encode_cmd=("$makocode_bin" encode --ecc=0.00 \
+    encode_cmd=("$makocode_bin" encode --ecc=0.02 \
         "--output-dir=$local_page_dir" "--prefix=${label}_${mode}")
     if [[ $mode == height ]]; then
         encode_cmd+=(--page-width=500)
@@ -108,7 +108,7 @@ done
 margin_pages="$work_dir/${label}_margin_pages"
 mkdir -p "$margin_pages"
 printf 'makocode' |
-    "$makocode_bin" encode --ecc=0.00 \
+    "$makocode_bin" encode --ecc=1.71 \
         --page-width=160 --page-height=160 \
         "--output-dir=$margin_pages" "--prefix=${label}_margin" >/dev/null
 shopt -s nullglob

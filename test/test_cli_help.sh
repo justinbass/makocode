@@ -113,7 +113,7 @@ run_expect_help top-level-short-help 'Usage:' 'makocode encode [options]' \
 run_expect_help unknown-command 'Usage:' 'makocode encode [options]' "$makocode_bin" unknown-command
 run_expect_help encode-help 'Usage: makocode encode' '--input PATH' "$makocode_bin" encode --help
 run_expect_help encode-footer-help 'Usage: makocode encode' '--footer TEXT' "$makocode_bin" encode --help
-run_expect_help encode-ecc-help 'default 0.10' 'sufficient base --ecc value' \
+run_expect_help encode-ecc-help 'default 0.10' 'minimum base --ecc value' \
     "$makocode_bin" encode --help
 run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" decode --help
 run_expect_help overlay-help 'Usage: makocode overlay' '--overlay-ecc-target TARGET' "$makocode_bin" overlay --help
@@ -145,6 +145,10 @@ if [[ -z $minimum_small_page_ecc ]]; then
     exit 1
 fi
 mkdir -p "$tmp_dir/small_page_minimum"
+run_expect_reject ecc-zero-metadata-overwrite 'use at least base --ecc' \
+    "$makocode_bin" encode "--input=$tmp_dir/small_page.bin" \
+    --page-width=80 --page-height=80 --ecc=0.00 \
+    "--output-dir=$tmp_dir/ecc_zero_out"
 "$makocode_bin" encode "--input=$tmp_dir/small_page.bin" \
     --page-width=80 --page-height=80 "--ecc=$minimum_small_page_ecc" \
     "--output-dir=$tmp_dir/small_page_minimum" --prefix=small_page_minimum >/dev/null

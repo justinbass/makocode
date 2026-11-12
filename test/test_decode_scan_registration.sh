@@ -6,7 +6,7 @@ label=${2:-decode_scan_registration}
 work=$(mktemp -d "$root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work/pages"
 printf 'registration regression' > "$work/input.bin"
-(cd "$work" && "$bin" encode --input=input.bin --ecc=0.00 --page-width=80 --page-height=80 --output-dir=pages --prefix=page >/dev/null)
+(cd "$work" && "$bin" encode --input=input.bin --ecc=1.86 --page-width=80 --page-height=80 --output-dir=pages --prefix=page >/dev/null)
 python3 - "$work/pages/page.ppm" "$work/scan.ppm" <<'PY'
 import math
 import random

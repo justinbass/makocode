@@ -79,7 +79,7 @@ fi
 printf '%s compile test-only decoder paths harness\n' "$(mako_format_label "$label")"
 "${CXX:-g++}" "${cxx_flags[@]}" "$harness_src" -o "$harness_bin"
 "$harness_bin" "$p5_fixture" "$p6_fixture" "$bad_format_fixture" "$harness_output"
-for ecc in 0.00 0.11; do
+for ecc in 0.13 0.11; do
     mode_dir="$work_dir/ecc_$ecc"
     input_dir="$mode_dir/input"
     ppm_dir="$mode_dir/ppm"
@@ -116,7 +116,7 @@ for ecc in 0.00 0.11; do
     printf ' %q' "${decode_cmd[@]}"
     printf '\n'
     "${decode_cmd[@]}" >/dev/null
-    if [[ $ecc == 0.00 ]]; then
+    if [[ $ecc == 0.13 ]]; then
         password_decode_dir="$mode_dir/decoded_with_ignored_password"
         mkdir -p "$password_decode_dir"
         password_decode_output="$mode_dir/decode_with_ignored_password_output.txt"
