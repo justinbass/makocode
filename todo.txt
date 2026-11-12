@@ -1,6 +1,8 @@
 TODO
 
 Features:
+- Investigate large white space in metadata section
+- Ecc/overlay compact_u16, make sure fill cases zero pad. Or increase to u64, but at high data (2^64) there might be zero padding anyways.
 - Security
   - PCG64 is not cryptographically secure for salt/nonce.
   - Hidden volume for plausible deniability
@@ -32,7 +34,7 @@ Features:
     - ECC (0 -> 65535), difficult to distinguish from data. Come up with a good encoder default, to use as a starting point. Measured from real tests.
     - Fiducials are easy to visibly measure, may not be needed in metadata at all...
     - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
-    - MA KO CO DE, if it's missing we don't know rotation. Rotation 90, 180, 270 tests, try each orientation.
+    - MA KO CO DE, if it's missing we don't know orientation. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
     - Pre-data section recovery (TBD)
 - Partial data recovery (ECC insufficient for damage), print warning not failure
