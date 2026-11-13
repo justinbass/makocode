@@ -4,7 +4,7 @@ A standard for color barcode printing with high density, designed for long-term 
 
 Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu, Mako 🐕, and about as silly as him.
 
-Written entirely with codex-gpt-5.
+Written entirely with gpt (totally not vibecoded).
 
 ## License
 
