@@ -1238,30 +1238,21 @@ static void cmd_transform(int argc, char** argv) {
                 canonical_control_source_mask[(size_t)y * (size_t)ppm.width + (size_t)x] = 1u;
             }
         }
-        // Keep the encoded default fiducial markers intact so the transformed
-        // test still checks their exact decoded locations after the overwrite.
-        const unsigned int marker_size = 4u;
+        // Keep the encoded 2x2 centered fiducial lattice intact during the
+        // transformation so the decoder test sees the original markers.
+        const unsigned int marker_size = 2u;
         const unsigned int spacing = 24u;
-        const unsigned int margin = 12u;
-        double min_x = (margin < (unsigned int)ppm.width) ? (double)margin : 0.0;
-        double max_x = (ppm.width > (int)margin)
-                           ? (double)(ppm.width - 1 - (int)margin)
-                           : (double)(ppm.width - 1);
-        double min_y = (margin < (unsigned int)ppm.height) ? (double)margin : 0.0;
-        double max_y = (ppm.height > (int)margin)
-                           ? (double)(ppm.height - 1 - (int)margin)
-                           : (double)(ppm.height - 1);
-        if (max_x < min_x) max_x = min_x;
-        if (max_y < min_y) max_y = min_y;
-        unsigned int columns = (unsigned int)ceil((max_x - min_x) / (double)spacing) + 1u;
-        unsigned int rows = (unsigned int)ceil((max_y - min_y) / (double)spacing) + 1u;
+        unsigned int columns = (unsigned int)ppm.width >= marker_size
+            ? 2u * (((unsigned int)ppm.width - marker_size) / (2u * spacing)) + 1u : 0u;
+        unsigned int rows = (unsigned int)ppm.height >= marker_size
+            ? 2u * (((unsigned int)ppm.height - marker_size) / (2u * spacing)) + 1u : 0u;
         for (unsigned int row = 0u; row < rows; ++row) {
-            double t_y = (rows == 1u) ? 0.5 : (double)row / (double)(rows - 1u);
-            double center_y = min_y + (max_y - min_y) * t_y;
+            double center_y = ((double)ppm.height - 1.0) * 0.5 +
+                              ((double)row - ((double)rows - 1.0) * 0.5) * spacing;
             int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
             for (unsigned int column = 0u; column < columns; ++column) {
-                double t_x = (columns == 1u) ? 0.5 : (double)column / (double)(columns - 1u);
-                double center_x = min_x + (max_x - min_x) * t_x;
+                double center_x = ((double)ppm.width - 1.0) * 0.5 +
+                                  ((double)column - ((double)columns - 1.0) * 0.5) * spacing;
                 int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
                 for (unsigned int dy = 0u; dy < marker_size; ++dy) {
                     int y = start_y + (int)dy;

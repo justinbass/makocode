@@ -61,6 +61,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -8226,42 +8227,39 @@ struct PageFooterConfig {
 };
 
 struct FiducialGridDefaults {
-    u32 marker_size_pixels = 4u;
     u32 spacing_pixels = 24u;
-    u32 margin_pixels = 12u;
 };
 
 static FiducialGridDefaults g_fiducial_defaults;
 
-static void compute_default_fiducial_dimensions(u32 width_pixels,
-                                                u32 draw_height_pixels,
-                                                u32 margin_pixels,
+static const u32 FIDUCIAL_MARKER_SIZE_PIXELS = 2u;
+
+static u32 compute_fiducial_grid_count(u32 extent_pixels, u32 spacing_pixels) {
+    if (extent_pixels < FIDUCIAL_MARKER_SIZE_PIXELS || spacing_pixels == 0u) return 0u;
+    u32 intervals_each_side = (u32)((u64)(extent_pixels - FIDUCIAL_MARKER_SIZE_PIXELS) /
+                                    (2ull * (u64)spacing_pixels));
+    if (intervals_each_side > (0xFFFFFFFFu - 1u) / 2u) return 0u;
+    return intervals_each_side * 2u + 1u;
+}
+
+static void compute_centered_fiducial_dimensions(u32 width_pixels,
+                                                u32 data_height_pixels,
+                                                u32 spacing_pixels,
                                                 u32& columns_out,
                                                 u32& rows_out) {
-    u32 smaller_edge = width_pixels < draw_height_pixels ? width_pixels : draw_height_pixels;
-    u32 maximum_margin = smaller_edge > 0u ? (smaller_edge - 1u) / 2u : 0u;
-    if (margin_pixels > maximum_margin) margin_pixels = maximum_margin;
-    double min_x = (margin_pixels < width_pixels) ? (double)margin_pixels : 0.0;
-    double max_x = (width_pixels > margin_pixels)
-                       ? (double)(width_pixels - 1u - margin_pixels)
-                       : (double)(width_pixels - 1u);
-    double min_y = (margin_pixels < draw_height_pixels) ? (double)margin_pixels : 0.0;
-    double max_y = (draw_height_pixels > margin_pixels)
-                       ? (double)(draw_height_pixels - 1u - margin_pixels)
-                       : (double)(draw_height_pixels - 1u);
-    double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
-    double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
-    u32 spacing = g_fiducial_defaults.spacing_pixels;
-    columns_out = 1u;
-    rows_out = 1u;
-    if (spacing > 0u && available_width > 0.0) {
-        double intervals = available_width / (double)spacing;
-        columns_out = (u32)((u64)ceil(intervals) + 1ull);
-    }
-    if (spacing > 0u && available_height > 0.0) {
-        double intervals = available_height / (double)spacing;
-        rows_out = (u32)((u64)ceil(intervals) + 1ull);
-    }
+    columns_out = compute_fiducial_grid_count(width_pixels, spacing_pixels);
+    rows_out = compute_fiducial_grid_count(data_height_pixels, spacing_pixels);
+}
+
+static double fiducial_lattice_center(u32 index,
+                                      u32 count,
+                                      u32 extent_pixels,
+                                      double spacing_pixels) {
+    double logical_center = ((double)extent_pixels - 1.0) * 0.5 +
+                            ((double)index - ((double)count - 1.0) * 0.5) * spacing_pixels;
+    double marker_start = (double)(int)(logical_center -
+                                        ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
+    return marker_start + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5;
 }
 
 static const u32 CURRENT_TILE_SCHEMA_VERSION = 0u;
@@ -8280,10 +8278,9 @@ static bool compute_fiducial_reservation(u32 width_pixels,
                                          u64& reserved_data_pixels,
                                          makocode::ByteBuffer* mask_out = 0,
                                          bool use_grid_override = false,
-                                         u32 marker_size_override = 0u,
                                          u32 columns_override = 0u,
                                          u32 rows_override = 0u,
-                                         u32 margin_override = 0u);
+                                         u32 spacing_override = 0u);
 
 static bool compute_fiducial_marker_mask(u32 width_pixels,
                                          u32 height_pixels,
@@ -8291,10 +8288,9 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
                                          u64& reserved_data_pixels,
                                          makocode::ByteBuffer* mask_out,
                                          bool use_grid_override,
-                                         u32 marker_size_override,
                                          u32 columns_override,
                                          u32 rows_override,
-                                         u32 margin_override);
+                                         u32 spacing_override);
 
 static const u8 OVERWRITE_MASK_PIXEL = 1u;
 
@@ -8617,7 +8613,7 @@ namespace MetadataTile {
         u32 page_width_pixels;
         u32 page_height_pixels;
         u32 footer_rows;
-        u32 fiducial_marker_size_pixels;
+        u32 fiducial_spacing_pixels;
         bool ecc_enabled;
         u16 ecc_header_magic;
         u8 ecc_header_version;
@@ -8629,7 +8625,6 @@ namespace MetadataTile {
         u64 ecc_original_bytes;
         u32 fiducial_columns;
         u32 fiducial_rows;
-        u32 fiducial_margin_pixels;
         u16 ecc_target_hundredths;
         // Q0.16 overlay fraction, stored as raw / 65536.
         u16 overlay_fraction_value;
@@ -8668,7 +8663,7 @@ namespace MetadataTile {
               page_width_pixels(0u),
               page_height_pixels(0u),
               footer_rows(0u),
-              fiducial_marker_size_pixels(0u),
+              fiducial_spacing_pixels(24u),
               ecc_enabled(false),
               ecc_header_magic(ECC_HEADER_MAGIC),
               ecc_header_version(ECC_HEADER_VERSION),
@@ -8680,7 +8675,6 @@ namespace MetadataTile {
               ecc_original_bytes(0u),
               fiducial_columns(0u),
               fiducial_rows(0u),
-              fiducial_margin_pixels(0u),
               ecc_target_hundredths(0u),
               overlay_fraction_value(0u),
               overwrite_layout(true),
@@ -8742,8 +8736,9 @@ namespace MetadataTile {
             values.page_height_pixels == 0u ||
             values.palette_count < 2u ||
             values.palette_count > MAX_CUSTOM_PALETTE_COLORS ||
-            !values.overwrite_layout || !values.fiducial_columns ||
-            !values.fiducial_rows || values.fiducial_columns > 0xFFFFu ||
+            !values.overwrite_layout ||
+            values.fiducial_spacing_pixels < FIDUCIAL_MARKER_SIZE_PIXELS ||
+            values.fiducial_columns > 0xFFFFu ||
             values.fiducial_rows > 0xFFFFu ||
             values.payload_bytes > (u64)USIZE_MAX_VALUE) return false;
         Values expected = values;
@@ -8768,12 +8763,11 @@ namespace MetadataTile {
             !write_compact_u64(writer, values.page_index) ||
             !write_compact_u64(writer, (u64)values.page_width_pixels) ||
             !write_compact_u64(writer, (u64)values.page_height_pixels) ||
-            !write_compact_u64(writer, (u64)values.fiducial_marker_size_pixels) ||
             !write_compact_u16(writer, (u32)values.ecc_target_hundredths, true) ||
             !write_compact_u16(writer, (u32)values.overlay_fraction_value, true) ||
+            !write_compact_u64(writer, (u64)values.fiducial_spacing_pixels) ||
             !write_compact_u64(writer, (u64)values.fiducial_columns) ||
-            !write_compact_u64(writer, (u64)values.fiducial_rows) ||
-            !write_compact_u64(writer, (u64)values.fiducial_margin_pixels)) return false;
+            !write_compact_u64(writer, (u64)values.fiducial_rows)) return false;
 
         if (!writer.align_to_byte()) return false;
         usize bytes = writer.byte_size();
@@ -8879,18 +8873,17 @@ namespace MetadataTile {
         out_values.page_width_pixels = (u32)value;
         if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
         out_values.page_height_pixels = (u32)value;
-        if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
-        out_values.fiducial_marker_size_pixels = (u32)value;
         if (!read_compact_u16(reader, compact_value, true) || compact_value > 0xFFFFu) return false;
         out_values.ecc_target_hundredths = (u16)compact_value;
         if (!read_compact_u16(reader, compact_value, true)) return false;
         out_values.overlay_fraction_value = (u16)compact_value;
+        if (!read_compact_u64(reader, value) ||
+            value < FIDUCIAL_MARKER_SIZE_PIXELS || value > 0xFFFFFFFFu) return false;
+        out_values.fiducial_spacing_pixels = (u32)value;
         if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
         out_values.fiducial_columns = (u32)value;
         if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
         out_values.fiducial_rows = (u32)value;
-        if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
-        out_values.fiducial_margin_pixels = (u32)value;
         if (!derive_schema_payload_layout(out_values)) return false;
         if (reader.failed || !metadata_values_sane(out_values)) return false;
         return build_palette_text_from_colors(out_values.palette,
@@ -13005,14 +12998,12 @@ struct PpmParserState {
     u64 skew_src_height_value;
     bool has_skew_y_pixels;
     double skew_y_pixels_value;
-    bool has_fiducial_size;
-    u64 fiducial_size_value;
+    bool has_fiducial_spacing;
+    u64 fiducial_spacing_value;
     bool has_fiducial_columns;
     u64 fiducial_columns_value;
     bool has_fiducial_rows;
     u64 fiducial_rows_value;
-    bool has_fiducial_margin;
-    u64 fiducial_margin_value;
 
     PpmParserState()
         : has_encoded_tile(false),
@@ -13068,14 +13059,12 @@ struct PpmParserState {
           skew_src_height_value(0u),
           has_skew_y_pixels(false),
           skew_y_pixels_value(0.0),
-          has_fiducial_size(false),
-          fiducial_size_value(0u),
+          has_fiducial_spacing(false),
+          fiducial_spacing_value(0u),
           has_fiducial_columns(false),
           fiducial_columns_value(0u),
           has_fiducial_rows(false),
-          fiducial_rows_value(0u),
-          has_fiducial_margin(false),
-          fiducial_margin_value(0u) {
+          fiducial_rows_value(0u) {
         palette_text[0] = '\0';
     }
 };
@@ -13411,7 +13400,7 @@ static bool estimate_rotation_from_gradients(const u8* pixel_data,
                                              u64 height,
                                              u64 expected_width,
                                              u64 expected_height,
-                                             double fiducial_margin,
+                                             double gradient_border_pixels,
                                              double& out_degrees,
                                              double& out_scale) {
     double scale_x_est = (double)width / (double)expected_width;
@@ -13420,7 +13409,7 @@ static bool estimate_rotation_from_gradients(const u8* pixel_data,
     if (scale_est < 1.0) {
         scale_est = 1.0;
     }
-    int margin = (int)(fiducial_margin * scale_est + 0.5);
+    int margin = (int)(gradient_border_pixels * scale_est + 0.5);
     if (margin < 2) {
         margin = 2;
     }
@@ -13497,7 +13486,7 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                                                 u32 fiducial_rows,
                                                 u64 expected_width,
                                                 u64 expected_height,
-                                                double fiducial_margin,
+                                                double fiducial_spacing,
                                                 u64 image_width,
                                                 u64 image_height,
                                                 const PpmParserState& state,
@@ -13513,7 +13502,6 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         !expected_width || !expected_height || !image_width || !image_height) {
         return false;
     }
-    (void)fiducial_margin;
     u64 point_count = (u64)fiducial_columns * (u64)fiducial_rows;
     if (out_affine) {
         *out_affine = AffineTransform();
@@ -13523,18 +13511,10 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     }
 
     if (visible_mask && out_affine) {
-        double marker_half_span = (state.has_fiducial_size && state.fiducial_size_value > 0u)
-                                      ? ((double)state.fiducial_size_value - 1.0) * 0.5
-                                      : 0.0;
-        double marker_min_x = (fiducial_margin < (double)expected_width) ? fiducial_margin : 0.0;
-        double marker_max_x = (double)expected_width - 1.0 - fiducial_margin;
-        double marker_min_y = (fiducial_margin < (double)expected_height) ? fiducial_margin : 0.0;
-        double marker_max_y = (double)expected_height - 1.0 - fiducial_margin;
-        if (marker_max_x < marker_min_x) marker_max_x = marker_min_x;
-        if (marker_max_y < marker_min_y) marker_max_y = marker_min_y;
-        auto rendered_marker_center = [&](double center) -> double {
-            return (double)(int)(center - marker_half_span) + marker_half_span + 0.5;
-        };
+        u32 logical_data_height = (u32)expected_height;
+        if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
+            logical_data_height -= (u32)state.footer_rows_value;
+        }
         double mean_logical_x = 0.0;
         double mean_logical_y = 0.0;
         double mean_screen_x = 0.0;
@@ -13545,8 +13525,8 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         u32 min_visible_col = fiducial_columns;
         u32 max_visible_col = 0u;
         for (u32 row = 0u; row < fiducial_rows; ++row) {
-            double t_y = (fiducial_rows <= 1u) ? 0.5 : (double)row / (double)(fiducial_rows - 1u);
-            double logical_y = rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y);
+            double logical_y = fiducial_lattice_center(row, fiducial_rows,
+                                                       logical_data_height, fiducial_spacing);
             for (u32 col = 0u; col < fiducial_columns; ++col) {
                 usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
                 if (!visible_mask[idx]) continue;
@@ -13554,8 +13534,8 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                 if (row > max_visible_row) max_visible_row = row;
                 if (col < min_visible_col) min_visible_col = col;
                 if (col > max_visible_col) max_visible_col = col;
-                double t_x = (fiducial_columns <= 1u) ? 0.5 : (double)col / (double)(fiducial_columns - 1u);
-                double logical_x = rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x);
+                double logical_x = fiducial_lattice_center(col, fiducial_columns,
+                                                           (u32)expected_width, fiducial_spacing);
                 mean_logical_x += logical_x;
                 mean_logical_y += logical_y;
                 mean_screen_x += centers_x[idx];
@@ -13580,14 +13560,14 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         double Sxx = 0.0, Syy = 0.0, Sxy = 0.0;
         double SxX = 0.0, SyX = 0.0, SxY = 0.0, SyY = 0.0;
         for (u32 row = 0u; row < fiducial_rows; ++row) {
-            double t_y = (fiducial_rows <= 1u) ? 0.5 : (double)row / (double)(fiducial_rows - 1u);
-            double logical_y = rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y);
+            double logical_y = fiducial_lattice_center(row, fiducial_rows,
+                                                       logical_data_height, fiducial_spacing);
             double centered_y = logical_y - mean_logical_y;
             for (u32 col = 0u; col < fiducial_columns; ++col) {
                 usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
                 if (!visible_mask[idx]) continue;
-                double t_x = (fiducial_columns <= 1u) ? 0.5 : (double)col / (double)(fiducial_columns - 1u);
-                double centered_x = rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x) -
+                double centered_x = fiducial_lattice_center(col, fiducial_columns,
+                                                            (u32)expected_width, fiducial_spacing) -
                                     mean_logical_x;
                 double centered_screen_x = centers_x[idx] - mean_screen_x;
                 double centered_screen_y = centers_y[idx] - mean_screen_y;
@@ -13612,10 +13592,100 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                          out_affine->a01 * mean_logical_y;
         out_affine->ty = mean_screen_y - out_affine->a10 * mean_logical_x -
                          out_affine->a11 * mean_logical_y;
+        for (u32 fit_round = 0u; fit_round < 3u; ++fit_round) {
+            double robust_mean_x = 0.0;
+            double robust_mean_y = 0.0;
+            double robust_mean_screen_x = 0.0;
+            double robust_mean_screen_y = 0.0;
+            u64 robust_count = 0u;
+            double residual_limit_sq = fit_round == 0u ? 25.0 : 6.25;
+            for (u32 row = 0u; row < fiducial_rows; ++row) {
+                double logical_y = fiducial_lattice_center(row, fiducial_rows,
+                                                           logical_data_height, fiducial_spacing);
+                for (u32 col = 0u; col < fiducial_columns; ++col) {
+                    usize idx = (usize)row * (usize)fiducial_columns + col;
+                    if (!visible_mask[idx]) continue;
+                    double logical_x = fiducial_lattice_center(col, fiducial_columns,
+                                                               (u32)expected_width, fiducial_spacing);
+                    double residual_x = centers_x[idx] - (out_affine->a00 * logical_x +
+                                                            out_affine->a01 * logical_y + out_affine->tx);
+                    double residual_y = centers_y[idx] - (out_affine->a10 * logical_x +
+                                                            out_affine->a11 * logical_y + out_affine->ty);
+                    if (residual_x * residual_x + residual_y * residual_y > residual_limit_sq) continue;
+                    robust_mean_x += logical_x;
+                    robust_mean_y += logical_y;
+                    robust_mean_screen_x += centers_x[idx];
+                    robust_mean_screen_y += centers_y[idx];
+                    ++robust_count;
+                }
+            }
+            if (robust_count < 12u || robust_count * 3u < visible_count) break;
+            double inverse_count = 1.0 / (double)robust_count;
+            robust_mean_x *= inverse_count;
+            robust_mean_y *= inverse_count;
+            robust_mean_screen_x *= inverse_count;
+            robust_mean_screen_y *= inverse_count;
+            double robust_sxx = 0.0;
+            double robust_syy = 0.0;
+            double robust_sxy = 0.0;
+            double robust_sx_screen_x = 0.0;
+            double robust_sy_screen_x = 0.0;
+            double robust_sx_screen_y = 0.0;
+            double robust_sy_screen_y = 0.0;
+            for (u32 row = 0u; row < fiducial_rows; ++row) {
+                double logical_y = fiducial_lattice_center(row, fiducial_rows,
+                                                           logical_data_height, fiducial_spacing);
+                double centered_y = logical_y - robust_mean_y;
+                for (u32 col = 0u; col < fiducial_columns; ++col) {
+                    usize idx = (usize)row * (usize)fiducial_columns + col;
+                    if (!visible_mask[idx]) continue;
+                    double logical_x = fiducial_lattice_center(col, fiducial_columns,
+                                                               (u32)expected_width, fiducial_spacing);
+                    double residual_x = centers_x[idx] - (out_affine->a00 * logical_x +
+                                                            out_affine->a01 * logical_y + out_affine->tx);
+                    double residual_y = centers_y[idx] - (out_affine->a10 * logical_x +
+                                                            out_affine->a11 * logical_y + out_affine->ty);
+                    if (residual_x * residual_x + residual_y * residual_y > residual_limit_sq) continue;
+                    double centered_x = logical_x - robust_mean_x;
+                    double centered_screen_x = centers_x[idx] - robust_mean_screen_x;
+                    double centered_screen_y = centers_y[idx] - robust_mean_screen_y;
+                    robust_sxx += centered_x * centered_x;
+                    robust_syy += centered_y * centered_y;
+                    robust_sxy += centered_x * centered_y;
+                    robust_sx_screen_x += centered_x * centered_screen_x;
+                    robust_sy_screen_x += centered_y * centered_screen_x;
+                    robust_sx_screen_y += centered_x * centered_screen_y;
+                    robust_sy_screen_y += centered_y * centered_screen_y;
+                }
+            }
+            double robust_det = robust_sxx * robust_syy - robust_sxy * robust_sxy;
+            if (robust_det <= 1e-9) break;
+            double robust_a00 = (robust_sx_screen_x * robust_syy -
+                                 robust_sy_screen_x * robust_sxy) / robust_det;
+            double robust_a01 = (robust_sy_screen_x * robust_sxx -
+                                 robust_sx_screen_x * robust_sxy) / robust_det;
+            double robust_a10 = (robust_sx_screen_y * robust_syy -
+                                 robust_sy_screen_y * robust_sxy) / robust_det;
+            double robust_a11 = (robust_sy_screen_y * robust_sxx -
+                                 robust_sx_screen_y * robust_sxy) / robust_det;
+            out_affine->a00 = robust_a00;
+            out_affine->a01 = robust_a01;
+            out_affine->a10 = robust_a10;
+            out_affine->a11 = robust_a11;
+            out_affine->tx = robust_mean_screen_x - robust_a00 * robust_mean_x -
+                             robust_a01 * robust_mean_y;
+            out_affine->ty = robust_mean_screen_y - robust_a10 * robust_mean_x -
+                             robust_a11 * robust_mean_y;
+        }
         double scale_x = sqrt(out_affine->a00 * out_affine->a00 + out_affine->a10 * out_affine->a10);
         double scale_y = sqrt(out_affine->a01 * out_affine->a01 + out_affine->a11 * out_affine->a11);
         if (scale_x <= 0.0 || scale_y <= 0.0) {
             return false;
+        }
+        if (fabs(out_affine->a01) > 0.0005 * scale_x ||
+            fabs(out_affine->a10) > 0.0005 * scale_y) {
+            out_affine->tx -= (out_affine->a00 + out_affine->a01) * 0.5;
+            out_affine->ty -= (out_affine->a10 + out_affine->a11) * 0.5;
         }
         double rotation_degrees = makocode::image::normalize_angle(
             atan2(out_affine->a10 - out_affine->a01,
@@ -13691,18 +13761,16 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
     };
 
     auto logical_column_value = [&](u32 col_index) -> double {
-        if (fiducial_columns <= 1u) {
-            return (double)expected_width * 0.5;
-        }
-        double t = (double)col_index / (double)(fiducial_columns - 1u);
-        return t * (double)expected_width;
+        return fiducial_lattice_center(col_index, fiducial_columns,
+                                       (u32)expected_width, fiducial_spacing);
     };
+    u32 logical_data_height = (u32)expected_height;
+    if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
+        logical_data_height -= (u32)state.footer_rows_value;
+    }
     auto logical_row_value = [&](u32 row_index) -> double {
-        if (fiducial_rows <= 1u) {
-            return (double)expected_height * 0.5;
-        }
-        double t = (double)row_index / (double)(fiducial_rows - 1u);
-        return t * (double)expected_height;
+        return fiducial_lattice_center(row_index, fiducial_rows,
+                                       logical_data_height, fiducial_spacing);
     };
     const double integer_snap_tolerance = 0.12;
 
@@ -14128,36 +14196,15 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
 
     bool affine_fit_valid = false;
     if (out_affine) {
-        // The fiducial markers sit inside the page margin; they do not occupy
-        // the first and last logical pixel. Fit their observed centers against
-        // the same margin-aware positions used when the grid is drawn.
-        double marker_half_span = (state.has_fiducial_size && state.fiducial_size_value > 0u)
-                                      ? ((double)state.fiducial_size_value - 1.0) * 0.5
-                                      : 0.0;
-        double marker_min_x = (fiducial_margin < (double)expected_width) ? fiducial_margin : 0.0;
-        double marker_max_x = (double)expected_width - 1.0 - fiducial_margin;
-        double marker_min_y = (fiducial_margin < (double)expected_height) ? fiducial_margin : 0.0;
-        double marker_max_y = (double)expected_height - 1.0 - fiducial_margin;
-        if (marker_max_x < marker_min_x) marker_max_x = marker_min_x;
-        if (marker_max_y < marker_min_y) marker_max_y = marker_min_y;
-        auto rendered_marker_center = [&](double center) -> double {
-            double start = (double)(int)(center - marker_half_span);
-            return start + marker_half_span + 0.5;
-        };
+        // The affine fit uses the same center-anchored lattice as the encoder.
         double Sxx = 0.0, Syy = 0.0, Sxy = 0.0;
         double Sx = 0.0, Sy = 0.0;
         double SX = 0.0, SY = 0.0;
         double SxX = 0.0, SyX = 0.0, SxY = 0.0, SyY = 0.0;
         for (u32 row = 0u; row < fiducial_rows; ++row) {
-            double t_y = (fiducial_rows <= 1u) ? 0.5 : ((double)row / (double)(fiducial_rows - 1u));
-            double logical_y = refine_affine_fit
-                                   ? rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y)
-                                   : logical_row_value(row);
+            double logical_y = logical_row_value(row);
             for (u32 col = 0u; col < fiducial_columns; ++col) {
-                double t_x = (fiducial_columns <= 1u) ? 0.5 : ((double)col / (double)(fiducial_columns - 1u));
-                double logical_x = refine_affine_fit
-                                       ? rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x)
-                                       : logical_column_value(col);
+                double logical_x = logical_column_value(col);
                 usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
                 double px = centers_x[idx];
                 double py = centers_y[idx];
@@ -14193,11 +14240,9 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                 double RxX = 0.0, RyX = 0.0, RxY = 0.0, RyY = 0.0;
                 robust_inlier_count = 0u;
                 for (u32 row = 0u; row < fiducial_rows; ++row) {
-                    double t_y = (fiducial_rows <= 1u) ? 0.5 : ((double)row / (double)(fiducial_rows - 1u));
-                    double logical_y = rendered_marker_center(marker_min_y + (marker_max_y - marker_min_y) * t_y);
+                    double logical_y = logical_row_value(row);
                     for (u32 col = 0u; col < fiducial_columns; ++col) {
-                        double t_x = (fiducial_columns <= 1u) ? 0.5 : ((double)col / (double)(fiducial_columns - 1u));
-                        double logical_x = rendered_marker_center(marker_min_x + (marker_max_x - marker_min_x) * t_x);
+                        double logical_x = logical_column_value(col);
                         usize idx = (usize)row * (usize)fiducial_columns + (usize)col;
                         double residual_x = centers_x[idx] - (a00 * logical_x + a01 * logical_y + tx);
                         double residual_y = centers_y[idx] - (a10 * logical_x + a11 * logical_y + ty);
@@ -14256,6 +14301,18 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
         }
     }
 
+    if (affine_fit_valid && out_affine) {
+        double affine_scale_x = sqrt(out_affine->a00 * out_affine->a00 +
+                                     out_affine->a10 * out_affine->a10);
+        double affine_scale_y = sqrt(out_affine->a01 * out_affine->a01 +
+                                     out_affine->a11 * out_affine->a11);
+        if (fabs(out_affine->a01) > 0.0005 * affine_scale_x ||
+            fabs(out_affine->a10) > 0.0005 * affine_scale_y) {
+            out_affine->tx -= (out_affine->a00 + out_affine->a01) * 0.5;
+            out_affine->ty -= (out_affine->a10 + out_affine->a11) * 0.5;
+        }
+    }
+
     if (refine_affine_fit && affine_fit_valid && out_affine &&
         (fabs(out_affine->a00 + out_affine->a11) > 1e-9 ||
                        fabs(out_affine->a10 - out_affine->a01) > 1e-9)) {
@@ -14293,8 +14350,7 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                                     u64 height,
                                     u32 fiducial_columns,
                                     u32 fiducial_rows,
-                                    double fiducial_margin,
-                                    double fiducial_size_value,
+                                    double fiducial_spacing,
                                     u64 expected_width,
                                     u64 expected_height,
                                     u64 expected_data_height,
@@ -14304,7 +14360,8 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                                     const MetadataTile::AffineParams* affine_hint = 0,
                                     const AffineTransform* screen_transform_hint = 0,
                                     u8** visible_out = 0,
-                                    bool wide_search = false) {
+                                                bool wide_search = false,
+                                                const ImageMappingConfig* mapping_hint = 0) {
     if (!pixel_data || !width || !height || !fiducial_columns || !fiducial_rows) {
         return false;
     }
@@ -14332,29 +14389,22 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     if (scale_est < 1.0) {
         scale_est = 1.0;
     }
-    double margin_pixels = (fiducial_margin >= 0.0) ? (fiducial_margin * scale_est) : 0.0;
-    double min_x = margin_pixels;
-    double max_x = (width > 0u) ? ((double)(width - 1u) - margin_pixels) : 0.0;
-    if (max_x < min_x) {
-        max_x = min_x;
-    }
-    double min_y = margin_pixels;
-    double max_y = (height > 0u) ? ((double)(height - 1u) - margin_pixels) : 0.0;
-    if (max_y < min_y) {
-        max_y = min_y;
-    }
-    double fiducial_size_pixels = (fiducial_size_value > 0.0) ? fiducial_size_value : 1.0;
+    double fiducial_size_pixels = (double)FIDUCIAL_MARKER_SIZE_PIXELS;
     fiducial_size_pixels *= scale_est;
-    double marker_half_span = (fiducial_size_value > 0.0) ? ((fiducial_size_value - 1.0) * 0.5) : 0.0;
+    u8 fiducial_rgb[3] = {};
+    u8 fiducial_background_rgb[3] = {};
+    if (mapping_hint) {
+        footer_select_colors(*mapping_hint, fiducial_rgb, fiducial_background_rgb);
+    }
     MetadataTile::Placement logical_tile = {};
     bool use_affine_hint = affine_hint && affine_hint->pitch_pixels > 0.0 &&
                            expected_width <= 0xFFFFFFFFull && expected_data_height <= 0xFFFFFFFFull;
     bool use_screen_transform_hint = screen_transform_hint != 0;
-    if (use_affine_hint) {
+    if (expected_width <= 0xFFFFFFFFull && expected_data_height <= 0xFFFFFFFFull) {
         logical_tile = MetadataTile::compute_center_tile_placement(
             (u32)expected_width, (u32)expected_data_height);
-        use_affine_hint = logical_tile.valid;
     }
+    use_affine_hint = use_affine_hint && logical_tile.valid;
     double logical_tile_center_x = use_affine_hint
                                        ? ((double)logical_tile.x0 + (double)MetadataTile::TILE_SIDE * 0.5)
                                        : 0.0;
@@ -14385,9 +14435,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     u64 total_bytes = pixel_count * 3u;
     u64* intensity_integral = 0;
     usize integral_stride = 0u;
-    u32 integral_marker_width = (u32)(fiducial_size_value * scale_x_est + 0.5);
-    u32 integral_marker_height = (u32)(fiducial_size_value * scale_y_est + 0.5);
-    bool need_integral = refine_marker_centers && scale_est >= 1.5 &&
+    u32 integral_marker_width = (u32)((double)FIDUCIAL_MARKER_SIZE_PIXELS * scale_x_est + 0.5);
+    u32 integral_marker_height = (u32)((double)FIDUCIAL_MARKER_SIZE_PIXELS * scale_y_est + 0.5);
+    bool need_integral = refine_marker_centers && scale_est >= 1.0 &&
                          integral_marker_width >= 2u && integral_marker_width <= 128u &&
                          integral_marker_height >= 2u && integral_marker_height <= 128u;
     if (need_integral && width < (u64)SIZE_MAX && height < (u64)SIZE_MAX &&
@@ -14405,9 +14455,8 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                     intensity_integral[current_row] = 0u;
                     for (u64 px = 0u; px < width; ++px) {
                         usize pixel = ((usize)py * (usize)width + (usize)px) * 3u;
-                        row_sum += (u64)pixel_data[pixel] +
-                                   (u64)pixel_data[pixel + 1u] +
-                                   (u64)pixel_data[pixel + 2u];
+                        row_sum += (u64)(MetadataTile::rgb_luminance_u8(
+                            pixel_data[pixel], pixel_data[pixel + 1u], pixel_data[pixel + 2u]) + 0.5);
                         intensity_integral[current_row + (usize)px + 1u] =
                             intensity_integral[previous_row + (usize)px + 1u] + row_sum;
                     }
@@ -14467,9 +14516,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                     continue;
                 }
             }
-            double intensity = ((double)pixel_data[pixel_index + 0u] +
-                                (double)pixel_data[pixel_index + 1u] +
-                                (double)pixel_data[pixel_index + 2u]) / 3.0;
+            double intensity = MetadataTile::rgb_luminance_u8(pixel_data[pixel_index + 0u],
+                                                               pixel_data[pixel_index + 1u],
+                                                               pixel_data[pixel_index + 2u]);
             if (intensity < min_intensity) {
                 min_intensity = intensity;
             }
@@ -14497,17 +14546,15 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     }
 
     for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
-        double t_row = (fiducial_rows == 1u) ? 0.5 : ((double)row_index / (double)(fiducial_rows - 1u));
-        double approx_y = min_y + (max_y - min_y) * t_row;
+        double logical_center_y = fiducial_lattice_center(row_index, fiducial_rows,
+                                                           (u32)expected_data_height,
+                                                           fiducial_spacing);
+        double approx_y = logical_center_y * scale_y_est;
         for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
-            double t_col = (fiducial_columns == 1u) ? 0.5 : ((double)col_index / (double)(fiducial_columns - 1u));
-            double approx_x = min_x + (max_x - min_x) * t_col;
-            double logical_center_x = fiducial_margin +
-                                      ((double)expected_width - 1.0 - 2.0 * fiducial_margin) * t_col;
-            logical_center_x = (double)(int)(logical_center_x - marker_half_span) + marker_half_span;
-            double logical_center_y = fiducial_margin +
-                                      ((double)expected_data_height - 1.0 - 2.0 * fiducial_margin) * t_row;
-            logical_center_y = (double)(int)(logical_center_y - marker_half_span) + marker_half_span;
+            double logical_center_x = fiducial_lattice_center(col_index, fiducial_columns,
+                                                              (u32)expected_width,
+                                                              fiducial_spacing);
+            double approx_x = logical_center_x * scale_x_est;
             if (use_screen_transform_hint) {
                 approx_x = screen_transform_hint->a00 * logical_center_x +
                            screen_transform_hint->a01 * logical_center_y +
@@ -14559,7 +14606,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                     u32 r_val = pixel_data[sample_index + 0u];
                     u32 g_val = pixel_data[sample_index + 1u];
                     u32 b_val = pixel_data[sample_index + 2u];
-                    double intensity = ((double)r_val + (double)g_val + (double)b_val) / 3.0;
+                    double intensity = MetadataTile::rgb_luminance_u8((u8)r_val,
+                                                                       (u8)g_val,
+                                                                       (u8)b_val);
                     if (intensity <= dark_threshold) {
                         double weight = (dark_threshold - intensity) + 1.0;
                         double dx = (double)sample_x_idx - approx_x;
@@ -14591,9 +14640,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 center_x = dark_x / dark_w;
                 center_y = dark_y / dark_w;
             }
-            u32 marker_width = (u32)(fiducial_size_value * scale_x_est + 0.5);
-            u32 marker_height = (u32)(fiducial_size_value * scale_y_est + 0.5);
-            if (refine_marker_centers && scale_est >= 1.5 &&
+            u32 marker_width = (u32)((double)FIDUCIAL_MARKER_SIZE_PIXELS * scale_x_est + 0.5);
+            u32 marker_height = (u32)((double)FIDUCIAL_MARKER_SIZE_PIXELS * scale_y_est + 0.5);
+            if (refine_marker_centers && scale_est >= 1.0 &&
                 marker_width >= 2u && marker_width <= 128u &&
                 marker_height >= 2u && marker_height <= 128u) {
                 u32 ring_x = (u32)(scale_x_est + 0.5);
@@ -14602,22 +14651,26 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 if (ring_y == 0u) ring_y = 1u;
                 if (ring_x > 8u) ring_x = 8u;
                 if (ring_y > 8u) ring_y = 8u;
-                int base_x = (int)((use_affine_hint || use_screen_transform_hint ? approx_x : center_x) -
+                int base_x = (int)(approx_x -
                                    ((double)marker_width - 1.0) * 0.5);
-                int base_y = (int)((use_affine_hint || use_screen_transform_hint ? approx_y : center_y) -
+                int base_y = (int)(approx_y -
                                    ((double)marker_height - 1.0) * 0.5);
                 double best_contrast = 0.0;
                 int best_x = base_x;
                 int best_y = base_y;
+                double best_inner_mean = 0.0;
+                double best_outer_mean = 0.0;
+                double best_target_contrast = 0.0;
+                double best_outer_rgb[3] = {};
                 bool marker_hidden_by_tile = false;
-                if (use_affine_hint && logical_tile.valid) {
-                    double logical_marker_half_span = (fiducial_size_value - 1.0) * 0.5;
+                if (logical_tile.valid) {
+                    double logical_marker_half_span = ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5;
                     int logical_marker_x0 = (int)(logical_center_x - logical_marker_half_span);
                     int logical_marker_y0 = (int)(logical_center_y - logical_marker_half_span);
                     marker_hidden_by_tile = logical_marker_x0 < (int)(logical_tile.x0 + MetadataTile::TILE_SIDE) &&
-                                            logical_marker_x0 + (int)fiducial_size_value > (int)logical_tile.x0 &&
+                                            logical_marker_x0 + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)logical_tile.x0 &&
                                             logical_marker_y0 < (int)(logical_tile.y0 + MetadataTile::TILE_SIDE) &&
-                                            logical_marker_y0 + (int)fiducial_size_value > (int)logical_tile.y0;
+                                            logical_marker_y0 + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)logical_tile.y0;
                 }
                 bool tight_small_page_affine_search = use_affine_hint &&
                     affine_hint_pitch >= 3.0 && expected_width <= 128u &&
@@ -14625,13 +14678,16 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                     (width >= 400u || height >= 400u) &&
                     fabs(affine_hint->angle_rad) <=
                         (0.5 * 3.14159265358979323846 / 180.0);
-                int marker_search_radius = (use_screen_transform_hint ||
-                                            tight_small_page_affine_search)
-                                               ? (int)(scale_est * 1.5 + 2.0)
-                                               : wide_search
-                                                     ? (int)(scale_est * 2.5 + 2.0)
-                                                     : (int)(scale_est * 4.0 + 2.0);
-                if (marker_search_radius < 4) marker_search_radius = 4;
+                bool anchored_marker_search = use_affine_hint ||
+                    use_screen_transform_hint || tight_small_page_affine_search ||
+                    (visible_out && scale_est >= 1.5);
+                int marker_search_radius = anchored_marker_search && !wide_search
+                    ? (int)(scale_est * 2.0 + 1.0)
+                    : wide_search
+                          ? (int)(scale_est * 2.5 + 2.0)
+                          : (int)(scale_est * 2.0 + 1.0);
+                if (marker_search_radius < 2) marker_search_radius = 2;
+                double best_marker_score = -1.0e30;
                 for (int dy = -marker_search_radius; dy <= marker_search_radius && !marker_hidden_by_tile; ++dy) {
                     for (int dx = -marker_search_radius; dx <= marker_search_radius; ++dx) {
                         int patch_x = base_x + dx;
@@ -14656,9 +14712,9 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                             double inner_area = (double)marker_width * (double)marker_height;
                             double outer_area = (double)(outer_x1 - outer_x0) *
                                                 (double)(outer_y1 - outer_y0) - inner_area;
-                            inner_mean = (double)inner_sum / (3.0 * inner_area);
+                            inner_mean = (double)inner_sum / inner_area;
                             outer_mean = (outer_area > 0.0)
-                                             ? (double)(total_sum - inner_sum) / (3.0 * outer_area)
+                                             ? (double)(total_sum - inner_sum) / outer_area
                                              : inner_mean;
                         } else {
                             double inner_sum = 0.0;
@@ -14670,9 +14726,10 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                                                  py >= ring_y && py < ring_y + marker_height;
                                     usize sample_index = ((usize)(patch_y - (int)ring_y + (int)py) * (usize)width +
                                                           (usize)(patch_x - (int)ring_x + (int)px)) * 3u;
-                                    double intensity = ((double)pixel_data[sample_index + 0u] +
-                                                        (double)pixel_data[sample_index + 1u] +
-                                                        (double)pixel_data[sample_index + 2u]) / 3.0;
+                                    double intensity = MetadataTile::rgb_luminance_u8(
+                                        pixel_data[sample_index + 0u],
+                                        pixel_data[sample_index + 1u],
+                                        pixel_data[sample_index + 2u]);
                                     if (inner) {
                                         inner_sum += intensity;
                                     } else {
@@ -14684,11 +14741,73 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                             inner_mean = inner_sum / ((double)marker_width * (double)marker_height);
                             outer_mean = (outer_count > 0u) ? (outer_sum / (double)outer_count) : inner_mean;
                         }
-                        double contrast = inner_mean - outer_mean;
-                        if (contrast > best_contrast) {
-                            best_contrast = contrast;
+                        double contrast = fabs(inner_mean - outer_mean);
+                        double target_contrast = 0.0;
+                        double outer_rgb[3] = {};
+                        if (mapping_hint) {
+                            double inner_rgb[3] = {};
+                            u64 inner_pixels = 0u;
+                            u64 outer_pixels = 0u;
+                            for (int py = patch_y - (int)ring_y;
+                                 py < patch_y + (int)marker_height + (int)ring_y; ++py) {
+                                for (int px = patch_x - (int)ring_x;
+                                     px < patch_x + (int)marker_width + (int)ring_x; ++px) {
+                                    if (exclude_tile && px >= tile_x0 && px < tile_x1 &&
+                                        py >= tile_y0 && py < tile_y1) continue;
+                                    usize pixel = ((usize)py * (usize)width + (usize)px) * 3u;
+                                    bool inner = px >= patch_x &&
+                                        px < patch_x + (int)marker_width &&
+                                        py >= patch_y &&
+                                        py < patch_y + (int)marker_height;
+                                    double* sums = inner ? inner_rgb : outer_rgb;
+                                    for (u32 channel = 0u; channel < 3u; ++channel) {
+                                        sums[channel] += pixel_data[pixel + channel];
+                                    }
+                                    if (inner) ++inner_pixels;
+                                    else ++outer_pixels;
+                                }
+                            }
+                            if (inner_pixels && outer_pixels) {
+                                double inner_target_distance = 0.0;
+                                double outer_target_distance = 0.0;
+                                for (u32 channel = 0u; channel < 3u; ++channel) {
+                                    inner_rgb[channel] /= (double)inner_pixels;
+                                    outer_rgb[channel] /= (double)outer_pixels;
+                                    inner_target_distance += fabs(inner_rgb[channel] -
+                                                                  (double)fiducial_rgb[channel]);
+                                    outer_target_distance += fabs(outer_rgb[channel] -
+                                                                  (double)fiducial_rgb[channel]);
+                                }
+                                target_contrast = (outer_target_distance -
+                                                  inner_target_distance) / 3.0;
+                            }
+                        }
+                        double marker_center_x = (double)patch_x +
+                            ((double)marker_width - 1.0) * 0.5;
+                        double marker_center_y = (double)patch_y +
+                            ((double)marker_height - 1.0) * 0.5;
+                        double center_dx = marker_center_x - approx_x;
+                        double center_dy = marker_center_y - approx_y;
+                        double distance_penalty_scale =
+                            scale_est > 1.0 ? scale_est : 1.0;
+                        double distance_penalty = 8.0 /
+                            (distance_penalty_scale * distance_penalty_scale);
+                        double score = contrast + target_contrast -
+                            (center_dx * center_dx + center_dy * center_dy) *
+                            distance_penalty;
+                        if (score > best_marker_score) {
+                            best_marker_score = score;
+                            best_contrast = (target_contrast > contrast)
+                                                ? target_contrast
+                                                : contrast;
+                            best_target_contrast = target_contrast;
                             best_x = patch_x;
                             best_y = patch_y;
+                            best_inner_mean = inner_mean;
+                            best_outer_mean = outer_mean;
+                            for (u32 channel = 0u; channel < 3u; ++channel) {
+                                best_outer_rgb[channel] = outer_rgb[channel];
+                            }
                         }
                     }
                 }
@@ -14696,6 +14815,39 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                 if (marker_visible) {
                     center_x = (double)best_x + ((double)marker_width - 1.0) * 0.5;
                     center_y = (double)best_y + ((double)marker_height - 1.0) * 0.5;
+                    double contrast_sign = best_inner_mean >= best_outer_mean ? 1.0 : -1.0;
+                    double contrast_weight = 0.0;
+                    double contrast_x = 0.0;
+                    double contrast_y = 0.0;
+                    for (u32 py = 0u; py < marker_height; ++py) {
+                        for (u32 px = 0u; px < marker_width; ++px) {
+                            usize sample_index = ((usize)(best_y + (int)py) * (usize)width +
+                                                  (usize)(best_x + (int)px)) * 3u;
+                            double intensity = MetadataTile::rgb_luminance_u8(
+                                pixel_data[sample_index], pixel_data[sample_index + 1u],
+                                pixel_data[sample_index + 2u]);
+                            double weight = contrast_sign * (intensity - best_outer_mean);
+                            if (mapping_hint && best_target_contrast > 0.0) {
+                                double target_distance = 0.0;
+                                double outer_distance = 0.0;
+                                for (u32 channel = 0u; channel < 3u; ++channel) {
+                                    target_distance += fabs((double)pixel_data[sample_index + channel] -
+                                                            (double)fiducial_rgb[channel]);
+                                    outer_distance += fabs((double)pixel_data[sample_index + channel] -
+                                                           best_outer_rgb[channel]);
+                                }
+                                weight = (outer_distance - target_distance) / 3.0;
+                            }
+                            if (weight <= 0.0) continue;
+                            contrast_weight += weight;
+                            contrast_x += weight * (double)(best_x + (int)px);
+                            contrast_y += weight * (double)(best_y + (int)py);
+                        }
+                    }
+                    if (contrast_weight > 0.0) {
+                        center_x = contrast_x / contrast_weight;
+                        center_y = contrast_y / contrast_weight;
+                    }
                 } else if (use_affine_hint || use_screen_transform_hint) {
                     center_x = approx_x;
                     center_y = approx_y;
@@ -15207,9 +15359,24 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     auto metadata_tile_plausible = [&](const MetadataTile::Values& values,
                                        u32 canvas_w,
                                        u32 canvas_h) -> bool {
-        (void)canvas_w;
-        (void)canvas_h;
-        return values.page_bits > 0u;
+        if (values.page_bits == 0u) return false;
+        if (canvas_w != values.page_width_pixels ||
+            canvas_h != values.page_height_pixels ||
+            values.page_width_pixels == 0u ||
+            values.page_height_pixels == 0u) {
+            return true;
+        }
+        if (values.footer_rows >= values.page_height_pixels) return false;
+        u32 expected_columns = 0u;
+        u32 expected_rows = 0u;
+        compute_centered_fiducial_dimensions(
+            values.page_width_pixels,
+            values.page_height_pixels - values.footer_rows,
+            values.fiducial_spacing_pixels,
+            expected_columns,
+            expected_rows);
+        return values.fiducial_columns == expected_columns &&
+               values.fiducial_rows == expected_rows;
     };
     if (!known_tile_override && !tile_available && sample_scaled_metadata_tile &&
         metadata_width_hint == 80u && metadata_height_hint == 80u &&
@@ -15601,8 +15768,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                        target_size,
                                                        candidate,
                                                        tile_values,
-                                                       tile_palette_text) ||
-                            !metadata_tile_plausible(tile_values, target_size, target_size)) {
+                                                       tile_palette_text)) {
                             continue;
                         }
                         if (tile_values.page_height_pixels > 0u) {
@@ -15620,6 +15786,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                     tile_values.footer_rows = inferred_footer_rows;
                                 }
                             }
+                        }
+                        if (!metadata_tile_plausible(tile_values, target_size, target_size)) {
+                            continue;
                         }
                         tile_available = true;
                         apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
@@ -16492,6 +16661,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             
         }
     }
+    bool native_page_raster = width_known && height_known &&
+                              width == expected_width && height == expected_height &&
+                              !state.has_rotation_degrees && !state.has_skew_y_pixels;
     bool fiducial_rotation_detected = false;
 
 struct RotationEstimateCandidate {
@@ -16599,7 +16771,7 @@ struct RotationEstimateCandidate {
         
         return has_rotation;
     };
-    if (width_known && height_known) {
+    if (!native_page_raster && width_known && height_known) {
         PpmParserState auto_state = state;
         if (auto_detect_page_rotation(pixel_data,
                                       width,
@@ -16622,7 +16794,7 @@ struct RotationEstimateCandidate {
         }
     }
     bool rotation_metadata_present = state.has_rotation_width && state.has_rotation_height;
-    if (width_known && height_known && state.has_fiducial_margin && width >= 256u && height >= 256u) {
+    if (!native_page_raster && width_known && height_known && width >= 256u && height >= 256u) {
         double gradient_angle = 0.0;
         double gradient_scale = 0.0;
         if (estimate_rotation_from_gradients(pixel_data,
@@ -16630,7 +16802,7 @@ struct RotationEstimateCandidate {
                                              height,
                                              expected_width,
                                              expected_height,
-                                             (double)state.fiducial_margin_value,
+                                             (double)0u,
                                              gradient_angle,
                                              gradient_scale)) {
             double width_est = gradient_scale * (double)expected_width;
@@ -16684,54 +16856,38 @@ struct RotationEstimateCandidate {
                                           : 0.20;
         tile_affine_hint_trusted = independent_angle_error < tile_angle_tolerance;
     }
-    bool fiducial_grid_visible = true;
+    bool fiducial_grid_visible = false;
     if (tile_available && width_known && height_known &&
-        state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_size &&
-        state.fiducial_columns_value > 0u && state.fiducial_rows_value > 0u &&
+        state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_spacing &&
         expected_width <= 0xFFFFFFFFull && expected_height <= 0xFFFFFFFFull) {
         u32 marker_columns = (u32)state.fiducial_columns_value;
         u32 marker_rows = (u32)state.fiducial_rows_value;
-        u32 marker_size = (state.fiducial_size_value > 0u)
-                              ? (u32)state.fiducial_size_value
-                              : 1u;
-        u32 marker_margin = state.has_fiducial_margin
-                                ? (u32)state.fiducial_margin_value
-                                : 0u;
+        u32 marker_spacing = (u32)state.fiducial_spacing_value;
         u32 logical_data_height = (u32)expected_height;
         if (state.has_footer_rows && state.footer_rows_value < logical_data_height) {
             logical_data_height -= (u32)state.footer_rows_value;
         }
         MetadataTile::Placement logical_tile = logical_tile_placement(
             (u32)expected_width, logical_data_height);
-        if (logical_tile.valid) {
-            double min_x = (marker_margin < expected_width) ? (double)marker_margin : 0.0;
-            double max_x = (expected_width > marker_margin)
-                               ? (double)(expected_width - 1u - marker_margin)
-                               : (double)(expected_width - 1u);
-            double min_y = (marker_margin < logical_data_height)
-                               ? (double)marker_margin
-                               : 0.0;
-            double max_y = (logical_data_height > marker_margin)
-                               ? (double)(logical_data_height - 1u - marker_margin)
-                               : (double)(logical_data_height - 1u);
+        if (logical_tile.valid && marker_spacing > 0u) {
             bool any_marker_pixel_visible = false;
             for (u32 grid_row = 0u; grid_row < marker_rows && !any_marker_pixel_visible; ++grid_row) {
-                double ty = (marker_rows == 1u)
-                                ? 0.5
-                                : ((double)grid_row / (double)(marker_rows - 1u));
-                double center_y = min_y + (max_y - min_y) * ty;
-                int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+                double center_y = fiducial_lattice_center(grid_row, marker_rows,
+                                                          logical_data_height, marker_spacing);
+                int start_y = (int)(center_y - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
                 for (u32 grid_col = 0u; grid_col < marker_columns && !any_marker_pixel_visible; ++grid_col) {
-                    double tx = (marker_columns == 1u)
-                                    ? 0.5
-                                    : ((double)grid_col / (double)(marker_columns - 1u));
-                    double center_x = min_x + (max_x - min_x) * tx;
-                    int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
-                    int end_x = start_x + (int)marker_size;
-                    int end_y = start_y + (int)marker_size;
+                    double center_x = fiducial_lattice_center(grid_col, marker_columns,
+                                                              (u32)expected_width, marker_spacing);
+                    int start_x = (int)(center_x - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
+                    int end_x = start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS;
+                    int end_y = start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS;
                     bool intersects_page = start_x < (int)expected_width && end_x > 0 &&
                                            start_y < (int)logical_data_height && end_y > 0;
-                    if (intersects_page) {
+                    bool intersects_tile = start_x < (int)(logical_tile.x0 + MetadataTile::TILE_SIDE) &&
+                                           end_x > (int)logical_tile.x0 &&
+                                           start_y < (int)(logical_tile.y0 + MetadataTile::TILE_SIDE) &&
+                                           end_y > (int)logical_tile.y0;
+                    if (intersects_page && !intersects_tile) {
                         any_marker_pixel_visible = true;
                     }
                 }
@@ -16739,17 +16895,14 @@ struct RotationEstimateCandidate {
             fiducial_grid_visible = any_marker_pixel_visible;
         }
     }
-    if (width_known && height_known &&
+    if (!native_page_raster && width_known && height_known &&
         fiducial_grid_visible &&
-        state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_size &&
+        state.has_fiducial_columns && state.has_fiducial_rows && state.has_fiducial_spacing &&
         state.fiducial_columns_value >= 1u && state.fiducial_rows_value >= 1u) {
         if (state.fiducial_columns_value <= 0xFFFFFFFFull && state.fiducial_rows_value <= 0xFFFFFFFFull) {
             u32 fiducial_columns = (u32)state.fiducial_columns_value;
             u32 fiducial_rows = (u32)state.fiducial_rows_value;
-            double fiducial_margin = state.has_fiducial_margin ? (double)state.fiducial_margin_value : 0.0;
-            double fiducial_size_pixels = (state.fiducial_size_value > 0u)
-                                              ? (double)state.fiducial_size_value
-                                              : 1.0;
+            double fiducial_spacing = (double)state.fiducial_spacing_value;
             double* centers_x = 0;
             double* centers_y = 0;
             u32 sample_height = height;
@@ -16771,6 +16924,19 @@ struct RotationEstimateCandidate {
             bool refine_marker_centers = !marker_rotation_hint ||
                                          tile_affine_hint_trusted ||
                                          tile_affine_hint_available;
+            double marker_hint_pitch_x = tile_affine_hint.pitch_x_pixels > 0.0
+                                             ? tile_affine_hint.pitch_x_pixels
+                                             : tile_affine_hint.pitch_pixels;
+            double marker_hint_pitch_y = tile_affine_hint.pitch_y_pixels > 0.0
+                                             ? tile_affine_hint.pitch_y_pixels
+                                             : tile_affine_hint.pitch_pixels;
+            bool marker_page_extent_mismatch = tile_affine_hint_available &&
+                ((marker_hint_pitch_x > 0.0 && expected_width > 0u &&
+                  fabs((double)width / (double)expected_width - marker_hint_pitch_x) >
+                      marker_hint_pitch_x * 0.001) ||
+                 (marker_hint_pitch_y > 0.0 && expected_height_eff > 0u &&
+                  fabs((double)sample_height / (double)expected_height_eff - marker_hint_pitch_y) >
+                      marker_hint_pitch_y * 0.001));
             MetadataTile::AffineParams initial_sample_tile_hint = tile_affine_hint;
             const MetadataTile::AffineParams* initial_sample_tile_hint_ptr =
                 tile_affine_hint_available ? &initial_sample_tile_hint :
@@ -16852,8 +17018,7 @@ struct RotationEstimateCandidate {
                                         sample_height,
                                         fiducial_columns,
                                         fiducial_rows,
-                                        fiducial_margin,
-                                        fiducial_size_pixels,
+                                        fiducial_spacing,
                                         expected_width,
                                         expected_height_eff,
                                         expected_height_eff,
@@ -16862,7 +17027,11 @@ struct RotationEstimateCandidate {
                                         centers_y,
                                         initial_sample_tile_hint_ptr,
                                         (const AffineTransform*)0,
-                                        &centers_visible)) {
+                                        &centers_visible,
+                                        (state.has_skew_y_pixels &&
+                                             fabs(state.skew_y_pixels_value) >= 0.5) ||
+                                            marker_page_extent_mismatch,
+                                        &active_mapping)) {
                 double rotation_degrees_est = 0.0;
                 u64 rotation_width_est = 0u;
                 u64 rotation_height_est = 0u;
@@ -16875,7 +17044,7 @@ struct RotationEstimateCandidate {
                                                                             fiducial_rows,
                                                                             expected_width,
                                                                             expected_height_eff,
-                                                                            fiducial_margin,
+                                                                            fiducial_spacing,
                                                                             width,
                                                                             sample_height,
                                                                             state,
@@ -17009,36 +17178,21 @@ struct RotationEstimateCandidate {
                                     similarity.a01 = -bounds_scale * s;
                                     similarity.a10 = bounds_scale * s;
                                     similarity.a11 = bounds_scale * c;
-                                    double marker_half_span = state.has_fiducial_size &&
-                                                              state.fiducial_size_value > 0u
-                                                                  ? ((double)state.fiducial_size_value - 1.0) * 0.5
-                                                                  : 0.0;
                                     double mean_logical_x = 0.0;
                                     double mean_logical_y = 0.0;
                                     double mean_screen_x = 0.0;
                                     double mean_screen_y = 0.0;
                                     u64 visible_count = 0u;
                                     for (u32 row = 0u; row < fiducial_rows; ++row) {
-                                        double row_t = (fiducial_rows <= 1u)
-                                                           ? 0.5
-                                                           : (double)row / (double)(fiducial_rows - 1u);
-                                        double logical_y = fiducial_margin +
-                                            ((double)expected_height_eff - 1.0 -
-                                             2.0 * fiducial_margin) * row_t;
-                                        logical_y = (double)(int)(logical_y - marker_half_span) +
-                                                    marker_half_span + 0.5;
+                                        double logical_y = fiducial_lattice_center(
+                                            row, fiducial_rows, (u32)expected_height_eff,
+                                            fiducial_spacing) + 0.5;
                                         for (u32 column = 0u; column < fiducial_columns; ++column) {
                                             usize point = (usize)row * (usize)fiducial_columns + column;
                                             if (centers_visible && !centers_visible[point]) continue;
-                                            double column_t = (fiducial_columns <= 1u)
-                                                                  ? 0.5
-                                                                  : (double)column /
-                                                                        (double)(fiducial_columns - 1u);
-                                            double logical_x = fiducial_margin +
-                                                ((double)expected_width - 1.0 -
-                                                 2.0 * fiducial_margin) * column_t;
-                                            logical_x = (double)(int)(logical_x - marker_half_span) +
-                                                        marker_half_span + 0.5;
+                                            double logical_x = fiducial_lattice_center(
+                                                column, fiducial_columns, (u32)expected_width,
+                                                fiducial_spacing) + 0.5;
                                             mean_logical_x += logical_x;
                                             mean_logical_y += logical_y;
                                             mean_screen_x += centers_x[point];
@@ -17061,27 +17215,15 @@ struct RotationEstimateCandidate {
                                         double affine_error = 0.0;
                                         double similarity_error = 0.0;
                                         for (u32 row = 0u; row < fiducial_rows; ++row) {
-                                            double row_t = (fiducial_rows <= 1u)
-                                                               ? 0.5
-                                                               : (double)row /
-                                                                     (double)(fiducial_rows - 1u);
-                                            double logical_y = fiducial_margin +
-                                                ((double)expected_height_eff - 1.0 -
-                                                 2.0 * fiducial_margin) * row_t;
-                                            logical_y = (double)(int)(logical_y - marker_half_span) +
-                                                        marker_half_span + 0.5;
+                                            double logical_y = fiducial_lattice_center(
+                                                row, fiducial_rows, (u32)expected_height_eff,
+                                                fiducial_spacing);
                                             for (u32 column = 0u; column < fiducial_columns; ++column) {
                                                 usize point = (usize)row * (usize)fiducial_columns + column;
                                                 if (centers_visible && !centers_visible[point]) continue;
-                                                double column_t = (fiducial_columns <= 1u)
-                                                                      ? 0.5
-                                                                      : (double)column /
-                                                                            (double)(fiducial_columns - 1u);
-                                                double logical_x = fiducial_margin +
-                                                    ((double)expected_width - 1.0 -
-                                                     2.0 * fiducial_margin) * column_t;
-                                                logical_x = (double)(int)(logical_x - marker_half_span) +
-                                                            marker_half_span + 0.5;
+                                                double logical_x = fiducial_lattice_center(
+                                                    column, fiducial_columns, (u32)expected_width,
+                                                    fiducial_spacing);
                                                 double affine_x = fiducial_affine.a00 * logical_x +
                                                     fiducial_affine.a01 * logical_y + fiducial_affine.tx;
                                                 double affine_y = fiducial_affine.a10 * logical_x +
@@ -18526,20 +18668,16 @@ struct RotationEstimateCandidate {
     }
     // Bootstrap metadata defines the payload prefix and reserved cells. Missing
     // metadata is a hard failure because the payload rank map depends on it.
-    bool use_metadata_fiducial_grid =
-        state.encoded_tile.fiducial_marker_size_pixels > 0u &&
-        state.encoded_tile.fiducial_columns > 0u &&
-        state.encoded_tile.fiducial_rows > 0u;
+    bool use_metadata_fiducial_grid = state.encoded_tile.fiducial_spacing_pixels > 0u;
     if (!compute_fiducial_marker_mask((u32)logical_width,
                                       (u32)logical_height,
                                       (u32)data_height,
                                       reserved_data_pixels,
                                       &fiducial_mask,
                                       use_metadata_fiducial_grid,
-                                      state.encoded_tile.fiducial_marker_size_pixels,
                                       state.encoded_tile.fiducial_columns,
                                       state.encoded_tile.fiducial_rows,
-                                      state.encoded_tile.fiducial_margin_pixels)) {
+                                      state.encoded_tile.fiducial_spacing_pixels)) {
         return false;
     }
     makocode::ByteBuffer payload_rank_reservation_mask;
@@ -18628,10 +18766,9 @@ struct RotationEstimateCandidate {
                                               reserved_data_pixels,
                                               &fiducial_mask,
                                               use_metadata_fiducial_grid,
-                                              state.encoded_tile.fiducial_marker_size_pixels,
                                               state.encoded_tile.fiducial_columns,
                                               state.encoded_tile.fiducial_rows,
-                                              state.encoded_tile.fiducial_margin_pixels)) {
+                                              state.encoded_tile.fiducial_spacing_pixels)) {
                 return false;
             }
             makocode::ByteBuffer payload_fiducial_mask;
@@ -18642,10 +18779,9 @@ struct RotationEstimateCandidate {
                                               payload_fiducial_pixels,
                                               &payload_fiducial_mask,
                                               use_metadata_fiducial_grid,
-                                              state.encoded_tile.fiducial_marker_size_pixels,
                                               state.encoded_tile.fiducial_columns,
                                               state.encoded_tile.fiducial_rows,
-                                              state.encoded_tile.fiducial_margin_pixels)) {
+                                              state.encoded_tile.fiducial_spacing_pixels)) {
                 return false;
             }
             if (metadata_placement.valid) {
@@ -19048,12 +19184,9 @@ struct RotationEstimateCandidate {
                                         height,
                                         fiducial_column_count,
                                         fiducial_row_count,
-                                        state.has_fiducial_margin
-                                            ? (double)state.fiducial_margin_value
-                                            : 0.0,
-                                        state.has_fiducial_size
-                                            ? (double)state.fiducial_size_value
-                                            : 1.0,
+                                        state.has_fiducial_spacing
+                                            ? (double)state.fiducial_spacing_value
+                                            : (double)g_fiducial_defaults.spacing_pixels,
                                         logical_width,
                                         logical_height,
                                         data_height,
@@ -19062,7 +19195,9 @@ struct RotationEstimateCandidate {
                                         final_centers_y,
                                         (const MetadataTile::AffineParams*)0,
                                         &final_screen_transform,
-                                        &final_visible)) {
+                                        &final_visible,
+                                        false,
+                                        &active_mapping)) {
                 free(fiducial_storage.centers_x);
                 free(fiducial_storage.centers_y);
                 if (fiducial_storage.visible) free(fiducial_storage.visible);
@@ -19075,19 +19210,6 @@ struct RotationEstimateCandidate {
                 if (final_visible) free(final_visible);
             }
         }
-        double fiducial_margin = state.has_fiducial_margin
-                                     ? (double)state.fiducial_margin_value
-                                     : 0.0;
-        double fiducial_min_x = fiducial_margin;
-        double fiducial_max_x = (logical_width > 0u)
-                                    ? (double)(logical_width - 1u) - fiducial_margin
-                                    : 0.0;
-        double fiducial_min_y = fiducial_margin;
-        double fiducial_max_y = (data_height > 0u)
-                                    ? (double)(data_height - 1u) - fiducial_margin
-                                    : 0.0;
-        if (fiducial_max_x < fiducial_min_x) fiducial_max_x = fiducial_min_x;
-        if (fiducial_max_y < fiducial_min_y) fiducial_max_y = fiducial_min_y;
         for (u32 row_index = 0u; row_index < fiducial_row_count; ++row_index) {
             for (u32 col_index = 0u; col_index < fiducial_column_count; ++col_index) {
                 usize point_index = (usize)row_index * (usize)fiducial_column_count + (usize)col_index;
@@ -19134,7 +19256,7 @@ struct RotationEstimateCandidate {
     if ((!has_rotation || rotation_metadata_present || fiducial_rotation_detected ||
          tile_affine_hint_available) &&
         state.has_fiducial_columns && state.has_fiducial_rows &&
-        state.has_fiducial_size &&
+        state.has_fiducial_spacing &&
         state.fiducial_columns_value >= 2u &&
         state.fiducial_rows_value >= 2u) {
         u64 fiducial_columns_value = state.fiducial_columns_value;
@@ -19142,6 +19264,7 @@ struct RotationEstimateCandidate {
         if (fiducial_columns_value <= 0xFFFFFFFFull && fiducial_rows_value <= 0xFFFFFFFFull) {
             u32 fiducial_columns = (u32)fiducial_columns_value;
             u32 fiducial_rows = (u32)fiducial_rows_value;
+            double fiducial_spacing = (double)state.fiducial_spacing_value;
             u32 sub_cols = fiducial_columns ? (fiducial_columns - 1u) : 0u;
             u32 sub_rows = fiducial_rows ? (fiducial_rows - 1u) : 0u;
             if (sub_cols > 0u && sub_rows > 0u &&
@@ -19157,22 +19280,6 @@ struct RotationEstimateCandidate {
                         fiducial_storage.centers_y &&
                         fiducial_storage.displacement_x &&
                         fiducial_storage.displacement_y) {
-                        double margin_pixels = state.has_fiducial_margin ? (double)state.fiducial_margin_value : 0.0;
-                        double min_x = margin_pixels;
-                        double max_x = (width > 0u) ? ((double)(width - 1u) - margin_pixels) : 0.0;
-                        if (max_x < min_x) max_x = min_x;
-                        double min_y = margin_pixels;
-                        double max_y = (height > 0u) ? ((double)(height - 1u) - margin_pixels) : 0.0;
-                        if (max_y < min_y) max_y = min_y;
-                        double marker_half_span = state.has_fiducial_size && state.fiducial_size_value > 0u
-                                                      ? ((double)state.fiducial_size_value - 1.0) * 0.5
-                                                      : 0.0;
-                        double logical_min_x = margin_pixels;
-                        double logical_max_x = (double)(logical_width - 1u) - margin_pixels;
-                        double logical_min_y = margin_pixels;
-                        double logical_max_y = (double)(data_height - 1u) - margin_pixels;
-                        if (logical_max_x < logical_min_x) logical_max_x = logical_min_x;
-                        if (logical_max_y < logical_min_y) logical_max_y = logical_min_y;
                         MetadataTile::Placement metadata_tile = {};
                         if (logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull) {
                             metadata_tile = logical_tile_placement((u32)logical_width,
@@ -19279,18 +19386,14 @@ struct RotationEstimateCandidate {
                                                             double& screen_y,
                                                             double& logical_center_x_out,
                                                             double& logical_center_y_out) {
-                            double t_col = (fiducial_columns <= 1u)
-                                               ? 0.5
-                                               : ((double)col_index / (double)(fiducial_columns - 1u));
-                            double t_row = (fiducial_rows <= 1u)
-                                               ? 0.5
-                                               : ((double)row_index / (double)(fiducial_rows - 1u));
-                            double logical_x = logical_min_x + (logical_max_x - logical_min_x) * t_col;
-                            double logical_y = logical_min_y + (logical_max_y - logical_min_y) * t_row;
-                            logical_x = (double)(int)(logical_x - marker_half_span) + marker_half_span;
-                            logical_y = (double)(int)(logical_y - marker_half_span) + marker_half_span;
-                            logical_center_x_out = logical_x + 0.5;
-                            logical_center_y_out = logical_y + 0.5;
+                            double logical_center_x = fiducial_lattice_center(
+                                col_index, fiducial_columns, (u32)logical_width, fiducial_spacing);
+                            double logical_center_y = fiducial_lattice_center(
+                                row_index, fiducial_rows, (u32)data_height, fiducial_spacing);
+                            double logical_x = logical_center_x - 0.5;
+                            double logical_y = logical_center_y - 0.5;
+                            logical_center_x_out = logical_center_x + 0.5;
+                            logical_center_y_out = logical_center_y + 0.5;
                             if (fiducial_dimension_affine ||
                                 (state.has_affine_transform && state.affine_fit_covers_page &&
                                  !state.affine_from_previous_page)) {
@@ -19360,8 +19463,8 @@ struct RotationEstimateCandidate {
                                 }
                             }
                         };
-                        double fiducial_size_pixels = (state.fiducial_size_value > 0u)
-                                                          ? (double)state.fiducial_size_value
+                        double fiducial_size_pixels = (FIDUCIAL_MARKER_SIZE_PIXELS > 0u)
+                                                          ? (double)FIDUCIAL_MARKER_SIZE_PIXELS
                                                           : 1.0;
                         // Keep this tight so nearby dark structures (e.g., metadata tile) do not bias fiducial centers.
                         double search_scale = has_rotation ? (scale_xd + scale_yd) * 0.5 : 1.0;
@@ -19585,14 +19688,14 @@ struct RotationEstimateCandidate {
                                         marker_center_visible = marker_intensity / marker_area >= 200.0;
                                     }
                                 }
-                                int logical_marker_x0 = (int)(logical_center_x - marker_half_span);
-                                int logical_marker_y0 = (int)(logical_center_y - marker_half_span);
+                                int logical_marker_x0 = (int)(logical_center_x - 0.5);
+                                int logical_marker_y0 = (int)(logical_center_y - 0.5);
                                 bool marker_hidden_by_tile = metadata_tile.valid &&
                                     logical_marker_x0 < (int)(metadata_tile.x0 + MetadataTile::TILE_SIDE) &&
-                                    logical_marker_x0 + (int)state.fiducial_size_value >
+                                    logical_marker_x0 + (int)FIDUCIAL_MARKER_SIZE_PIXELS >
                                         (int)metadata_tile.x0 &&
                                     logical_marker_y0 < (int)(metadata_tile.y0 + MetadataTile::TILE_SIDE) &&
-                                    logical_marker_y0 + (int)state.fiducial_size_value >
+                                    logical_marker_y0 + (int)FIDUCIAL_MARKER_SIZE_PIXELS >
                                         (int)metadata_tile.y0;
                                 if (marker_hidden_by_tile) {
                                     if (tile_affine_hint_available && tile_affine_hint.pitch_pixels > 0.0) {
@@ -19650,8 +19753,7 @@ struct RotationEstimateCandidate {
                                                         height,
                                                         fiducial_columns,
                                                         fiducial_rows,
-                                                        margin_pixels,
-                                                        fiducial_size_pixels,
+                                                        fiducial_spacing,
                                                         expected_width,
                                                         expected_height,
                                                         data_height,
@@ -19661,7 +19763,8 @@ struct RotationEstimateCandidate {
                                                         local_affine_hint_ptr,
                                                         (const AffineTransform*)0,
                                                         &refined_visible,
-                                                        wide_search)) {
+                                                        wide_search,
+                                                        &active_mapping)) {
                                 u64 refined_visible_count = 0u;
                                 for (usize point_index = 0u; point_index < fiducial_point_count; ++point_index) {
                                     if (refined_visible[point_index]) ++refined_visible_count;
@@ -19694,8 +19797,7 @@ struct RotationEstimateCandidate {
                                                             height,
                                                             fiducial_columns,
                                                             fiducial_rows,
-                                                            margin_pixels,
-                                                            fiducial_size_pixels,
+                                                            fiducial_spacing,
                                                             expected_width,
                                                             expected_height,
                                                             data_height,
@@ -19703,7 +19805,10 @@ struct RotationEstimateCandidate {
                                                             debug_centers_x,
                                                             debug_centers_y,
                                                             (const MetadataTile::AffineParams*)0,
-                                                            &screen_transform_hint)) {
+                                                            &screen_transform_hint,
+                                                            (u8**)0,
+                                                            false,
+                                                            &active_mapping)) {
                                     if (fiducial_storage.debug_centers_x) free(fiducial_storage.debug_centers_x);
                                     if (fiducial_storage.debug_centers_y) free(fiducial_storage.debug_centers_y);
                                     fiducial_storage.debug_centers_x = debug_centers_x;
@@ -19718,6 +19823,7 @@ struct RotationEstimateCandidate {
                             fiducial_storage.displacement_y) {
                             bool small_page_rotation_fit = !has_rotation &&
                                 tile_affine_hint_available &&
+                                fiducial_grid_visible &&
                                 logical_width <= 96u && data_height <= 96u &&
                                 width < 400u && height < 400u &&
                                 fiducial_columns >= 3u && fiducial_rows >= 3u &&
@@ -19747,34 +19853,21 @@ struct RotationEstimateCandidate {
                                     fiducial_point_count <= 4096u) {
                                     inferred_visible_fit_mask = (u8*)malloc((usize)fiducial_point_count);
                                     if (inferred_visible_fit_mask) {
-                                        u32 marker_size = state.has_fiducial_size &&
-                                                                  state.fiducial_size_value > 0u
-                                                              ? state.fiducial_size_value
-                                                              : 1u;
                                         for (u32 row = 0u; row < fiducial_rows; ++row) {
-                                            double t_row = fiducial_rows <= 1u
-                                                               ? 0.5
-                                                               : (double)row / (double)(fiducial_rows - 1u);
-                                            double logical_y = logical_min_y +
-                                                (logical_max_y - logical_min_y) * t_row;
-                                            logical_y = (double)(int)(logical_y - marker_half_span) +
-                                                        marker_half_span;
+                                            double logical_y = fiducial_lattice_center(
+                                                row, fiducial_rows, (u32)data_height,
+                                                fiducial_spacing);
                                             for (u32 column = 0u; column < fiducial_columns; ++column) {
-                                                double t_column = fiducial_columns <= 1u
-                                                                      ? 0.5
-                                                                      : (double)column /
-                                                                            (double)(fiducial_columns - 1u);
-                                                double logical_x = logical_min_x +
-                                                    (logical_max_x - logical_min_x) * t_column;
-                                                logical_x = (double)(int)(logical_x - marker_half_span) +
-                                                            marker_half_span;
-                                                int marker_x0 = (int)(logical_x - marker_half_span);
-                                                int marker_y0 = (int)(logical_y - marker_half_span);
+                                                double logical_x = fiducial_lattice_center(
+                                                    column, fiducial_columns, (u32)logical_width,
+                                                    fiducial_spacing);
+                                                int marker_x0 = (int)(logical_x - 0.5);
+                                                int marker_y0 = (int)(logical_y - 0.5);
                                                 bool hidden_by_tile = metadata_tile.valid &&
                                                     marker_x0 < (int)(metadata_tile.x0 + MetadataTile::TILE_SIDE) &&
-                                                    marker_x0 + (int)marker_size > (int)metadata_tile.x0 &&
+                                                    marker_x0 + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)metadata_tile.x0 &&
                                                     marker_y0 < (int)(metadata_tile.y0 + MetadataTile::TILE_SIDE) &&
-                                                    marker_y0 + (int)marker_size > (int)metadata_tile.y0;
+                                                    marker_y0 + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)metadata_tile.y0;
                                                 usize point_index = (usize)row * (usize)fiducial_columns +
                                                                     (usize)column;
                                                 inferred_visible_fit_mask[point_index] = hidden_by_tile ? 0u : 1u;
@@ -19789,7 +19882,7 @@ struct RotationEstimateCandidate {
                                                                                            fiducial_rows,
                                                                                             expected_width,
                                                                                             has_rotation ? data_height : expected_height,
-                                                                                            margin_pixels,
+                                                                                            fiducial_spacing,
                                                                                            width,
                                                                                            height,
                                                                                            state,
@@ -19836,25 +19929,13 @@ struct RotationEstimateCandidate {
                                     // At low resolution, correct isolated pixel-centroid outliers
                                     // from the robust affine fit of the other detected markers.
                                     if (debug_scale < 1.5 && !fiducial_storage.debug_centers_x) {
-                                        double marker_half_span = (fiducial_size_pixels - 1.0) * 0.5;
                                         for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
-                                            double t_row = (fiducial_rows <= 1u)
-                                                               ? 0.5
-                                                               : ((double)row_index / (double)(fiducial_rows - 1u));
-                                            double logical_center_y = margin_pixels +
-                                                                      ((double)data_height - 1.0 -
-                                                                       2.0 * margin_pixels) * t_row;
-                                            logical_center_y = (double)(int)(logical_center_y - marker_half_span) +
-                                                               marker_half_span;
+                                            double logical_center_y = fiducial_lattice_center(
+                                                row_index, fiducial_rows, (u32)data_height, fiducial_spacing);
                                             for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
-                                                double t_col = (fiducial_columns <= 1u)
-                                                                   ? 0.5
-                                                                   : ((double)col_index / (double)(fiducial_columns - 1u));
-                                                double logical_center_x = margin_pixels +
-                                                                          ((double)logical_width - 1.0 -
-                                                                           2.0 * margin_pixels) * t_col;
-                                                logical_center_x = (double)(int)(logical_center_x - marker_half_span) +
-                                                                   marker_half_span;
+                                                double logical_center_x = fiducial_lattice_center(
+                                                    col_index, fiducial_columns, (u32)logical_width,
+                                                    fiducial_spacing);
                                                 double predicted_screen_x = fiducial_affine.a00 *
                                                                                 (logical_center_x + 0.5) +
                                                                             fiducial_affine.a01 *
@@ -20211,7 +20292,8 @@ struct RotationEstimateCandidate {
     }
 
 
-    if (!has_rotation && logical_width > 1u && data_height > 1u &&
+    if (!native_page_raster && !has_rotation && fiducial_grid_visible &&
+        logical_width > 1u && data_height > 1u &&
         logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull &&
         fiducial_storage.centers_x && fiducial_storage.centers_y &&
         fiducial_column_count >= 3u && fiducial_row_count >= 3u) {
@@ -20228,7 +20310,9 @@ struct RotationEstimateCandidate {
             fiducial_row_count,
             logical_width,
             data_height,
-            state.has_fiducial_margin ? (double)state.fiducial_margin_value : 0.0,
+            state.has_fiducial_spacing
+                ? (double)state.fiducial_spacing_value
+                : (double)g_fiducial_defaults.spacing_pixels,
             width,
             height,
             state,
@@ -20303,13 +20387,18 @@ struct RotationEstimateCandidate {
                                               tile_tolerance;
                 }
             }
+            bool axis_aligned_fiducial_fit = !has_rotation &&
+                cross_term_ratio_x <= 0.001 && cross_term_ratio_y <= 0.001;
             if (fiducial_fit_covers_page && scale_matches && tile_center_matches &&
-                (cross_term_ratio_x > 0.001 || cross_term_ratio_y > 0.001)) {
-                state.affine_transform = measured_affine;
-                state.has_affine_transform = true;
-                initial_fiducial_affine_hint = measured_affine;
-                initial_fiducial_affine_hint_available = true;
-                recompute_skew_flags();
+                ((cross_term_ratio_x > 0.001 || cross_term_ratio_y > 0.001) ||
+                 axis_aligned_fiducial_fit)) {
+                if (!initial_fiducial_affine_hint_available) {
+                    state.affine_transform = measured_affine;
+                    state.has_affine_transform = true;
+                    initial_fiducial_affine_hint = measured_affine;
+                    initial_fiducial_affine_hint_available = true;
+                    recompute_skew_flags();
+                }
             }
         }
     }
@@ -20325,6 +20414,15 @@ struct RotationEstimateCandidate {
 
     if (force_disable_fiducial_subgrid) {
         use_fiducial_subgrid = false;
+        prefer_nearest_sampling = false;
+    }
+
+    if (native_page_raster) {
+        state.has_affine_transform = false;
+        state.affine_fit_covers_page = false;
+        state.affine_from_previous_page = false;
+        use_fiducial_subgrid = false;
+        fiducial_displacement_active = false;
         prefer_nearest_sampling = false;
     }
 
@@ -20582,12 +20680,9 @@ struct RotationEstimateCandidate {
                                         height,
                                         fiducial_column_count,
                                         fiducial_row_count,
-                                        state.has_fiducial_margin
-                                            ? (double)state.fiducial_margin_value
-                                            : 0.0,
-                                        state.has_fiducial_size
-                                            ? (double)state.fiducial_size_value
-                                            : 1.0,
+                                        state.has_fiducial_spacing
+                                            ? (double)state.fiducial_spacing_value
+                                            : (double)g_fiducial_defaults.spacing_pixels,
                                         logical_width,
                                         logical_height,
                                         data_height,
@@ -20596,7 +20691,9 @@ struct RotationEstimateCandidate {
                                         mapped_centers_y,
                                         (const MetadataTile::AffineParams*)0,
                                         &marker_screen_transform,
-                                        &mapped_visible)) {
+                                        &mapped_visible,
+                                        false,
+                                        &active_mapping)) {
                 free(fiducial_storage.centers_x);
                 free(fiducial_storage.centers_y);
                 if (fiducial_storage.visible) free(fiducial_storage.visible);
@@ -20618,9 +20715,9 @@ struct RotationEstimateCandidate {
                             fiducial_row_count,
                             logical_width,
                             data_height,
-                            state.has_fiducial_margin
-                                ? (double)state.fiducial_margin_value
-                                : 0.0,
+                            state.has_fiducial_spacing
+                                ? (double)state.fiducial_spacing_value
+                                : (double)g_fiducial_defaults.spacing_pixels,
                             width,
                             height,
                             state,
@@ -20651,21 +20748,10 @@ struct RotationEstimateCandidate {
                         u32 fit_max_row = 0u;
                         u32 fit_min_column = fiducial_column_count;
                         u32 fit_max_column = 0u;
-                        double marker_half_span = state.has_fiducial_size &&
-                                                  state.fiducial_size_value > 0u
-                                                      ? ((double)state.fiducial_size_value - 1.0) * 0.5
-                                                      : 0.0;
-                        double marker_margin = state.has_fiducial_margin
-                                                   ? (double)state.fiducial_margin_value
-                                                   : 0.0;
                         for (u32 row = 0u; row < fiducial_row_count; ++row) {
-                            double t_row = (fiducial_row_count <= 1u)
-                                               ? 0.5
-                                               : (double)row / (double)(fiducial_row_count - 1u);
-                            double logical_y = marker_margin +
-                                ((double)data_height - 1.0 - 2.0 * marker_margin) * t_row;
-                            logical_y = (double)(int)(logical_y - marker_half_span) +
-                                        marker_half_span + 0.5;
+                            double logical_y = fiducial_lattice_center(
+                                row, fiducial_row_count, (u32)data_height,
+                                (double)state.fiducial_spacing_value) + 0.5;
                             for (u32 column = 0u; column < fiducial_column_count; ++column) {
                                 usize point = (usize)row * (usize)fiducial_column_count +
                                               (usize)column;
@@ -20674,14 +20760,9 @@ struct RotationEstimateCandidate {
                                 if (row > fit_max_row) fit_max_row = row;
                                 if (column < fit_min_column) fit_min_column = column;
                                 if (column > fit_max_column) fit_max_column = column;
-                                double t_column = (fiducial_column_count <= 1u)
-                                                      ? 0.5
-                                                      : (double)column /
-                                                            (double)(fiducial_column_count - 1u);
-                                double logical_x = marker_margin +
-                                    ((double)logical_width - 1.0 - 2.0 * marker_margin) * t_column;
-                                logical_x = (double)(int)(logical_x - marker_half_span) +
-                                            marker_half_span + 0.5;
+                                double logical_x = fiducial_lattice_center(
+                                    column, fiducial_column_count, (u32)logical_width,
+                                    (double)state.fiducial_spacing_value) + 0.5;
                                 double predicted_x = measured_affine.a00 * logical_x +
                                                      measured_affine.a01 * logical_y +
                                                      measured_affine.tx;
@@ -20736,27 +20817,16 @@ struct RotationEstimateCandidate {
                             state.affine_transform = tile_anchored_axis_affine;
                             recompute_skew_flags();
                             for (u32 row = 0u; row < fiducial_row_count; ++row) {
-                                double t_row = (fiducial_row_count <= 1u)
-                                                   ? 0.5
-                                                   : (double)row /
-                                                         (double)(fiducial_row_count - 1u);
-                                double logical_y = marker_margin +
-                                    ((double)data_height - 1.0 - 2.0 * marker_margin) * t_row;
-                                logical_y = (double)(int)(logical_y - marker_half_span) +
-                                            marker_half_span + 0.5;
+                                double logical_y = fiducial_lattice_center(
+                                    row, fiducial_row_count, (u32)data_height,
+                                    (double)state.fiducial_spacing_value) + 0.5;
                                 for (u32 column = 0u; column < fiducial_column_count; ++column) {
                                     usize point = (usize)row * (usize)fiducial_column_count +
                                                   (usize)column;
                                     if (!fiducial_storage.visible[point]) continue;
-                                    double t_column = (fiducial_column_count <= 1u)
-                                                          ? 0.5
-                                                          : (double)column /
-                                                                (double)(fiducial_column_count - 1u);
-                                    double logical_x = marker_margin +
-                                        ((double)logical_width - 1.0 -
-                                         2.0 * marker_margin) * t_column;
-                                    logical_x = (double)(int)(logical_x - marker_half_span) +
-                                                marker_half_span + 0.5;
+                                    double logical_x = fiducial_lattice_center(
+                                        column, fiducial_column_count, (u32)logical_width,
+                                        (double)state.fiducial_spacing_value) + 0.5;
                                     double predicted_x = measured_affine.a00 * logical_x +
                                                          measured_affine.a01 * logical_y +
                                                          measured_affine.tx;
@@ -21268,10 +21338,14 @@ struct RotationEstimateCandidate {
                 ((!tile_anchored_axis_affine_valid || dimension_scale_overrides_sparse_skew) &&
                  !dense_page_affine_has_shear &&
                  (tile_center_matches || large_page_dimensions_match))) {
-                tile_anchored_axis_affine.a00 = page_scale_x;
+                tile_anchored_axis_affine.a00 = exact_dimension_scale
+                    ? tile_pitch_x
+                    : page_scale_x;
                 tile_anchored_axis_affine.a01 = 0.0;
                 tile_anchored_axis_affine.a10 = 0.0;
-                tile_anchored_axis_affine.a11 = page_scale_y;
+                tile_anchored_axis_affine.a11 = exact_dimension_scale
+                    ? tile_pitch_y
+                    : page_scale_y;
                 tile_anchored_axis_affine.tx = large_page_dimensions_match &&
                                                !directly_scaled_dimensions
                     ? tile_affine_hint.center_x - page_scale_x * tile_center_x
@@ -21462,6 +21536,7 @@ struct RotationEstimateCandidate {
                     (u64)(predicted_width + 0.5) == width &&
                     (u64)(predicted_height + 0.5) == height &&
                     tile_affine_hint_available &&
+                    tile_affine_hint.pitch_pixels > 0.0 &&
                     fitted_bounds_match_raster &&
                     !fitted_affine_matches_bounds &&
                     previous_page_geometry_matches &&
@@ -21992,23 +22067,47 @@ struct RotationEstimateCandidate {
             if (force_tile_center_sampling && !use_custom_palette && color_mode == 1u) {
                 double best_confidence = -1.0;
                 AffineTransform best_axis_affine = tile_anchored_axis_affine;
-                double pitch_candidates_x[6] = {};
-                double pitch_candidates_y[6] = {};
+                bool refine_common_pitch = force_tile_center_sampling &&
+                    !fiducial_grid_visible;
+                if (refine_common_pitch && !lock_metadata_pitch) {
+                    double common_pitch = 0.5 * (pitch_x + pitch_y);
+                    pitch_x = common_pitch;
+                    pitch_y = common_pitch;
+                }
+                double pitch_candidates_x[24] = {};
+                double pitch_candidates_y[24] = {};
                 u32 pitch_candidate_count_x = 0u;
                 u32 pitch_candidate_count_y = 0u;
                 pitch_candidates_x[pitch_candidate_count_x++] = pitch_x;
                 pitch_candidates_y[pitch_candidate_count_y++] = pitch_y;
-                for (int offset = 1; offset <= 2 && !lock_metadata_pitch; ++offset) {
-                    double pitch_delta_x = (double)offset * 0.01;
-                    double pitch_delta_y = (double)offset * 0.01;
-                    double candidate_x = pitch_x - pitch_delta_x;
-                    double candidate_y = pitch_y - pitch_delta_y;
-                    if (candidate_x > 0.0) pitch_candidates_x[pitch_candidate_count_x++] = candidate_x;
-                    if (candidate_y > 0.0) pitch_candidates_y[pitch_candidate_count_y++] = candidate_y;
-                    pitch_candidates_x[pitch_candidate_count_x++] = pitch_x + pitch_delta_x;
-                    pitch_candidates_y[pitch_candidate_count_y++] = pitch_y + pitch_delta_y;
+                if (refine_common_pitch && !lock_metadata_pitch) {
+                    for (int offset = 1; offset <= 10; ++offset) {
+                        double candidate_pitch = pitch_x + (double)offset * 0.005;
+                        double lower_pitch = pitch_x - (double)offset * 0.005;
+                        if (lower_pitch > 0.0) {
+                            pitch_candidates_x[pitch_candidate_count_x] = lower_pitch;
+                            pitch_candidates_y[pitch_candidate_count_y] = lower_pitch;
+                            ++pitch_candidate_count_x;
+                            ++pitch_candidate_count_y;
+                        }
+                        pitch_candidates_x[pitch_candidate_count_x] = candidate_pitch;
+                        pitch_candidates_y[pitch_candidate_count_y] = candidate_pitch;
+                        ++pitch_candidate_count_x;
+                        ++pitch_candidate_count_y;
+                    }
+                } else {
+                    for (int offset = 1; offset <= 2 && !lock_metadata_pitch; ++offset) {
+                        double pitch_delta_x = (double)offset * 0.01;
+                        double pitch_delta_y = (double)offset * 0.01;
+                        double candidate_x = pitch_x - pitch_delta_x;
+                        double candidate_y = pitch_y - pitch_delta_y;
+                        if (candidate_x > 0.0) pitch_candidates_x[pitch_candidate_count_x++] = candidate_x;
+                        if (candidate_y > 0.0) pitch_candidates_y[pitch_candidate_count_y++] = candidate_y;
+                        pitch_candidates_x[pitch_candidate_count_x++] = pitch_x + pitch_delta_x;
+                        pitch_candidates_y[pitch_candidate_count_y++] = pitch_y + pitch_delta_y;
+                    }
                 }
-                if (!lock_metadata_pitch) {
+                if (!lock_metadata_pitch && !refine_common_pitch) {
                     double half_pitch_x = floor(pitch_x * 2.0 + 0.5) * 0.5;
                     double half_pitch_y = floor(pitch_y * 2.0 + 0.5) * 0.5;
                     if (fabs(half_pitch_x - pitch_x) <= pitch_x * 0.03) {
@@ -22028,12 +22127,18 @@ struct RotationEstimateCandidate {
                     : ((pitch_x > 1.5 || pitch_y > 1.5)
                            ? 0.125 * (pitch_x > pitch_y ? pitch_x : pitch_y)
                            : 0.25);
-                u32 center_offset_count = lock_metadata_pitch ? 1u : 9u;
+                u32 center_offset_count = lock_metadata_pitch
+                    ? 1u
+                    : (refine_common_pitch ? 5u : 9u);
                 auto sample_affine_confidence = [&](const AffineTransform& candidate) -> double {
                     u64 confidence_histogram[256] = {};
                     u64 confidence_count = 0u;
                     for (u64 row = 0u; row < data_height; ++row) {
                         for (u64 col = 0u; col < logical_width; ++col) {
+                            if (refine_common_pitch &&
+                                ((row & 1u) != 0u || (col & 1u) != 0u)) {
+                                continue;
+                            }
                             usize logical_index = (usize)row *
                                 (usize)logical_width + (usize)col;
                             if (!lock_quarter_scale_pitch && reservation_mask &&
@@ -22061,6 +22166,40 @@ struct RotationEstimateCandidate {
                             double luminance = MetadataTile::rgb_luminance_u8(
                                 pixel_data[pixel], pixel_data[pixel + 1u],
                                 pixel_data[pixel + 2u]);
+                            if (refine_common_pitch) {
+                                double neighborhood[5];
+                                u32 neighborhood_count = 0u;
+                                const int sample_dx[5] = {0, -1, 1, 0, 0};
+                                const int sample_dy[5] = {0, 0, 0, -1, 1};
+                                for (u32 sample = 0u; sample < 5u; ++sample) {
+                                    int neighbor_x = (int)pixel_x + sample_dx[sample];
+                                    int neighbor_y = (int)pixel_y + sample_dy[sample];
+                                    if (neighbor_x < 0 || neighbor_y < 0 ||
+                                        neighbor_x >= (int)width ||
+                                        neighbor_y >= (int)height) {
+                                        continue;
+                                    }
+                                    usize neighbor =
+                                        ((usize)neighbor_y * (usize)width +
+                                         (usize)neighbor_x) * 3u;
+                                    neighborhood[neighborhood_count++] =
+                                        MetadataTile::rgb_luminance_u8(
+                                            pixel_data[neighbor],
+                                            pixel_data[neighbor + 1u],
+                                            pixel_data[neighbor + 2u]);
+                                }
+                                for (u32 i = 1u; i < neighborhood_count; ++i) {
+                                    for (u32 j = i; j > 0u &&
+                                         neighborhood[j] < neighborhood[j - 1u]; --j) {
+                                        double value = neighborhood[j];
+                                        neighborhood[j] = neighborhood[j - 1u];
+                                        neighborhood[j - 1u] = value;
+                                    }
+                                }
+                                if (neighborhood_count > 0u) {
+                                    luminance = neighborhood[neighborhood_count / 2u];
+                                }
+                            }
                             u32 confidence_bin = (u32)(fabs(luminance - monochrome_threshold) + 0.5);
                             if (confidence_bin > 255u) confidence_bin = 255u;
                             ++confidence_histogram[confidence_bin];
@@ -22089,7 +22228,10 @@ struct RotationEstimateCandidate {
                 double best_angle_rad = base_angle_rad;
                 bool refine_rotation_angle =
                     (has_rotation && fabs(state.rotation_degrees_value) >= 0.25) ||
-                    lock_quarter_scale_pitch;
+                    lock_quarter_scale_pitch ||
+                    (!fiducial_grid_visible &&
+                     fabs(tile_angle_hint_rad) >
+                         (0.75 * 3.14159265358979323846 / 180.0));
                 if (force_tile_center_sampling && tile_affine_hint_available &&
                     has_rotation) {
                     double tile_angle_degrees = tile_angle_hint_rad *
@@ -22097,7 +22239,10 @@ struct RotationEstimateCandidate {
                     if (fabs(state.rotation_degrees_value - tile_angle_degrees) > 0.25) {
                         base_angle_rad = tile_angle_hint_rad;
                         best_angle_rad = base_angle_rad;
-                        refine_rotation_angle = lock_quarter_scale_pitch;
+                        refine_rotation_angle = lock_quarter_scale_pitch ||
+                            (!fiducial_grid_visible &&
+                             fabs(tile_angle_hint_rad) >
+                                 (0.75 * 3.14159265358979323846 / 180.0));
                     }
                 }
                 int minimum_angle_offset = refine_rotation_angle ? -12 : 0;
@@ -22109,32 +22254,42 @@ struct RotationEstimateCandidate {
                         (0.125 * 3.14159265358979323846 / 180.0);
                     double cosine = cos(angle);
                     double sine = sin(angle);
-                    for (u32 center_y_index = 0u;
-                         center_y_index < center_offset_count;
-                         ++center_y_index) {
-                        int center_y = center_offsets[center_y_index];
-                        for (u32 center_x_index = 0u;
-                             center_x_index < center_offset_count;
-                             ++center_x_index) {
-                            int center_x = center_offsets[center_x_index];
-                            AffineTransform candidate = {};
-                            candidate.a00 = pitch_x * cosine;
-                            candidate.a01 = -pitch_y * sine;
-                            candidate.a10 = pitch_x * sine;
-                            candidate.a11 = pitch_y * cosine;
-                            candidate.tx = tile_center_hint_x +
-                                (double)center_x * center_offset_scale -
-                                candidate.a00 * logical_center_x -
-                                candidate.a01 * logical_center_y;
-                            candidate.ty = tile_center_hint_y +
-                                (double)center_y * center_offset_scale -
-                                candidate.a10 * logical_center_x -
-                                candidate.a11 * logical_center_y;
-                            double confidence = sample_affine_confidence(candidate);
-                            if (confidence > best_confidence) {
-                                best_confidence = confidence;
-                                best_axis_affine = candidate;
-                                best_angle_rad = angle;
+                    u32 angle_pitch_count = refine_common_pitch
+                        ? pitch_candidate_count_x
+                        : 1u;
+                    for (u32 pitch_index = 0u;
+                         pitch_index < angle_pitch_count;
+                         ++pitch_index) {
+                        double angle_pitch = refine_common_pitch
+                            ? pitch_candidates_x[pitch_index]
+                            : pitch_x;
+                        for (u32 center_y_index = 0u;
+                             center_y_index < center_offset_count;
+                             ++center_y_index) {
+                            int center_y = center_offsets[center_y_index];
+                            for (u32 center_x_index = 0u;
+                                 center_x_index < center_offset_count;
+                                 ++center_x_index) {
+                                int center_x = center_offsets[center_x_index];
+                                AffineTransform candidate = {};
+                                candidate.a00 = angle_pitch * cosine;
+                                candidate.a01 = -angle_pitch * sine;
+                                candidate.a10 = angle_pitch * sine;
+                                candidate.a11 = angle_pitch * cosine;
+                                candidate.tx = tile_center_hint_x +
+                                    (double)center_x * center_offset_scale -
+                                    candidate.a00 * logical_center_x -
+                                    candidate.a01 * logical_center_y;
+                                candidate.ty = tile_center_hint_y +
+                                    (double)center_y * center_offset_scale -
+                                    candidate.a10 * logical_center_x -
+                                    candidate.a11 * logical_center_y;
+                                double confidence = sample_affine_confidence(candidate);
+                                if (confidence > best_confidence) {
+                                    best_confidence = confidence;
+                                    best_axis_affine = candidate;
+                                    best_angle_rad = angle;
+                                }
                             }
                         }
                     }
@@ -22142,10 +22297,16 @@ struct RotationEstimateCandidate {
                 for (u32 pitch_index_y = 0u;
                      pitch_index_y < pitch_candidate_count_y;
                      ++pitch_index_y) {
+                    if (refine_common_pitch && pitch_index_y >= pitch_candidate_count_x) {
+                        break;
+                    }
                     double candidate_pitch_y = pitch_candidates_y[pitch_index_y];
                     for (u32 pitch_index_x = 0u;
                          pitch_index_x < pitch_candidate_count_x;
                          ++pitch_index_x) {
+                        if (refine_common_pitch && pitch_index_x != pitch_index_y) {
+                            continue;
+                        }
                         double candidate_pitch_x = pitch_candidates_x[pitch_index_x];
                         for (u32 center_y_index = 0u;
                              center_y_index < center_offset_count;
@@ -22276,11 +22437,31 @@ struct RotationEstimateCandidate {
             }
         }
     }
-    if (scan_border_affine_from_raster_bounds) {
+    if (scan_border_affine_from_raster_bounds &&
+        !(state.affine_fit_covers_page && initial_fiducial_affine_hint_available)) {
         tile_anchored_axis_affine = scan_border_affine;
         tile_anchored_axis_affine_valid = true;
         state.affine_transform = scan_border_affine;
         state.has_affine_transform = true;
+        recompute_skew_flags();
+    }
+    if (state.affine_fit_covers_page && initial_fiducial_affine_hint_available) {
+        AffineTransform sampling_affine = initial_fiducial_affine_hint;
+        double fiducial_scale_x = sqrt(sampling_affine.a00 * sampling_affine.a00 +
+                                       sampling_affine.a10 * sampling_affine.a10);
+        double fiducial_scale_y = sqrt(sampling_affine.a01 * sampling_affine.a01 +
+                                       sampling_affine.a11 * sampling_affine.a11);
+        if (!has_rotation && !has_skew &&
+            fabs(sampling_affine.a01) <= 0.0005 * fiducial_scale_y &&
+            fabs(sampling_affine.a10) <= 0.0005 * fiducial_scale_x) {
+            sampling_affine.tx -= 0.5 * sampling_affine.a00 + 0.5 * sampling_affine.a01;
+            sampling_affine.ty -= 0.5 * sampling_affine.a10 + 0.5 * sampling_affine.a11;
+        }
+        tile_anchored_axis_affine = sampling_affine;
+        tile_anchored_axis_affine_valid = true;
+        state.affine_transform = sampling_affine;
+        state.has_affine_transform = true;
+        state.affine_from_previous_page = false;
         recompute_skew_flags();
     }
     double anchored_scale_x = sqrt(tile_anchored_axis_affine.a00 *
@@ -23498,49 +23679,57 @@ static bool append_bits_from_buffer(makocode::BitWriter& writer,
 static void apply_metadata_tile_metadata(PpmParserState& state,
                                          const MetadataTile::Values& values,
                                          const makocode::ByteBuffer& palette_text) {
+    MetadataTile::Values normalized_values = values;
+    if (values.fiducial_spacing_pixels > 0u &&
+        values.page_width_pixels > 0u && values.page_height_pixels > 0u &&
+        values.footer_rows < values.page_height_pixels) {
+        compute_centered_fiducial_dimensions(
+            values.page_width_pixels,
+            values.page_height_pixels - values.footer_rows,
+            values.fiducial_spacing_pixels,
+            normalized_values.fiducial_columns,
+            normalized_values.fiducial_rows);
+    }
     state.has_encoded_tile = true;
-    state.encoded_tile = values;
-    const u64 payload_bits = values.page_bits;
+    state.encoded_tile = normalized_values;
+    const u64 payload_bits = normalized_values.page_bits;
     const u64 frame_bits = payload_bits;
     update_metadata_field(state.has_bits, state.bits_value, payload_bits);
     update_metadata_field(state.has_page_bits, state.page_bits_value, frame_bits);
-    if (values.page_count > 0u) {
-        update_metadata_field(state.has_page_count, state.page_count_value, values.page_count);
+    if (normalized_values.page_count > 0u) {
+        update_metadata_field(state.has_page_count, state.page_count_value, normalized_values.page_count);
     }
-    update_metadata_field(state.has_page_index, state.page_index_value, values.page_index);
-    update_metadata_field(state.has_page_width_pixels, state.page_width_pixels_value, values.page_width_pixels);
-    update_metadata_field(state.has_page_height_pixels, state.page_height_pixels_value, values.page_height_pixels);
-    state.has_footer_rows = values.footer_rows > 0u;
-    state.footer_rows_value = (u64)values.footer_rows;
-    update_metadata_field(state.has_ecc_flag, state.ecc_flag_value, values.ecc_enabled ? 1ull : 0ull);
-    if (values.ecc_enabled) {
+    update_metadata_field(state.has_page_index, state.page_index_value, normalized_values.page_index);
+    update_metadata_field(state.has_page_width_pixels, state.page_width_pixels_value, normalized_values.page_width_pixels);
+    update_metadata_field(state.has_page_height_pixels, state.page_height_pixels_value, normalized_values.page_height_pixels);
+    state.has_footer_rows = normalized_values.footer_rows > 0u;
+    state.footer_rows_value = (u64)normalized_values.footer_rows;
+    update_metadata_field(state.has_ecc_flag, state.ecc_flag_value, normalized_values.ecc_enabled ? 1ull : 0ull);
+    if (normalized_values.ecc_enabled) {
         update_metadata_field(state.has_ecc_block_data,
                                      state.ecc_block_data_value,
-                                     (u64)values.ecc_block_data);
+                                     (u64)normalized_values.ecc_block_data);
         update_metadata_field(state.has_ecc_parity,
                                      state.ecc_parity_value,
-                                     (u64)values.ecc_parity);
+                                     (u64)normalized_values.ecc_parity);
         update_metadata_field(state.has_ecc_block_count,
                                      state.ecc_block_count_value,
-                                     values.ecc_block_count);
+                                     normalized_values.ecc_block_count);
         update_metadata_field(state.has_ecc_original_bytes,
                                      state.ecc_original_bytes_value,
-                                     values.ecc_original_bytes);
+                                     normalized_values.ecc_original_bytes);
     }
 
-    if (values.fiducial_marker_size_pixels > 0u) {
-        update_metadata_field(state.has_fiducial_size,
-                                     state.fiducial_size_value,
-                                     (u64)values.fiducial_marker_size_pixels);
+    if (normalized_values.fiducial_spacing_pixels > 0u) {
+        update_metadata_field(state.has_fiducial_spacing,
+                              state.fiducial_spacing_value,
+                              (u64)normalized_values.fiducial_spacing_pixels);
         update_metadata_field(state.has_fiducial_columns,
                               state.fiducial_columns_value,
-                              values.fiducial_columns);
+                              normalized_values.fiducial_columns);
         update_metadata_field(state.has_fiducial_rows,
                               state.fiducial_rows_value,
-                              values.fiducial_rows);
-        update_metadata_field(state.has_fiducial_margin,
-                              state.fiducial_margin_value,
-                              values.fiducial_margin_pixels);
+                              normalized_values.fiducial_rows);
     }
 
     // Provide palette text for existing decode path (hex tokens).
@@ -23699,12 +23888,12 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         dest.has_page_symbols = true;
         dest.page_symbols_value = src.page_symbols_value;
     }
-    if (src.has_fiducial_size) {
-        if (dest.has_fiducial_size && dest.fiducial_size_value != src.fiducial_size_value) {
+    if (src.has_fiducial_spacing) {
+        if (dest.has_fiducial_spacing && dest.fiducial_spacing_value != src.fiducial_spacing_value) {
             return false;
         }
-        dest.has_fiducial_size = true;
-        dest.fiducial_size_value = src.fiducial_size_value;
+        dest.has_fiducial_spacing = true;
+        dest.fiducial_spacing_value = src.fiducial_spacing_value;
     }
     if (src.has_fiducial_columns) {
         if (dest.has_fiducial_columns && dest.fiducial_columns_value != src.fiducial_columns_value) {
@@ -23719,10 +23908,6 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
         }
         dest.has_fiducial_rows = true;
         dest.fiducial_rows_value = src.fiducial_rows_value;
-    }
-    if (src.has_fiducial_margin) {
-        dest.has_fiducial_margin = true;
-        dest.fiducial_margin_value = src.fiducial_margin_value;
     }
     if (src.has_page_width_pixels) {
         if (dest.has_page_width_pixels && dest.page_width_pixels_value != src.page_width_pixels_value) {
@@ -23876,10 +24061,9 @@ static bool ppm_write_dimensions(u64 width,
 }
 
 static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
-                                     u32 marker_size,
                                      u32 grid_columns,
                                      u32 grid_rows,
-                                     u32 margin_pixels,
+                                     u32 spacing_pixels,
                                      u32 grid_height_limit,
                                      const u8* fiducial_rgb,
                                      makocode::ByteBuffer& output,
@@ -23923,50 +24107,36 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
     u8* pixel_data = pixels.data;
     u32 width_px = (u32)width;
     u32 height_px = (u32)height;
-    if (marker_size > width_px || marker_size > height_px) {
+    if (FIDUCIAL_MARKER_SIZE_PIXELS > width_px ||
+        FIDUCIAL_MARKER_SIZE_PIXELS > height_px) {
         return false;
     }
     u32 draw_height = (grid_height_limit > 0u && grid_height_limit < height_px) ? grid_height_limit : height_px;
-    u32 smaller_edge = width_px < draw_height ? width_px : draw_height;
-    u32 maximum_margin = smaller_edge > 0u ? (smaller_edge - 1u) / 2u : 0u;
-    if (margin_pixels > maximum_margin) margin_pixels = maximum_margin;
     MetadataTile::Placement metadata_tile = MetadataTile::compute_center_tile_placement(width_px, draw_height);
-    double min_x = (margin_pixels < width_px) ? (double)margin_pixels : 0.0;
-    double max_x = (width_px > margin_pixels) ? (double)(width_px - 1u - margin_pixels)
-                                              : (double)(width_px - 1u);
-    double min_y = (margin_pixels < draw_height) ? (double)margin_pixels : 0.0;
-    double max_y = (draw_height > margin_pixels) ? (double)(draw_height - 1u - margin_pixels)
-                                                 : (double)(draw_height - 1u);
-    if (max_x < min_x) {
-        max_x = min_x;
-    }
-    if (max_y < min_y) {
-        max_y = min_y;
-    }
     for (u32 grid_row = 0u; grid_row < grid_rows; ++grid_row) {
-        double t_y = (grid_rows == 1u) ? 0.5 : ((double)grid_row / (double)(grid_rows - 1u));
-        double center_y = min_y + (max_y - min_y) * t_y;
+        double center_y = fiducial_lattice_center(grid_row, grid_rows,
+                                                  draw_height, (double)spacing_pixels);
         for (u32 grid_col = 0u; grid_col < grid_columns; ++grid_col) {
-            double t_x = (grid_columns == 1u) ? 0.5 : ((double)grid_col / (double)(grid_columns - 1u));
-            double center_x = min_x + (max_x - min_x) * t_x;
-            int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
-            int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+            double center_x = fiducial_lattice_center(grid_col, grid_columns,
+                                                      width_px, (double)spacing_pixels);
+            int start_x = (int)(center_x - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
+            int start_y = (int)(center_y - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
             bool overlaps_metadata_tile =
                 metadata_tile.valid &&
                 start_x < (int)(metadata_tile.x0 + MetadataTile::TILE_SIDE) &&
-                start_x + (int)marker_size > (int)metadata_tile.x0 &&
+                start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)metadata_tile.x0 &&
                 start_y < (int)(metadata_tile.y0 + MetadataTile::TILE_SIDE) &&
-                start_y + (int)marker_size > (int)metadata_tile.y0;
+                start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)metadata_tile.y0;
             if (overlaps_metadata_tile) {
                 continue;
             }
             bool marker_visible = false;
-            for (u32 dy = 0u; dy < marker_size; ++dy) {
+            for (u32 dy = 0u; dy < FIDUCIAL_MARKER_SIZE_PIXELS; ++dy) {
                 int pixel_y = start_y + (int)dy;
                 if (pixel_y < 0 || pixel_y >= (int)draw_height) {
                     continue;
                 }
-                for (u32 dx = 0u; dx < marker_size; ++dx) {
+                for (u32 dx = 0u; dx < FIDUCIAL_MARKER_SIZE_PIXELS; ++dx) {
                     int pixel_x = start_x + (int)dx;
                     if (pixel_x < 0 || pixel_x >= (int)width_px) {
                         continue;
@@ -23977,19 +24147,19 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                     pixel_data[index + 2u] = fiducial_rgb[2];
                 }
             }
-            int visibility_radius = (int)marker_size;
+            int visibility_radius = (int)FIDUCIAL_MARKER_SIZE_PIXELS;
             int ring_x0 = start_x - visibility_radius;
             int ring_y0 = start_y - visibility_radius;
-            int ring_x1 = start_x + (int)marker_size + visibility_radius;
-            int ring_y1 = start_y + (int)marker_size + visibility_radius;
+            int ring_x1 = start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS + visibility_radius;
+            int ring_y1 = start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS + visibility_radius;
             if (ring_x0 < 0) ring_x0 = 0;
             if (ring_y0 < 0) ring_y0 = 0;
             if (ring_x1 > (int)width_px) ring_x1 = (int)width_px;
             if (ring_y1 > (int)draw_height) ring_y1 = (int)draw_height;
             for (int ring_y = ring_y0; ring_y < ring_y1 && !marker_visible; ++ring_y) {
                 for (int ring_x = ring_x0; ring_x < ring_x1; ++ring_x) {
-                    if (ring_x >= start_x && ring_x < start_x + (int)marker_size &&
-                        ring_y >= start_y && ring_y < start_y + (int)marker_size) {
+                    if (ring_x >= start_x && ring_x < start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS &&
+                        ring_y >= start_y && ring_y < start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS) {
                         continue;
                     }
                     if (metadata_tile.valid &&
@@ -24016,10 +24186,10 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                          debug_page,
                                          grid_row,
                                          grid_col,
-                                         (double)start_x + ((double)marker_size - 1.0) * 0.5,
-                                         (double)start_y + ((double)marker_size - 1.0) * 0.5,
-                                         (double)start_x + ((double)marker_size - 1.0) * 0.5,
-                                         (double)start_y + ((double)marker_size - 1.0) * 0.5)) {
+                                         (double)start_x + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5,
+                                         (double)start_y + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5,
+                                         (double)start_x + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5,
+                                         (double)start_y + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5)) {
                 return false;
             }
         }
@@ -24084,24 +24254,21 @@ static bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
     if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
         return false;
     }
-    u32 fiducial_marker_size = g_fiducial_defaults.marker_size_pixels;
-    u32 fiducial_margin = g_fiducial_defaults.margin_pixels;
     u32 grid_height = height_pixels;
     if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
         grid_height = data_height_pixels;
     }
     u32 fiducial_columns = 0u;
     u32 fiducial_rows = 0u;
-    compute_default_fiducial_dimensions(width_pixels,
-                                        grid_height,
-                                        fiducial_margin,
-                                        fiducial_columns,
-                                        fiducial_rows);
+    compute_centered_fiducial_dimensions(width_pixels,
+                                         grid_height,
+                                         g_fiducial_defaults.spacing_pixels,
+                                         fiducial_columns,
+                                         fiducial_rows);
     return ppm_insert_fiducial_grid(input,
-                                    fiducial_marker_size,
                                     fiducial_columns,
                                     fiducial_rows,
-                                    fiducial_margin,
+                                    g_fiducial_defaults.spacing_pixels,
                                     grid_height,
                                     fiducial_rgb,
                                     output,
@@ -24137,10 +24304,9 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
                                         u64& reserved_data_pixels,
                                         makocode::ByteBuffer* mask_out,
                                         bool use_grid_override = false,
-                                        u32 marker_size_override = 0u,
                                         u32 columns_override = 0u,
                                         u32 rows_override = 0u,
-                                        u32 margin_override = 0u) {
+                                        u32 spacing_override = 0u) {
     reserved_data_pixels = 0u;
     u64 total_pixels = (u64)width_pixels * (u64)height_pixels;
     if (mask_out) {
@@ -24153,51 +24319,51 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
             memset(mask_out->data, 0, (usize)total_pixels);
         }
     }
-    u32 marker_size = use_grid_override
-                          ? marker_size_override
-                          : g_fiducial_defaults.marker_size_pixels;
     u32 draw_height = height_pixels;
     if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
         draw_height = data_height_pixels;
     }
-    u32 margin = use_grid_override ? margin_override : g_fiducial_defaults.margin_pixels;
-    u32 smaller_edge = width_pixels < draw_height ? width_pixels : draw_height;
-    u32 maximum_margin = smaller_edge > 0u ? (smaller_edge - 1u) / 2u : 0u;
-    if (margin > maximum_margin) margin = maximum_margin;
-    double min_x = (margin < width_pixels) ? (double)margin : 0.0;
-    double max_x = (width_pixels > margin)
-                       ? (double)(width_pixels - 1u - margin)
-                       : (double)(width_pixels - 1u);
-    double min_y = (margin < draw_height) ? (double)margin : 0.0;
-    double max_y = (draw_height > margin)
-                       ? (double)(draw_height - 1u - margin)
-                       : (double)(draw_height - 1u);
-    if (max_x < min_x) max_x = min_x;
-    if (max_y < min_y) max_y = min_y;
+    u32 spacing = use_grid_override && spacing_override > 0u
+                      ? spacing_override
+                      : g_fiducial_defaults.spacing_pixels;
     u32 fiducial_columns = columns_override;
     u32 fiducial_rows = rows_override;
     if (!use_grid_override) {
-        compute_default_fiducial_dimensions(width_pixels,
-                                            draw_height,
-                                            margin,
-                                            fiducial_columns,
-                                            fiducial_rows);
+        compute_centered_fiducial_dimensions(width_pixels,
+                                             draw_height,
+                                             spacing,
+                                             fiducial_columns,
+                                             fiducial_rows);
     }
+    MetadataTile::Placement metadata_tile =
+        MetadataTile::compute_center_tile_placement(width_pixels, draw_height);
     for (u32 grid_row = 0u; grid_row < fiducial_rows; ++grid_row) {
-        double t_y = (fiducial_rows == 1u) ? 0.5 : ((double)grid_row / (double)(fiducial_rows - 1u));
-        double center_y = min_y + (max_y - min_y) * t_y;
-        int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
+        double center_y = fiducial_lattice_center(grid_row, fiducial_rows,
+                                                  draw_height, (double)spacing);
+        int start_y = (int)(center_y - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
         for (u32 grid_col = 0u; grid_col < fiducial_columns; ++grid_col) {
-            double t_x = (fiducial_columns == 1u) ? 0.5 : ((double)grid_col / (double)(fiducial_columns - 1u));
-            double center_x = min_x + (max_x - min_x) * t_x;
-            int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
-            for (u32 dy = 0u; dy < marker_size; ++dy) {
+            double center_x = fiducial_lattice_center(grid_col, fiducial_columns,
+                                                      width_pixels, (double)spacing);
+            int start_x = (int)(center_x - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
+            bool overlaps_metadata_tile = false;
+            if (metadata_tile.valid) {
+                int tile_x0 = (int)metadata_tile.x0 - (int)metadata_tile.offset_x;
+                int tile_y0 = (int)metadata_tile.y0 - (int)metadata_tile.offset_y;
+                int tile_x1 = tile_x0 + (int)MetadataTile::TILE_SIDE;
+                int tile_y1 = tile_y0 + (int)MetadataTile::TILE_SIDE;
+                overlaps_metadata_tile = start_x < tile_x1 &&
+                    start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS > tile_x0 &&
+                    start_y < tile_y1 &&
+                    start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS > tile_y0;
+            }
+            if (overlaps_metadata_tile) continue;
+            for (u32 dy = 0u; dy < FIDUCIAL_MARKER_SIZE_PIXELS; ++dy) {
                 int pixel_y = start_y + (int)dy;
                 if (pixel_y < 0 || pixel_y >= (int)draw_height) {
                     continue;
                 }
                 bool within_data = ((u32)pixel_y < data_height_pixels);
-                for (u32 dx = 0u; dx < marker_size; ++dx) {
+                for (u32 dx = 0u; dx < FIDUCIAL_MARKER_SIZE_PIXELS; ++dx) {
                     int pixel_x = start_x + (int)dx;
                     if (pixel_x < 0 || pixel_x >= (int)width_pixels) {
                         continue;
@@ -24227,20 +24393,18 @@ static bool compute_fiducial_reservation(u32 width_pixels,
                                          u64& reserved_data_pixels,
                                          makocode::ByteBuffer* mask_out,
                                          bool use_grid_override,
-                                         u32 marker_size_override,
                                          u32 columns_override,
                                          u32 rows_override,
-                                         u32 margin_override) {
+                                         u32 spacing_override) {
     if (!compute_fiducial_marker_mask(width_pixels,
                                       height_pixels,
                                       data_height_pixels,
                                       reserved_data_pixels,
                                       mask_out,
                                       use_grid_override,
-                                      marker_size_override,
                                       columns_override,
                                       rows_override,
-                                      margin_override)) {
+                                      spacing_override)) {
         return false;
     }
 
@@ -24488,24 +24652,13 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
     tile_values.page_width_pixels = width_pixels;
     tile_values.page_height_pixels = height_pixels;
     tile_values.footer_rows = height_pixels - data_height_pixels;
-    tile_values.fiducial_marker_size_pixels =
-        g_fiducial_defaults.marker_size_pixels ? g_fiducial_defaults.marker_size_pixels : 1u;
+    tile_values.fiducial_spacing_pixels = g_fiducial_defaults.spacing_pixels;
     tile_values.overwrite_layout = true;
-    u32 smaller_page_edge = width_pixels < data_height_pixels
-                                ? width_pixels
-                                : data_height_pixels;
-    u32 maximum_fiducial_margin = smaller_page_edge > 0u
-                                      ? (smaller_page_edge - 1u) / 2u
-                                      : 0u;
-    tile_values.fiducial_margin_pixels =
-        g_fiducial_defaults.margin_pixels < maximum_fiducial_margin
-            ? g_fiducial_defaults.margin_pixels
-            : maximum_fiducial_margin;
-    compute_default_fiducial_dimensions(width_pixels,
-                                        data_height_pixels,
-                                        tile_values.fiducial_margin_pixels,
-                                        tile_values.fiducial_columns,
-                                        tile_values.fiducial_rows);
+    compute_centered_fiducial_dimensions(width_pixels,
+                                         data_height_pixels,
+                                         tile_values.fiducial_spacing_pixels,
+                                         tile_values.fiducial_columns,
+                                         tile_values.fiducial_rows);
     tile_values.ecc_enabled = (ecc_summary && ecc_summary->enabled);
     tile_values.ecc_target_hundredths = ecc_summary
                                             ? ecc_summary->ecc_target_hundredths
@@ -24910,98 +25063,46 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     return true;
 }
-static bool process_fiducial_option(int arg_count,
-                                    char** args,
-                                    int* arg_index,
-                                    FiducialGridDefaults& defaults,
-                                    const char* command_name,
-                                    bool* handled) {
+static bool process_fiducial_spacing_option(int arg_count,
+                                            char** args,
+                                            int* arg_index,
+                                            FiducialGridDefaults& defaults,
+                                            const char* command_name,
+                                            bool* handled) {
     *handled = false;
     int index = *arg_index;
     if (index < 0 || index >= arg_count) {
         return false;
     }
     const char* arg = args[index];
-    const char fiducial_prefix[] = "--fiducials=";
+    const char spacing_prefix[] = "--fiducial-spacing=";
     const char* value_text = 0;
-    if (ascii_equals_token(arg, ascii_length(arg), "--fiducials")) {
+    if (ascii_equals_token(arg, ascii_length(arg), "--fiducial-spacing")) {
         if ((index + 1) >= arg_count) {
             console_write(2, command_name);
-            console_line(2, ": --fiducials requires size,spacing[,margin]");
+            console_line(2, ": --fiducial-spacing requires a positive pixel distance");
             return false;
         }
         value_text = args[index + 1];
         *arg_index = index + 1;
-    } else if (ascii_starts_with(arg, fiducial_prefix)) {
-        value_text = arg + (sizeof(fiducial_prefix) - 1u);
+    } else if (ascii_starts_with(arg, spacing_prefix)) {
+        value_text = arg + (sizeof(spacing_prefix) - 1u);
     } else {
         return true;
     }
     usize total_length = ascii_length(value_text);
-    u64 parsed_values[3];
-    usize parsed_count = 0u;
-    usize segment_start = 0u;
-    for (usize i = 0u; i <= total_length; ++i) {
-        bool at_end = (i == total_length);
-        char c = at_end ? '\0' : value_text[i];
-        if (c == ',' || at_end) {
-            if (parsed_count >= 3u) {
-                console_write(2, command_name);
-                console_line(2, ": --fiducials accepts at most three numeric values");
-                return false;
-            }
-            usize segment_length = i - segment_start;
-            if (segment_length == 0u) {
-                console_write(2, command_name);
-                console_line(2, ": --fiducials values must be non-empty");
-                return false;
-            }
-            u64 number_value = 0u;
-            if (!ascii_to_u64(value_text + segment_start, segment_length, &number_value)) {
-                console_write(2, command_name);
-                console_line(2, ": --fiducials values must be unsigned integers");
-                return false;
-            }
-            parsed_values[parsed_count++] = number_value;
-            segment_start = i + 1u;
-            continue;
-        }
-        if (c < '0' || c > '9') {
-            console_write(2, command_name);
-            console_line(2, ": --fiducials values must be numeric");
-            return false;
-        }
-    }
-    if (parsed_count < 2u) {
+    u64 spacing = 0u;
+    if (!total_length || !ascii_to_u64(value_text, total_length, &spacing)) {
         console_write(2, command_name);
-        console_line(2, ": --fiducials requires at least size and spacing");
+        console_line(2, ": --fiducial-spacing must be a positive integer");
         return false;
     }
-    if (parsed_values[0] == 0u || parsed_values[0] > 0xFFFFFFFFull) {
+    if (spacing < FIDUCIAL_MARKER_SIZE_PIXELS || spacing > 0xFFFFFFFFull) {
         console_write(2, command_name);
-        console_line(2, ": --fiducials size must be between 1 and 4294967295");
+        console_line(2, ": --fiducial-spacing must be between 2 and 4294967295");
         return false;
     }
-    if (parsed_values[1] == 0u || parsed_values[1] > 0xFFFFFFFFull) {
-        console_write(2, command_name);
-        console_line(2, ": --fiducials spacing must be between 1 and 4294967295");
-        return false;
-    }
-    if (parsed_values[1] < parsed_values[0]) {
-        console_write(2, command_name);
-        console_line(2, ": --fiducials spacing must be >= size");
-        return false;
-    }
-    defaults.marker_size_pixels = (u32)parsed_values[0];
-    defaults.spacing_pixels = (u32)parsed_values[1];
-    if (parsed_count >= 3u) {
-        if (parsed_values[2] > 0xFFFFFFFFull) {
-            console_write(2, command_name);
-            console_line(2, ": --fiducials margin must be between 0 and 4294967295");
-            return false;
-        }
-        defaults.margin_pixels = (u32)parsed_values[2];
-    }
+    defaults.spacing_pixels = (u32)spacing;
     *handled = true;
     return true;
 }
@@ -25949,7 +26050,7 @@ static void write_encode_help() {
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
     console_line(1, "  --page-width PX      Page width in pixels; omitted width fits the encoded payload.");
     console_line(1, "  --page-height PX     Page height in pixels; omitted height fits the encoded payload.");
-    console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
+    console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
@@ -25985,7 +26086,7 @@ static void write_decode_help() {
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
     console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable (default 2480).");
     console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable (default 3508).");
-    console_line(1, "  --fiducials S,D[,M]  Marker size, spacing, optional margin (default 4,24,12).");
+    console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
     console_line(1, "  --debug              Write decode_fiducials.csv and decode_affine.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "General:");
@@ -26948,7 +27049,7 @@ static int command_encode(int arg_count, char** args) {
             continue;
         }
         handled = false;
-        if (!process_fiducial_option(arg_count, args, &i, g_fiducial_defaults, "encode", &handled)) {
+        if (!process_fiducial_spacing_option(arg_count, args, &i, g_fiducial_defaults, "encode", &handled)) {
             return 1;
         }
         if (handled) {
@@ -27452,7 +27553,6 @@ static int command_encode(int arg_count, char** args) {
                                       false,
                                       0u,
                                       0u,
-                                      0u,
                                       0u)) {
         console_line(2, "encode: canonical centered metadata layout does not fit page geometry");
         return 1;
@@ -27465,7 +27565,7 @@ static int command_encode(int arg_count, char** args) {
     }
     u64 data_pixels = (u64)width_pixels *
                       (u64)estimate_footer_layout.data_height_pixels;
-    if (data_pixels == 0u || overwritten_pixels == 0u) {
+    if (data_pixels == 0u) {
         console_line(2, "encode: canonical layout has no payload capacity");
         return 1;
     }
@@ -27770,9 +27870,9 @@ static int command_encode(int arg_count, char** args) {
     }
     bool debug_reapplied_by_filename = debug_requested &&
                                        path_contains_substring(page_name_prefix, "_encoded");
-    u8 fiducial_text_rgb[3] = {0u, 0u, 0u};
-    u8 fiducial_rgb[3] = {255u, 255u, 255u};
-    footer_select_colors(mapping, fiducial_text_rgb, fiducial_rgb);
+    u8 fiducial_rgb[3] = {0u, 0u, 0u};
+    u8 fiducial_background_rgb[3] = {255u, 255u, 255u};
+    footer_select_colors(mapping, fiducial_rgb, fiducial_background_rgb);
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
     if (debug_requested) {
@@ -28003,9 +28103,7 @@ static bool build_overlay_payload_rank_reservation_mask(
     const OverlayPage& page,
     makocode::ByteBuffer& mask_out) {
     const MetadataTile::Values& tile = page.metadata.encoded_tile;
-    bool use_metadata_fiducial_grid = tile.fiducial_marker_size_pixels > 0u &&
-                                      tile.fiducial_columns > 0u &&
-                                      tile.fiducial_rows > 0u;
+    bool use_metadata_fiducial_grid = tile.fiducial_spacing_pixels > 0u;
     u64 reserved_pixels = 0u;
     return compute_fiducial_marker_mask(page.width,
                                        page.height,
@@ -28013,10 +28111,9 @@ static bool build_overlay_payload_rank_reservation_mask(
                                        reserved_pixels,
                                        &mask_out,
                                        use_metadata_fiducial_grid,
-                                       tile.fiducial_marker_size_pixels,
                                        tile.fiducial_columns,
                                        tile.fiducial_rows,
-                                       tile.fiducial_margin_pixels);
+                                       tile.fiducial_spacing_pixels);
 }
 
 static const usize MAX_OVERLAY_IGNORE_COLORS = 64u;
@@ -28038,13 +28135,9 @@ static void overlay_apply_base_layout(const OverlayPage& base, OverlayPage& over
         overlay.metadata.has_footer_rows = true;
         overlay.metadata.footer_rows_value = base.metadata.footer_rows_value;
     }
-    if (base.metadata.has_fiducial_size) {
-        overlay.metadata.has_fiducial_size = true;
-        overlay.metadata.fiducial_size_value = base.metadata.fiducial_size_value;
-    }
-    if (base.metadata.has_fiducial_margin) {
-        overlay.metadata.has_fiducial_margin = true;
-        overlay.metadata.fiducial_margin_value = base.metadata.fiducial_margin_value;
+    if (base.metadata.has_fiducial_spacing) {
+        overlay.metadata.has_fiducial_spacing = true;
+        overlay.metadata.fiducial_spacing_value = base.metadata.fiducial_spacing_value;
     }
     if (base.metadata.has_fiducial_columns) {
         overlay.metadata.has_fiducial_columns = true;
@@ -28346,99 +28439,19 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
 static bool build_overlay_mask(const OverlayPage& page,
                                makocode::ByteBuffer& mask_out,
                                u64& reserved_pixels) {
-    reserved_pixels = 0u;
-    mask_out.release();
-    u64 total_pixels = (u64)page.width * (u64)page.height;
-    if (!mask_out.ensure((usize)total_pixels)) {
+    bool use_metadata_grid = page.metadata.has_fiducial_spacing &&
+                             page.metadata.has_fiducial_columns &&
+                             page.metadata.has_fiducial_rows;
+    if (!compute_fiducial_marker_mask(page.width,
+                                      page.height,
+                                      page.data_height,
+                                      reserved_pixels,
+                                      &mask_out,
+                                      use_metadata_grid,
+                                      (u32)page.metadata.fiducial_columns_value,
+                                      (u32)page.metadata.fiducial_rows_value,
+                                      (u32)page.metadata.fiducial_spacing_value)) {
         return false;
-    }
-    mask_out.size = (usize)total_pixels;
-    for (usize i = 0u; i < mask_out.size; ++i) {
-        mask_out.data[i] = 0u;
-    }
-    if (page.data_height == 0u) {
-        return true;
-    }
-    u32 marker_size = g_fiducial_defaults.marker_size_pixels;
-    if (page.metadata.has_fiducial_size && page.metadata.fiducial_size_value > 0u && page.metadata.fiducial_size_value <= 0xFFFFFFFFull) {
-        marker_size = (u32)page.metadata.fiducial_size_value;
-    }
-    u32 draw_height = page.height;
-    if (page.data_height < page.height) {
-        draw_height = page.data_height;
-    }
-    u32 margin = g_fiducial_defaults.margin_pixels;
-    if (page.metadata.has_fiducial_margin && page.metadata.fiducial_margin_value <= 0xFFFFFFFFull) {
-        margin = (u32)page.metadata.fiducial_margin_value;
-    }
-    double min_x = (margin < page.width) ? (double)margin : 0.0;
-    double max_x = (page.width > margin)
-                       ? (double)(page.width - 1u - margin)
-                       : (double)(page.width - 1u);
-    if (max_x < min_x) {
-        max_x = min_x;
-    }
-    double min_y = (margin < draw_height) ? (double)margin : 0.0;
-    double max_y = (draw_height > margin)
-                       ? (double)(draw_height - 1u - margin)
-                       : (double)(draw_height - 1u);
-    if (max_y < min_y) {
-        max_y = min_y;
-    }
-    double available_width = (max_x >= min_x) ? (max_x - min_x) : 0.0;
-    double available_height = (max_y >= min_y) ? (max_y - min_y) : 0.0;
-    u32 columns = (page.metadata.has_fiducial_columns && page.metadata.fiducial_columns_value > 0u)
-                      ? (u32)page.metadata.fiducial_columns_value
-                      : 0u;
-    u32 rows = (page.metadata.has_fiducial_rows && page.metadata.fiducial_rows_value > 0u)
-                   ? (u32)page.metadata.fiducial_rows_value
-                   : 0u;
-    if (columns == 0u || rows == 0u) {
-        u32 spacing = g_fiducial_defaults.spacing_pixels;
-        if (columns == 0u) {
-            columns = 1u;
-            if (spacing > 0u && available_width > 0.0) {
-                double span = available_width / (double)spacing;
-                u64 additional = (u64)span;
-                columns = (u32)(additional + 1ull);
-            }
-        }
-        if (rows == 0u) {
-            rows = 1u;
-            if (spacing > 0u && available_height > 0.0) {
-                double span = available_height / (double)spacing;
-                u64 additional = (u64)span;
-                rows = (u32)(additional + 1ull);
-            }
-        }
-    }
-    for (u32 grid_row = 0u; grid_row < rows; ++grid_row) {
-        double t_y = (rows == 1u) ? 0.5 : ((double)grid_row / (double)(rows - 1u));
-        double center_y = min_y + (max_y - min_y) * t_y;
-        int start_y = (int)(center_y - ((double)marker_size - 1.0) * 0.5);
-        for (u32 grid_col = 0u; grid_col < columns; ++grid_col) {
-            double t_x = (columns == 1u) ? 0.5 : ((double)grid_col / (double)(columns - 1u));
-            double center_x = min_x + (max_x - min_x) * t_x;
-            int start_x = (int)(center_x - ((double)marker_size - 1.0) * 0.5);
-            for (u32 dy = 0u; dy < marker_size; ++dy) {
-                int pixel_y = start_y + (int)dy;
-                if (pixel_y < 0 || pixel_y >= (int)draw_height) {
-                    continue;
-                }
-                bool within_data = ((u32)pixel_y < page.data_height);
-                for (u32 dx = 0u; dx < marker_size; ++dx) {
-                    int pixel_x = start_x + (int)dx;
-                    if (pixel_x < 0 || pixel_x >= (int)page.width) {
-                        continue;
-                    }
-                    usize index = ((usize)pixel_y * (usize)page.width) + (usize)pixel_x;
-                    mask_out.data[index] = 1u;
-                    if (within_data) {
-                        ++reserved_pixels;
-                    }
-                }
-            }
-        }
     }
 
     // Protect only the written metadata barcode and codeword modules.
@@ -30149,6 +30162,13 @@ static int command_decode(int arg_count, char** args) {
         if (handled) {
             continue;
         }
+        handled = false;
+        if (!process_fiducial_spacing_option(arg_count, args, &i, g_fiducial_defaults, "decode", &handled)) {
+            return 1;
+        }
+        if (handled) {
+            continue;
+        }
         const char* arg = args[i];
         if (ascii_equals_token(arg, ascii_length(arg), "--decoded-file")) {
             decoded_file_requested = true;
@@ -31075,8 +31095,8 @@ retry_decode:
             ok = decoded.append_ascii("page ") && decoded.append_ascii(number) && decoded.append_char('\n');
             if (encoded_page_present[page]) {
                 const MetadataTile::Values& tile = encoded_pages[page];
-                const char* names[] = {"tile_schema", "page_bits", "page_count", "page_index", "width", "height", "footer_rows", "fiducial_size", "ecc_enabled", "ecc_block_data", "ecc_parity", "ecc_block_count", "ecc_original_bytes", "palette_count"};
-                u64 values[] = {MetadataTile::TILE_SCHEMA_VERSION, tile.page_bits, tile.page_count, tile.page_index, tile.page_width_pixels, tile.page_height_pixels, tile.footer_rows, tile.fiducial_marker_size_pixels, tile.ecc_enabled ? 1u : 0u, tile.ecc_block_data, tile.ecc_parity, tile.ecc_block_count, tile.ecc_original_bytes, tile.palette_count};
+                const char* names[] = {"tile_schema", "page_bits", "page_count", "page_index", "width", "height", "footer_rows", "fiducial_spacing", "ecc_enabled", "ecc_block_data", "ecc_parity", "ecc_block_count", "ecc_original_bytes", "palette_count"};
+                u64 values[] = {MetadataTile::TILE_SCHEMA_VERSION, tile.page_bits, tile.page_count, tile.page_index, tile.page_width_pixels, tile.page_height_pixels, tile.footer_rows, tile.fiducial_spacing_pixels, tile.ecc_enabled ? 1u : 0u, tile.ecc_block_data, tile.ecc_parity, tile.ecc_block_count, tile.ecc_original_bytes, tile.palette_count};
                 for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
                     u64_to_ascii(values[i], number, sizeof(number));
                     ok = decoded.append_ascii("metadata ") && decoded.append_ascii(names[i]) && decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');

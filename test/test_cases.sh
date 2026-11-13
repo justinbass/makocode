@@ -102,7 +102,7 @@ test_case 0025_ecc_multi_page_massive roundtrip "262 KiB ECC multi-page stress" 
     --size 262144  --width 520 --height 520 --multi-page
 
 test_case 0026_multi_page_distorted roundtrip "Multi-page payload with scale and rotation distortions" \
-    --size 32768 --width 620 --height 620 --multi-page --ecc 0.41 \
+    --size 65536 --width 620 --height 620 --multi-page --ecc 0.41 \
     --scale 2.10 --rotate 1 --transform-seed 7331
 
 test_case 0027_palette_base5_custom roundtrip "Custom palette/base-5 mode" \
@@ -197,7 +197,7 @@ test_case 0048_overlay_bw_ecc_target_025 overlay "Black/white circle overlay obe
     MAKO_OVERLAY_PAGE_HEIGHT=1840 \
     MAKO_OVERLAY_EXPECT_PAGES=1 \
     MAKO_OVERLAY_ECC_TARGET=0.25 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducials=4,60,12" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducial-spacing=60" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
@@ -210,7 +210,7 @@ test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obe
     MAKO_OVERLAY_PAGE_HEIGHT=1840 \
     MAKO_OVERLAY_EXPECT_PAGES=1 \
     MAKO_OVERLAY_ECC_TARGET=0.5 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducials=4,60,12" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducial-spacing=60" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \

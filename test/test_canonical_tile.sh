@@ -71,12 +71,12 @@ if ! rg -q "page was encoded with zero overlay fraction" "$work/no_overlay_error
     exit 1
 fi
 
-# A non-default marker geometry must produce the same known-erasure map on
+# A non-default fiducial spacing must produce the same known-erasure map on
 # decode that the encoder used when padding structural parity.
 mkdir -p "$work/custom_fiducials/pages" "$work/custom_fiducials/out"
 (cd "$work" && "$bin" encode --input=payload.bin  \
     --page-width=1000 --page-height=1000 \
-    --fiducials=6,30,15 --prefix=custom --output-dir="$work/custom_fiducials/pages" >/dev/null)
+    --fiducial-spacing=30 --prefix=custom --output-dir="$work/custom_fiducials/pages" >/dev/null)
 shopt -s nullglob
 custom_pages=("$work"/custom_fiducials/pages/*.ppm)
 shopt -u nullglob

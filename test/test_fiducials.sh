@@ -71,7 +71,7 @@ encode_cmd=(
 
     --page-width=240
     --page-height=240
-    --fiducials=6,30,15
+    --fiducial-spacing=30
     "--prefix=${label}_fiducials"
     "--output-dir=$pages_dir"
     --debug
@@ -90,16 +90,16 @@ if [[ ! -f $encode_csv ]]; then
     exit 1
 fi
 
-# The configured 6-pixel marker at margin 15 is centered at 14.5 pixels;
-# 30-pixel spacing puts the next marker center at 44.5.
+# The hardcoded 2x2 marker grid is centered on the 240-pixel page;
+# 30-pixel spacing puts the first two marker centers at 29.5 and 59.5.
 if ! awk -F, '
-    NR == 2 { exit !($1 == 1 && $2 == 0 && $3 == 0 && $4 == "14.500" && $5 == "14.500") }
+    NR == 2 { exit !($1 == 1 && $2 == 0 && $3 == 0 && $4 == "29.500" && $5 == "29.500") }
 ' "$encode_csv"; then
-    echo 'test_fiducials: first marker does not match configured size and margin' >&2
+    echo 'test_fiducials: first marker is not centered on the page' >&2
     exit 1
 fi
 if ! awk -F, '
-    NR == 3 { exit !($1 == 1 && $2 == 0 && $3 == 1 && $4 == "44.500" && $5 == "14.500") }
+    NR == 3 { exit !($1 == 1 && $2 == 0 && $3 == 1 && $4 == "59.500" && $5 == "29.500") }
 ' "$encode_csv"; then
     echo 'test_fiducials: second marker does not match configured spacing' >&2
     exit 1

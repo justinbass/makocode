@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
             values.overlay_fraction_value = 0u;
             values.page_width_pixels = MetadataTile::TILE_SIDE;
             values.page_height_pixels = MetadataTile::TILE_SIDE;
-            values.fiducial_marker_size_pixels = 4u;
+            values.fiducial_spacing_pixels = 24u;
             values.fiducial_columns = 1u;
             values.fiducial_rows = 1u;
             values.overwrite_layout = true;
@@ -229,7 +229,6 @@ int main(int argc, char** argv) {
                                           reserved_pixels,
                                           &mask,
                                           false,
-                                          0u,
                                           0u,
                                           0u,
                                           0u)) {
@@ -453,27 +452,19 @@ int main(int argc, char** argv) {
     }
     if (check_structural) {
         bool fiducial_crosses_tile = false;
-        double min_x = (double)values.fiducial_margin_pixels;
-        double max_x = (double)(width - 1u - values.fiducial_margin_pixels);
-        double min_y = (double)values.fiducial_margin_pixels;
-        double max_y = (double)(data_height - 1u - values.fiducial_margin_pixels);
         for (u32 row = 0u; row < values.fiducial_rows && !fiducial_crosses_tile; ++row) {
-            double ty = values.fiducial_rows == 1u
-                            ? 0.5
-                            : (double)row / (double)(values.fiducial_rows - 1u);
-            double center_y = min_y + (max_y - min_y) * ty;
-            int start_y = (int)(center_y - ((double)values.fiducial_marker_size_pixels - 1.0) * 0.5);
+            double center_y = fiducial_lattice_center(row, values.fiducial_rows,
+                                                      data_height, values.fiducial_spacing_pixels);
+            int start_y = (int)(center_y - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
             for (u32 column = 0u; column < values.fiducial_columns && !fiducial_crosses_tile; ++column) {
-                double tx = values.fiducial_columns == 1u
-                                ? 0.5
-                                : (double)column / (double)(values.fiducial_columns - 1u);
-                double center_x = min_x + (max_x - min_x) * tx;
-                int start_x = (int)(center_x - ((double)values.fiducial_marker_size_pixels - 1.0) * 0.5);
+                double center_x = fiducial_lattice_center(column, values.fiducial_columns,
+                                                          width, values.fiducial_spacing_pixels);
+                int start_x = (int)(center_x - ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5);
                 fiducial_crosses_tile =
                     start_x < (int)(placement.x0 + MetadataTile::TILE_SIDE) &&
-                    start_x + (int)values.fiducial_marker_size_pixels > (int)placement.x0 &&
+                    start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)placement.x0 &&
                     start_y < (int)(placement.y0 + MetadataTile::TILE_SIDE) &&
-                    start_y + (int)values.fiducial_marker_size_pixels > (int)placement.y0;
+                    start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS > (int)placement.y0;
             }
         }
         if (!fiducial_crosses_tile) {
