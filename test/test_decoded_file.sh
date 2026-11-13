@@ -7,7 +7,7 @@ work=$(mktemp -d "$root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work/input/empty" "$work/input/sub" "$work/pages" "$work/out"
 printf 'hello\nback\\slash\000\377' > "$work/input/sub/a b"
 : > "$work/input/blank"
-(cd "$work" && "$bin" encode --input=input  --password=secret --prefix=page --output-dir=pages >/dev/null)
+(cd "$work" && "$bin" encode --input=input --password=secret --random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb --prefix=page --output-dir=pages >/dev/null)
 "$bin" decode --decoded-file --password=secret --output-dir="$work/out" "$work"/pages/*.ppm >/dev/null
 python3 - "$work" <<'PY'
 import pathlib, re, sys

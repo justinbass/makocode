@@ -5329,73 +5329,6 @@ bool remove_border_dirt(image::ImageBuffer& image,
     return true;
 }
 
-__extension__ typedef unsigned __int128 u128;
-
-static const u128 PCG64_MULTIPLIER =
-    (((u128)0x2360ED051FC65DA4ull) << 64u) | (u128)0x4385DF649FCCF645ull;
-static const u128 PCG64_INCREMENT =
-    (((u128)0x5851F42D4C957F2Dull) << 64u) | (u128)0x14057B7EF767814Full;
-
-struct Pcg64Generator {
-    u128 state;
-
-    Pcg64Generator() : state(0u) {}
-
-    void seed(u64 seed_value) {
-        state = 0u;
-        (void)next();
-        state += (u128)seed_value;
-        (void)next();
-    }
-
-    u64 next() {
-        u128 oldstate = state;
-        state = oldstate * PCG64_MULTIPLIER + PCG64_INCREMENT;
-        u64 xorshifted = (u64)(((oldstate >> 64u) ^ oldstate) >> 64u);
-        u32 rot = (u32)(oldstate >> 122u);
-        u32 rotate = rot & 63u;
-        u32 inverse = (64u - rotate) & 63u;
-        return (xorshifted >> rotate) | (xorshifted << inverse);
-    }
-};
-
-static void crypto_random_bytes(u8* dest, usize count) {
-    static Pcg64Generator rng;
-    static bool seeded = false;
-    if (!seeded) {
-        u64 seed = (u64)time((long*)0);
-        const char* test_seed_text = getenv("MAKOCODE_TEST_SEED");
-        if (test_seed_text && *test_seed_text) {
-            u64 parsed_seed = 0u;
-            bool valid_seed = true;
-            for (const char* cursor = test_seed_text; *cursor; ++cursor) {
-                if (*cursor < '0' || *cursor > '9') {
-                    valid_seed = false;
-                    break;
-                }
-                u64 digit = (u64)(*cursor - '0');
-                if (parsed_seed > (U64_MAX_VALUE - digit) / 10u) {
-                    valid_seed = false;
-                    break;
-                }
-                parsed_seed = parsed_seed * 10u + digit;
-            }
-            if (valid_seed) seed = parsed_seed;
-        }
-        if (!seed) {
-            seed = 0x726f6c6c6572756cull;
-        }
-        rng.seed(seed);
-        seeded = true;
-    }
-    for (usize i = 0u; i < count; ) {
-        u64 value = rng.next();
-        for (u32 j = 0u; j < 8u && i < count; ++j) {
-            dest[i++] = (u8)((value >> (j * 8u)) & 0xFFu);
-        }
-    }
-}
-
 static bool constant_time_equal(const u8* a, const u8* b, usize length) {
     u8 diff = 0u;
     for (usize i = 0u; i < length; ++i) {
@@ -5742,6 +5675,22 @@ static bool chacha20_xor(const u8 key[32],
     return true;
 }
 
+__extension__ typedef unsigned __int128 u128;
+static const u128 PCG64_MULTIPLIER = (((u128)0x2360ED051FC65DA4ull) << 64u) | (u128)0x4385DF649FCCF645ull;
+static const u128 PCG64_INCREMENT = (((u128)0x5851F42D4C957F2Dull) << 64u) | (u128)0x14057B7EF767814Full;
+struct Pcg64Generator {
+    u128 state;
+    Pcg64Generator() : state(0u) {}
+    void seed(u64 seed_value) { state = 0u; (void)next(); state += (u128)seed_value; (void)next(); }
+    u64 next() {
+        u128 oldstate = state;
+        state = oldstate * PCG64_MULTIPLIER + PCG64_INCREMENT;
+        u64 xorshifted = (u64)(((oldstate >> 64u) ^ oldstate) >> 64u);
+        u32 rotate = (u32)(oldstate >> 122u) & 63u;
+        return (xorshifted >> rotate) | (xorshifted << ((64u - rotate) & 63u));
+    }
+};
+
 struct Poly1305State {
     u64 r0, r1, r2, r3, r4;
     u64 s1, s2, s3, s4;
@@ -6053,11 +6002,13 @@ enum DecryptStatus {
 static bool encrypt_payload_buffer(const ByteBuffer& plaintext,
                                    const char* password,
                                    usize password_length,
+                                   const u8* random_data,
                                    ByteBuffer& output) {
     u8 salt[ENCRYPTION_SALT_BYTES];
     u8 nonce[ENCRYPTION_NONCE_BYTES];
-    crypto_random_bytes(salt, ENCRYPTION_SALT_BYTES);
-    crypto_random_bytes(nonce, ENCRYPTION_NONCE_BYTES);
+    if (!random_data) return false;
+    for (usize i = 0u; i < ENCRYPTION_SALT_BYTES; ++i) salt[i] = random_data[i];
+    for (usize i = 0u; i < ENCRYPTION_NONCE_BYTES; ++i) nonce[i] = random_data[ENCRYPTION_SALT_BYTES + i];
     u8 key[32];
     if (!pbkdf2_hmac_sha256((const u8*)password,
                             password_length,
@@ -6638,6 +6589,7 @@ struct EncoderContext {
     ByteBuffer payload_bytes;
     BitWriter bit_writer;
     ByteBuffer encryption_password;
+    ByteBuffer encryption_random_data;
     bool configured;
     bool encryption_enabled;
 
@@ -6648,6 +6600,7 @@ struct EncoderContext {
           payload_bytes(),
           bit_writer(),
           encryption_password(),
+          encryption_random_data(),
           configured(false),
           encryption_enabled(false),
           ecc_summary() {}
@@ -6660,6 +6613,7 @@ struct EncoderContext {
         payload_bytes.release();
         bit_writer.reset();
         encryption_password.release();
+        encryption_random_data.release();
         configured = false;
         encryption_enabled = false;
         ecc_summary = EccSummary();
@@ -6694,6 +6648,15 @@ struct EncoderContext {
         return true;
     }
 
+    bool set_random_data(const u8* data, usize length) {
+        encryption_random_data.release();
+        if (!data || length != ENCRYPTION_SALT_BYTES + ENCRYPTION_NONCE_BYTES ||
+            !encryption_random_data.ensure(length)) return false;
+        for (usize i = 0u; i < length; ++i) encryption_random_data.data[i] = data[i];
+        encryption_random_data.size = length;
+        return true;
+    }
+
     bool encode_payload(ByteBuffer& output) {
         output.release();
         return lzma_compress(payload_bytes.data, payload_bytes.size, output, true);
@@ -6710,7 +6673,7 @@ struct EncoderContext {
         const ByteBuffer* payload_source = &compressed;
         ByteBuffer encrypted;
         if (encryption_enabled && encryption_password.size > 0u) {
-            if (!encrypt_payload_buffer(compressed, (const char*)encryption_password.data, encryption_password.size, encrypted)) {
+            if (!encrypt_payload_buffer(compressed, (const char*)encryption_password.data, encryption_password.size, encryption_random_data.data, encrypted)) {
                 return false;
             }
             payload_source = &encrypted;
@@ -26104,6 +26067,7 @@ static void write_encode_help() {
     console_line(1, "                       --overlay-fraction also requires --overlay-ppm. Overlay bits are reserved per RS block.");
     console_line(1, "  --overlay-ignore-colors LIST  Skip overlay pixels matching named or hex colors.");
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
+    console_line(1, "  --random-data HEX    Required with --password: 28 random bytes as 56 hex digits (16-byte salt + 12-byte nonce).");
     console_line(1, "");
     console_line(1, "Footer customization:");
     console_line(1, "  --footer TEXT        Footer template; %page and %totalpages expand per page, \\% is literal %.");
@@ -27123,9 +27087,11 @@ static int command_encode(int arg_count, char** args) {
     usize input_count = 0u;
     makocode::ByteBuffer footer_buffer;
     makocode::ByteBuffer password_buffer;
+    makocode::ByteBuffer random_data_buffer;
     makocode::ByteBuffer output_dir_buffer;
     makocode::ByteBuffer prefix_buffer;
     bool have_password = false;
+    bool have_random_data = false;
     bool have_footer = false;
     const char* output_dir = ".";
     bool have_output_dir = false;
@@ -27478,6 +27444,42 @@ static int command_encode(int arg_count, char** args) {
             footer_config.font_size = (u32)value;
             continue;
         }
+        const char random_prefix[] = "--random-data=";
+        const char* random_value = 0;
+        usize random_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--random-data")) {
+            if (have_random_data || (i + 1) >= arg_count) {
+                console_line(2, "encode: --random-data requires exactly 56 hex characters");
+                return 1;
+            }
+            random_value = args[++i];
+            random_length = ascii_length(random_value);
+        } else if (ascii_starts_with(arg, random_prefix)) {
+            if (have_random_data) return 1;
+            random_value = arg + sizeof(random_prefix) - 1u;
+            random_length = ascii_length(random_value);
+        }
+        if (random_value) {
+            if (random_length != 56u || !random_data_buffer.ensure(28u)) {
+                console_line(2, "encode: --random-data requires exactly 56 hex characters");
+                return 1;
+            }
+            for (usize j = 0u; j < 28u; ++j) {
+                u8 value = 0u;
+                for (u32 k = 0u; k < 2u; ++k) {
+                    char c = random_value[j * 2u + k];
+                    u8 digit = (c >= '0' && c <= '9') ? (u8)(c - '0') :
+                               (c >= 'a' && c <= 'f') ? (u8)(c - 'a' + 10) :
+                               (c >= 'A' && c <= 'F') ? (u8)(c - 'A' + 10) : 255u;
+                    if (digit == 255u) { console_line(2, "encode: --random-data must be hexadecimal"); return 1; }
+                    value = (u8)((value << 4u) | digit);
+                }
+                random_data_buffer.data[j] = value;
+            }
+            random_data_buffer.size = 28u;
+            have_random_data = true;
+            continue;
+        }
         const char password_prefix[] = "--password=";
         const char* password_value = 0;
         usize password_length = 0u;
@@ -27527,6 +27529,10 @@ static int command_encode(int arg_count, char** args) {
     }
     if (overlay_ignore_colors_specified && !overlay_ppm_specified) {
         console_line(2, "encode: --overlay-ignore-colors requires --overlay-ppm");
+        return 1;
+    }
+    if (have_password != have_random_data) {
+        console_line(2, "encode: --password and --random-data must be supplied together");
         return 1;
     }
     if (mapping.palette_set) {
@@ -28021,6 +28027,10 @@ static int command_encode(int arg_count, char** args) {
     if (have_password) {
         if (!encoder.set_password((const char*)password_buffer.data, password_buffer.size)) {
             console_line(2, "encode: failed to set encryption password");
+            return 1;
+        }
+        if (!encoder.set_random_data(random_data_buffer.data, random_data_buffer.size)) {
+            console_line(2, "encode: failed to set encryption random data");
             return 1;
         }
     }

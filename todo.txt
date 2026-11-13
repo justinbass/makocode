@@ -2,7 +2,6 @@ TODO
 
 Features:
 - Security
-  - PCG64 is not cryptographically secure for salt/nonce. User supplied random, or else system random library (per OS).
   - Hidden volume for plausible deniability
     - --data-fill, fills random data to pad the page. Needs new pre-data entry. Size must be password protected, provides size obfuscation.
     - Can also add a --total-pages option so it pads to a large number of pages...

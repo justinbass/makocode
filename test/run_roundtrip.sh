@@ -318,7 +318,7 @@ if [[ -n $palette ]]; then
     encode_cmd+=("--palette" "$palette")
 fi
 if [[ -n $password ]]; then
-    encode_cmd+=("--password=$password")
+    encode_cmd+=("--password=$password" "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb")
 fi
 if [[ -n $footer ]]; then
     encode_cmd+=("--footer" "$footer")

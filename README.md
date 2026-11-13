@@ -32,6 +32,45 @@ make test
 
 Decode restores the original file tree by default. `--decoded-file` writes a timestamped `makocode_decoded_YYYYMMDDHHMMSS.txt` containing page and payload metadata and escaped archive entries. `--decoded-stdout` prints the same content without creating files; it cannot be combined with `--decoded-file` or `--debug`. Archive paths cannot be absolute or contain `..`. Extraction may follow symlinks in the output directory; use a fresh, trusted directory for untrusted input.
 
+### Encryption randomness
+
+Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes), split into a 16-byte salt and 12-byte nonce. Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system. This keeps the single-file source portable and avoids platform-specific random APIs and build dependencies.
+
+Linux and macOS:
+
+```sh
+random=$(od -An -N28 -tx1 /dev/urandom | tr -d ' \n')
+./makocode encode --input=file.txt --password=... --random-data="$random"
+```
+
+Windows PowerShell:
+
+```powershell
+$bytes = [byte[]]::new(28)
+[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$random = [Convert]::ToHexString($bytes)
+.\makocode.exe encode --input=file.txt --password=... --random-data=$random
+```
+
+Diceware can supply the randomness too; these words are entropy input, not the encryption password. Use 18 independently selected words (about 232 bits of entropy), hash their exact space-separated text, and take 56 hex digits (28 bytes). Linux:
+
+```sh
+words='word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18'
+random=$(printf '%s' "$words" | sha256sum | cut -c1-56)
+./makocode encode --input=file.txt --password=... --random-data="$random"
+```
+
+On macOS replace `sha256sum` with `shasum -a 256`. In PowerShell, set `$words` to the 18 words, then run:
+
+```powershell
+$sha = [Security.Cryptography.SHA256]::Create()
+$digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($words))
+$random = [Convert]::ToHexString($digest).Substring(0, 56)
+.\makocode.exe encode --input=file.txt --password=... --random-data=$random
+```
+
+Use a newly generated value for every encryption. Hashing formats the Diceware entropy into the required bytes; it does not add entropy.
+
 The decoded file uses ASCII lines, begins with `MAKOCODE-DECODED`, and ends with `end`. Each `page N` section contains `metadata NAME VALUE` lines and ends with `end-page`. The `payload` section uses the same metadata form and ends with `end-payload`. Byte arrays in metadata are uppercase hexadecimal; numeric fields are decimal. Fields are present only when recovered. Page sections report the recovered metadata fields without the raw tile header or tile bytes.
 
 The `archive` section gives `entries COUNT`, followed by `directory PATH` and `file PATH SIZE` entries in archive order, and ends with `end-archive`. A file's next line is its complete content; `SIZE` is its original byte count. Backslash, nonprintable bytes, and spaces in paths are encoded as `\xHH` with two uppercase hexadecimal digits. Content spaces are literal. All lines end in LF; even an empty file has a content line. Escaping applies to bytes, so UTF-8 and binary contents can be reconstructed exactly. Footer text is rendered in the image and is not recovered into the decoded file.

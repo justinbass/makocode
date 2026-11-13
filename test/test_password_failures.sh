@@ -115,6 +115,7 @@ encode_cmd=(
     --page-width=1000
     --page-height=1000
     "--password=$password"
+    --random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb
     "--output-dir=$work_dir"
     "--prefix=${label}_page"
     --debug
