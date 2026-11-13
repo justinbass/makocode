@@ -6639,6 +6639,7 @@ struct EccSummary {
     u64 block_count;
     u16 ecc_target_hundredths;
     u16 overlay_fraction_q16;
+    u32 metadata_ecc_minimum_parity_bytes;
 
     EccSummary()
         : enabled(false),
@@ -6648,7 +6649,8 @@ struct EccSummary {
           original_bytes(0u),
           block_count(0u),
           ecc_target_hundredths(0u),
-          overlay_fraction_q16(0u) {}
+          overlay_fraction_q16(0u),
+          metadata_ecc_minimum_parity_bytes(2u) {}
 };
 
 struct EccDecodeStats {
@@ -8594,6 +8596,7 @@ namespace MetadataTile {
         u32 metadata_bit_count;
         u32 metadata_ecc_bytes;
         double metadata_ecc_redundancy;
+        u32 metadata_ecc_minimum_parity_bytes;
         u32 metadata_length_prefix_bits;
         u32 metadata_outer_length_bits;
         u32 metadata_symbol_count;
@@ -8644,6 +8647,7 @@ namespace MetadataTile {
               metadata_bit_count(0u),
               metadata_ecc_bytes(0u),
               metadata_ecc_redundancy(0.0),
+              metadata_ecc_minimum_parity_bytes(2u),
               metadata_length_prefix_bits(0u),
               metadata_outer_length_bits(0u),
               metadata_symbol_count(0u),
@@ -8909,11 +8913,13 @@ namespace MetadataTile {
         reader.reset(codeword.data, metadata_bit_count);
         u64 schema_value = 0u;
         u32 encoded_parity_bytes = 0u;
+        u32 metadata_payload_size = 0u;
         u32 schema = 0u;
         if (!read_compact_u64(reader, schema_value) || schema_value > 0xFFFFFFFFu) return false;
         schema = (u32)schema_value;
         if (reader.failed || !metadata_schema_is_supported(schema) ||
             !read_compact_u16(reader, encoded_parity_bytes) || encoded_parity_bytes != parity_bytes ||
+            !read_compact_u16(reader, metadata_payload_size) || metadata_payload_size == 0u ||
             !reader.align_to_byte()) return false;
         if (reader.cursor >= reader.bit_count || ((reader.bit_count - reader.cursor) & 7u)) return false;
         ByteBuffer metadata_payload;
@@ -8921,7 +8927,7 @@ namespace MetadataTile {
         if (!lzma_decompress(codeword.data + (reader.cursor >> 3u),
                              reader.bit_count - reader.cursor,
                              metadata_payload,
-                             LZMA_SIZE_FROM_HEADER,
+                             (u64)metadata_payload_size,
                              false,
                              &consumed_bytes)) return false;
         usize metadata_header_bytes = (usize)reader.cursor >> 3u;
@@ -9097,20 +9103,29 @@ namespace MetadataTile {
 
         ByteBuffer metadata_payload;
         if (!encode_metadata_payload_bytes(values, metadata_payload)) return false;
+        if (metadata_payload.size == 0u || metadata_payload.size > 0xFFFFu) return false;
         ByteBuffer compressed_metadata;
-        if (!lzma_compress(metadata_payload.data, metadata_payload.size, compressed_metadata)) return false;
+        if (!lzma_compress(metadata_payload.data,
+                           metadata_payload.size,
+                           compressed_metadata,
+                           false)) return false;
 
         u32 parity_bytes = 0u;
         if (values.metadata_ecc_redundancy > 0.0) {
-            double parity_estimate = ceil((double)compressed_metadata.size *
+            // Preserve the prior ECC estimate, which included LZMA's
+            // eight-byte uncompressed-size header.
+            usize ecc_basis_bytes = compressed_metadata.size + 8u;
+            double parity_estimate = ceil((double)ecc_basis_bytes *
                                           values.metadata_ecc_redundancy);
             if (parity_estimate > 254.0) parity_estimate = 254.0;
             u32 estimated_parity_bytes = (u32)parity_estimate;
-            if (estimated_parity_bytes < 2u) estimated_parity_bytes = 2u;
+            if (estimated_parity_bytes < values.metadata_ecc_minimum_parity_bytes) {
+                estimated_parity_bytes = values.metadata_ecc_minimum_parity_bytes;
+            }
             parity_bytes = estimated_parity_bytes;
-            if (parity_bytes >= compressed_metadata.size) {
-                parity_bytes = compressed_metadata.size > 1u
-                                   ? (u32)compressed_metadata.size - 1u
+            if (parity_bytes >= ecc_basis_bytes) {
+                parity_bytes = ecc_basis_bytes > 1u
+                                   ? (u32)ecc_basis_bytes - 1u
                                    : 0u;
             }
         }
@@ -9118,6 +9133,7 @@ namespace MetadataTile {
         BitWriter metadata_writer;
         if (!write_compact_u64(metadata_writer, values.schema_version) ||
             !write_compact_u16(metadata_writer, parity_bytes) ||
+            !write_compact_u16(metadata_writer, (u32)metadata_payload.size) ||
             !metadata_writer.align_to_byte()) return false;
         for (usize i = 0u; i < compressed_metadata.size; ++i) {
             if (!metadata_writer.write_bits((u64)compressed_metadata.data[i], 8u)) return false;
@@ -24667,6 +24683,8 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
                                              ? ecc_summary->overlay_fraction_q16
                                              : 0u;
     tile_values.metadata_ecc_redundancy = metadata_ecc_redundancy;
+    tile_values.metadata_ecc_minimum_parity_bytes =
+        ecc_summary ? ecc_summary->metadata_ecc_minimum_parity_bytes : 2u;
     if (tile_values.ecc_enabled && ecc_summary) {
         tile_values.ecc_block_data = ecc_summary->block_data_symbols;
         tile_values.ecc_parity = ecc_summary->parity_symbols;
@@ -26722,7 +26740,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         bool fit_height,
                                         double structural_erasure_fraction,
                                         u16 overlay_fraction_q16,
-                                        EccFillCandidate& candidate) {
+                                        EccFillCandidate& candidate,
+                                        u32 metadata_ecc_minimum_parity_bytes = 2u) {
     u32 target_hundredths = (u32)floor(requested_redundancy * 100.0 + 0.5);
     if (target_hundredths == 0u || target_hundredths > 65535u) return false;
     double encoded_redundancy = (double)target_hundredths / 100.0;
@@ -26798,6 +26817,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
         fit_ecc_summary.block_count = candidate.block_count;
         fit_ecc_summary.ecc_target_hundredths = (u16)target_hundredths;
         fit_ecc_summary.overlay_fraction_q16 = overlay_fraction_q16;
+        fit_ecc_summary.metadata_ecc_minimum_parity_bytes =
+            metadata_ecc_minimum_parity_bytes;
         if (!fit_page_dimensions(mapping,
                                  footer_template,
                                  candidate.frame_bits,
@@ -26832,6 +26853,7 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
         summary.block_count = candidate.block_count;
         summary.ecc_target_hundredths = (u16)target_hundredths;
         summary.overlay_fraction_q16 = overlay_fraction_q16;
+        summary.metadata_ecc_minimum_parity_bytes = metadata_ecc_minimum_parity_bytes;
         u16 required_parity = 0u;
         if (validate_overwrite_budget(mapping,
                                       dummy_frame,
@@ -27528,6 +27550,9 @@ static int command_encode(int arg_count, char** args) {
     double structural_erasure_fraction = 0.0;
     double unknown_error_redundancy = ecc_redundancy;
     double metadata_ecc_redundancy = 0.0;
+    // Keep auto-minimum scans resilient after removing the fixed LZMA size header.
+    u32 metadata_ecc_minimum_parity_bytes =
+        ecc_mode == ECC_AUTO_MINIMUM ? 8u : 2u;
     u16 unknown_parity_budget = 0u;
     u16 overlay_erasure_budget = 0u;
     if (width_pixels < MetadataTile::TILE_MARKER_WIDTH ||
@@ -27586,7 +27611,8 @@ static int command_encode(int arg_count, char** args) {
                                           !mapping.page_height_set,
                                           structural_erasure_fraction,
                                           overlay_fraction_q16,
-                                          minimum_candidate)) {
+                                          minimum_candidate,
+                                          metadata_ecc_minimum_parity_bytes)) {
             console_line(2, "encode: unable to determine the minimum ECC for this payload and page layout");
             return 1;
         }
@@ -27714,6 +27740,9 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: build failed");
         return 1;
     }
+    makocode::EccSummary page_ecc_summary = encoder.ecc_info();
+    page_ecc_summary.metadata_ecc_minimum_parity_bytes =
+        metadata_ecc_minimum_parity_bytes;
     if (debug_requested) {
         char data_buffer[32];
         char parity_buffer[32];
@@ -27737,7 +27766,7 @@ static int command_encode(int arg_count, char** args) {
                              !mapping.page_height_set,
                              width_pixels,
                              height_pixels,
-                             &encoder.ecc_info(),
+                             &page_ecc_summary,
                              metadata_ecc_redundancy,
                              unknown_parity_budget,
                              overlay_erasure_budget)) {
@@ -27757,7 +27786,7 @@ static int command_encode(int arg_count, char** args) {
                              layout_data_height,
                              bits_per_page,
                              page_count,
-                             &encoder.ecc_info(),
+                             &page_ecc_summary,
                              metadata_ecc_redundancy,
                              unknown_parity_budget,
                              overlay_erasure_budget)) {
@@ -27773,7 +27802,7 @@ static int command_encode(int arg_count, char** args) {
                                    layout_data_height,
                                    bits_per_page,
                                    page_count,
-                                   encoder.ecc_info(),
+                                   page_ecc_summary,
                                    metadata_ecc_redundancy,
                                    unknown_parity_budget,
                                    overlay_erasure_budget,
@@ -27821,7 +27850,8 @@ static int command_encode(int arg_count, char** args) {
                 !mapping.page_height_set,
                 structural_erasure_fraction,
                 overlay_fraction_q16,
-                sufficient_candidate);
+                sufficient_candidate,
+                metadata_ecc_minimum_parity_bytes);
             if (candidate_satisfies_layout) {
                 sufficient_target_hundredths =
                     (u32)floor(sufficient_candidate.ratio * 100.0 + 0.5);
@@ -27891,7 +27921,7 @@ static int command_encode(int arg_count, char** args) {
         }
     }
     makocode::ByteBuffer footer_text_buffer;
-    const makocode::EccSummary* ecc_summary = &encoder.ecc_info();
+    const makocode::EccSummary* ecc_summary = &page_ecc_summary;
     if (page_count == 1u) {
         u32 output_height_pixels = height_pixels;
         FooterLayout output_footer_layout = footer_layout;
