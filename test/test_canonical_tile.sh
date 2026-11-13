@@ -39,7 +39,11 @@ done
 # Confirm automatic ECC includes enough parity for the configured overlay
 # erasure count.
 mkdir -p "$work/ecc_budget/pages"
+"$root/test/ppm_transform" overlay-mask --output "$work/ecc_budget/overlay.ppm" \
+    --circle-color "0 0 0" --background-color "255 255 255" \
+    --width 1200 --height 1200
 (cd "$work" && "$bin" encode --input=payload.bin  --overlay-fraction=0.10 \
+    --overlay-ppm="$work/ecc_budget/overlay.ppm" \
     --page-width=1200 --page-height=1200 \
     --prefix=budget --output-dir="$work/ecc_budget/pages" >/dev/null)
 shopt -s nullglob
@@ -61,13 +65,15 @@ no_overlay_page=$(find "$work/no_overlay_fraction/pages" -maxdepth 1 -type f -na
 "$root/test/ppm_transform" overlay-mask --output "$work/overlay_mask.ppm" \
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1000 --height 1000
-if "$bin" overlay "$no_overlay_page" "$work/overlay_mask.ppm" 0.10 \
-    >"$work/no_overlay_merged.ppm" 2>"$work/no_overlay_error.log"; then
-    echo "canonical tile: overlay accepted a page encoded with zero overlay fraction" >&2
+if (cd "$work" && "$bin" encode --input=payload.bin --ecc=0 \
+    --overlay-fraction=0.10 --overlay-ppm="$work/overlay_mask.ppm" \
+    --page-width=1000 --page-height=1000 --output-dir="$work/no_overlay_attempt") \
+    >"$work/no_overlay_error.log" 2>&1; then
+    echo "canonical tile: overlay accepted --ecc=0" >&2
     exit 1
 fi
-if ! rg -q "page was encoded with zero overlay fraction" "$work/no_overlay_error.log"; then
-    echo "canonical tile: zero-fraction overlay failure had the wrong reason" >&2
+if ! rg -q "overlay requires ECC" "$work/no_overlay_error.log"; then
+    echo "canonical tile: zero-ECC overlay failure had the wrong reason" >&2
     exit 1
 fi
 

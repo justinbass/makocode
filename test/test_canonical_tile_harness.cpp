@@ -30,34 +30,42 @@ int main(int argc, char** argv) {
             if (!MetadataTile::read_compact_u64(reader, actual) || actual != expected[i] ||
                 reader.failed || reader.cursor != writer.bit_size()) return 1;
         }
-        const u32 ecc_targets[] = {0u, 1u, 65535u};
-        const u32 overlay_q16_values[] = {0u, 1u, 655u, 13107u, 32768u};
-        for (usize i = 0u; i < sizeof(ecc_targets) / sizeof(ecc_targets[0]); ++i) {
-            for (usize j = 0u; j < sizeof(overlay_q16_values) / sizeof(overlay_q16_values[0]); ++j) {
+        const u64 ecc_bit_counts[] = {0u, 8u, 65536u, U64_MAX_VALUE - 7u};
+        const u64 overlay_bit_counts[] = {0u, 8u, 65536u, U64_MAX_VALUE - 7u};
+        for (usize i = 0u; i < sizeof(ecc_bit_counts) / sizeof(ecc_bit_counts[0]); ++i) {
+            for (usize j = 0u; j < sizeof(overlay_bit_counts) / sizeof(overlay_bit_counts[0]); ++j) {
                 MetadataTile::BitWriter writer;
-                if (!MetadataTile::write_compact_u16(writer, ecc_targets[i], true) ||
-                    !MetadataTile::write_compact_u16(writer, overlay_q16_values[j], true) ||
-                    (ecc_targets[i] == 0u && overlay_q16_values[j] == 0u &&
+                if (!MetadataTile::write_compact_u64(writer, ecc_bit_counts[i]) ||
+                    !MetadataTile::write_compact_u64(writer, overlay_bit_counts[j]) ||
+                    (ecc_bit_counts[i] == 0u && overlay_bit_counts[j] == 0u &&
                      writer.bit_size() != 6u)) return 1;
                 MetadataTile::BitReader reader;
                 reader.reset(writer.data(), writer.bit_size());
-                u32 actual_target = 0u;
-                if (!MetadataTile::read_compact_u16(reader, actual_target, true) ||
-                    actual_target != ecc_targets[i] ||
-                    !MetadataTile::read_compact_u16(reader, actual_target, true) ||
-                    actual_target != overlay_q16_values[j] ||
+                u64 actual_bits = 0u;
+                if (!MetadataTile::read_compact_u64(reader, actual_bits) ||
+                    actual_bits != ecc_bit_counts[i] ||
+                    !MetadataTile::read_compact_u64(reader, actual_bits) ||
+                    actual_bits != overlay_bit_counts[j] ||
                     reader.failed || reader.cursor != writer.bit_size()) return 1;
             }
         }
         MetadataTile::Values current_values;
         current_values.schema_version = CURRENT_TILE_SCHEMA_VERSION;
         current_values.payload_bytes = 1000u;
-        current_values.ecc_target_hundredths = 50u;
-        current_values.overlay_fraction_value = 13107u;
+        if (!makocode::compute_ecc_layout(1000u, 0.5,
+                                          current_values.ecc_block_data,
+                                          current_values.ecc_parity,
+                                          current_values.ecc_block_count)) return 1;
+        current_values.ecc_bits = (u64)current_values.ecc_parity *
+                                  current_values.ecc_block_count * 8u;
+        u64 overlay_symbols = 500u;
+        u64 per_block_overlay = overlay_symbols / current_values.ecc_block_count +
+                                ((overlay_symbols % current_values.ecc_block_count) ? 1u : 0u);
+        current_values.overlay_bits = per_block_overlay * current_values.ecc_block_count * 8u;
         if (!MetadataTile::derive_schema_payload_layout(current_values) ||
-            current_values.overlay_erasure_budget !=
-                (u16)(((u32)(current_values.ecc_block_data + current_values.ecc_parity) *
-                       13107u + 65535u) / 65536u)) return 1;
+            current_values.overlay_erasure_budget != per_block_overlay ||
+            current_values.ecc_bits !=
+                (u64)current_values.ecc_parity * current_values.ecc_block_count * 8u) return 1;
         return 0;
     }
     if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-metadata-rs")) {
@@ -95,8 +103,12 @@ int main(int argc, char** argv) {
             MetadataTile::Values values;
             values.payload_bytes = 1u;
             values.page_index = 1u;
-            values.ecc_target_hundredths = 100u;
-            values.overlay_fraction_value = 0u;
+            if (!makocode::compute_ecc_layout(1u, 1.0,
+                                              values.ecc_block_data,
+                                              values.ecc_parity,
+                                              values.ecc_block_count)) return 1;
+            values.ecc_bits = (u64)values.ecc_parity * values.ecc_block_count * 8u;
+            values.overlay_bits = 0u;
             values.page_width_pixels = MetadataTile::TILE_SIDE;
             values.page_height_pixels = MetadataTile::TILE_SIDE;
             values.fiducial_spacing_pixels = 24u;
@@ -480,13 +492,9 @@ int main(int argc, char** argv) {
             return 2;
         }
         u16 expected_unknown_budget = 0u;
-        u32 overlay_basis = (u32)values.ecc_block_data + (u32)values.ecc_parity;
-        u32 overlay_denominator = 65536u;
         u16 expected_overlay_budget = check_overlay_budget
-                                          ? (u16)((overlay_basis *
-                                                   values.overlay_fraction_value +
-                                                   overlay_denominator - 1u) /
-                                                  overlay_denominator)
+                                          ? (u16)(values.overlay_bits / 8u /
+                                                   values.ecc_block_count)
                                           : 0u;
         if ((check_overlay_budget && (unknown_budget != expected_unknown_budget ||
                                   overlay_budget != expected_overlay_budget)) ||
@@ -494,13 +502,13 @@ int main(int argc, char** argv) {
                  ? selector_counts.size != values.ecc_block_count
                  : selector_counts.size != 0u)) {
             fprintf(stderr,
-                    "canonical tile: selector mismatch (unknown=%u/%u, overlay=%u/%u, parity=%u, fraction=%u)\n",
+                    "canonical tile: selector mismatch (unknown=%u/%u, overlay=%u/%u, parity=%u, overlay_bits=%llu)\n",
                     (unsigned)unknown_budget,
                     (unsigned)expected_unknown_budget,
                     (unsigned)overlay_budget,
                     (unsigned)expected_overlay_budget,
                     (unsigned)values.ecc_parity,
-                    (unsigned)values.overlay_fraction_value);
+                    (unsigned long long)values.overlay_bits);
             return 1;
         }
         for (usize block = 0u; !report_page && values.overlay_selector_present &&
@@ -727,9 +735,9 @@ int main(int argc, char** argv) {
             putchar('\n');
         }
         if (report_ecc_settings) {
-            printf("%u\t%u\n",
-                   (unsigned)values.ecc_target_hundredths,
-                   (unsigned)values.overlay_fraction_value);
+            printf("%llu\t%llu\n",
+                   (unsigned long long)values.ecc_bits,
+                   (unsigned long long)values.overlay_bits);
         }
         (void)payload_bits;
         (void)selector_seed;

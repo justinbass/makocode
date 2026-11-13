@@ -191,36 +191,35 @@ test_case 0047_overlay_e2e_ignore_colors overlay "Overlay CLI skips white backgr
     MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill \
     MAKO_OVERLAY_IGNORE_COLORS=White
 
-test_case 0048_overlay_bw_ecc_target_025 overlay "Black/white circle overlay obeys ECC target 0.25" \
+test_case 0048_overlay_bw_ecc_ratio_025 overlay "Black/white circle overlay with ECC ratio 0.25" \
     MAKO_OVERLAY_FRACTION=0.1 \
+    MAKO_OVERLAY_ECC=0.25 \
     MAKO_OVERLAY_PAGE_WIDTH=1840 \
     MAKO_OVERLAY_PAGE_HEIGHT=1840 \
     MAKO_OVERLAY_EXPECT_PAGES=1 \
-    MAKO_OVERLAY_ECC_TARGET=0.25 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducial-spacing=60" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--fiducial-spacing=60" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
     "MAKO_OVERLAY_ALLOWED_COLORS=0 0 0;255 255 255" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
-test_case 0049_overlay_bw_ecc_target_050 overlay "Black/white circle overlay obeys ECC target 0.5" \
+test_case 0049_overlay_bw_ecc_ratio_050 overlay "Black/white circle overlay with ECC ratio 0.5" \
     MAKO_OVERLAY_FRACTION=0.1 \
+    MAKO_OVERLAY_ECC=0.5 \
     MAKO_OVERLAY_PAGE_WIDTH=1840 \
     MAKO_OVERLAY_PAGE_HEIGHT=1840 \
     MAKO_OVERLAY_EXPECT_PAGES=1 \
-    MAKO_OVERLAY_ECC_TARGET=0.5 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill --fiducial-spacing=60" \
+    "MAKO_OVERLAY_ENCODE_OPTS=--fiducial-spacing=60" \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_CIRCLE_COLOR="0 0 0" \
     MAKO_OVERLAY_BACKGROUND_COLOR="255 255 255" \
     "MAKO_OVERLAY_ALLOWED_COLORS=0 0 0;255 255 255" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
-test_case 0050_overlay_ecc_target_gray_base_color overlay "Grayscale base with color overlay exercises pixel candidate counting" \
-    MAKO_OVERLAY_ECC_TARGET=0.25 \
+test_case 0050_overlay_ecc_ratio_gray_base_color overlay "Grayscale base with ECC ratio and color overlay" \
+    MAKO_OVERLAY_ECC=0.25 \
     MAKO_OVERLAY_FRACTION=0.1 \
-    "MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill" \
     "MAKO_OVERLAY_CIRCLE_COLOR=255 0 0" \
     "MAKO_OVERLAY_BACKGROUND_COLOR=0 255 0" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
@@ -262,7 +261,7 @@ test_case 0058_cli_decoder_paths script "Decoder paths and archive traversal rej
 test_case 0059_prefix_ends_encoded script "--prefix ending in _encoded keeps its filename and fiducials" \
     test_prefix_ends_encoded.sh
 
-test_case 0060_overlay_ecc_target script "Overlay ECC target happy path" \
+test_case 0060_overlay_fill script "Overlay encode with fill ECC" \
     test_overlay_ecc_target.sh
 
 test_case 0061_archive_symlink_roundtrip script "Directory symlink target decodes as a regular file" \
@@ -277,7 +276,7 @@ test_case 0063_fiducials script "Custom fiducial dimensions happy path" \
 test_case 0064_default_encode_naming script "Default encode output uses a timestamped filename" \
     test_default_encode_naming.sh
 
-test_case 0065_overlay_ecc_target_mixed script "Mixed-color overlay ECC target filters candidates and copies raw pixels" \
+test_case 0065_overlay_fill_mixed script "Mixed-color overlay with fill ECC filters and copies mask pixels" \
     test_overlay_ecc_target_mixed.sh
 
 test_case 0066_decode_raw_fallback script "Raw decode fallback is gated and writes recovered payload bytes" \

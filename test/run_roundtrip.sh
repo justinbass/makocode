@@ -43,7 +43,7 @@ Usage: run_roundtrip.sh --label NAME --size BYTES [--ecc VALUE|fill] [--width PX
 Required:
   --label NAME          Artifact prefix under test_output/ (e.g., 3001_demo).
   --size BYTES          Payload size fed to the encoder.
-  --ecc VALUE|fill      Optional payload ECC target (0.00-655.35; 2 decimals); fill maximizes page use.
+  --ecc VALUE|fill      Optional parity/data ratio (0-254); fill maximizes page use.
                         Omit to select the minimum ECC for metadata, fiducials, and configured overlay erasures.
   --width PX            Optional fixed page width; omitted dimensions fit the payload.
   --height PX           Optional fixed page height; omitted dimensions fit the payload.

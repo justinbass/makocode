@@ -25,8 +25,13 @@ with open(sys.argv[1], 'wb') as stream:
     stream.write(bytes(source.randrange(256) for _ in range(262144)))
 PY
 
+"$ppm_transform_bin" overlay-mask --output "$work/overlay.ppm" \
+    --circle-color "0 0 0" --background-color "255 255 255" \
+    --width 1000 --height 1000
+
 mkdir -p "$work/pages"
 (cd "$work" && "$bin" encode --input=payload.bin --ecc=fill --overlay-fraction=0.01 \
+    --overlay-ppm="$work/overlay.ppm" \
     --page-width=1000 --page-height=1000 \
     --prefix=page --output-dir="$work/pages" >/dev/null)
 shopt -s nullglob
@@ -47,6 +52,7 @@ with open(sys.argv[1], 'wb') as stream:
 PY
 mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
 (cd "$work" && "$bin" encode --input=mixed_payload.bin  --overlay-fraction=0.01 \
+    --overlay-ppm="$work/overlay.ppm" \
     --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
 (cd "$work" && "$bin" encode --input=mixed_payload.bin  \
@@ -128,54 +134,6 @@ if "$canonical_tile_harness_bin" "$work/bad_tile.ppm" 1000 1000 1 --report-page-
     exit 1
 fi
 
-"$ppm_transform_bin" overlay-mask --output "$work/overlay.ppm" \
-    --circle-color "0 0 0" --background-color "255 255 255" \
-    --width 1000 --height 1000
-mkdir -p "$work/merged" "$work/decoded"
-merged_pages=()
-for index in "${!pages[@]}"; do
-    merged="$work/merged/page_${index}.ppm"
-    "$bin" overlay --debug "${pages[$index]}" "$work/overlay.ppm" 0.10 > "$merged" 2>"$work/overlay_${index}.log"
-    selector_report=$(awk '/overlay selector symbols used:/ {print $5}' "$work/overlay_${index}.log")
-    IFS=/ read -r selector_used selector_capacity <<< "$selector_report"
-    if [[ -z $selector_used || -z $selector_capacity || $selector_used -eq 0 ||
-          $selector_used -gt $selector_capacity ]]; then
-        echo "canonical overlay: overlay did not consume a protected selector" >&2
-        exit 1
-    fi
-    change_report=$("$ppm_transform_bin" overlay-check --base "${pages[$index]}" \
-        --merged "$merged" --skip-grayscale 1)
-    changed=$(printf '%s\n' "$change_report" | awk '/overlay pixels modified:/ {print $4}')
-    if [[ -z $changed || $changed -eq 0 ]]; then
-        echo "canonical overlay: page $((index + 1)) had no visible overlay changes" >&2
-        exit 1
-    fi
-    merged_summary=$("$canonical_tile_harness_bin" "$merged" 1000 1000 1 --report-page)
-    IFS=$'\t' read -r merged_index merged_count merged_blocks merged_parity merged_unknown merged_overlay merged_selector_present merged_total merged_seed merged_counts <<< "$merged_summary"
-    IFS=$'\t' read -r base_index base_count base_blocks base_parity base_unknown base_overlay base_selector_present base_total base_seed base_counts <<< "${page_summaries[$index]}"
-    if [[ $merged_index -ne $((index + 1)) || $merged_count -ne ${#pages[@]} ||
-          $merged_index -ne $base_index || $merged_count -ne $base_count ||
-          $merged_blocks -ne $base_blocks || $merged_parity -ne $base_parity ||
-          $merged_unknown -ne $base_unknown || $merged_overlay -ne $base_overlay ||
-          $merged_selector_present -ne 1 || $merged_seed -ne $base_seed ||
-          $merged_total -ne $base_total || $selector_capacity -ne $((merged_blocks * merged_overlay)) ]]; then
-        echo "canonical overlay: merged page selector or ECC metadata is inconsistent" >&2
-        exit 1
-    fi
-    IFS=, read -r -a merged_count_values <<< "$merged_counts"
-    merged_sum=0
-    for selector_count in "${merged_count_values[@]}"; do
-        if [[ $selector_count -ne $merged_overlay ]]; then
-            echo "canonical overlay: decoder did not reconstruct the full selector set" >&2
-            exit 1
-        fi
-        merged_sum=$((merged_sum + selector_count))
-    done
-    if [[ $merged_sum -ne $merged_total ]]; then
-        echo "canonical overlay: full selector total is inconsistent" >&2
-        exit 1
-    fi
-    merged_pages+=("$merged")
-done
-"$bin" decode --output-dir="$work/decoded" "${merged_pages[@]}" >/dev/null
+mkdir -p "$work/decoded"
+"$bin" decode --output-dir="$work/decoded" "${pages[@]}" >/dev/null
 cmp "$work/payload.bin" "$work/decoded/payload.bin"

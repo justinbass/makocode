@@ -276,44 +276,6 @@ static bool ascii_to_u64(const char* text, usize length, u64* out_value) {
     return true;
 }
 
-static bool ascii_to_fixed_hundredths(const char* text,
-                                      usize length,
-                                      u32 maximum_hundredths,
-                                      u32& value_out) {
-    value_out = 0u;
-    if (!text || length == 0u) return false;
-    u64 integer_part = 0u;
-    u32 fractional_part = 0u;
-    u32 fractional_digits = 0u;
-    bool seen_decimal = false;
-    bool seen_digit = false;
-    for (usize i = 0u; i < length; ++i) {
-        char c = text[i];
-        if (c == '.') {
-            if (seen_decimal) return false;
-            seen_decimal = true;
-            continue;
-        }
-        if (c < '0' || c > '9') return false;
-        seen_digit = true;
-        u32 digit = (u32)(c - '0');
-        if (!seen_decimal) {
-            if (integer_part > (U64_MAX_VALUE - digit) / 10u) return false;
-            integer_part = integer_part * 10u + digit;
-        } else {
-            if (fractional_digits >= 2u) return false;
-            fractional_part = fractional_part * 10u + digit;
-            ++fractional_digits;
-        }
-    }
-    if (!seen_digit) return false;
-    if (fractional_digits == 1u) fractional_part *= 10u;
-    if (integer_part > (U64_MAX_VALUE - fractional_part) / 100u) return false;
-    u64 scaled = integer_part * 100u + fractional_part;
-    if (scaled > maximum_hundredths) return false;
-    value_out = (u32)scaled;
-    return true;
-}
 
 static u64 gcd_u64(u64 a, u64 b);
 
@@ -6617,16 +6579,14 @@ struct EncoderConfig {
     u32 metadata_key_count;
     u32 fiducial_density;
     double ecc_redundancy;
-    u16 ecc_target_hundredths;
-    u16 overlay_fraction_q16;
+    u64 overlay_bits;
     u32 max_parallelism;
 
     EncoderConfig()
         : metadata_key_count(0u),
           fiducial_density(0u),
           ecc_redundancy(0.0),
-          ecc_target_hundredths(0u),
-          overlay_fraction_q16(0u),
+          overlay_bits(0u),
           max_parallelism(1u) {}
 };
 
@@ -6637,8 +6597,8 @@ struct EccSummary {
     double redundancy;
     u64 original_bytes;
     u64 block_count;
-    u16 ecc_target_hundredths;
-    u16 overlay_fraction_q16;
+    u64 ecc_bits;
+    u64 overlay_bits;
     u32 metadata_ecc_minimum_parity_bytes;
 
     EccSummary()
@@ -6648,8 +6608,8 @@ struct EccSummary {
           redundancy(0.0),
           original_bytes(0u),
           block_count(0u),
-          ecc_target_hundredths(0u),
-          overlay_fraction_q16(0u),
+          ecc_bits(0u),
+          overlay_bits(0u),
           metadata_ecc_minimum_parity_bytes(2u) {}
 };
 
@@ -6742,8 +6702,7 @@ struct EncoderContext {
     bool build() {
         bit_writer.reset();
         ecc_summary = EccSummary();
-        ecc_summary.ecc_target_hundredths = config.ecc_target_hundredths;
-        ecc_summary.overlay_fraction_q16 = config.overlay_fraction_q16;
+        ecc_summary.overlay_bits = config.overlay_bits;
         ByteBuffer compressed;
         if (!encode_payload(compressed)) {
             return false;
@@ -7546,6 +7505,8 @@ static bool encode_payload_with_ecc(const ByteBuffer& compressed,
     summary.parity_symbols = parity_symbols;
     summary.block_count = block_count;
     summary.original_bytes = compressed.size;
+    if (!block_count || (u64)parity_symbols > U64_MAX_VALUE / block_count / 8u) return false;
+    summary.ecc_bits = (u64)parity_symbols * block_count * 8u;
     summary.redundancy = (block_data ? ((double)parity_symbols) / (double)block_data : 0.0);
     return true;
 }
@@ -8628,9 +8589,8 @@ namespace MetadataTile {
         u64 ecc_original_bytes;
         u32 fiducial_columns;
         u32 fiducial_rows;
-        u16 ecc_target_hundredths;
-        // Q0.16 overlay fraction, stored as raw / 65536.
-        u16 overlay_fraction_value;
+        u64 ecc_bits;
+        u64 overlay_bits;
         bool overwrite_layout;
         bool overlay_selector_present;
         u64 overlay_selector_seed;
@@ -8679,8 +8639,8 @@ namespace MetadataTile {
               ecc_original_bytes(0u),
               fiducial_columns(0u),
               fiducial_rows(0u),
-              ecc_target_hundredths(0u),
-              overlay_fraction_value(0u),
+              ecc_bits(0u),
+              overlay_bits(0u),
               overwrite_layout(true),
               overlay_selector_present(false),
               overlay_selector_seed(0u),
@@ -8695,36 +8655,42 @@ namespace MetadataTile {
         if (values.schema_version != TILE_SCHEMA_VERSION ||
             values.payload_bytes == 0u || values.payload_bytes > (u64)USIZE_MAX_VALUE) return false;
         values.page_bits = 0u;
-        values.ecc_enabled = values.ecc_target_hundredths > 0u;
-        values.ecc_block_data = 0u;
-        values.ecc_parity = 0u;
-        values.ecc_block_count = 0u;
+        values.ecc_enabled = values.ecc_bits > 0u;
         values.ecc_original_bytes = values.payload_bytes;
         values.unknown_parity_budget = 0u;
         values.overlay_erasure_budget = 0u;
         values.overlay_selector_seed = 0u;
         values.overlay_selector_present = false;
         if (values.ecc_enabled) {
-            if (!makocode::compute_ecc_layout((usize)values.payload_bytes,
-                                              (double)values.ecc_target_hundredths / 100.0,
-                                              values.ecc_block_data,
-                                              values.ecc_parity,
-                                              values.ecc_block_count) ||
-                !values.ecc_block_data || !values.ecc_parity ||
-                !values.ecc_block_count) return false;
+            if (values.ecc_bits % 8u != 0u || values.overlay_bits % 8u != 0u ||
+                !values.ecc_block_data ||
+                values.ecc_block_data + 2u > makocode::RS_FIELD_SIZE) return false;
+            values.ecc_block_count = values.payload_bytes / values.ecc_block_data +
+                ((values.payload_bytes % values.ecc_block_data) ? 1u : 0u);
+            u64 total_parity_symbols = values.ecc_bits / 8u;
+            if (!values.ecc_block_count ||
+                total_parity_symbols % values.ecc_block_count != 0u ||
+                values.overlay_bits / 8u % values.ecc_block_count != 0u) return false;
+            u64 parity_symbols = total_parity_symbols / values.ecc_block_count;
+            if (!parity_symbols || parity_symbols > 0xFFFFu ||
+                (u64)values.ecc_block_data + parity_symbols > makocode::RS_FIELD_SIZE) {
+                return false;
+            }
+            values.ecc_parity = (u16)parity_symbols;
             u64 block_total = (u64)values.ecc_block_data + (u64)values.ecc_parity;
             if (values.ecc_block_count > U64_MAX_VALUE / block_total ||
                 values.ecc_block_count * block_total > U64_MAX_VALUE / 8u) return false;
             values.page_bits = values.ecc_block_count * block_total * 8u;
-            const u32 overlay_denominator = 65536u;
-            u32 overlay_basis = (u32)values.ecc_block_data + (u32)values.ecc_parity;
-            values.overlay_erasure_budget = (u16)(((u32)overlay_basis *
-                                                    values.overlay_fraction_value +
-                                                    overlay_denominator - 1u) /
-                                                   overlay_denominator);
-            if (values.overlay_erasure_budget > values.ecc_parity) return false;
+            u64 per_block_overlay = values.overlay_bits / 8u / values.ecc_block_count;
+            if (per_block_overlay > values.ecc_parity ||
+                per_block_overlay > 0xFFFFu) return false;
+            values.overlay_erasure_budget = (u16)per_block_overlay;
+            if ((u32)values.unknown_parity_budget + values.overlay_erasure_budget >
+                values.ecc_parity) return false;
             values.overlay_selector_present = values.overlay_erasure_budget > 0u;
         } else {
+            if (values.ecc_block_data || values.ecc_parity || values.ecc_block_count ||
+                values.ecc_bits || values.overlay_bits) return false;
             if (values.payload_bytes > U64_MAX_VALUE / 8u) return false;
             values.page_bits = values.payload_bytes * 8u;
         }
@@ -8753,6 +8719,8 @@ namespace MetadataTile {
                expected.ecc_parity == values.ecc_parity &&
                expected.ecc_block_count == values.ecc_block_count &&
                expected.ecc_original_bytes == values.ecc_original_bytes &&
+               expected.ecc_bits == values.ecc_bits &&
+               expected.overlay_bits == values.overlay_bits &&
                expected.overlay_erasure_budget == values.overlay_erasure_budget &&
                expected.overlay_selector_present == values.overlay_selector_present;
     }
@@ -8767,9 +8735,16 @@ namespace MetadataTile {
             !write_compact_u64(writer, values.page_index) ||
             !write_compact_u64(writer, (u64)values.page_width_pixels) ||
             !write_compact_u64(writer, (u64)values.page_height_pixels) ||
-            !write_compact_u16(writer, (u32)values.ecc_target_hundredths, true) ||
-            !write_compact_u16(writer, (u32)values.overlay_fraction_value, true) ||
-            !write_compact_u64(writer, (u64)values.fiducial_spacing_pixels) ||
+            !write_compact_u64(writer, values.ecc_bits) ||
+            !write_compact_u64(writer, values.overlay_bits)) return false;
+        if (values.ecc_enabled) {
+            u32 encoded_block_data =
+                (u64)values.ecc_block_data == values.payload_bytes
+                    ? 0u
+                    : (u32)values.ecc_block_data;
+            if (!write_compact_u16(writer, encoded_block_data, true)) return false;
+        }
+        if (!write_compact_u64(writer, (u64)values.fiducial_spacing_pixels) ||
             !write_compact_u64(writer, (u64)values.fiducial_columns) ||
             !write_compact_u64(writer, (u64)values.fiducial_rows)) return false;
 
@@ -8870,17 +8845,24 @@ namespace MetadataTile {
             out_values.palette[i] = tag_palette[i];
         }
         u64 value = 0u;
-        u32 compact_value = 0u;
         if (!read_compact_u64(reader, out_values.payload_bytes) ||
             !read_compact_u64(reader, out_values.page_index) ||
             !read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
         out_values.page_width_pixels = (u32)value;
         if (!read_compact_u64(reader, value) || value > 0xFFFFFFFFu) return false;
         out_values.page_height_pixels = (u32)value;
-        if (!read_compact_u16(reader, compact_value, true) || compact_value > 0xFFFFu) return false;
-        out_values.ecc_target_hundredths = (u16)compact_value;
-        if (!read_compact_u16(reader, compact_value, true)) return false;
-        out_values.overlay_fraction_value = (u16)compact_value;
+        if (!read_compact_u64(reader, out_values.ecc_bits) ||
+            !read_compact_u64(reader, out_values.overlay_bits)) return false;
+        if (out_values.ecc_bits > 0u) {
+            u32 encoded_block_data = 0u;
+            if (!read_compact_u16(reader, encoded_block_data, true)) return false;
+            if (encoded_block_data == 0u) {
+                if (out_values.payload_bytes > 0xFFFFu) return false;
+                out_values.ecc_block_data = (u16)out_values.payload_bytes;
+            } else {
+                out_values.ecc_block_data = (u16)encoded_block_data;
+            }
+        }
         if (!read_compact_u64(reader, value) ||
             value < FIDUCIAL_MARKER_SIZE_PIXELS || value > 0xFFFFFFFFu) return false;
         out_values.fiducial_spacing_pixels = (u32)value;
@@ -16396,6 +16378,52 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         console_line(2, "decode: metadata tile missing; aborting (no metadata available)");
         return false;
     }
+    if (tile_affine_hint_available && tile_values.page_width_pixels > 0u &&
+        tile_values.page_height_pixels > 0u &&
+        tile_values.page_width_pixels == tile_values.page_height_pixels &&
+        tile_values.page_width_pixels <= 256u && width <= 512u && height <= 512u &&
+        tile_affine_hint.angle_rad >= -0.008726646259971648 &&
+        tile_affine_hint.angle_rad <= 0.008726646259971648) {
+        double full_frame_pitch_x = (double)width / (double)tile_values.page_width_pixels;
+        double full_frame_pitch_y = (double)height / (double)tile_values.page_height_pixels;
+        double full_frame_pitch = 0.5 * (full_frame_pitch_x + full_frame_pitch_y);
+        double tile_pitch = tile_affine_hint.pitch_pixels;
+        double frame_anisotropy = fabs(full_frame_pitch_x - full_frame_pitch_y) /
+                                  full_frame_pitch;
+        double pitch_difference = tile_pitch > 0.0
+                                      ? fabs(full_frame_pitch - tile_pitch) / tile_pitch
+                                      : 1.0;
+        if (full_frame_pitch >= 1.5 && full_frame_pitch <= 8.0 &&
+            frame_anisotropy <= 0.005 && pitch_difference <= 0.08) {
+            MetadataTile::AffineParams full_frame_affine = {};
+            full_frame_affine.center_x = ((double)width - 1.0) * 0.5;
+            full_frame_affine.center_y = ((double)height - 1.0) * 0.5;
+            full_frame_affine.pitch_pixels = full_frame_pitch;
+            full_frame_affine.pitch_x_pixels = full_frame_pitch_x;
+            full_frame_affine.pitch_y_pixels = full_frame_pitch_y;
+            full_frame_affine.angle_rad = 0.0;
+            MetadataTile::Values full_frame_values;
+            makocode::ByteBuffer full_frame_palette_text;
+            bool full_frame_decoded = MetadataTile::decode_tile_affine(
+                    pixel_data, (u32)width, (u32)height, (u32)height,
+                    full_frame_affine, full_frame_values, full_frame_palette_text, 0,
+                    sample_scaled_metadata_tile);
+            makocode::ByteBuffer full_frame_metadata;
+            makocode::ByteBuffer tile_hint_metadata;
+            bool same_metadata = full_frame_decoded &&
+                metadata_tile_plausible(full_frame_values, (u32)width, (u32)height) &&
+                MetadataTile::encode_metadata_payload_bytes(full_frame_values,
+                                                             full_frame_metadata) &&
+                MetadataTile::encode_metadata_payload_bytes(tile_values,
+                                                             tile_hint_metadata) &&
+                full_frame_metadata.size == tile_hint_metadata.size &&
+                memcmp(full_frame_metadata.data, tile_hint_metadata.data,
+                       tile_hint_metadata.size) == 0;
+            if (same_metadata) {
+                tile_affine_hint = full_frame_affine;
+            }
+        }
+    }
     if (retry_without_subgrid_out) {
         *retry_without_subgrid_out = true;
     }
@@ -22453,8 +22481,7 @@ struct RotationEstimateCandidate {
             }
         }
     }
-    if (scan_border_affine_from_raster_bounds &&
-        !(state.affine_fit_covers_page && initial_fiducial_affine_hint_available)) {
+    if (scan_border_affine_from_raster_bounds) {
         tile_anchored_axis_affine = scan_border_affine;
         tile_anchored_axis_affine_valid = true;
         state.affine_transform = scan_border_affine;
@@ -23778,8 +23805,8 @@ static bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) 
                 left.ecc_block_count != right.ecc_block_count ||
                 left.ecc_original_bytes != right.ecc_original_bytes ||
                 left.payload_bytes != right.payload_bytes ||
-                left.ecc_target_hundredths != right.ecc_target_hundredths ||
-                left.overlay_fraction_value != right.overlay_fraction_value) {
+                left.ecc_bits != right.ecc_bits ||
+                left.overlay_bits != right.overlay_bits) {
                 return false;
             }
         } else {
@@ -24676,12 +24703,8 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
                                          tile_values.fiducial_columns,
                                          tile_values.fiducial_rows);
     tile_values.ecc_enabled = (ecc_summary && ecc_summary->enabled);
-    tile_values.ecc_target_hundredths = ecc_summary
-                                            ? ecc_summary->ecc_target_hundredths
-                                            : 0u;
-    tile_values.overlay_fraction_value = ecc_summary
-                                             ? ecc_summary->overlay_fraction_q16
-                                             : 0u;
+    tile_values.ecc_bits = ecc_summary ? ecc_summary->ecc_bits : 0u;
+    tile_values.overlay_bits = ecc_summary ? ecc_summary->overlay_bits : 0u;
     tile_values.metadata_ecc_redundancy = metadata_ecc_redundancy;
     tile_values.metadata_ecc_minimum_parity_bytes =
         ecc_summary ? ecc_summary->metadata_ecc_minimum_parity_bytes : 2u;
@@ -26033,7 +26056,6 @@ static void write_usage() {
     console_line(1, "Usage:");
     console_line(1, "  makocode encode [options]   (reads files or stdin; emits PPM pages)");
     console_line(1, "  makocode decode [options] files... (reads PPM pages; use stdin when no files)");
-    console_line(1, "  makocode overlay BASE.ppm OVERLAY.ppm FRACTION (writes merged page to stdout)");
     console_line(1, "  makocode minify             (writes makocode_minified.cpp without comments)");
     console_line(1, "");
     console_line(1, "Run 'makocode <command> --help' (or -h) for command-specific details.");
@@ -26072,12 +26094,15 @@ static void write_encode_help() {
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
-    console_line(1, "  --ecc RATIO|fill     Omit to use the minimum ECC for metadata/fiducial/overlay erasures; numeric targets are used as-is.");
-    console_line(1, "                       Insufficient numeric targets are rejected with the minimum required value; fill maximizes page use.");
-    console_line(1, "                       0.00 disables payload ECC and is rejected when required erasures cannot be recovered.");
+    console_line(1, "  --ecc RATIO|fill     Parity/data ratio (0-254); fill maximizes page use.");
+    console_line(1, "                       Omit to use the minimum ECC for metadata, fiducial, and overlay erasures.");
+    console_line(1, "                       Insufficient ECC is rejected with a sufficient ratio and supported overlay fraction.");
+    console_line(1, "                       0 disables payload ECC and is rejected when required erasures cannot be recovered.");
     console_line(1, "                       RS blocks max out at 255 total symbols.");
-    console_line(1, "  --overlay-fraction F Maximum share of codeword positions for overlay erasures (0.00-0.99; default 0.00).");
-    console_line(1, "                       Wire value is Q0.16 (raw / 65536); max raw 65535 = 65535/65536; 1.00 is invalid.");
+    console_line(1, "  --overlay-fraction F Overlay budget as a share of protected data bits (0.0-1.0).");
+    console_line(1, "  --overlay-ppm PATH   PPM image to apply to every encoded page; requires --overlay-fraction.");
+    console_line(1, "                       --overlay-fraction also requires --overlay-ppm. Overlay bits are reserved per RS block.");
+    console_line(1, "  --overlay-ignore-colors LIST  Skip overlay pixels matching named or hex colors.");
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
     console_line(1, "");
     console_line(1, "Footer customization:");
@@ -26110,17 +26135,6 @@ static void write_decode_help() {
     console_line(1, "General:");
     console_line(1, "  --help               Show this message.");
     console_line(1, "Provide one or more PPM files, or pipe pages via stdin.");
-}
-
-static void write_overlay_help() {
-    console_line(1, "makocode overlay");
-    console_line(1, "Usage: makocode overlay [--debug] [--ignore-colors COLORS] [--overlay-ecc-target TARGET] BASE.ppm OVERLAY.ppm FRACTION");
-    console_line(1, "Blends OVERLAY data bytes into BASE using FRACTION (0.0-1.0 decimal).");
-    console_line(1, "Both pages must share dimensions and fiducial layout.");
-    console_line(1, "  --ignore-colors COLORS  Skip writing overlay pixels whose color matches one of the listed");
-    console_line(1, "                           color names (White/Cyan/Magenta/Yellow/Black) or hex tokens (RRGGBB).");
-    console_line(1, "  --overlay-ecc-target TARGET  Consume this fraction (0.00-1.00, max 2 decimals) of the overlay ECC reserve.");
-    console_line(1, "  --debug                       Report the overlay selector symbols used.");
 }
 
 static void write_minify_help() {
@@ -26660,12 +26674,13 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
                                           double& effective_redundancy,
                                           u16& unknown_parity_budget,
                                           u16& overlay_erasure_budget,
-                                          u16 overlay_fraction_q16) {
+                                          double overlay_fraction) {
     effective_redundancy = 0.0;
     unknown_parity_budget = 0u;
     overlay_erasure_budget = 0u;
     (void)structural_fraction;
-    if (requested_redundancy < 0.0 || payload_bytes == 0u) return false;
+    if (requested_redundancy < 0.0 || payload_bytes == 0u ||
+        overlay_fraction < 0.0 || overlay_fraction > 1.0) return false;
     if (requested_redundancy == 0.0) return true;
     u16 block_data = 0u;
     u16 block_parity = 0u;
@@ -26678,8 +26693,13 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
         !block_data || !block_parity || !block_count) {
         return false;
     }
-    overlay_erasure_budget = (u16)(((u32)(block_data + block_parity) *
-                                    overlay_fraction_q16 + 65535u) / 65536u);
+    long double requested_symbols = ceill((long double)payload_bytes * overlay_fraction);
+    if (requested_symbols > (long double)U64_MAX_VALUE) return false;
+    u64 overlay_symbols = (u64)requested_symbols;
+    u64 per_block = overlay_symbols / block_count;
+    if (overlay_symbols % block_count) ++per_block;
+    if (per_block > 0xFFFFu) return false;
+    overlay_erasure_budget = (u16)per_block;
     effective_redundancy = requested_redundancy;
     return true;
 }
@@ -26728,6 +26748,8 @@ struct EccFillCandidate {
     u64 frame_bits;
     u64 bits_per_page;
     u64 page_count;
+    u16 overlay_budget;
+    u64 overlay_bits;
 };
 
 static bool evaluate_ecc_fill_candidate(usize payload_bytes,
@@ -26739,12 +26761,11 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         bool fit_width,
                                         bool fit_height,
                                         double structural_erasure_fraction,
-                                        u16 overlay_fraction_q16,
+                                        double overlay_fraction,
                                         EccFillCandidate& candidate,
                                         u32 metadata_ecc_minimum_parity_bytes = 2u) {
-    u32 target_hundredths = (u32)floor(requested_redundancy * 100.0 + 0.5);
-    if (target_hundredths == 0u || target_hundredths > 65535u) return false;
-    double encoded_redundancy = (double)target_hundredths / 100.0;
+    if (requested_redundancy <= 0.0 || requested_redundancy > 254.0) return false;
+    double encoded_redundancy = requested_redundancy;
     u16 unknown_budget = 0u;
     u16 overlay_budget = 0u;
     if (!derive_ecc_redundancy_with_overwrite(payload_bytes,
@@ -26753,11 +26774,9 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                               encoded_redundancy,
                                               unknown_budget,
                                               overlay_budget,
-                                              overlay_fraction_q16)) {
+                                              overlay_fraction)) {
         return false;
     }
-    encoded_redundancy = (double)target_hundredths / 100.0;
-
     FooterLayout layout = FooterLayout();
     u32 layout_data_height = height_pixels;
     u64 bits_per_page = 0u;
@@ -26788,7 +26807,7 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                                   encoded_redundancy,
                                                   unknown_budget,
                                                   overlay_budget,
-                                                  overlay_fraction_q16)) {
+                                                  overlay_fraction)) {
             return false;
         }
         if (overlay_budget > candidate.parity) {
@@ -26800,12 +26819,11 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                           : ((double)retry_parity - 0.5) /
                                                 ((double)makocode::RS_FIELD_SIZE -
                                                  (double)retry_parity);
-            target_hundredths = (u32)floor(retry_redundancy * 100.0 + 0.5);
-            if (target_hundredths <= (u32)floor(encoded_redundancy * 100.0 + 0.5)) {
-                target_hundredths = (u32)floor(encoded_redundancy * 100.0 + 0.5) + 1u;
+            if (retry_redundancy <= encoded_redundancy) {
+                retry_redundancy = encoded_redundancy + 0.000001;
             }
-            if (target_hundredths == 0u || target_hundredths > 65535u) return false;
-            encoded_redundancy = (double)target_hundredths / 100.0;
+            if (retry_redundancy > 254.0) return false;
+            encoded_redundancy = retry_redundancy;
             continue;
         }
         makocode::EccSummary fit_ecc_summary;
@@ -26815,8 +26833,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
         fit_ecc_summary.redundancy = encoded_redundancy;
         fit_ecc_summary.original_bytes = payload_bytes;
         fit_ecc_summary.block_count = candidate.block_count;
-        fit_ecc_summary.ecc_target_hundredths = (u16)target_hundredths;
-        fit_ecc_summary.overlay_fraction_q16 = overlay_fraction_q16;
+        fit_ecc_summary.ecc_bits = (u64)candidate.parity * candidate.block_count * 8u;
+        fit_ecc_summary.overlay_bits = (u64)overlay_budget * candidate.block_count * 8u;
         fit_ecc_summary.metadata_ecc_minimum_parity_bytes =
             metadata_ecc_minimum_parity_bytes;
         if (!fit_page_dimensions(mapping,
@@ -26851,8 +26869,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
         summary.redundancy = encoded_redundancy;
         summary.original_bytes = payload_bytes;
         summary.block_count = candidate.block_count;
-        summary.ecc_target_hundredths = (u16)target_hundredths;
-        summary.overlay_fraction_q16 = overlay_fraction_q16;
+        summary.ecc_bits = fit_ecc_summary.ecc_bits;
+        summary.overlay_bits = fit_ecc_summary.overlay_bits;
         summary.metadata_ecc_minimum_parity_bytes = metadata_ecc_minimum_parity_bytes;
         u16 required_parity = 0u;
         if (validate_overwrite_budget(mapping,
@@ -26895,12 +26913,11 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
             retry_parity <= candidate.parity) {
             return false;
         }
-        target_hundredths = (u32)floor(retry_redundancy * 100.0 + 0.5);
-        if (target_hundredths <= (u32)floor(encoded_redundancy * 100.0 + 0.5)) {
-            target_hundredths = (u32)floor(encoded_redundancy * 100.0 + 0.5) + 1u;
+        if (retry_redundancy <= encoded_redundancy) {
+            retry_redundancy = encoded_redundancy + 0.000001;
         }
-        if (target_hundredths == 0u || target_hundredths > 65535u) return false;
-        encoded_redundancy = (double)target_hundredths / 100.0;
+        if (retry_redundancy > 254.0) return false;
+        encoded_redundancy = retry_redundancy;
     }
     if (!exact_budget_valid) return false;
 
@@ -26908,6 +26925,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
     candidate.requested_ratio = requested_redundancy;
     candidate.bits_per_page = bits_per_page;
     candidate.page_count = page_count;
+    candidate.overlay_budget = overlay_budget;
+    candidate.overlay_bits = (u64)overlay_budget * candidate.block_count * 8u;
     return true;
 }
 
@@ -26921,7 +26940,7 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                bool fit_width,
                                bool fit_height,
                                double structural_erasure_fraction,
-                               u16 overlay_fraction_q16,
+                               double overlay_fraction,
                                double& best_ratio,
                                double& best_requested_ratio,
                                u16& best_block_data,
@@ -26959,7 +26978,7 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                           fit_width,
                                           fit_height,
                                           structural_erasure_fraction,
-                                          overlay_fraction_q16,
+                                          overlay_fraction,
                                           local)) {
             return false;
         }
@@ -27008,7 +27027,7 @@ static bool find_best_ecc_fill(usize payload_bytes,
                                           fit_width,
                                           fit_height,
                                           structural_erasure_fraction,
-                                          overlay_fraction_q16,
+                                          overlay_fraction,
                                           candidate)) {
             search_high = mid;
             continue;
@@ -27035,6 +27054,53 @@ static bool find_best_ecc_fill(usize payload_bytes,
     return (best_ratio >= 0.0);
 }
 
+struct OverlayPage {
+    makocode::ByteBuffer original;
+    makocode::ByteBuffer pixels;
+    PpmParserState      metadata;
+    u32                 width;
+    u32                 height;
+    u32                 data_height;
+    u32                 footer_rows;
+    u8                  color_mode;
+    bool                use_custom_palette;
+    ImageMappingConfig  custom_mapping;
+    u8                  custom_symbol_bits;
+
+    OverlayPage()
+        : original(),
+          pixels(),
+          metadata(),
+          width(0u),
+          height(0u),
+          data_height(0u),
+          footer_rows(0u),
+          color_mode(1u),
+          use_custom_palette(false),
+          custom_mapping(),
+          custom_symbol_bits(0u) {}
+
+    ~OverlayPage() {
+        original.release();
+        pixels.release();
+        metadata = PpmParserState();
+        width = 0u;
+        height = 0u;
+        data_height = 0u;
+        footer_rows = 0u;
+        color_mode = 1u;
+        use_custom_palette = false;
+        custom_symbol_bits = 0u;
+    }
+};
+
+static bool load_overlay_page(const char* path, OverlayPage& page);
+static bool merge_overlay_into_encoded_page(const char* page_path,
+                                            const OverlayPage& overlay_page,
+                                            const char* ignore_colors,
+                                            usize ignore_colors_length,
+                                            bool debug_requested);
+
 static int command_encode(int arg_count, char** args) {
     if (arguments_request_help(arg_count, args)) {
         write_encode_help();
@@ -27044,8 +27110,13 @@ static int command_encode(int arg_count, char** args) {
     PageFooterConfig footer_config;
     enum EccMode { ECC_AUTO_MINIMUM, ECC_EXPLICIT_RATIO, ECC_FILL };
     EccMode ecc_mode = ECC_AUTO_MINIMUM;
-    u32 ecc_target_hundredths = 0u;
-    u16 overlay_fraction_q16 = 0u;
+    double overlay_fraction = 0.0;
+    u64 overlay_fraction_numerator = 0u;
+    u64 overlay_fraction_denominator = 1u;
+    const char* overlay_ppm_path = 0;
+    OverlayPage overlay_ppm_page;
+    const char* overlay_ignore_colors_text = 0;
+    usize overlay_ignore_colors_length = 0u;
     double ecc_redundancy = 0.0;
     static const usize MAX_INPUT_ITEMS = 512u;
     const char* input_paths[MAX_INPUT_ITEMS];
@@ -27061,6 +27132,8 @@ static int command_encode(int arg_count, char** args) {
     bool have_prefix = false;
     bool ecc_option_specified = false;
     bool overlay_fraction_specified = false;
+    bool overlay_ppm_specified = false;
+    bool overlay_ignore_colors_specified = false;
     bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
@@ -27172,6 +27245,62 @@ static int command_encode(int arg_count, char** args) {
             debug_requested = true;
             continue;
         }
+        const char overlay_ignore_prefix[] = "--overlay-ignore-colors=";
+        const char* overlay_ignore_value = 0;
+        if (ascii_equals_token(arg, ascii_length(arg), "--overlay-ignore-colors")) {
+            if (overlay_ignore_colors_specified || (i + 1) >= arg_count ||
+                !args[i + 1] || args[i + 1][0] == '\0') {
+                console_line(2, "encode: --overlay-ignore-colors requires a color list");
+                return 1;
+            }
+            overlay_ignore_value = args[i + 1];
+            i += 1;
+        } else if (ascii_starts_with(arg, overlay_ignore_prefix)) {
+            if (overlay_ignore_colors_specified) {
+                console_line(2, "encode: --overlay-ignore-colors specified multiple times");
+                return 1;
+            }
+            overlay_ignore_value = arg + (sizeof(overlay_ignore_prefix) - 1u);
+            if (*overlay_ignore_value == '\0') {
+                console_line(2, "encode: --overlay-ignore-colors requires a color list");
+                return 1;
+            }
+        }
+        if (overlay_ignore_value) {
+            overlay_ignore_colors_text = overlay_ignore_value;
+            overlay_ignore_colors_length = ascii_length(overlay_ignore_value);
+            overlay_ignore_colors_specified = true;
+            continue;
+        }
+        const char overlay_ppm_prefix[] = "--overlay-ppm=";
+        const char* overlay_ppm_value = 0;
+        if (ascii_equals_token(arg, ascii_length(arg), "--overlay-ppm")) {
+            if (overlay_ppm_specified) {
+                console_line(2, "encode: --overlay-ppm specified multiple times");
+                return 1;
+            }
+            if ((i + 1) >= arg_count || !args[i + 1] || args[i + 1][0] == '\0') {
+                console_line(2, "encode: --overlay-ppm requires a PPM path");
+                return 1;
+            }
+            overlay_ppm_value = args[i + 1];
+            i += 1;
+        } else if (ascii_starts_with(arg, overlay_ppm_prefix)) {
+            if (overlay_ppm_specified) {
+                console_line(2, "encode: --overlay-ppm specified multiple times");
+                return 1;
+            }
+            overlay_ppm_value = arg + (sizeof(overlay_ppm_prefix) - 1u);
+            if (*overlay_ppm_value == '\0') {
+                console_line(2, "encode: --overlay-ppm requires a PPM path");
+                return 1;
+            }
+        }
+        if (overlay_ppm_value) {
+            overlay_ppm_path = overlay_ppm_value;
+            overlay_ppm_specified = true;
+            continue;
+        }
         const char overlay_fraction_prefix[] = "--overlay-fraction=";
         const char* overlay_fraction_value = 0;
         usize overlay_fraction_length = 0u;
@@ -27181,7 +27310,7 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             if ((i + 1) >= arg_count) {
-                console_line(2, "encode: --overlay-fraction requires a fraction from 0.00 to 0.99");
+                console_line(2, "encode: --overlay-fraction requires a fraction from 0.0 to 1.0");
                 return 1;
             }
             overlay_fraction_value = args[i + 1];
@@ -27196,15 +27325,16 @@ static int command_encode(int arg_count, char** args) {
             overlay_fraction_length = ascii_length(overlay_fraction_value);
         }
         if (overlay_fraction_value) {
-            u32 parsed_hundredths = 0u;
-            if (!ascii_to_fixed_hundredths(overlay_fraction_value,
-                                           overlay_fraction_length,
-                                           99u,
-                                           parsed_hundredths)) {
-                console_line(2, "encode: --overlay-fraction must be 0.00 to 0.99 with at most 2 decimal places; 1.00 is invalid");
+            if (!ascii_to_fraction(overlay_fraction_value,
+                                   overlay_fraction_length,
+                                   overlay_fraction_numerator,
+                                   overlay_fraction_denominator) ||
+                overlay_fraction_numerator > overlay_fraction_denominator) {
+                console_line(2, "encode: --overlay-fraction must be between 0.0 and 1.0");
                 return 1;
             }
-            overlay_fraction_q16 = (u16)((parsed_hundredths * 65536u + 50u) / 100u);
+            overlay_fraction = (double)overlay_fraction_numerator /
+                               (double)overlay_fraction_denominator;
             overlay_fraction_specified = true;
             continue;
         }
@@ -27237,16 +27367,15 @@ static int command_encode(int arg_count, char** args) {
                 ecc_mode = ECC_FILL;
                 continue;
             }
-            u32 parsed_hundredths = 0u;
-            if (!ascii_to_fixed_hundredths(ecc_value,
-                                           ecc_length,
-                                           65535u,
-                                           parsed_hundredths)) {
-                console_line(2, "encode: --ecc must be 0.00 to 655.35 with at most 2 decimal places");
+            u64 ratio_numerator = 0u;
+            u64 ratio_denominator = 1u;
+            if (!ascii_to_fraction(ecc_value, ecc_length,
+                                   ratio_numerator, ratio_denominator) ||
+                (long double)ratio_numerator / (long double)ratio_denominator > 254.0L) {
+                console_line(2, "encode: --ecc ratio must be between 0 and 254");
                 return 1;
             }
-            ecc_target_hundredths = parsed_hundredths;
-            ecc_redundancy = (double)ecc_target_hundredths / 100.0;
+            ecc_redundancy = (double)ratio_numerator / (double)ratio_denominator;
             ecc_mode = ECC_EXPLICIT_RATIO;
             continue;
         }
@@ -27390,6 +27519,14 @@ static int command_encode(int arg_count, char** args) {
         }
         console_write(2, "encode: unknown option: ");
         console_line(2, arg);
+        return 1;
+    }
+    if (overlay_fraction_specified != overlay_ppm_specified) {
+        console_line(2, "encode: --overlay-fraction and --overlay-ppm must be used together");
+        return 1;
+    }
+    if (overlay_ignore_colors_specified && !overlay_ppm_specified) {
+        console_line(2, "encode: --overlay-ignore-colors requires --overlay-ppm");
         return 1;
     }
     if (mapping.palette_set) {
@@ -27601,8 +27738,10 @@ static int command_encode(int arg_count, char** args) {
             : (double)overwritten_pixels / (double)data_pixels;
     if (ecc_mode != ECC_EXPLICIT_RATIO) {
         EccFillCandidate minimum_candidate;
-        if (!evaluate_ecc_fill_candidate(ecc_payload_bytes,
-                                          0.01,
+        double low_ratio = 0.01;
+        double high_ratio = low_ratio;
+        bool found_minimum = evaluate_ecc_fill_candidate(ecc_payload_bytes,
+                                          high_ratio,
                                           mapping,
                                           footer_config,
                                           width_pixels,
@@ -27610,18 +27749,58 @@ static int command_encode(int arg_count, char** args) {
                                           !mapping.page_width_set,
                                           !mapping.page_height_set,
                                           structural_erasure_fraction,
-                                          overlay_fraction_q16,
+                                          overlay_fraction,
                                           minimum_candidate,
-                                          metadata_ecc_minimum_parity_bytes)) {
+                                          metadata_ecc_minimum_parity_bytes);
+        if (!found_minimum) {
+            for (u32 attempt = 0u; attempt < 16u && high_ratio < 254.0; ++attempt) {
+                low_ratio = high_ratio;
+                high_ratio *= 2.0;
+                if (high_ratio > 254.0) high_ratio = 254.0;
+                found_minimum = evaluate_ecc_fill_candidate(ecc_payload_bytes,
+                                          high_ratio,
+                                          mapping,
+                                          footer_config,
+                                          width_pixels,
+                                          height_pixels,
+                                          !mapping.page_width_set,
+                                          !mapping.page_height_set,
+                                          structural_erasure_fraction,
+                                          overlay_fraction,
+                                          minimum_candidate,
+                                          metadata_ecc_minimum_parity_bytes);
+                if (found_minimum) break;
+            }
+            if (found_minimum) {
+                for (u32 iteration = 0u; iteration < 64u; ++iteration) {
+                    double middle = (low_ratio + high_ratio) * 0.5;
+                    if (middle == low_ratio || middle == high_ratio) break;
+                    EccFillCandidate candidate;
+                    if (evaluate_ecc_fill_candidate(ecc_payload_bytes,
+                                                    middle,
+                                                    mapping,
+                                                    footer_config,
+                                                    width_pixels,
+                                                    height_pixels,
+                                                    !mapping.page_width_set,
+                                                    !mapping.page_height_set,
+                                                    structural_erasure_fraction,
+                                                    overlay_fraction,
+                                                    candidate,
+                                                    metadata_ecc_minimum_parity_bytes)) {
+                        high_ratio = middle;
+                        minimum_candidate = candidate;
+                    } else {
+                        low_ratio = middle;
+                    }
+                }
+            }
+        }
+        if (!found_minimum) {
             console_line(2, "encode: unable to determine the minimum ECC for this payload and page layout");
             return 1;
         }
-        ecc_target_hundredths = (u32)floor(minimum_candidate.ratio * 100.0 + 0.5);
-        if (ecc_target_hundredths == 0u || ecc_target_hundredths > 65535u) {
-            console_line(2, "encode: minimum ECC target is outside the supported range");
-            return 1;
-        }
-        ecc_redundancy = (double)ecc_target_hundredths / 100.0;
+        ecc_redundancy = minimum_candidate.ratio;
         unknown_error_redundancy = ecc_redundancy;
     }
     if (ecc_mode == ECC_FILL) {
@@ -27634,7 +27813,7 @@ static int command_encode(int arg_count, char** args) {
         u64 best_page_count = 0u;
         bool found_fill = find_best_ecc_fill(ecc_payload_bytes,
                                 ecc_redundancy,
-                                (double)makocode::RS_FIELD_SIZE,
+                                254.0,
                                 mapping,
                                 footer_config,
                                 width_pixels,
@@ -27642,7 +27821,7 @@ static int command_encode(int arg_count, char** args) {
                                 !mapping.page_width_set,
                                 !mapping.page_height_set,
                                 structural_erasure_fraction,
-                                overlay_fraction_q16,
+                                overlay_fraction,
                                 best_ratio,
                                 best_requested_ratio,
                                 best_block_data,
@@ -27661,32 +27840,25 @@ static int command_encode(int arg_count, char** args) {
                                            derived_redundancy,
                                            unknown_parity_budget,
                                            overlay_erasure_budget,
-                                           overlay_fraction_q16)) {
+                                           overlay_fraction)) {
             console_line(2, "encode: canonical ECC fill cannot preserve structural and unknown-error budgets");
             return 1;
         }
-        u32 resolved_target = (u32)floor(best_ratio * 100.0 + 0.5);
-        if (resolved_target > 65535u) {
-            console_line(2, "encode: ECC fill target exceeds 655.35");
-            return 1;
-        }
-        ecc_target_hundredths = resolved_target;
-        double rounded_redundancy = (double)ecc_target_hundredths / 100.0;
         double effective_redundancy = 0.0;
         if (!derive_ecc_redundancy_with_overwrite(ecc_payload_bytes,
-                                                   rounded_redundancy,
+                                                   best_ratio,
                                                    structural_erasure_fraction,
                                                    effective_redundancy,
                                                    unknown_parity_budget,
                                                    overlay_erasure_budget,
-                                                   overlay_fraction_q16)) {
-            console_line(2, "encode: rounded ECC fill target is invalid");
+                                                   overlay_fraction)) {
+            console_line(2, "encode: ECC fill target is invalid");
             return 1;
         }
         ecc_redundancy = effective_redundancy;
         unknown_error_redundancy = ecc_redundancy;
         char ratio_buffer[32];
-        format_fixed_3(rounded_redundancy, ratio_buffer, sizeof(ratio_buffer));
+        format_fixed_3(ecc_redundancy, ratio_buffer, sizeof(ratio_buffer));
         char block_buffer[32];
         u64_to_ascii(best_block_data, block_buffer, sizeof(block_buffer));
         char parity_buffer[32];
@@ -27714,7 +27886,7 @@ static int command_encode(int arg_count, char** args) {
                                            derived_redundancy,
                                            unknown_parity_budget,
                                            overlay_erasure_budget,
-                                           overlay_fraction_q16)) {
+                                           overlay_fraction)) {
             console_line(2, "encode: requested ECC cannot preserve structural and unknown-error budgets");
             return 1;
         } else {
@@ -27722,10 +27894,130 @@ static int command_encode(int arg_count, char** args) {
         }
     }
     metadata_ecc_redundancy = ecc_redundancy < 0.25 ? ecc_redundancy : 0.25;
+    u64 overlay_bits = 0u;
+    if (ecc_redundancy > 0.0) {
+        u16 planned_data = 0u;
+        u16 planned_parity = 0u;
+        u64 planned_blocks = 0u;
+        if (!makocode::compute_ecc_layout(ecc_payload_bytes,
+                                          ecc_redundancy,
+                                          planned_data,
+                                          planned_parity,
+                                          planned_blocks) ||
+            !planned_data || !planned_parity || !planned_blocks) {
+            console_line(2, "encode: failed to determine ECC block layout");
+            return 1;
+        }
+        if (overlay_erasure_budget &&
+            planned_blocks > U64_MAX_VALUE / overlay_erasure_budget / 8u) {
+            console_line(2, "encode: overlay bit budget overflow");
+            return 1;
+        }
+        overlay_bits = (u64)overlay_erasure_budget * planned_blocks * 8u;
+    }
+    if (overlay_fraction > 0.0 && ecc_redundancy == 0.0) {
+        char ratio_buffer[32] = {};
+        long double requested_symbols =
+            ceill((long double)ecc_payload_bytes * overlay_fraction);
+        u64 symbols = requested_symbols > (long double)U64_MAX_VALUE
+                          ? U64_MAX_VALUE
+                          : (u64)requested_symbols;
+        for (u32 candidate_hundredths = 1u;
+             candidate_hundredths <= 25400u;
+             ++candidate_hundredths) {
+            u16 candidate_data = 0u;
+            u16 candidate_parity = 0u;
+            u64 candidate_blocks = 0u;
+            if (!makocode::compute_ecc_layout(ecc_payload_bytes,
+                                              (double)candidate_hundredths / 100.0,
+                                              candidate_data,
+                                              candidate_parity,
+                                              candidate_blocks) ||
+                !candidate_data || !candidate_parity || !candidate_blocks) continue;
+            u64 per_block = symbols / candidate_blocks;
+            if (symbols % candidate_blocks) ++per_block;
+            if (per_block <= candidate_parity) {
+                format_fixed_3((double)candidate_hundredths / 100.0,
+                               ratio_buffer,
+                               sizeof(ratio_buffer));
+                break;
+            }
+        }
+        console_write(2, "encode: overlay requires ECC");
+        if (ratio_buffer[0]) {
+            console_write(2, "; use at least --ecc ");
+            console_write(2, ratio_buffer);
+        }
+        console_line(2, " or use --ecc fill");
+        return 1;
+    }
+    if (overlay_fraction > 0.0) {
+        u16 planned_data = 0u;
+        u16 planned_parity = 0u;
+        u64 planned_blocks = 0u;
+        if (!makocode::compute_ecc_layout(ecc_payload_bytes,
+                                          ecc_redundancy,
+                                          planned_data,
+                                          planned_parity,
+                                          planned_blocks) ||
+            !planned_data || !planned_parity || !planned_blocks) {
+            console_line(2, "encode: failed to determine ECC layout for overlay budget");
+            return 1;
+        }
+        if (overlay_erasure_budget > planned_parity) {
+            char needed_buffer[32];
+            char parity_buffer[32];
+            char ratio_buffer[32] = {};
+            char supported_buffer[32];
+            for (u32 candidate_hundredths = 1u;
+                 candidate_hundredths <= 25400u;
+                 ++candidate_hundredths) {
+                u16 candidate_data = 0u;
+                u16 candidate_parity = 0u;
+                u64 candidate_blocks = 0u;
+                if (!makocode::compute_ecc_layout(ecc_payload_bytes,
+                                                  (double)candidate_hundredths / 100.0,
+                                                  candidate_data,
+                                                  candidate_parity,
+                                                  candidate_blocks) ||
+                    !candidate_data || !candidate_parity || !candidate_blocks) continue;
+                long double requested_symbols = ceill((long double)ecc_payload_bytes * overlay_fraction);
+                u64 symbols = (u64)requested_symbols;
+                u64 per_block = symbols / candidate_blocks +
+                                ((symbols % candidate_blocks) ? 1u : 0u);
+                if (per_block <= candidate_parity) {
+                    format_fixed_3((double)candidate_hundredths / 100.0,
+                                   ratio_buffer,
+                                   sizeof(ratio_buffer));
+                    break;
+                }
+            }
+            long double supported_fraction =
+                ((long double)planned_parity * planned_blocks) / (long double)ecc_payload_bytes;
+            if (supported_fraction > 1.0L) supported_fraction = 1.0L;
+            supported_fraction = (long double)floor((double)(supported_fraction * 1000.0L)) /
+                                 1000.0L;
+            format_fixed_3((double)supported_fraction,
+                           supported_buffer,
+                           sizeof(supported_buffer));
+            u64_to_ascii(overlay_erasure_budget, needed_buffer, sizeof(needed_buffer));
+            u64_to_ascii(planned_parity, parity_buffer, sizeof(parity_buffer));
+            console_write(2, "encode: overlay needs ");
+            console_write(2, needed_buffer);
+            console_write(2, " erasures per block; ECC provides ");
+            console_write(2, parity_buffer);
+            if (ratio_buffer[0]) {
+                console_write(2, "; use at least --ecc ");
+                console_write(2, ratio_buffer);
+            }
+            console_write(2, " or reduce --overlay-fraction to at most ");
+            console_line(2, supported_buffer);
+            return 1;
+        }
+    }
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
-    encoder.config.ecc_target_hundredths = (u16)ecc_target_hundredths;
-    encoder.config.overlay_fraction_q16 = overlay_fraction_q16;
+    encoder.config.overlay_bits = overlay_bits;
     if (have_password) {
         if (!encoder.set_password((const char*)password_buffer.data, password_buffer.size)) {
             console_line(2, "encode: failed to set encryption password");
@@ -27793,6 +28085,14 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: footer layout did not converge");
         return 1;
     }
+    if (overlay_ppm_path) {
+        if (!load_overlay_page(overlay_ppm_path, overlay_ppm_page)) return 1;
+        if (overlay_ppm_page.width != width_pixels ||
+            overlay_ppm_page.height != height_pixels) {
+            console_line(2, "encode: --overlay-ppm dimensions must match the encoded pages");
+            return 1;
+        }
+    }
     u16 required_parity = 0u;
     if (!validate_overwrite_budget(mapping,
                                    frame_bits,
@@ -27810,80 +28110,72 @@ static int command_encode(int arg_count, char** args) {
         char required_parity_buffer[32];
         char target_parity_buffer[32];
         char sufficient_target_buffer[32] = {};
-        u32 sufficient_target_hundredths = 0u;
+        char supported_overlay_buffer[32] = {};
         u32 required_without_current_overlay =
             required_parity > overlay_erasure_budget
                 ? (u32)required_parity - (u32)overlay_erasure_budget
                 : 0u;
-        for (u32 candidate_target = 1u;
-             candidate_target <= 65535u;
-             ++candidate_target) {
+        for (u32 candidate_hundredths = 1u;
+             candidate_hundredths <= 25400u;
+             ++candidate_hundredths) {
             u16 candidate_data = 0u;
             u16 candidate_parity = 0u;
             u64 candidate_blocks = 0u;
             if (!makocode::compute_ecc_layout(
                     ecc_payload_bytes,
-                    (double)candidate_target / 100.0,
+                    (double)candidate_hundredths / 100.0,
                     candidate_data,
                     candidate_parity,
                     candidate_blocks) ||
                 candidate_data == 0u || candidate_parity == 0u || candidate_blocks == 0u) {
                 continue;
             }
-            u32 candidate_overlay = (u32)(((u32)(candidate_data + candidate_parity) *
-                                            overlay_fraction_q16 + 65535u) / 65536u);
+            long double requested_overlay_symbols =
+                ceill((long double)ecc_payload_bytes * overlay_fraction);
+            u64 overlay_symbols = requested_overlay_symbols > (long double)U64_MAX_VALUE
+                                      ? U64_MAX_VALUE
+                                      : (u64)requested_overlay_symbols;
+            u64 candidate_overlay = overlay_symbols / candidate_blocks;
+            if (overlay_symbols % candidate_blocks) ++candidate_overlay;
             if ((u32)candidate_parity >= required_without_current_overlay + candidate_overlay) {
-                sufficient_target_hundredths = candidate_target;
+                format_fixed_3((double)candidate_hundredths / 100.0,
+                               sufficient_target_buffer,
+                               sizeof(sufficient_target_buffer));
                 break;
             }
         }
-        if (sufficient_target_hundredths > 0u) {
-            EccFillCandidate sufficient_candidate;
-            bool candidate_satisfies_layout = evaluate_ecc_fill_candidate(
-                ecc_payload_bytes,
-                (double)sufficient_target_hundredths / 100.0,
-                mapping,
-                footer_config,
-                width_pixels,
-                height_pixels,
-                !mapping.page_width_set,
-                !mapping.page_height_set,
-                structural_erasure_fraction,
-                overlay_fraction_q16,
-                sufficient_candidate,
-                metadata_ecc_minimum_parity_bytes);
-            if (candidate_satisfies_layout) {
-                sufficient_target_hundredths =
-                    (u32)floor(sufficient_candidate.ratio * 100.0 + 0.5);
-                u64_to_ascii(sufficient_target_hundredths / 100u,
-                             sufficient_target_buffer,
-                             sizeof(sufficient_target_buffer));
-                usize whole_length = ascii_length(sufficient_target_buffer);
-                if (whole_length + 4u < sizeof(sufficient_target_buffer)) {
-                    sufficient_target_buffer[whole_length] = '.';
-                    sufficient_target_buffer[whole_length + 1u] =
-                        (char)('0' + ((sufficient_target_hundredths % 100u) / 10u));
-                    sufficient_target_buffer[whole_length + 2u] =
-                        (char)('0' + (sufficient_target_hundredths % 10u));
-                    sufficient_target_buffer[whole_length + 3u] = '\0';
-                }
-            } else {
-                sufficient_target_hundredths = 0u;
-            }
+        u32 available_overlay_per_block =
+            encoder.ecc_info().parity_symbols > required_without_current_overlay
+                ? (u32)encoder.ecc_info().parity_symbols - required_without_current_overlay
+                : 0u;
+        long double max_overlay_fraction = ecc_payload_bytes
+            ? ((long double)available_overlay_per_block *
+               (long double)encoder.ecc_info().block_count) /
+                  (long double)ecc_payload_bytes
+            : 0.0L;
+        if (max_overlay_fraction > 1.0L) max_overlay_fraction = 1.0L;
+        max_overlay_fraction = (long double)floor((double)(max_overlay_fraction * 1000.0L)) /
+                               1000.0L;
+        format_fixed_3((double)max_overlay_fraction,
+                       supported_overlay_buffer,
+                       sizeof(supported_overlay_buffer));
+        if (supported_overlay_buffer[0] == '\0') {
+            strcpy(supported_overlay_buffer, "0.000");
         }
         u64_to_ascii(required_parity, required_parity_buffer, sizeof(required_parity_buffer));
         u64_to_ascii(encoder.ecc_info().parity_symbols,
                      target_parity_buffer,
                      sizeof(target_parity_buffer));
-        console_write(2, "encode: requested ECC target cannot cover structural erasures and overlay damage (needs ");
+        console_write(2, "encode: ECC cannot cover structural erasures and requested overlay (needs ");
         console_write(2, required_parity_buffer);
         console_write(2, " symbols per block; target provides ");
         console_write(2, target_parity_buffer);
-        if (sufficient_target_hundredths > 0u) {
+        if (sufficient_target_buffer[0] != '\0') {
             console_write(2, "; use at least base --ecc ");
             console_write(2, sufficient_target_buffer);
-            console_write(2, " for this payload/page layout");
         }
+        console_write(2, "; current ECC supports at most --overlay-fraction ");
+        console_write(2, supported_overlay_buffer);
         console_line(2, ")");
         return 1;
     }
@@ -27990,6 +28282,12 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
+        if (overlay_ppm_path && overlay_bits > 0u &&
+            !merge_overlay_into_encoded_page((const char*)output_path.data,
+                                             overlay_ppm_page,
+                                             overlay_ignore_colors_text,
+                                             overlay_ignore_colors_length,
+                                             debug_requested)) return 1;
         console_write(1, "encode: wrote 1 page (");
         console_write(1, (const char*)output_path.data);
         console_line(1, ")");
@@ -28059,6 +28357,12 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }
+            if (overlay_ppm_path && overlay_bits > 0u &&
+                !merge_overlay_into_encoded_page((const char*)path_buffer.data,
+                                                 overlay_ppm_page,
+                                                 overlay_ignore_colors_text,
+                                                 overlay_ignore_colors_length,
+                                                 debug_requested)) return 1;
         }
         makocode::ByteBuffer sample_name;
         if (!build_page_filename(sample_name, page_name_prefix, 1u, page_count)) {
@@ -28089,46 +28393,6 @@ static int command_encode(int arg_count, char** args) {
     return 0;
 }
 
-struct OverlayPage {
-    makocode::ByteBuffer original;
-    makocode::ByteBuffer pixels;
-    PpmParserState      metadata;
-    u32                 width;
-    u32                 height;
-    u32                 data_height;
-    u32                 footer_rows;
-    u8                  color_mode;
-    bool                use_custom_palette;
-    ImageMappingConfig  custom_mapping;
-    u8                  custom_symbol_bits;
-
-    OverlayPage()
-        : original(),
-          pixels(),
-          metadata(),
-          width(0u),
-          height(0u),
-          data_height(0u),
-          footer_rows(0u),
-          color_mode(1u),
-          use_custom_palette(false),
-          custom_mapping(),
-          custom_symbol_bits(0u) {}
-
-    ~OverlayPage() {
-        original.release();
-        pixels.release();
-        metadata = PpmParserState();
-        width = 0u;
-        height = 0u;
-        data_height = 0u;
-        footer_rows = 0u;
-        color_mode = 1u;
-        use_custom_palette = false;
-        custom_symbol_bits = 0u;
-    }
-};
-
 static bool build_overlay_payload_rank_reservation_mask(
     const OverlayPage& page,
     makocode::ByteBuffer& mask_out) {
@@ -28152,36 +28416,6 @@ struct OverlayIgnoreColorList {
     PaletteColor colors[MAX_OVERLAY_IGNORE_COLORS];
     usize count;
 };
-
-// The overlay PPM that carries the mask rarely encodes layout metadata such as
-// footer rows or fiducial sizing. When that metadata is absent we still need the
-// overlay to line up pixel-for-pixel with the base page so that the merged image
-// doesn't appear shifted. Synchronize the layout-critical fields from the base
-// page onto the overlay before we build masks or gather bits.
-static void overlay_apply_base_layout(const OverlayPage& base, OverlayPage& overlay) {
-    overlay.footer_rows = base.footer_rows;
-    overlay.data_height = overlay.height - overlay.footer_rows;
-    if (base.metadata.has_footer_rows) {
-        overlay.metadata.has_footer_rows = true;
-        overlay.metadata.footer_rows_value = base.metadata.footer_rows_value;
-    }
-    if (base.metadata.has_fiducial_spacing) {
-        overlay.metadata.has_fiducial_spacing = true;
-        overlay.metadata.fiducial_spacing_value = base.metadata.fiducial_spacing_value;
-    }
-    if (base.metadata.has_fiducial_columns) {
-        overlay.metadata.has_fiducial_columns = true;
-        overlay.metadata.fiducial_columns_value = base.metadata.fiducial_columns_value;
-    }
-    if (base.metadata.has_fiducial_rows) {
-        overlay.metadata.has_fiducial_rows = true;
-        overlay.metadata.fiducial_rows_value = base.metadata.fiducial_rows_value;
-    }
-    if (base.metadata.has_encoded_tile) {
-        overlay.metadata.has_encoded_tile = true;
-        overlay.metadata.encoded_tile = base.metadata.encoded_tile;
-    }
-}
 
 static bool overlay_ignore_char_is_delimiter(char c) {
     switch (c) {
@@ -28536,991 +28770,269 @@ static bool build_overlay_mask(const OverlayPage& page,
     return true;
 }
 
-static bool gather_overlay_bits(const OverlayPage& page,
-                                const makocode::ByteBuffer& mask,
-                                makocode::ByteBuffer& bits_out,
-                                u64& bit_count) {
-    bit_count = 0u;
-    bits_out.release();
-    bool canonical_overwrite = page.metadata.has_encoded_tile &&
-                             metadata_schema_is_current(page.metadata.encoded_tile.schema_version) &&
-                             page.metadata.encoded_tile.overwrite_layout;
-    u8 custom_symbol_bits = canonical_overwrite && page.use_custom_palette
-                                ? page.custom_symbol_bits
-                                : 0u;
-    u8 sample_bits = custom_symbol_bits ? custom_symbol_bits : bits_per_sample(page.color_mode);
-    u8 samples_per_pixel = custom_symbol_bits ? 1u : color_mode_samples_per_pixel(page.color_mode);
-    ImageMappingConfig local_custom_mapping = page.custom_mapping;
-    if (custom_symbol_bits) {
-        local_custom_mapping.custom_palette_count = 1u << custom_symbol_bits;
-    }
-    makocode::BitWriter writer;
-    for (u32 row = 0u; row < page.data_height; ++row) {
-        for (u32 column = 0u; column < page.width; ++column) {
-            u8 reservation_kind = 0u;
-            if (mask.data && mask.size) {
-                usize index = ((usize)row * (usize)page.width) + (usize)column;
-                if (index < mask.size) reservation_kind = mask.data[index];
-            }
-            if (reservation_kind == OVERWRITE_MASK_PIXEL && !canonical_overwrite) {
-                continue;
-            }
-            usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
-            if (custom_symbol_bits) {
-                u32 symbol = 0u;
-                if (!map_rgb_to_custom_symbol(local_custom_mapping,
-                                              page.pixels.data + pixel_index,
-                                              symbol) ||
-                    !writer.write_bits(symbol, custom_symbol_bits)) {
-                    return false;
-                }
-                continue;
-            }
-            u32 samples[3] = {0u, 0u, 0u};
-            map_rgb_to_samples(page.color_mode, page.pixels.data + pixel_index, samples);
-            for (u8 sample_idx = 0u; sample_idx < samples_per_pixel; ++sample_idx) {
-                if (!writer.write_bits(samples[sample_idx], sample_bits)) {
-                    return false;
-                }
-            }
-        }
-    }
-    writer.align_to_byte();
-    if (!custom_symbol_bits && page.color_mode == 3u) {
-        usize total_bytes = writer.byte_size();
-        if (total_bytes && writer.buffer.data) {
-            for (usize i = 0u; i < total_bytes; ++i) {
-                u8 rotate = (u8)((i % 3u) + 1u);
-                writer.buffer.data[i] = rotate_right_u8(writer.buffer.data[i], rotate);
-            }
-        }
-    }
-    bit_count = writer.bit_size();
-    byte_buffer_move(bits_out, writer.buffer);
-    return true;
-}
 
-static bool apply_overlay_bits(const makocode::ByteBuffer& bits,
-                               u64 bit_count,
-                               const makocode::ByteBuffer& mask,
-                               OverlayPage& page,
-                               const OverlayPage* overlay_page,
-                               const OverlayIgnoreColorList* ignore_list) {
-    bool canonical_overwrite = page.metadata.has_encoded_tile &&
-                             metadata_schema_is_current(page.metadata.encoded_tile.schema_version) &&
-                             page.metadata.encoded_tile.overwrite_layout;
-    u8 custom_symbol_bits = canonical_overwrite && page.use_custom_palette
-                                ? page.custom_symbol_bits
-                                : 0u;
-    u8 sample_bits = custom_symbol_bits ? custom_symbol_bits : bits_per_sample(page.color_mode);
-    u8 samples_per_pixel = custom_symbol_bits ? 1u : color_mode_samples_per_pixel(page.color_mode);
-    const u8* bit_data = bits.data;
-    usize bit_data_size = bits.size;
-    makocode::ByteBuffer rotated;
-    if (!custom_symbol_bits && page.color_mode == 3u && bits.size) {
-        if (!rotated.ensure(bits.size)) {
-            return false;
-        }
-        rotated.size = bits.size;
-        for (usize i = 0u; i < bits.size; ++i) {
-            u8 rotate = (u8)((i % 3u) + 1u);
-            rotated.data[i] = rotate_left_u8(bits.data[i], rotate);
-        }
-        bit_data = rotated.data;
-        bit_data_size = rotated.size;
-    }
-    ImageMappingConfig local_custom_mapping = page.custom_mapping;
-    if (custom_symbol_bits) {
-        local_custom_mapping.custom_palette_count = 1u << custom_symbol_bits;
-    }
-    const bool filter_overlay_colors = (ignore_list && overlay_page && overlay_page->pixels.data);
-    u64 cursor = 0u;
-    for (u32 row = 0u; row < page.data_height; ++row) {
-        for (u32 column = 0u; column < page.width; ++column) {
-            u8 reservation_kind = 0u;
-            if (mask.data && mask.size) {
-                usize index = ((usize)row * (usize)page.width) + (usize)column;
-                if (index < mask.size) reservation_kind = mask.data[index];
-            }
-            if (reservation_kind == OVERWRITE_MASK_PIXEL && !canonical_overwrite) {
-                continue;
-            }
-
-            bool skip_overlay_pixel = false;
-            if (filter_overlay_colors) {
-                usize overlay_index = (((usize)row * (usize)overlay_page->width) + (usize)column) * 3u;
-                u8 overlay_r = overlay_page->pixels.data[overlay_index + 0u];
-                u8 overlay_g = overlay_page->pixels.data[overlay_index + 1u];
-                u8 overlay_b = overlay_page->pixels.data[overlay_index + 2u];
-                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
-                    skip_overlay_pixel = true;
-                }
-            }
-            u8 rgb[3];
-            if (custom_symbol_bits) {
-                u32 symbol = 0u;
-                for (u8 bit = 0u; bit < sample_bits; ++bit) {
-                    u8 bit_value = 0u;
-                    if (cursor < bit_count && bit_data) {
-                        usize byte_index = (usize)(cursor >> 3u);
-                        if (byte_index < bit_data_size) {
-                            u8 bit_mask = (u8)(1u << (cursor & 7u));
-                            bit_value = (bit_data[byte_index] & bit_mask) ? 1u : 0u;
-                        }
-                    }
-                    symbol |= ((u32)bit_value) << bit;
-                    ++cursor;
-                }
-                const PaletteColor& color = local_custom_mapping.custom_palette[symbol];
-                rgb[0] = color.r;
-                rgb[1] = color.g;
-                rgb[2] = color.b;
-            } else {
-                u32 samples[3] = {0u, 0u, 0u};
-                for (u8 sample_idx = 0u; sample_idx < samples_per_pixel; ++sample_idx) {
-                    u32 value = 0u;
-                    for (u8 bit = 0u; bit < sample_bits; ++bit) {
-                        u8 bit_value = 0u;
-                        if (cursor < bit_count && bit_data) {
-                            usize byte_index = (usize)(cursor >> 3u);
-                            if (byte_index < bit_data_size) {
-                                u8 mask_bit = (u8)(1u << (cursor & 7u));
-                                bit_value = (bit_data[byte_index] & mask_bit) ? 1u : 0u;
-                            }
-                        }
-                        value |= ((u32)bit_value) << bit;
-                        ++cursor;
-                    }
-                    samples[sample_idx] = value;
-                }
-                map_samples_to_rgb(page.color_mode, samples, rgb);
-            }
-            usize pixel_index = (((usize)row * (usize)page.width) + (usize)column) * 3u;
-            if ((pixel_index + 2u) >= page.pixels.size) {
-                return false;
-            }
-            if (reservation_kind == OVERWRITE_MASK_PIXEL || skip_overlay_pixel) {
-                continue;
-            }
-            page.pixels.data[pixel_index + 0u] = rgb[0];
-            page.pixels.data[pixel_index + 1u] = rgb[1];
-            page.pixels.data[pixel_index + 2u] = rgb[2];
-        }
-    }
-    return true;
-}
-
-struct RawOverlayBlockTracker {
-    bool enabled;
-    bool limits_known;
-    u64 parity_symbols;
-    u64 block_total_symbols;
-    u64 block_count;
-    u64 block_limit_per_block;
-    u64 rs_region_start;
-    u64 rs_region_end;
-    u64 encoded_block_bytes;
-    u64 page_bit_offset;
-    makocode::ByteBuffer counts;
-    makocode::ByteBuffer shuffle_map;
-    makocode::ByteBuffer symbol_marks;
-    makocode::ByteBuffer pending_symbols;
-    makocode::ByteBuffer pending_blocks;
-
-    RawOverlayBlockTracker()
-        : enabled(false),
-          limits_known(false),
-          parity_symbols(0u),
-          block_total_symbols(0u),
-          block_count(0u),
-          block_limit_per_block(0u),
-          rs_region_start(0u),
-          rs_region_end(0u),
-          encoded_block_bytes(0u),
-          page_bit_offset(0u),
-          counts(),
-          shuffle_map(),
-          symbol_marks(),
-          pending_symbols(),
-          pending_blocks() {}
-
-    ~RawOverlayBlockTracker() {
-        counts.release();
-        shuffle_map.release();
-        symbol_marks.release();
-        pending_symbols.release();
-        pending_blocks.release();
-    }
-};
 
 struct OverlaySelector {
-    bool enabled;
     u64 seed;
-    u16 unknown_parity_budget;
     u16 overlay_erasure_budget;
     u16 block_total;
     u64 block_count;
-    bool target_budget_active;
-    u64 target_budget_remaining;
     makocode::ByteBuffer counts;
     makocode::ByteBuffer ranks;
 
     OverlaySelector()
-        : enabled(false),
-          seed(0u),
-          unknown_parity_budget(0u),
+        : seed(0u),
           overlay_erasure_budget(0u),
           block_total(0u),
           block_count(0u),
-          target_budget_active(false),
-          target_budget_remaining(0u),
           counts(),
           ranks() {}
 };
 
-static void raw_overlay_tracker_init(const OverlayPage& base_page,
-                                     RawOverlayBlockTracker& tracker) {
-    tracker.enabled = false;
-    tracker.limits_known = false;
-    tracker.parity_symbols = 0u;
-    tracker.block_total_symbols = 0u;
-    tracker.block_count = 0u;
-    tracker.block_limit_per_block = 0u;
-    tracker.rs_region_start = 0u;
-    tracker.rs_region_end = 0u;
-    tracker.encoded_block_bytes = 0u;
-    tracker.page_bit_offset = 0u;
-    tracker.counts.release();
-    tracker.shuffle_map.release();
-    tracker.symbol_marks.release();
-    tracker.pending_symbols.release();
-    tracker.pending_blocks.release();
-    if (!base_page.metadata.has_ecc_block_data ||
-        !base_page.metadata.has_ecc_parity ||
-        !base_page.metadata.has_ecc_block_count) {
-        return;
+static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
+                                               const makocode::ByteBuffer& base_mask,
+                                               const OverlayIgnoreColorList* ignore_list,
+                                               OverlayPage& base_page,
+                                               OverlaySelector& overlay_selector) {
+    if (!overlay_page.pixels.data || !base_page.pixels.data ||
+        overlay_page.width != base_page.width ||
+        overlay_page.height != base_page.height ||
+        overlay_selector.overlay_erasure_budget == 0u ||
+        overlay_selector.block_total == 0u ||
+        overlay_selector.block_count == 0u) {
+        return false;
     }
-    u64 block_data_symbols = base_page.metadata.ecc_block_data_value;
-    u64 parity_symbols = base_page.metadata.ecc_parity_value;
-    u64 block_count = base_page.metadata.ecc_block_count_value;
-    if (block_data_symbols == 0u || parity_symbols == 0u || block_count == 0u) {
-        return;
+    if (base_page.height &&
+        (usize)base_page.width > USIZE_MAX_VALUE / (usize)base_page.height) {
+        return false;
     }
-    u64 block_total_symbols = block_data_symbols + parity_symbols;
-    u64 encoded_block_bytes = 0u;
-    if (block_total_symbols > (U64_MAX_VALUE / block_count)) {
-        return;
+    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
+    if (total_pixels > USIZE_MAX_VALUE / 3u ||
+        base_page.pixels.size < total_pixels * 3u ||
+        overlay_page.pixels.size < total_pixels * 3u ||
+        base_mask.size != total_pixels ||
+        !base_mask.data) {
+        return false;
     }
-    encoded_block_bytes = block_total_symbols * block_count;
-    bool canonical_overwrite = base_page.metadata.has_encoded_tile &&
-                             metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                             base_page.metadata.encoded_tile.overwrite_layout;
-    bool headerless_layout = base_page.metadata.has_encoded_tile &&
-                             metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                             base_page.metadata.encoded_tile.overwrite_layout;
-    u64 rs_region_start = headerless_layout
-                              ? 0u
-                              : 8u + (u64)makocode::ECC_HEADER_TOTAL_BYTES;
-    if (encoded_block_bytes > U64_MAX_VALUE - rs_region_start) {
-        return;
+    u32 apply_height = base_page.data_height;
+    if (apply_height == 0u) return true;
+
+    const MetadataTile::Values& tile = base_page.metadata.encoded_tile;
+    if (!base_page.metadata.has_encoded_tile ||
+        !metadata_schema_is_current(tile.schema_version) ||
+        !tile.overwrite_layout || !tile.ecc_enabled ||
+        tile.ecc_block_data == 0u || tile.ecc_parity == 0u ||
+        tile.ecc_block_count != overlay_selector.block_count ||
+        tile.ecc_block_data + tile.ecc_parity != overlay_selector.block_total ||
+        tile.page_bits == 0u || tile.page_index == 0u) {
+        return false;
     }
-    u64 rs_region_end = rs_region_start + encoded_block_bytes;
-    u64 base_bits = 0u;
-    if (canonical_overwrite) {
-        if (!base_page.metadata.has_page_bits || base_page.metadata.page_bits_value == 0u) {
-            return;
-        }
-        // Canonical page_bits stores the complete encoded payload length.
-        base_bits = base_page.metadata.page_bits_value;
-    } else if (base_page.metadata.has_bits) {
-        base_bits = base_page.metadata.bits_value;
-    }
-    u64 base_bytes = (base_bits + 7u) >> 3u;
-    if (rs_region_start >= base_bytes) {
-        return;
-    }
-    if (rs_region_end > base_bytes) {
-        rs_region_end = base_bytes;
-    }
-    usize counter_bytes = 0u;
-    if (block_count > (U64_MAX_VALUE / (u64)sizeof(u32))) {
-        return;
-    }
-    counter_bytes = (usize)(block_count * (u64)sizeof(u32));
-    if (!tracker.counts.ensure(counter_bytes)) {
-        return;
-    }
-    tracker.counts.size = counter_bytes;
-    for (usize i = 0u; i < counter_bytes; ++i) {
-        tracker.counts.data[i] = 0u;
-    }
-    if (encoded_block_bytes > (U64_MAX_VALUE / (u64)sizeof(usize))) {
-        return;
-    }
+    bool include_metadata_overwrites =
+        !base_page.use_custom_palette ||
+        is_power_of_two_u32(base_page.custom_mapping.custom_palette_count);
+    u64 bits_per_pixel = base_page.use_custom_palette
+                             ? (u64)base_page.custom_symbol_bits
+                             : (u64)bits_per_sample(base_page.color_mode) *
+                                   (u64)color_mode_samples_per_pixel(base_page.color_mode);
+    if (!bits_per_pixel || bits_per_pixel > 64u) return false;
+
+    u64 block_total_symbols = (u64)overlay_selector.block_total;
+    if (block_total_symbols > U64_MAX_VALUE / overlay_selector.block_count) return false;
+    u64 encoded_block_bytes = block_total_symbols * overlay_selector.block_count;
+    if (encoded_block_bytes > (u64)USIZE_MAX_VALUE / (u64)sizeof(usize)) return false;
     usize shuffle_bytes = (usize)(encoded_block_bytes * (u64)sizeof(usize));
-    if (shuffle_bytes == 0u) {
-        return;
+    if (shuffle_bytes == 0u || !overlay_selector.ranks.data ||
+        overlay_selector.ranks.size != (usize)encoded_block_bytes) {
+        return false;
     }
-    if (!tracker.shuffle_map.ensure(shuffle_bytes)) {
-        return;
-    }
-    tracker.shuffle_map.size = shuffle_bytes;
-    usize* shuffle_ptr = (usize*)tracker.shuffle_map.data;
+    makocode::ByteBuffer shuffle_map;
+    if (!shuffle_map.ensure(shuffle_bytes)) return false;
+    shuffle_map.size = shuffle_bytes;
+    usize* shuffle_ptr = (usize*)shuffle_map.data;
     for (u64 entry = 0u; entry < encoded_block_bytes; ++entry) {
         shuffle_ptr[entry] = (usize)entry;
     }
-    makocode::Pcg64Generator rng;
-    rng.seed(0u);
+    makocode::Pcg64Generator shuffle_rng;
+    shuffle_rng.seed(0u);
     for (u64 remaining = encoded_block_bytes; remaining > 1u; --remaining) {
-        usize i_map = (usize)(remaining - 1u);
-        u64 value = rng.next();
-        usize j_map = (usize)(value % (u64)(i_map + 1u));
-        usize temp = shuffle_ptr[i_map];
-        shuffle_ptr[i_map] = shuffle_ptr[j_map];
-        shuffle_ptr[j_map] = temp;
+        usize i = (usize)(remaining - 1u);
+        usize j = (usize)(shuffle_rng.next() % remaining);
+        usize temp = shuffle_ptr[i];
+        shuffle_ptr[i] = shuffle_ptr[j];
+        shuffle_ptr[j] = temp;
     }
-    if (!tracker.symbol_marks.ensure((usize)encoded_block_bytes)) {
-        return;
-    }
-    tracker.symbol_marks.size = (usize)encoded_block_bytes;
-    for (u64 entry = 0u; entry < encoded_block_bytes; ++entry) {
-        tracker.symbol_marks.data[entry] = 0u;
-    }
-    tracker.enabled = true;
-    tracker.limits_known = true;
-    tracker.parity_symbols = parity_symbols;
-    tracker.block_total_symbols = block_total_symbols;
-    tracker.block_count = block_count;
-    tracker.block_limit_per_block = parity_symbols / 2u;
-    if (tracker.block_limit_per_block > 1u) {
-        tracker.block_limit_per_block = (tracker.block_limit_per_block * 2u) / 3u;
-    }
-    if (tracker.block_limit_per_block == 0u) {
-        tracker.block_limit_per_block = 1u;
-    }
-    tracker.rs_region_start = rs_region_start;
-    tracker.rs_region_end = rs_region_end;
-    tracker.encoded_block_bytes = encoded_block_bytes;
-}
 
-static bool raw_overlay_tracker_try_reserve_bytes(RawOverlayBlockTracker& tracker,
-                                                  u64 byte_start,
-                                                  u64 byte_end) {
-    if (byte_end <= tracker.rs_region_start || byte_start >= tracker.rs_region_end) {
-        return true;
-    }
-    if (byte_start < tracker.rs_region_start) {
-        byte_start = tracker.rs_region_start;
-    }
-    if (byte_end > tracker.rs_region_end) {
-        byte_end = tracker.rs_region_end;
-    }
-    u32* counts = (u32*)tracker.counts.data;
-    const usize* shuffle_ptr = tracker.shuffle_map.data
-                                   ? (const usize*)tracker.shuffle_map.data
-                                   : 0;
-    u8* mark_ptr = tracker.symbol_marks.data ? tracker.symbol_marks.data : 0;
-    struct RawOverlayPendingSymbol {
-        u64 relative;
-        usize counter_index;
-        u64 block_index;
-    };
-    struct RawOverlayPendingBlock {
-        u64 block_index;
-        usize counter_index;
-        u32 pending;
-    };
-    usize span = (usize)(byte_end - byte_start);
-    if (span > (SIZE_MAX / sizeof(RawOverlayPendingSymbol))) {
-        return false;
-    }
-    usize pending_symbol_bytes = span * sizeof(RawOverlayPendingSymbol);
-    if (!tracker.pending_symbols.ensure(pending_symbol_bytes)) {
-        return false;
-    }
-    RawOverlayPendingSymbol* pending_symbols =
-        (RawOverlayPendingSymbol*)tracker.pending_symbols.data;
-    usize pending_symbol_count = 0u;
-    if (span > (SIZE_MAX / sizeof(RawOverlayPendingBlock))) {
-        return false;
-    }
-    usize block_bytes = span * sizeof(RawOverlayPendingBlock);
-    if (!tracker.pending_blocks.ensure(block_bytes)) {
-        return false;
-    }
-    RawOverlayPendingBlock* block_accums =
-        (RawOverlayPendingBlock*)tracker.pending_blocks.data;
-    usize block_accum_count = 0u;
-    for (u64 byte_index = byte_start; byte_index < byte_end; ++byte_index) {
-        u64 relative = byte_index - tracker.rs_region_start;
-        if (mark_ptr && mark_ptr[relative]) {
-            continue;
-        }
-        u64 original_index = shuffle_ptr ? (u64)shuffle_ptr[(usize)relative] : relative;
-        u64 block_index = original_index / tracker.block_total_symbols;
-        usize counter_index = (usize)block_index;
-        if (counter_index >= (tracker.counts.size / sizeof(u32))) {
-            continue;
-        }
-        RawOverlayPendingBlock* block_entry = 0;
-        for (usize i = 0u; i < block_accum_count; ++i) {
-            if (block_accums[i].block_index == block_index) {
-                block_entry = &block_accums[i];
-                break;
-            }
-        }
-        if (!block_entry) {
-            block_entry = &block_accums[block_accum_count++];
-            block_entry->block_index = block_index;
-            block_entry->counter_index = counter_index;
-            block_entry->pending = 0u;
-        }
-        u32 current_value = counts[counter_index];
-        u64 prospective = (u64)current_value + (u64)block_entry->pending + 1u;
-        if (prospective > tracker.block_limit_per_block) {
-            return false;
-        }
-        RawOverlayPendingSymbol* symbol_entry = &pending_symbols[pending_symbol_count++];
-        symbol_entry->relative = relative;
-        symbol_entry->counter_index = counter_index;
-        symbol_entry->block_index = block_index;
-        block_entry->pending += 1u;
-    }
-    if (pending_symbol_count == 0u) {
-        return true;
-    }
-    for (usize i = 0u; i < pending_symbol_count; ++i) {
-        if (mark_ptr) {
-            mark_ptr[pending_symbols[i].relative] = 1u;
-        }
-    }
-    for (usize i = 0u; i < block_accum_count; ++i) {
-        RawOverlayPendingBlock& block_entry = block_accums[i];
-        u32* counter_ptr = counts + block_entry.counter_index;
-        u64 new_value = (u64)(*counter_ptr) + (u64)block_entry.pending;
-        if (new_value > 0xFFFFFFFFu) {
-            new_value = 0xFFFFFFFFu;
-        }
-        *counter_ptr = (u32)new_value;
-    }
-    return true;
-}
+    u64 rs_region_start = 0u;
+    u64 rs_region_end = encoded_block_bytes;
+    if (tile.page_bits > U64_MAX_VALUE - 7u) return false;
+    u64 page_bytes = (tile.page_bits + 7u) >> 3u;
+    if (rs_region_start >= page_bytes) return false;
+    if (rs_region_end > page_bytes) rs_region_end = page_bytes;
 
-static bool raw_overlay_tracker_try_reserve_bits(RawOverlayBlockTracker& tracker,
-                                                 u64 bit_start,
-                                                 u64 bit_length) {
-    if (!tracker.enabled || bit_length == 0u) {
-        return true;
-    }
-    u64 bit_end = bit_start + bit_length;
-    u64 byte_start = bit_start >> 3u;
-    u64 byte_end = (bit_end + 7u) >> 3u;
-    return raw_overlay_tracker_try_reserve_bytes(tracker, byte_start, byte_end);
-}
-
-static bool count_overlay_pixel_candidates(const OverlayPage& base_page,
-                                          const OverlayPage& overlay_page,
-                                          const makocode::ByteBuffer& base_mask,
-                                          const makocode::ByteBuffer& overlay_mask,
-                                          const OverlayIgnoreColorList* ignore_list,
-                                          usize& out_count) {
-    out_count = 0u;
-    if (!base_page.pixels.data || !overlay_page.pixels.data) {
-        return false;
-    }
-    if (base_page.width != overlay_page.width ||
-        base_page.height != overlay_page.height) {
-        return false;
-    }
-    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
-    if (base_page.pixels.size < total_pixels * 3u ||
-        overlay_page.pixels.size < total_pixels * 3u) {
-        return false;
-    }
-    if ((base_mask.size && base_mask.size != total_pixels) ||
-        (overlay_mask.size && overlay_mask.size != total_pixels)) {
-        return false;
-    }
-    u32 apply_height = base_page.data_height;
-    const bool have_base_mask = (base_mask.data && base_mask.size);
-    const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
-    bool canonical_overwrite = base_page.metadata.has_encoded_tile &&
-                               metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                               base_page.metadata.encoded_tile.overwrite_layout;
-    bool include_metadata_overwrites = canonical_overwrite &&
-        (!base_page.use_custom_palette ||
-         is_power_of_two_u32(base_page.custom_mapping.custom_palette_count));
-    u64 bits_per_pixel = canonical_overwrite && base_page.use_custom_palette
-                             ? (u64)base_page.custom_symbol_bits
-                             : (u64)bits_per_sample(base_page.color_mode) *
-                                   (u64)color_mode_samples_per_pixel(base_page.color_mode);
-    u64 centered_segment_bits = 0u;
     makocode::ByteBuffer payload_rank_map;
     makocode::ByteBuffer payload_rank_reservation_mask;
-    const u8* payload_rank_reservation_data = base_mask.data;
-    usize payload_rank_reservation_size = base_mask.size;
-    if (canonical_overwrite) {
-        if (!build_overlay_payload_rank_reservation_mask(base_page,
-                                                         payload_rank_reservation_mask)) {
-            return false;
-        }
-        payload_rank_reservation_data = payload_rank_reservation_mask.data;
-        payload_rank_reservation_size = payload_rank_reservation_mask.size;
-    }
-    u64 payload_pixel_count = 0u;
-    const u64* payload_ranks = 0;
-    if (canonical_overwrite) {
-        u64 total_data_pixels = (u64)base_page.width * (u64)apply_height;
-        if (!bits_per_pixel || !payload_rank_reservation_data ||
-            payload_rank_reservation_size < (usize)total_data_pixels) return false;
-        u64 fiducial_pixels = 0u;
-        for (usize pixel = 0u; pixel < (usize)total_data_pixels; ++pixel) {
-            if (payload_rank_reservation_data[pixel]) ++fiducial_pixels;
-        }
-        if (fiducial_pixels > total_data_pixels ||
-            MetadataTile::TILE_MAX_ACTIVE_CELLS > total_data_pixels - fiducial_pixels) {
-            return false;
-        }
-        u64 usable_data_pixels = total_data_pixels - fiducial_pixels -
-                                 MetadataTile::TILE_MAX_ACTIVE_CELLS;
-        double page_capacity = (double)usable_data_pixels *
-                               (double)bits_per_pixel;
-        if (page_capacity < 1.0 || page_capacity > (double)U64_MAX_VALUE) return false;
-        u64 bits_per_page = (u64)page_capacity;
-        u64 page_index = base_page.metadata.encoded_tile.page_index;
-        if (!page_index || page_index - 1u > U64_MAX_VALUE / bits_per_page) return false;
-        u64 page_bit_offset = (page_index - 1u) * bits_per_page;
-        if (page_bit_offset >= base_page.metadata.encoded_tile.page_bits) return false;
-        centered_segment_bits = base_page.metadata.encoded_tile.page_bits - page_bit_offset;
-        if (centered_segment_bits > bits_per_page) centered_segment_bits = bits_per_page;
-        MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
-            base_page.width, apply_height);
-        if (!MetadataTile::build_payload_rank_map(base_page.width,
-                                                  apply_height,
-                                                  placement,
-                                                  base_page.metadata.encoded_tile,
-                                                  payload_rank_reservation_data,
-                                                  payload_rank_reservation_size,
-                                                  payload_rank_map,
-                                                  payload_pixel_count,
-                                                  include_metadata_overwrites) ||
-            payload_pixel_count == 0u ||
-            payload_pixel_count < (centered_segment_bits / bits_per_pixel +
-                                   ((centered_segment_bits % bits_per_pixel) ? 1u : 0u))) {
-            return false;
-        }
-        payload_ranks = (const u64*)payload_rank_map.data;
-    }
-    for (u32 row = 0u; row < (u32)apply_height; ++row) {
-        for (u32 column = 0u; column < base_page.width; ++column) {
-            usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
-            bool reserved = false;
-            if (have_base_mask && base_mask.data[pixel_index]) {
-                reserved = true;
-            }
-            if (!reserved && have_overlay_mask && overlay_mask.data[pixel_index]) {
-                reserved = true;
-            }
-            if (reserved) {
-                continue;
-            }
-            if (canonical_overwrite) {
-                u64 payload_rank = payload_ranks[pixel_index];
-                if (payload_rank == U64_MAX_VALUE ||
-                    payload_rank > U64_MAX_VALUE / bits_per_pixel ||
-                    payload_rank * bits_per_pixel >= centered_segment_bits) continue;
-            }
-            usize byte_index = pixel_index * 3u;
-            if (ignore_list) {
-                u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
-                u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
-                u8 overlay_b = overlay_page.pixels.data[byte_index + 2u];
-                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
-                    continue;
-                }
-            }
-            out_count += 1u;
-        }
-    }
-    return true;
-}
-
-static bool count_overlay_byte_candidates(const OverlayPage& base_page,
-                                          const OverlayPage& overlay_page,
-                                          const makocode::ByteBuffer& base_mask,
-                                          const makocode::ByteBuffer& overlay_mask,
-                                          const OverlayIgnoreColorList* ignore_list,
-                                          u64& out_bytes) {
-    out_bytes = 0u;
-    if (!base_page.pixels.data || !overlay_page.pixels.data) {
-        return false;
-    }
-    if (base_page.width != overlay_page.width ||
-        base_page.height != overlay_page.height) {
-        return false;
-    }
-    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
-    if (base_page.pixels.size < total_pixels * 3u ||
-        overlay_page.pixels.size < total_pixels * 3u) {
-        return false;
-    }
-    if ((base_mask.size && base_mask.size != total_pixels) ||
-        (overlay_mask.size && overlay_mask.size != total_pixels)) {
-        return false;
-    }
-    u32 apply_height = base_page.data_height;
-    const bool have_base_mask = (base_mask.data && base_mask.size);
-    const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
-    bool canonical_overwrite = base_page.metadata.has_encoded_tile &&
-                             metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                             base_page.metadata.encoded_tile.overwrite_layout;
-    u64 bits_per_pixel = canonical_overwrite && base_page.use_custom_palette
-                             ? (u64)base_page.custom_symbol_bits
-                             : (u64)bits_per_sample(base_page.color_mode) *
-                                   (u64)color_mode_samples_per_pixel(base_page.color_mode);
-    u64 bit_count = 0u;
-    for (u32 row = 0u; row < (u32)apply_height; ++row) {
-        for (u32 column = 0u; column < base_page.width; ++column) {
-            usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
-            bool reserved = false;
-            if (have_base_mask && base_mask.data[pixel_index]) {
-                reserved = true;
-            }
-            if (!reserved && have_overlay_mask && overlay_mask.data[pixel_index]) {
-                reserved = true;
-            }
-            if (reserved) {
-                continue;
-            }
-            usize byte_index = pixel_index * 3u;
-            if (ignore_list) {
-                u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
-                u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
-                u8 overlay_b = overlay_page.pixels.data[byte_index + 2u];
-                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
-                    continue;
-                }
-            }
-            bit_count += bits_per_pixel;
-        }
-    }
-    u64 byte_count = bit_count >> 3u;
-    if (bit_count & 7u) {
-        ++byte_count;
-    }
-    out_bytes = byte_count;
-    return true;
-}
-
-static bool apply_overlay_pixels_raw(const OverlayPage& overlay_page,
-                                     const makocode::ByteBuffer& base_mask,
-                                     const makocode::ByteBuffer& overlay_mask,
-                                     u64 numerator,
-                                     u64 denominator,
-                                     const OverlayIgnoreColorList* ignore_list,
-                                     OverlayPage& base_page,
-                                     OverlaySelector* overlay_selector = 0) {
-    RawOverlayBlockTracker tracker;
-    raw_overlay_tracker_init(base_page, tracker);
-    if (overlay_selector && overlay_selector->enabled && !tracker.enabled) {
-        return false;
-    }
-    if (!base_page.pixels.data || !overlay_page.pixels.data) {
-        return false;
-    }
-    if (base_page.width != overlay_page.width ||
-        base_page.height != overlay_page.height) {
-        return false;
-    }
-    usize total_pixels = (usize)base_page.width * (usize)base_page.height;
-    if (base_page.pixels.size < total_pixels * 3u ||
-        overlay_page.pixels.size < total_pixels * 3u) {
-        return false;
-    }
-    if ((base_mask.size && base_mask.size != total_pixels) ||
-        (overlay_mask.size && overlay_mask.size != total_pixels)) {
-        return false;
-    }
-    u32 apply_height = base_page.data_height;
-    if (apply_height == 0u) {
-        return true;
-    }
-    const bool have_base_mask = (base_mask.data && base_mask.size);
-    const bool have_overlay_mask = (overlay_mask.data && overlay_mask.size);
-    bool canonical_overwrite = base_page.metadata.has_encoded_tile &&
-                             metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                             base_page.metadata.encoded_tile.overwrite_layout;
-    bool include_metadata_overwrites = canonical_overwrite &&
-        (!base_page.use_custom_palette ||
-         is_power_of_two_u32(base_page.custom_mapping.custom_palette_count));
-    u64 bits_per_pixel = canonical_overwrite && base_page.use_custom_palette
-                             ? (u64)base_page.custom_symbol_bits
-                             : (u64)bits_per_sample(base_page.color_mode) *
-                                   (u64)color_mode_samples_per_pixel(base_page.color_mode);
-    struct RawOverlayPixelCandidate {
-        u64 bit_start;
-        usize pixel_index;
-    };
-    if (total_pixels > (SIZE_MAX / sizeof(RawOverlayPixelCandidate))) {
-        return false;
-    }
-    usize candidate_capacity_bytes = total_pixels * sizeof(RawOverlayPixelCandidate);
-    makocode::ByteBuffer candidate_buffer;
-    if (!candidate_buffer.ensure(candidate_capacity_bytes)) {
-        return false;
-    }
-    RawOverlayPixelCandidate* candidates =
-        (RawOverlayPixelCandidate*)candidate_buffer.data;
-    usize candidate_count = 0u;
-    u64 stream_bit_cursor = 0u;
-    u64 centered_segment_bits = 0u;
-    makocode::ByteBuffer payload_rank_map;
-    makocode::ByteBuffer payload_rank_reservation_mask;
-    const u8* payload_rank_reservation_data = base_mask.data;
-    usize payload_rank_reservation_size = base_mask.size;
+    const u8* reservation_data = base_mask.data;
+    usize reservation_size = base_mask.size;
     if (include_metadata_overwrites) {
         if (!build_overlay_payload_rank_reservation_mask(base_page,
                                                          payload_rank_reservation_mask)) {
             return false;
         }
-        payload_rank_reservation_data = payload_rank_reservation_mask.data;
-        payload_rank_reservation_size = payload_rank_reservation_mask.size;
+        reservation_data = payload_rank_reservation_mask.data;
+        reservation_size = payload_rank_reservation_mask.size;
     }
+    u64 total_data_pixels = (u64)base_page.width * (u64)apply_height;
+    if (total_data_pixels > (u64)USIZE_MAX_VALUE ||
+        !reservation_data || reservation_size < (usize)total_data_pixels) {
+        return false;
+    }
+    u64 fiducial_pixels = 0u;
+    for (usize pixel = 0u; pixel < (usize)total_data_pixels; ++pixel) {
+        if (reservation_data[pixel]) ++fiducial_pixels;
+    }
+    if (fiducial_pixels > total_data_pixels ||
+        MetadataTile::TILE_MAX_ACTIVE_CELLS > total_data_pixels - fiducial_pixels) {
+        return false;
+    }
+    u64 usable_data_pixels = total_data_pixels - fiducial_pixels -
+                             MetadataTile::TILE_MAX_ACTIVE_CELLS;
+    if (usable_data_pixels > U64_MAX_VALUE / bits_per_pixel) return false;
+    u64 bits_per_page = usable_data_pixels * bits_per_pixel;
+    if (bits_per_page == 0u ||
+        tile.page_index - 1u > U64_MAX_VALUE / bits_per_page) {
+        return false;
+    }
+    u64 page_bit_offset = (tile.page_index - 1u) * bits_per_page;
+    if (page_bit_offset >= tile.page_bits) return false;
+    u64 centered_segment_bits = tile.page_bits - page_bit_offset;
+    if (centered_segment_bits > bits_per_page) centered_segment_bits = bits_per_page;
+    MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
+        base_page.width, apply_height);
     u64 payload_pixel_count = 0u;
-    const u64* payload_ranks = 0;
-    if (canonical_overwrite) {
-        u64 total_data_pixels = (u64)base_page.width * (u64)apply_height;
-        if (bits_per_pixel == 0u ||
-            !payload_rank_reservation_data ||
-            payload_rank_reservation_size < (usize)total_data_pixels) {
-            return false;
-        }
-        u64 fiducial_pixels = 0u;
-        for (usize pixel = 0u; pixel < (usize)total_data_pixels; ++pixel) {
-            if (payload_rank_reservation_data[pixel]) ++fiducial_pixels;
-        }
-        if (fiducial_pixels > total_data_pixels ||
-            MetadataTile::TILE_MAX_ACTIVE_CELLS > total_data_pixels - fiducial_pixels) {
-            return false;
-        }
-        u64 usable_data_pixels = total_data_pixels - fiducial_pixels -
-                                 MetadataTile::TILE_MAX_ACTIVE_CELLS;
-        double page_capacity = (double)usable_data_pixels *
-                               (double)bits_per_pixel;
-        if (page_capacity < 1.0 || page_capacity > (double)U64_MAX_VALUE) {
-            return false;
-        }
-        u64 bits_per_page = (u64)page_capacity;
-        u64 page_index = base_page.metadata.encoded_tile.page_index;
-        if (page_index == 0u || page_index - 1u > U64_MAX_VALUE / bits_per_page) {
-            return false;
-        }
-        MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
-            base_page.width, apply_height);
-        if (!MetadataTile::build_payload_rank_map(base_page.width,
-                                                  apply_height,
-                                                  placement,
-                                                  base_page.metadata.encoded_tile,
-                                                  payload_rank_reservation_data,
-                                                  payload_rank_reservation_size,
-                                                  payload_rank_map,
-                                                  payload_pixel_count,
-                                                  include_metadata_overwrites) ||
-            payload_pixel_count == 0u) {
-            return false;
-        }
-        tracker.page_bit_offset = (page_index - 1u) * bits_per_page;
-        if (tracker.page_bit_offset >= base_page.metadata.encoded_tile.page_bits) return false;
-        centered_segment_bits = base_page.metadata.encoded_tile.page_bits -
-                                tracker.page_bit_offset;
-        if (centered_segment_bits > bits_per_page) centered_segment_bits = bits_per_page;
-        if (payload_pixel_count < (centered_segment_bits / bits_per_pixel +
-                                   ((centered_segment_bits % bits_per_pixel) ? 1u : 0u))) {
-            return false;
-        }
-        payload_ranks = (const u64*)payload_rank_map.data;
+    if (!MetadataTile::build_payload_rank_map(base_page.width,
+                                              apply_height,
+                                              placement,
+                                              tile,
+                                              reservation_data,
+                                              reservation_size,
+                                              payload_rank_map,
+                                              payload_pixel_count,
+                                              include_metadata_overwrites) ||
+        payload_pixel_count == 0u ||
+        payload_pixel_count < (centered_segment_bits / bits_per_pixel +
+                               ((centered_segment_bits % bits_per_pixel) ? 1u : 0u))) {
+        return false;
     }
+    const u64* payload_ranks = (const u64*)payload_rank_map.data;
+
+    struct OverlayPixelCandidate {
+        u64 bit_start;
+        usize pixel_index;
+    };
+    if (total_pixels > USIZE_MAX_VALUE / sizeof(OverlayPixelCandidate)) return false;
+    makocode::ByteBuffer candidate_buffer;
+    if (!candidate_buffer.ensure(total_pixels * sizeof(OverlayPixelCandidate))) return false;
+    OverlayPixelCandidate* candidates = (OverlayPixelCandidate*)candidate_buffer.data;
+    usize candidate_count = 0u;
     for (u32 row = 0u; row < apply_height; ++row) {
         for (u32 column = 0u; column < base_page.width; ++column) {
-            usize pixel_index = ((usize)row * (usize)base_page.width) + (usize)column;
-            u8 reservation_kind = 0u;
-            if (have_base_mask && base_mask.data[pixel_index] > reservation_kind) {
-                reservation_kind = base_mask.data[pixel_index];
-            }
-            if (have_overlay_mask && overlay_mask.data[pixel_index] > reservation_kind) {
-                reservation_kind = overlay_mask.data[pixel_index];
-            }
-            if (reservation_kind == OVERWRITE_MASK_PIXEL) {
+            usize pixel_index = (usize)row * (usize)base_page.width + (usize)column;
+            if (base_mask.data[pixel_index] == OVERWRITE_MASK_PIXEL) continue;
+            u64 payload_rank = payload_ranks[pixel_index];
+            if (payload_rank == U64_MAX_VALUE ||
+                payload_rank > U64_MAX_VALUE / bits_per_pixel ||
+                payload_rank * bits_per_pixel >= centered_segment_bits ||
+                payload_rank * bits_per_pixel > U64_MAX_VALUE - page_bit_offset) {
                 continue;
             }
-            u64 bit_start = 0u;
-            if (canonical_overwrite) {
-                u64 payload_rank = payload_ranks[pixel_index];
-                if (payload_rank == U64_MAX_VALUE ||
-                    payload_rank > U64_MAX_VALUE / bits_per_pixel ||
-                    payload_rank * bits_per_pixel >= centered_segment_bits ||
-                    payload_rank * bits_per_pixel > U64_MAX_VALUE - tracker.page_bit_offset) {
-                    continue;
-                }
-                bit_start = tracker.page_bit_offset + payload_rank * bits_per_pixel;
-            } else {
-                bit_start = stream_bit_cursor;
-                stream_bit_cursor += bits_per_pixel;
-            }
             usize byte_index = pixel_index * 3u;
-            if (ignore_list) {
-                u8 overlay_r = overlay_page.pixels.data[byte_index + 0u];
-                u8 overlay_g = overlay_page.pixels.data[byte_index + 1u];
-                u8 overlay_b = overlay_page.pixels.data[byte_index + 2u];
-                if (overlay_color_matches_ignore(*ignore_list, overlay_r, overlay_g, overlay_b)) {
-                    continue;
-                }
+            if (ignore_list &&
+                overlay_color_matches_ignore(*ignore_list,
+                                             overlay_page.pixels.data[byte_index],
+                                             overlay_page.pixels.data[byte_index + 1u],
+                                             overlay_page.pixels.data[byte_index + 2u])) {
+                continue;
             }
-            RawOverlayPixelCandidate* entry = &candidates[candidate_count++];
-            entry->pixel_index = pixel_index;
-            entry->bit_start = bit_start;
+            candidates[candidate_count].pixel_index = pixel_index;
+            candidates[candidate_count].bit_start =
+                page_bit_offset + payload_rank * bits_per_pixel;
+            ++candidate_count;
         }
     }
     if (candidate_count > 1u) {
-        makocode::Pcg64Generator shuffle_rng;
-        shuffle_rng.seed(0u);
+        makocode::Pcg64Generator candidate_rng;
+        candidate_rng.seed(0u);
         for (usize remaining = candidate_count; remaining > 1u; --remaining) {
             usize i = remaining - 1u;
-            u64 value = shuffle_rng.next();
-            usize j = (usize)(value % (u64)remaining);
-            RawOverlayPixelCandidate temp = candidates[i];
+            usize j = (usize)(candidate_rng.next() % remaining);
+            OverlayPixelCandidate temp = candidates[i];
             candidates[i] = candidates[j];
             candidates[j] = temp;
         }
     }
-    if (!tracker.enabled && candidate_count > 0u) {
-        u64 requested = (u64)candidate_count;
-        requested *= numerator;
-        requested /= denominator;
-        u64 cap = (u64)candidate_count / 50u; // ~2% of candidates when ECC metadata is unknown.
-        if (cap == 0u) {
-            cap = 1u;
-        }
-        if (requested > cap) {
-            numerator = cap;
-            denominator = (u64)candidate_count;
-        }
-    }
-    u64 accumulator = 0u;
-    for (usize idx = 0u; idx < candidate_count; ++idx) {
-        const RawOverlayPixelCandidate& candidate = candidates[idx];
-        if (!overlay_selector || !overlay_selector->enabled ||
-            !overlay_selector->target_budget_active) {
-            accumulator += numerator;
-            if (accumulator < denominator) {
-                continue;
-            }
-            accumulator -= denominator;
-        }
+    if (overlay_selector.counts.size != (usize)overlay_selector.block_count) return false;
+    for (usize candidate_index = 0u; candidate_index < candidate_count; ++candidate_index) {
+        const OverlayPixelCandidate& candidate = candidates[candidate_index];
         usize pixel_index = candidate.pixel_index;
         usize byte_index = pixel_index * 3u;
-        bool changed = false;
-        if (base_page.pixels.data[byte_index + 0u] != overlay_page.pixels.data[byte_index + 0u] ||
-            base_page.pixels.data[byte_index + 1u] != overlay_page.pixels.data[byte_index + 1u] ||
-            base_page.pixels.data[byte_index + 2u] != overlay_page.pixels.data[byte_index + 2u]) {
-            changed = true;
+        if (base_page.pixels.data[byte_index] == overlay_page.pixels.data[byte_index] &&
+            base_page.pixels.data[byte_index + 1u] == overlay_page.pixels.data[byte_index + 1u] &&
+            base_page.pixels.data[byte_index + 2u] == overlay_page.pixels.data[byte_index + 2u]) {
+            continue;
+        }
+        if (candidate.bit_start > U64_MAX_VALUE - bits_per_pixel) continue;
+        u64 byte_start = candidate.bit_start >> 3u;
+        u64 bit_end = candidate.bit_start + bits_per_pixel;
+        if (bit_end > U64_MAX_VALUE - 7u) continue;
+        u64 byte_end = (bit_end + 7u) >> 3u;
+        if (byte_start < rs_region_start || byte_end > rs_region_end || byte_end <= byte_start) {
+            continue;
         }
         u64 pending_blocks[8];
         u8 pending_counts[8];
         usize pending_count = 0u;
         bool selector_allowed = true;
-        if (changed && overlay_selector && overlay_selector->enabled) {
-            u64 bit_end = candidate.bit_start + bits_per_pixel;
-            u64 byte_start = candidate.bit_start >> 3u;
-            u64 byte_end = (bit_end + 7u) >> 3u;
-            u64 rs_start = tracker.rs_region_start;
-            u64 rs_end = tracker.rs_region_end;
-            // The prefix, ECC header, and any trailing padding have no selector
-            // entries. A candidate touching any of them must remain unchanged.
-            if (byte_start < rs_start || byte_end > rs_end || byte_end <= byte_start) {
+        for (u64 byte_index = byte_start; byte_index < byte_end; ++byte_index) {
+            u64 relative = byte_index - rs_region_start;
+            if (relative >= encoded_block_bytes) {
                 selector_allowed = false;
+                break;
             }
-            for (u64 byte_index = byte_start; byte_index < byte_end; ++byte_index) {
-                if (!selector_allowed) break;
-                u64 relative = byte_index - rs_start;
-                if (relative >= tracker.encoded_block_bytes ||
-                    !tracker.shuffle_map.data ||
-                    !overlay_selector->ranks.data) {
-                    selector_allowed = false;
-                    break;
-                }
-                u64 original_index = ((const usize*)tracker.shuffle_map.data)[(usize)relative];
-                if (original_index >= overlay_selector->ranks.size) {
-                    selector_allowed = false;
-                    break;
-                }
-                u8 rank = overlay_selector->ranks.data[(usize)original_index];
-                if (rank == 0u || rank > overlay_selector->overlay_erasure_budget) {
-                    selector_allowed = false;
-                    break;
-                }
-                u64 block_index = original_index / overlay_selector->block_total;
-                usize pending_index = 0u;
-                while (pending_index < pending_count && pending_blocks[pending_index] != block_index) {
-                    ++pending_index;
-                }
-                if (pending_index == pending_count) {
-                    if (pending_count >= sizeof(pending_blocks) / sizeof(pending_blocks[0])) {
-                        selector_allowed = false;
-                        break;
-                    }
-                    pending_blocks[pending_count] = block_index;
-                    pending_counts[pending_count] = rank;
-                    ++pending_count;
-                } else if (rank > pending_counts[pending_index]) {
-                    pending_counts[pending_index] = rank;
-                }
-            }
-        }
-        if (changed && selector_allowed && overlay_selector && overlay_selector->enabled) {
-            for (usize i = 0u; i < pending_count; ++i) {
-                usize block = (usize)pending_blocks[i];
-                if (block >= overlay_selector->counts.size) {
-                    selector_allowed = false;
-                    break;
-                }
-            }
-        }
-        u64 selector_budget_cost = 0u;
-        if (changed && selector_allowed && overlay_selector && overlay_selector->enabled &&
-            overlay_selector->target_budget_active) {
-            for (usize i = 0u; i < pending_count; ++i) {
-                usize block = (usize)pending_blocks[i];
-                u64 current = overlay_selector->counts.data[block];
-                if ((u64)pending_counts[i] > current) {
-                    u64 increase = (u64)pending_counts[i] - current;
-                    if (increase > U64_MAX_VALUE - selector_budget_cost) {
-                        selector_allowed = false;
-                        break;
-                    }
-                    selector_budget_cost += increase;
-                }
-            }
-            if (selector_budget_cost > overlay_selector->target_budget_remaining) {
+            u64 original_index = (u64)shuffle_ptr[(usize)relative];
+            if (original_index >= overlay_selector.ranks.size) {
                 selector_allowed = false;
+                break;
             }
-        }
-        if (!selector_allowed) {
-            continue;
-        }
-        if (changed && overlay_selector && overlay_selector->enabled) {
-            for (usize i = 0u; i < pending_count; ++i) {
-                usize block = (usize)pending_blocks[i];
-                if (pending_counts[i] > overlay_selector->counts.data[block]) {
-                    overlay_selector->counts.data[block] = pending_counts[i];
+            u8 rank = overlay_selector.ranks.data[(usize)original_index];
+            if (rank == 0u || rank > overlay_selector.overlay_erasure_budget) {
+                selector_allowed = false;
+                break;
+            }
+            u64 block_index = original_index / overlay_selector.block_total;
+            usize pending_index = 0u;
+            while (pending_index < pending_count && pending_blocks[pending_index] != block_index) {
+                ++pending_index;
+            }
+            if (pending_index == pending_count) {
+                if (pending_count >= sizeof(pending_blocks) / sizeof(pending_blocks[0])) {
+                    selector_allowed = false;
+                    break;
                 }
+                pending_blocks[pending_count] = block_index;
+                pending_counts[pending_count] = rank;
+                ++pending_count;
+            } else if (rank > pending_counts[pending_index]) {
+                pending_counts[pending_index] = rank;
             }
-            if (overlay_selector->target_budget_active) {
-                overlay_selector->target_budget_remaining -= selector_budget_cost;
-            }
-        } else if (changed) {
-            if (!raw_overlay_tracker_try_reserve_bits(tracker, candidate.bit_start, bits_per_pixel)) {
-                continue;
+        }
+        for (usize i = 0u; selector_allowed && i < pending_count; ++i) {
+            if (pending_blocks[i] >= overlay_selector.counts.size) selector_allowed = false;
+        }
+        if (!selector_allowed) continue;
+        for (usize i = 0u; i < pending_count; ++i) {
+            usize block = (usize)pending_blocks[i];
+            if (pending_counts[i] > overlay_selector.counts.data[block]) {
+                overlay_selector.counts.data[block] = pending_counts[i];
             }
         }
         memcpy(base_page.pixels.data + byte_index,
@@ -29543,624 +29055,115 @@ static bool serialize_overlay_page(const OverlayPage& page,
     return output.append_bytes(page.pixels.data, total_bytes);
 }
 
-static bool write_buffer_to_fd(int fd, const makocode::ByteBuffer& buffer) {
-    usize offset = 0u;
-    while (offset < buffer.size) {
-        unsigned long chunk = (unsigned long)(buffer.size - offset);
-        if (chunk > 65536ul) {
-            chunk = 65536ul;
-        }
-        int wrote = write(fd, buffer.data + offset, chunk);
-        if (wrote <= 0) {
-            return false;
-        }
-        offset += (usize)wrote;
-    }
-    return true;
-}
 
-static int command_overlay(int arg_count, char** args) {
-    if (arguments_request_help(arg_count, args)) {
-        write_overlay_help();
-        return 0;
-    }
-    OverlayIgnoreColorList ignore_colors;
-    ignore_colors.count = 0u;
-    const char* ignore_text = 0;
-    usize ignore_length = 0u;
-    bool ignore_specified = false;
-    bool ecc_target_specified = false;
-    bool debug_requested = false;
-    u64 ecc_target_numerator = 0u;
-    u64 ecc_target_denominator = 1u;
-    int option_index = 0;
-    const char ignore_option[] = "--ignore-colors";
-    const char ignore_prefix[] = "--ignore-colors=";
-    const char ecc_target_option[] = "--overlay-ecc-target";
-    const char ecc_target_prefix[] = "--overlay-ecc-target=";
-    const char debug_option[] = "--debug";
-    while (option_index < arg_count) {
-        const char* arg = args[option_index];
-        
-        usize length = ascii_length(arg);
-        if (ascii_equals_token(arg, length, debug_option)) {
-            if (debug_requested) {
-                console_line(2, "overlay: --debug specified multiple times");
-                return 1;
-            }
-            debug_requested = true;
-            ++option_index;
-            continue;
-        }
-        if (ascii_equals_token(arg, length, ignore_option)) {
-            if (ignore_specified) {
-                console_line(2, "overlay: --ignore-colors specified multiple times");
-                return 1;
-            }
-            if ((option_index + 1) >= arg_count) {
-                console_line(2, "overlay: --ignore-colors requires a value");
-                return 1;
-            }
-            const char* value = args[option_index + 1];
-            usize value_length = ascii_length(value);
-            if (value_length == 0u) {
-                console_line(2, "overlay: --ignore-colors requires a non-empty value");
-                return 1;
-            }
-            ignore_text = value;
-            ignore_length = value_length;
-            ignore_specified = true;
-            option_index += 2;
-            continue;
-        }
-        if (ascii_starts_with(arg, ignore_prefix)) {
-            if (ignore_specified) {
-                console_line(2, "overlay: --ignore-colors specified multiple times");
-                return 1;
-            }
-            const char* value = arg + (sizeof(ignore_prefix) - 1u);
-            if (*value == '\0') {
-                console_line(2, "overlay: --ignore-colors requires a non-empty value");
-                return 1;
-            }
-            ignore_text = value;
-            ignore_length = ascii_length(value);
-            ignore_specified = true;
-            ++option_index;
-            continue;
-        }
-        if (ascii_equals_token(arg, length, ecc_target_option)) {
-            if (ecc_target_specified) {
-                console_line(2, "overlay: --overlay-ecc-target specified multiple times");
-                return 1;
-            }
-            const char* value = args[option_index + 1];
-            if (!value) {
-                console_line(2, "overlay: --overlay-ecc-target requires a value");
-                return 1;
-            }
-            usize value_length = ascii_length(value);
-            if (value_length == 0u) {
-                console_line(2, "overlay: --overlay-ecc-target requires a non-empty value");
-                return 1;
-            }
-            u32 target_hundredths = 0u;
-            if (!ascii_to_fixed_hundredths(value, value_length, 100u, target_hundredths)) {
-                console_line(2, "overlay: --overlay-ecc-target must be 0.00 to 1.00 with at most 2 decimal places");
-                return 1;
-            }
-            ecc_target_numerator = target_hundredths;
-            ecc_target_denominator = 100u;
-            ecc_target_specified = true;
-            option_index += 2;
-            continue;
-        }
-        if (ascii_starts_with(arg, ecc_target_prefix)) {
-            if (ecc_target_specified) {
-                console_line(2, "overlay: --overlay-ecc-target specified multiple times");
-                return 1;
-            }
-            const char* value = arg + (sizeof(ecc_target_prefix) - 1u);
-            if (*value == '\0') {
-                console_line(2, "overlay: --overlay-ecc-target requires a non-empty value");
-                return 1;
-            }
-            u32 target_hundredths = 0u;
-            if (!ascii_to_fixed_hundredths(value,
-                                           ascii_length(value),
-                                           100u,
-                                           target_hundredths)) {
-                console_line(2, "overlay: --overlay-ecc-target must be 0.00 to 1.00 with at most 2 decimal places");
-                return 1;
-            }
-            ecc_target_numerator = target_hundredths;
-            ecc_target_denominator = 100u;
-            ecc_target_specified = true;
-            ++option_index;
-            continue;
-        }
-        break;
-    }
-    int positional_count = arg_count - option_index;
-    if (positional_count != 3) {
-        console_line(2, "overlay: usage: makocode overlay [--debug] [--ignore-colors COLORS] [--overlay-ecc-target TARGET] BASE.ppm OVERLAY.ppm FRACTION");
-        return 1;
-    }
-    const char* base_path = args[option_index];
-    const char* overlay_path = args[option_index + 1];
-    const char* fraction_text = args[option_index + 2];
-    if (ignore_specified) {
-        if (!parse_overlay_ignore_colors(ignore_text, ignore_length, ignore_colors)) {
-            return 1;
-        }
-    }
-    const OverlayIgnoreColorList* overlay_ignore = (ignore_colors.count > 0u) ? &ignore_colors : 0;
-    usize fraction_length = ascii_length(fraction_text);
-    u64 numerator = 0u;
-    u64 denominator = 1u;
-    if (fraction_length == 0u ||
-        !ascii_to_fraction(fraction_text, fraction_length, numerator, denominator)) {
-        console_line(2, "overlay: fraction must be a decimal value such as 0.25");
-        return 1;
-    }
-    if (numerator > denominator) {
-        numerator = denominator;
-    }
+static bool merge_overlay_into_encoded_page(const char* page_path,
+                                            const OverlayPage& overlay_page,
+                                            const char* ignore_colors,
+                                            usize ignore_colors_length,
+                                            bool debug_requested) {
     OverlayPage base_page;
-    OverlayPage overlay_page;
-    if (!load_overlay_page(base_path, base_page)) {
-        return 1;
-    }
-    if (!load_overlay_page(overlay_path, overlay_page)) {
-        return 1;
-    }
+    if (!load_overlay_page(page_path, base_page)) return false;
     if (base_page.width != overlay_page.width ||
         base_page.height != overlay_page.height) {
-        console_line(2, "overlay: ppm images must have identical dimensions");
-        return 1;
+        console_line(2, "encode: --overlay-ppm dimensions must match the encoded pages");
+        return false;
     }
-    // Align overlay layout to the base so fiducial/data regions match pixel-for-pixel.
-    overlay_apply_base_layout(base_page, overlay_page);
-    bool same_symbol_mapping = (base_page.color_mode == overlay_page.color_mode);
-    if (base_page.use_custom_palette || overlay_page.use_custom_palette) {
-        same_symbol_mapping = base_page.use_custom_palette && overlay_page.use_custom_palette &&
-                              base_page.metadata.has_encoded_tile &&
-                              metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                              base_page.metadata.encoded_tile.overwrite_layout &&
-                              base_page.custom_mapping.custom_palette_count ==
-                                  overlay_page.custom_mapping.custom_palette_count;
-        if (same_symbol_mapping) {
-            for (u32 i = 0u; i < base_page.custom_mapping.custom_palette_count; ++i) {
-                if (!palette_colors_equal(base_page.custom_mapping.custom_palette[i],
-                                          overlay_page.custom_mapping.custom_palette[i])) {
-                    same_symbol_mapping = false;
-                    break;
-                }
-            }
-        }
-    }
-    makocode::ByteBuffer base_mask;
-    makocode::ByteBuffer overlay_mask;
-    u64 base_reserved = 0u;
-    u64 overlay_reserved = 0u;
-    if (!build_overlay_mask(base_page, base_mask, base_reserved)) {
-        console_line(2, "overlay: failed to prepare fiducial mask for base image");
-        return 1;
-    }
-    if (!build_overlay_mask(overlay_page, overlay_mask, overlay_reserved)) {
-        console_line(2, "overlay: failed to prepare fiducial mask for overlay image");
-        return 1;
-    }
-    OverlaySelector overlay_selector;
-    bool canonical_overlay = base_page.metadata.has_encoded_tile &&
-                           metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                           base_page.metadata.encoded_tile.overwrite_layout;
-    if (canonical_overlay) {
-        const MetadataTile::Values& tile = base_page.metadata.encoded_tile;
-        if (!tile.overlay_selector_present) {
-            console_line(2, "overlay: page was encoded with zero overlay fraction");
-            return 1;
-        }
-        if (!tile.ecc_enabled || tile.ecc_block_count == 0u || tile.ecc_parity == 0u ||
-            tile.ecc_block_data == 0u ||
-            (u64)tile.ecc_block_data + tile.ecc_parity > 255u ||
-            tile.ecc_parity > 255u) {
-            console_line(2, "overlay: canonical page has invalid ECC metadata");
-            return 1;
-        }
-        overlay_selector.seed = tile.overlay_selector_seed;
-        overlay_selector.unknown_parity_budget = tile.unknown_parity_budget;
-        overlay_selector.overlay_erasure_budget = tile.overlay_erasure_budget;
-        overlay_selector.block_total = (u16)(tile.ecc_block_data + tile.ecc_parity);
-        overlay_selector.block_count = tile.ecc_block_count;
-        if ((u32)overlay_selector.unknown_parity_budget +
-                    (u32)overlay_selector.overlay_erasure_budget > tile.ecc_parity ||
-            overlay_selector.block_count > (u64)USIZE_MAX_VALUE ||
-            !overlay_selector.counts.ensure((usize)overlay_selector.block_count) ||
-            overlay_selector.block_count > (u64)USIZE_MAX_VALUE / overlay_selector.block_total ||
-            !overlay_selector.ranks.ensure((usize)(overlay_selector.block_count *
-                                                   overlay_selector.block_total))) {
-            console_line(2, "overlay: canonical selector map is too large");
-            return 1;
-        }
-        overlay_selector.counts.size = (usize)overlay_selector.block_count;
-        for (usize block = 0u; block < overlay_selector.counts.size; ++block) {
-            overlay_selector.counts.data[block] = 0u;
-        }
-        overlay_selector.ranks.size = (usize)(overlay_selector.block_count *
-                                              overlay_selector.block_total);
-        u8 selector_mask[255];
-        u8 selector_ranks[255];
-        for (u32 block = 0u; block < overlay_selector.block_count; ++block) {
-            if (!makocode::overlay_selector_mask(overlay_selector.seed,
-                                                         block,
-                                                         overlay_selector.block_total,
-                                                         (u8)overlay_selector.overlay_erasure_budget,
-                                                         selector_mask,
-                                                         selector_ranks)) {
-                console_line(2, "overlay: failed to generate canonical selector map");
-                return 1;
-            }
-            usize offset = (usize)block * (usize)overlay_selector.block_total;
-            memcpy(overlay_selector.ranks.data + offset,
-                   selector_ranks,
-                   overlay_selector.block_total);
-        }
-        overlay_selector.enabled = true;
-    }
-    if (ecc_target_specified) {
-        RawOverlayBlockTracker ecc_tracker;
-        raw_overlay_tracker_init(base_page, ecc_tracker);
-        if (!ecc_tracker.enabled) {
-            console_line(2, "overlay: --overlay-ecc-target requires ECC metadata");
-            return 1;
-        }
-        u64 candidate_limit = 0u;
-        if (!same_symbol_mapping || overlay_selector.enabled) {
-            usize candidate_count = 0u;
-            count_overlay_pixel_candidates(base_page,
-                                           overlay_page,
-                                           base_mask,
-                                           overlay_mask,
-                                           overlay_ignore,
-                                           candidate_count);
-            candidate_limit = (candidate_count > (usize)U64_MAX_VALUE)
-                                ? U64_MAX_VALUE
-                                : (u64)candidate_count;
-        } else {
-            u64 candidate_bytes = 0u;
-            if (!count_overlay_byte_candidates(base_page,
-                                               overlay_page,
-                                               base_mask,
-                                               overlay_mask,
-                                               overlay_ignore,
-                                               candidate_bytes)) {
-                console_line(2, "overlay: failed to evaluate overlay candidates");
-                return 1;
-            }
-            candidate_limit = candidate_bytes;
-        }
-        long double target_fraction = (long double)ecc_target_numerator /
-                                       (long double)ecc_target_denominator;
-        if (target_fraction > 1.0L) {
-            target_fraction = 1.0L;
-        }
-        u64 total_limit = ecc_tracker.block_count * ecc_tracker.block_limit_per_block;
-        if (overlay_selector.enabled) {
-            total_limit = 0u;
-            for (usize block = 0u; block < overlay_selector.counts.size; ++block) {
-                u64 current = overlay_selector.counts.data[block];
-                if (current < overlay_selector.overlay_erasure_budget) {
-                    u64 available = (u64)overlay_selector.overlay_erasure_budget - current;
-                    if (available > U64_MAX_VALUE - total_limit) {
-                        total_limit = U64_MAX_VALUE;
-                        break;
-                    }
-                    total_limit += available;
-                }
-            }
-        }
-        long double desired_changes = target_fraction * (long double)total_limit;
-        u64 target_changes = (u64)(desired_changes + 0.5L);
-        if (target_changes == 0u && target_fraction > 0.0L && candidate_limit > 0u) {
-            target_changes = 1u;
-        }
-        if (candidate_limit == 0u) {
-            numerator = 0u;
-        } else if (overlay_selector.enabled) {
-            overlay_selector.target_budget_active = true;
-            overlay_selector.target_budget_remaining = target_changes;
-            numerator = 1u;
-            denominator = 1u;
-        } else {
-            if (target_changes > candidate_limit) {
-                target_changes = candidate_limit;
-            }
-            numerator = target_changes;
-            denominator = candidate_limit;
-        }
-    }
-    if (numerator == 0u) {
-        if (!write_buffer_to_fd(1, base_page.original)) {
-            console_line(2, "overlay: failed to write original base image");
-            return 1;
-        }
-        return 0;
-    }
-    if (!same_symbol_mapping || overlay_selector.enabled) {
-        if (!apply_overlay_pixels_raw(overlay_page,
-                                      base_mask,
-                                      overlay_mask,
-                                      numerator,
-                                      denominator,
-                                      overlay_ignore,
-                                      base_page,
-                                      &overlay_selector)) {
-            console_line(2, "overlay: failed to copy raw pixel data between color modes");
-            return 1;
-        }
-    } else {
-        makocode::ByteBuffer base_bits;
-        makocode::ByteBuffer overlay_bits;
-        u64 base_bit_count = 0u;
-        u64 overlay_bit_count = 0u;
-        if (!gather_overlay_bits(base_page, base_mask, base_bits, base_bit_count)) {
-            console_line(2, "overlay: failed to extract data bytes from base image");
-            return 1;
-        }
-        if (!gather_overlay_bits(overlay_page, overlay_mask, overlay_bits, overlay_bit_count)) {
-            console_line(2, "overlay: failed to extract data bytes from overlay image");
-            return 1;
-        }
-        if (base_bit_count == 0u || base_bits.size == 0u) {
-            console_line(2, "overlay: base image does not contain data bytes to modify");
-            return 1;
-        }
-        if (overlay_bits.size == 0u) {
-            console_line(2, "overlay: overlay image does not provide data bytes");
-            return 1;
-        }
-        u64 base_bytes = (base_bit_count + 7u) >> 3u;
-        u64 overlay_bytes = (overlay_bit_count + 7u) >> 3u;
-        u64 copy_bytes = (base_bytes < overlay_bytes) ? base_bytes : overlay_bytes;
-        if (copy_bytes == 0u) {
-            console_line(2, "overlay: no whole bytes available for overlay");
-            return 1;
-        }
-        u8* base_ptr = base_bits.data;
-        const u8* overlay_ptr = overlay_bits.data;
-        if (!base_ptr || !overlay_ptr) {
-            console_line(2, "overlay: internal byte buffer unavailable");
-            return 1;
-        }
-        u64 accumulator = 0u;
-        makocode::ByteBuffer block_counters;
-        makocode::ByteBuffer block_shuffle_map;
-        u16* block_counters_ptr = 0;
-        usize* block_shuffle_map_ptr = 0;
-        bool block_limit_active = false;
-        u64 block_limit_start = 0u;
-        u64 block_limit_end = 0u;
-        u64 block_total_symbols = 0u;
-        u64 block_total_count = 0u;
-        u64 block_limit_per_block = 0u;
-        u64 shuffle_entry_count = 0u;
-        bool headerless_layout = base_page.metadata.has_encoded_tile &&
-                                 metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) &&
-                                 base_page.metadata.encoded_tile.overwrite_layout;
-        u64 rs_region_start = headerless_layout
-                                  ? 0u
-                                  : 8u + (u64)makocode::ECC_HEADER_TOTAL_BYTES;
-        u64 block_data = 0u;
-        u64 parity = 0u;
-        u64 block_count_value = 0u;
-        if (headerless_layout) {
-            const MetadataTile::Values& tile = base_page.metadata.encoded_tile;
-            if (tile.ecc_enabled) {
-                block_data = tile.ecc_block_data;
-                parity = tile.ecc_parity;
-                block_count_value = tile.ecc_block_count;
-            }
-        } else if (base_bytes >= rs_region_start) {
-            usize payload_byte_count = (base_bytes - 8u > (u64)USIZE_MAX_VALUE)
-                                           ? USIZE_MAX_VALUE
-                                           : (usize)(base_bytes - 8u);
-            if (payload_byte_count >= makocode::ECC_HEADER_TOTAL_BYTES) {
-                makocode::EccHeaderInfo ecc_header;
-                if (makocode::parse_ecc_header(base_ptr + 8u,
-                                               payload_byte_count,
-                                               ecc_header) &&
-                    ecc_header.valid && ecc_header.enabled) {
-                    block_data = (u64)ecc_header.block_data;
-                    parity = (u64)ecc_header.parity;
-                    block_count_value = ecc_header.block_count;
-                }
-            }
-        }
-        u64 block_total = block_data + parity;
-        if (block_data && parity && block_total && block_count_value &&
-            block_total <= (U64_MAX_VALUE / block_count_value)) {
-            u64 encoded_block_bytes = block_total * block_count_value;
-            u64 available_rs_bytes = base_bytes - rs_region_start;
-            if (encoded_block_bytes > available_rs_bytes) {
-                encoded_block_bytes = available_rs_bytes;
-            }
-            if (encoded_block_bytes > 0u &&
-                block_count_value <= (u64)(USIZE_MAX_VALUE / sizeof(u16))) {
-                usize counter_bytes = (usize)(block_count_value * (u64)sizeof(u16));
-                if (counter_bytes != 0u && block_counters.ensure(counter_bytes)) {
-                    block_counters.size = counter_bytes;
-                    for (usize counter_index = 0u; counter_index < counter_bytes; ++counter_index) {
-                        block_counters.data[counter_index] = 0u;
-                    }
-                    block_total_symbols = block_total;
-                    block_total_count = block_count_value;
-                    // RS can correct up to t = floor(parity/2) symbol errors per block.
-                    // Stay slightly under that theoretical maximum to leave room for scan damage.
-                    block_limit_per_block = parity / 2u;
-                    if (block_limit_per_block > 1u) {
-                        block_limit_per_block -= 1u;
-                    } else {
-                        block_limit_per_block = 1u;
-                    }
-                    if (encoded_block_bytes <= (u64)USIZE_MAX_VALUE) {
-                        usize entries = (usize)encoded_block_bytes;
-                        if (entries != 0u &&
-                            entries <= (USIZE_MAX_VALUE / sizeof(usize))) {
-                            usize map_bytes = entries * sizeof(usize);
-                            if (map_bytes != 0u && block_shuffle_map.ensure(map_bytes)) {
-                                block_shuffle_map.size = map_bytes;
-                                block_shuffle_map_ptr = (usize*)block_shuffle_map.data;
-                                for (usize map_index = 0u; map_index < entries; ++map_index) {
-                                    block_shuffle_map_ptr[map_index] = map_index;
-                                }
-                                makocode::Pcg64Generator rng;
-                                rng.seed(0u);
-                                for (usize map_index = entries; map_index > 1u; --map_index) {
-                                    usize i_map = map_index - 1u;
-                                    u64 value = rng.next();
-                                    usize j_map = (usize)(value % (u64)(i_map + 1u));
-                                    usize temp = block_shuffle_map_ptr[i_map];
-                                    block_shuffle_map_ptr[i_map] = block_shuffle_map_ptr[j_map];
-                                    block_shuffle_map_ptr[j_map] = temp;
-                                }
-                                block_counters_ptr = (u16*)block_counters.data;
-                                shuffle_entry_count = (u64)entries;
-                                block_limit_start = rs_region_start;
-                                block_limit_end = block_limit_start + shuffle_entry_count;
-                                block_limit_active = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    OverlayIgnoreColorList ignored_colors;
+    ignored_colors.count = 0u;
+    if (ignore_colors && ignore_colors_length > 0u &&
+        !parse_overlay_ignore_colors(ignore_colors,
+                                     ignore_colors_length,
+                                     ignored_colors)) return false;
+    const OverlayIgnoreColorList* ignored_colors_ptr = ignored_colors.count
+                                                          ? &ignored_colors
+                                                          : 0;
 
-        // If ECC metadata is available and the caller did not specify an explicit ECC target,
-        // clamp the requested overlay fraction to a conservative bound based on correctable
-        // symbols. The raw fraction argument is in terms of bytes to replace and can easily
-        // exceed ECC capabilities when used with heavy overlays.
-        if (!ecc_target_specified &&
-            block_limit_active &&
-            block_total_symbols > 0u &&
-            block_total_count > 0u &&
-            block_limit_per_block > 0u &&
-            copy_bytes > 0u &&
-            denominator > 0u) {
-            // Keep generous headroom beyond the theoretical RS limit to survive
-            // additional damage (e.g., scanning noise) on top of the overlay.
-            u64 safe_per_block = block_limit_per_block;
-            if (safe_per_block > 1u) {
-                safe_per_block = (safe_per_block * 2u) / 3u; // ~67% of the nominal limit
-            }
-            __uint128_t safe_total = (__uint128_t)safe_per_block * (__uint128_t)block_total_count;
-            __uint128_t max_num128 = safe_total * (__uint128_t)denominator;
-            max_num128 /= (__uint128_t)copy_bytes;
-            u64 max_numerator = (max_num128 > (__uint128_t)U64_MAX_VALUE) ? U64_MAX_VALUE : (u64)max_num128;
-            if (max_numerator == 0u && safe_total > 0u) {
-                max_numerator = 1u;
-            }
-            if (numerator > max_numerator) {
-                numerator = max_numerator;
-            }
-        }
-        for (u64 i = 0u; i < copy_bytes; ++i) {
-            accumulator += numerator;
-            if (accumulator < denominator) {
-                continue;
-            }
-            bool replaced = false;
-            bool skipped_for_limit = false;
-            if (block_limit_active &&
-                block_shuffle_map_ptr &&
-                block_counters_ptr &&
-                block_total_symbols > 0u &&
-                block_total_count > 0u &&
-                i >= block_limit_start &&
-                i < block_limit_end) {
-                u64 relative = i - block_limit_start;
-                if (relative < shuffle_entry_count) {
-                    u64 original_index = (u64)block_shuffle_map_ptr[(usize)relative];
-                    u64 block_index = original_index / block_total_symbols;
-                    if (overlay_selector.enabled) {
-                        if (original_index >= overlay_selector.ranks.size ||
-                            block_index >= overlay_selector.counts.size) {
-                            skipped_for_limit = true;
-                        } else {
-                            u8 selector_rank = overlay_selector.ranks.data[(usize)original_index];
-                            if (selector_rank == 0u ||
-                                selector_rank > overlay_selector.overlay_erasure_budget) {
-                                skipped_for_limit = true;
-                            } else {
-                                if (base_ptr[i] != overlay_ptr[i] &&
-                                    selector_rank > overlay_selector.counts.data[(usize)block_index]) {
-                                    overlay_selector.counts.data[(usize)block_index] = selector_rank;
-                                }
-                                base_ptr[i] = overlay_ptr[i];
-                                replaced = true;
-                            }
-                        }
-                    } else if (block_index < block_total_count) {
-                        usize counter_index = (usize)block_index;
-                        u16 current_count = block_counters_ptr[counter_index];
-                        if ((u64)current_count < block_limit_per_block) {
-                            base_ptr[i] = overlay_ptr[i];
-                            block_counters_ptr[counter_index] = (u16)(current_count + 1u);
-                            replaced = true;
-                        } else {
-                            skipped_for_limit = true;
-                        }
-                    }
-                }
-            }
-            if (!replaced && !skipped_for_limit) {
-                base_ptr[i] = overlay_ptr[i];
-                replaced = true;
-            }
-            if (replaced) {
-                accumulator -= denominator;
-            }
-        }
-        
-        if (!apply_overlay_bits(base_bits, base_bit_count, base_mask, base_page, &overlay_page, overlay_ignore)) {
-            console_line(2, "overlay: failed to map merged bytes back to base image");
-            return 1;
-        }
+    makocode::ByteBuffer base_mask;
+    u64 base_reserved = 0u;
+    if (!build_overlay_mask(base_page, base_mask, base_reserved)) {
+        console_line(2, "encode: failed to prepare overlay masks");
+        return false;
     }
-    if (debug_requested && overlay_selector.enabled) {
+    if (!base_page.metadata.has_encoded_tile ||
+        !metadata_schema_is_current(base_page.metadata.encoded_tile.schema_version) ||
+        !base_page.metadata.encoded_tile.overwrite_layout) {
+        console_line(2, "encode: overlay requires canonical encoded pages");
+        return false;
+    }
+    const MetadataTile::Values& tile = base_page.metadata.encoded_tile;
+    if (!tile.ecc_enabled || tile.ecc_block_count == 0u || tile.ecc_parity == 0u ||
+        tile.ecc_block_data == 0u || tile.overlay_bits == 0u ||
+        (u64)tile.ecc_block_data + tile.ecc_parity > makocode::RS_FIELD_SIZE ||
+        tile.overlay_bits % 8u != 0u ||
+        tile.overlay_bits / 8u % tile.ecc_block_count != 0u) {
+        console_line(2, "encode: overlay requires a nonzero, valid ECC selector budget");
+        return false;
+    }
+
+    OverlaySelector overlay_selector;
+    overlay_selector.seed = tile.overlay_selector_seed;
+    overlay_selector.overlay_erasure_budget = tile.overlay_erasure_budget;
+    overlay_selector.block_total = (u16)(tile.ecc_block_data + tile.ecc_parity);
+    overlay_selector.block_count = tile.ecc_block_count;
+    if ((u32)overlay_selector.overlay_erasure_budget > tile.ecc_parity ||
+        overlay_selector.block_count > (u64)USIZE_MAX_VALUE ||
+        !overlay_selector.counts.ensure((usize)overlay_selector.block_count) ||
+        overlay_selector.block_count > (u64)USIZE_MAX_VALUE / overlay_selector.block_total ||
+        !overlay_selector.ranks.ensure((usize)(overlay_selector.block_count *
+                                               overlay_selector.block_total))) {
+        console_line(2, "encode: overlay selector map is too large or exceeds ECC capacity");
+        return false;
+    }
+    overlay_selector.counts.size = (usize)overlay_selector.block_count;
+    memset(overlay_selector.counts.data, 0, overlay_selector.counts.size);
+    overlay_selector.ranks.size = (usize)(overlay_selector.block_count *
+                                          overlay_selector.block_total);
+    u8 selector_mask[makocode::RS_FIELD_SIZE];
+    u8 selector_ranks[makocode::RS_FIELD_SIZE];
+    for (u64 block = 0u; block < overlay_selector.block_count; ++block) {
+        if (!makocode::overlay_selector_mask(overlay_selector.seed,
+                                             block,
+                                             overlay_selector.block_total,
+                                             (u8)overlay_selector.overlay_erasure_budget,
+                                             selector_mask,
+                                             selector_ranks)) {
+            console_line(2, "encode: failed to generate deterministic overlay selector map");
+            return false;
+        }
+        usize offset = (usize)block * (usize)overlay_selector.block_total;
+        memcpy(overlay_selector.ranks.data + offset,
+               selector_ranks,
+               overlay_selector.block_total);
+    }
+    if (!apply_overlay_pixels_with_selector(overlay_page,
+                                             base_mask,
+                                             ignored_colors_ptr,
+                                             base_page,
+                                             overlay_selector)) {
+        console_line(2, "encode: failed to apply overlay PPM");
+        return false;
+    }
+    if (debug_requested) {
         u64 used = 0u;
         for (usize block = 0u; block < overlay_selector.counts.size; ++block) {
-            if (overlay_selector.counts.data[block] > U64_MAX_VALUE - used) {
-                console_line(2, "overlay: selector accounting overflow");
-                return 1;
-            }
             used += overlay_selector.counts.data[block];
         }
-        if (overlay_selector.block_count &&
-            overlay_selector.overlay_erasure_budget >
-                U64_MAX_VALUE / overlay_selector.block_count) {
-            console_line(2, "overlay: selector capacity overflow");
-            return 1;
-        }
-        u64 capacity = overlay_selector.block_count * overlay_selector.overlay_erasure_budget;
-        console_write(2, "overlay selector symbols used: ");
-        char number[32];
-        u64_to_ascii(used, number, sizeof(number));
-        console_write(2, number);
+        char used_buffer[32];
+        char budget_buffer[32];
+        u64_to_ascii(used * 8u, used_buffer, sizeof(used_buffer));
+        u64_to_ascii(tile.overlay_bits, budget_buffer, sizeof(budget_buffer));
+        console_write(2, "debug: overlay bits used=");
+        console_write(2, used_buffer);
         console_write(2, "/");
-        u64_to_ascii(capacity, number, sizeof(number));
-        console_line(2, number);
+        console_line(2, budget_buffer);
     }
     makocode::ByteBuffer output;
-    if (!serialize_overlay_page(base_page, output)) {
-        console_line(2, "overlay: failed to serialize merged ppm");
-        return 1;
+    if (!serialize_overlay_page(base_page, output) ||
+        !write_bytes_to_file(page_path, output.data, output.size)) {
+        console_line(2, "encode: failed to write overlay page");
+        return false;
     }
-    if (!write_buffer_to_fd(1, output)) {
-        console_line(2, "overlay: failed to emit merged ppm");
-        return 1;
-    }
-    return 0;
+    return true;
 }
 
 static int command_decode(int arg_count, char** args) {
@@ -31603,9 +30606,6 @@ int main(int argc, char** argv) {
     }
     if (ascii_compare(command, "decode") == 0) {
         return command_decode(command_argc, command_argv);
-    }
-    if (ascii_compare(command, "overlay") == 0) {
-        return command_overlay(command_argc, command_argv);
     }
     if (ascii_compare(command, "minify") == 0) {
         return command_minify(command_argc, command_argv);

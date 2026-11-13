@@ -47,7 +47,7 @@ if [[ -z $label ]]; then
     exit 1
 fi
 
-export MAKO_OVERLAY_ECC_TARGET=0.25
+export MAKO_OVERLAY_FRACTION=0.25
 export MAKO_OVERLAY_PALETTE='White Cyan Magenta Yellow'
 export MAKO_OVERLAY_CIRCLE_COLOR='255 0 0'
 export MAKO_OVERLAY_BACKGROUND_COLOR='0 255 0'

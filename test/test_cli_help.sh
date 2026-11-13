@@ -113,19 +113,22 @@ run_expect_help top-level-short-help 'Usage:' 'makocode encode [options]' \
 run_expect_help unknown-command 'Usage:' 'makocode encode [options]' "$makocode_bin" unknown-command
 run_expect_help encode-help 'Usage: makocode encode' '--input PATH' "$makocode_bin" encode --help
 run_expect_help encode-footer-help 'Usage: makocode encode' '--footer TEXT' "$makocode_bin" encode --help
-run_expect_help encode-ecc-help 'Omit to use the minimum ECC' 'minimum required value' \
+run_expect_help encode-ecc-help 'Omit to use the minimum ECC' 'supported overlay fraction' \
     "$makocode_bin" encode --help
 run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" decode --help
-run_expect_help overlay-help 'Usage: makocode overlay' '--overlay-ecc-target TARGET' "$makocode_bin" overlay --help
+run_expect_help encode-overlay-help '--overlay-fraction F' '--overlay-ppm PATH' \
+    "$makocode_bin" encode --help
+run_expect_help removed-overlay-command 'Usage:' 'makocode encode [options]' \
+    "$makocode_bin" overlay --help
 run_expect_help minify-help 'Usage: makocode minify' 'Strips comments/whitespace' "$makocode_bin" minify --help
-run_expect_reject ecc-precision '--ecc must be 0.00 to 655.35 with at most 2 decimal places' \
-    "$makocode_bin" encode --ecc=0.001
-run_expect_reject ecc-range '--ecc must be 0.00 to 655.35 with at most 2 decimal places' \
-    "$makocode_bin" encode --ecc=655.36
-run_expect_reject overlay-fraction-precision '--overlay-fraction must be 0.00 to 0.99 with at most 2 decimal places' \
-    "$makocode_bin" encode --overlay-fraction=0.001
-run_expect_reject overlay-fraction-one '--overlay-fraction must be 0.00 to 0.99 with at most 2 decimal places; 1.00 is invalid' \
-    "$makocode_bin" encode --overlay-fraction=1.00
+run_expect_reject ecc-range '--ecc ratio must be between 0 and 254' \
+    "$makocode_bin" encode --ecc=254.01
+run_expect_reject overlay-fraction-range '--overlay-fraction must be between 0.0 and 1.0' \
+    "$makocode_bin" encode --overlay-fraction=1.01
+run_expect_reject overlay-fraction-alone '--overlay-fraction and --overlay-ppm must be used together' \
+    "$makocode_bin" encode --overlay-fraction=0.5
+run_expect_reject overlay-ppm-alone '--overlay-fraction and --overlay-ppm must be used together' \
+    "$makocode_bin" encode --overlay-ppm=missing.ppm
 
 printf 'x' > "$tmp_dir/payload.bin"
 printf makocode > "$tmp_dir/small_page.bin"
@@ -133,14 +136,14 @@ small_page_error="$tmp_dir/small-page-ecc-minimum.txt"
 if "$makocode_bin" encode "--input=$tmp_dir/small_page.bin" \
     --page-width=80 --page-height=80 --ecc=0.00 "--output-dir=$tmp_dir/small_page_out" \
     >"$small_page_error" 2>&1; then
-    echo "test_cli_help: insufficient ECC target unexpectedly succeeded" >&2
+    echo "test_cli_help: insufficient ECC ratio unexpectedly succeeded" >&2
     exit 1
 fi
 minimum_small_page_ecc=$(sed -n \
-    's/.*use at least base --ecc \([0-9][0-9]*\.[0-9][0-9]\) for this payload\/page layout.*/\1/p' \
+    's/.*use at least base --ecc \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
     "$small_page_error")
 if [[ -z $minimum_small_page_ecc ]]; then
-    echo "test_cli_help: small-page ECC rejection did not report a minimum target" >&2
+    echo "test_cli_help: small-page ECC rejection did not report a minimum ratio" >&2
     cat "$small_page_error" >&2
     exit 1
 fi
@@ -160,17 +163,37 @@ if [[ -z $default_ecc || $default_ecc -le 0 || $default_overlay != 0 ]]; then
     echo "test_cli_help: automatic ECC settings were $default_settings, expected positive ECC/zero overlay" >&2
     exit 1
 fi
+("$repo_root/test/ppm_transform" overlay-mask --output "$tmp_dir/overlay.ppm" \
+    --circle-color "0 0 0" --background-color "255 255 255" \
+    --width 1000 --height 1000)
+overlay_rejection="$tmp_dir/overlay-ecc-rejection.txt"
+if (cd "$tmp_dir" && "$makocode_bin" encode --input=default.bin \
+    --ecc=0.01 --overlay-fraction=1.0 --overlay-ppm="$tmp_dir/overlay.ppm" \
+    --page-width=1000 --page-height=1000 \
+    "--output-dir=$tmp_dir/overlay_rejected") >"$overlay_rejection" 2>&1; then
+    echo "test_cli_help: unsupported overlay fraction unexpectedly succeeded" >&2
+    exit 1
+fi
+if ! grep -Fq -- 'use at least --ecc' "$overlay_rejection" ||
+   ! grep -Fq -- 'reduce --overlay-fraction to at most' "$overlay_rejection"; then
+    echo "test_cli_help: insufficient ECC error omitted the supported settings" >&2
+    cat "$overlay_rejection" >&2
+    exit 1
+fi
 (cd "$tmp_dir" && "$makocode_bin" encode --input=default.bin \
-    --overlay-fraction=0.20 "--output-dir=$tmp_dir/overlay_fraction" \
+    --overlay-fraction=0.20 --overlay-ppm="$tmp_dir/overlay.ppm" \
+    --page-width=1000 --page-height=1000 "--output-dir=$tmp_dir/overlay_fraction" \
     --prefix=overlay_fraction >/dev/null)
 overlay_page="$tmp_dir/overlay_fraction/overlay_fraction.ppm"
 read -r _ < "$overlay_page"
 read -r overlay_width overlay_height < <(sed -n '2p' "$overlay_page")
 overlay_settings=$("$harness" "$overlay_page" "$overlay_width" "$overlay_height" 1 \
     --report-ecc-settings)
-IFS=$'\t' read -r overlay_ecc overlay_raw <<<"$overlay_settings"
-if [[ -z $overlay_ecc || $overlay_ecc -le 0 || $overlay_raw != 13107 ]]; then
-    echo "test_cli_help: automatic overlay settings were $overlay_settings, expected positive ECC/Q0.16 13107" >&2
+IFS=$'\t' read -r overlay_ecc_bits overlay_raw_bits <<<"$overlay_settings"
+if [[ -z $overlay_ecc_bits || $overlay_ecc_bits -le 0 ||
+      -z $overlay_raw_bits || $overlay_raw_bits -le 0 ||
+      $((overlay_raw_bits % 8)) -ne 0 ]]; then
+    echo "test_cli_help: automatic overlay settings were $overlay_settings, expected positive bit counts" >&2
     exit 1
 fi
 "$makocode_bin" decode --output-dir="$tmp_dir/overlay_fraction_decoded" \
@@ -183,9 +206,8 @@ if grep -Eq '^  --' "$tmp_dir/top-level.txt"; then
     exit 1
 fi
 if ! grep -Fq -- 'Omit to use the minimum ECC' "$tmp_dir/encode-help.txt" ||
-   ! grep -Fq -- 'default 0.00' "$tmp_dir/encode-help.txt" ||
-   ! grep -Fq -- '0.00 disables payload ECC' "$tmp_dir/encode-help.txt" ||
-   ! grep -Fq -- 'Q0.16 (raw / 65536)' "$tmp_dir/encode-help.txt" ||
+   ! grep -Fq -- '0 disables payload ECC' "$tmp_dir/encode-help.txt" ||
+   ! grep -Fq -- 'Overlay budget as a share of protected data bits' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- '255 total symbols' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- 'omitted width fits the encoded payload' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- 'omitted height fits the encoded payload' "$tmp_dir/encode-help.txt" ||
