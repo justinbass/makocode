@@ -6153,6 +6153,128 @@ static DecryptStatus decrypt_payload_buffer(const u8* data,
     return DecryptStatus_Success;
 }
 
+static const usize STEALTH_CONTAINER_PREFIX_BYTES =
+    ENCRYPTION_SALT_BYTES + ENCRYPTION_NONCE_BYTES;
+static const usize STEALTH_VISIBLE_DESCRIPTOR_BYTES = 24u;
+static const usize STEALTH_HIDDEN_DESCRIPTOR_BYTES = 40u;
+static const usize STEALTH_CONTAINER_HEADER_BYTES = STEALTH_CONTAINER_PREFIX_BYTES +
+                                                    STEALTH_VISIBLE_DESCRIPTOR_BYTES +
+                                                    STEALTH_HIDDEN_DESCRIPTOR_BYTES;
+
+static bool stealth_derive_key_nonce(const u8 base_key[32],
+                                     const u8 nonce_seed[12],
+                                     const char* domain,
+                                     u8 key_out[32],
+                                     u8 nonce_out[12]) {
+    usize domain_length = ascii_length(domain);
+    u8 input[96];
+    if (domain_length + 1u + 12u > sizeof(input)) return false;
+    for (usize i = 0u; i < domain_length; ++i) input[i] = (u8)domain[i];
+    input[domain_length] = 0u;
+    for (usize i = 0u; i < 12u; ++i) input[domain_length + 1u + i] = nonce_seed[i];
+    if (!hmac_sha256(base_key, 32u, input, domain_length + 1u + 12u, key_out)) return false;
+    input[domain_length] = 1u;
+    u8 nonce_hash[32];
+    if (!hmac_sha256(base_key, 32u, input, domain_length + 1u + 12u, nonce_hash)) return false;
+    for (usize i = 0u; i < 12u; ++i) nonce_out[i] = nonce_hash[i];
+    for (usize i = 0u; i < sizeof(input); ++i) input[i] = 0u;
+    for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
+    return true;
+}
+
+static bool stealth_encrypt_blob(const u8* plaintext,
+                                 usize plaintext_length,
+                                 const u8 base_key[32],
+                                 const u8 nonce_seed[12],
+                                 const u8* aad,
+                                 usize aad_length,
+                                 const char* domain,
+                                 ByteBuffer& output) {
+    u8 key[32];
+    u8 nonce[12];
+    u8 tag[ENCRYPTION_TAG_BYTES];
+    if (!stealth_derive_key_nonce(base_key, nonce_seed, domain, key, nonce)) return false;
+    ByteBuffer ciphertext;
+    bool ok = chacha20_poly1305_encrypt(key, nonce, plaintext, plaintext_length,
+                                        aad, aad_length, ciphertext, tag);
+    for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
+    for (usize i = 0u; i < sizeof(nonce); ++i) nonce[i] = 0u;
+    if (!ok || ciphertext.size > USIZE_MAX_VALUE - ENCRYPTION_TAG_BYTES ||
+        !output.ensure(ciphertext.size + ENCRYPTION_TAG_BYTES)) {
+        ciphertext.release();
+        return false;
+    }
+    output.size = ciphertext.size + ENCRYPTION_TAG_BYTES;
+    if (ciphertext.size) memcpy(output.data, ciphertext.data, ciphertext.size);
+    memcpy(output.data + ciphertext.size, tag, ENCRYPTION_TAG_BYTES);
+    ciphertext.release();
+    for (usize i = 0u; i < sizeof(tag); ++i) tag[i] = 0u;
+    return true;
+}
+
+static bool stealth_decrypt_blob(const u8* input,
+                                 usize input_length,
+                                 const u8 base_key[32],
+                                 const u8 nonce_seed[12],
+                                 const u8* aad,
+                                 usize aad_length,
+                                 const char* domain,
+                                 ByteBuffer& plaintext) {
+    plaintext.release();
+    if (!input || input_length < ENCRYPTION_TAG_BYTES) return false;
+    u8 key[32];
+    u8 nonce[12];
+    if (!stealth_derive_key_nonce(base_key, nonce_seed, domain, key, nonce)) return false;
+    bool auth_failed = false;
+    bool ok = chacha20_poly1305_decrypt(key, nonce, input,
+                                        input_length - ENCRYPTION_TAG_BYTES,
+                                        aad, aad_length, plaintext,
+                                        input + input_length - ENCRYPTION_TAG_BYTES,
+                                        &auth_failed);
+    for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
+    for (usize i = 0u; i < sizeof(nonce); ++i) nonce[i] = 0u;
+    if (!ok) plaintext.release();
+    return ok;
+}
+
+static bool stealth_derive_base_key(const char* password,
+                                    usize password_length,
+                                    const u8 salt[ENCRYPTION_SALT_BYTES],
+                                    u8 base_key[32]) {
+    return pbkdf2_hmac_sha256((const u8*)password, password_length,
+                              salt, ENCRYPTION_SALT_BYTES,
+                              ENCRYPTION_PBKDF2_ITERATIONS, base_key, 32u);
+}
+
+static bool stealth_fill_random(ByteBuffer& output,
+                                usize size,
+                                const u8* random_data,
+                                usize random_data_length,
+                                const char* domain) {
+    if (!random_data || random_data_length != ENCRYPTION_SALT_BYTES + ENCRYPTION_NONCE_BYTES ||
+        !domain || !output.ensure(size)) return false;
+    u8 key[32];
+    u8 nonce_hash[32];
+    if (!hmac_sha256(random_data, random_data_length, (const u8*)domain,
+                     ascii_length(domain), key) ||
+        !hmac_sha256(key, sizeof(key), random_data,
+                     random_data_length, nonce_hash)) {
+        for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
+        for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
+        return false;
+    }
+    for (usize i = 0u; i < size; ++i) output.data[i] = 0u;
+    if (!chacha20_xor(key, nonce_hash, 1u, output.data, output.data, size)) {
+        for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
+        for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
+        return false;
+    }
+    output.size = size;
+    for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
+    for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
+    return true;
+}
+
 static bool fisher_yates_shuffle(u8* data, usize count) {
     if (!data || count <= 1u) {
         return true;
@@ -6507,6 +6629,81 @@ static bool lzma_decompress(const u8* input,
     return true;
 }
 
+static bool decode_stealth_container(const u8* data,
+                                    usize data_length,
+                                    const char* password,
+                                    usize password_length,
+                                    ByteBuffer& archive_out,
+                                    bool& is_container) {
+    is_container = false;
+    archive_out.release();
+    if (!data || data_length < STEALTH_CONTAINER_HEADER_BYTES || !password || !password_length) return false;
+    const u8* salt = data;
+    const u8* nonce_seed = data + ENCRYPTION_SALT_BYTES;
+    const u8* aad = data;
+    u8 base_key[32];
+    ByteBuffer descriptor;
+    ByteBuffer compressed;
+    bool opened = false;
+
+    if (!stealth_derive_base_key(password, password_length, salt, base_key)) return false;
+    bool descriptor_ok = stealth_decrypt_blob(data + STEALTH_CONTAINER_PREFIX_BYTES,
+                                              STEALTH_VISIBLE_DESCRIPTOR_BYTES,
+                                              base_key, nonce_seed, aad,
+                                              STEALTH_CONTAINER_PREFIX_BYTES,
+                                              "visible descriptor", descriptor);
+    if (descriptor_ok && descriptor.size == 8u) {
+        is_container = true;
+        u64 body_length = read_le_u64(descriptor.data);
+        if (body_length >= ENCRYPTION_TAG_BYTES &&
+            body_length <= (u64)(data_length - STEALTH_CONTAINER_HEADER_BYTES) &&
+            body_length <= (u64)USIZE_MAX_VALUE &&
+            stealth_decrypt_blob(data + STEALTH_CONTAINER_HEADER_BYTES,
+                                 (usize)body_length, base_key, nonce_seed,
+                                 aad, STEALTH_CONTAINER_PREFIX_BYTES,
+                                 "visible body", compressed) &&
+            lzma_decompress(compressed.data, compressed.size * 8u,
+                            archive_out, LZMA_SIZE_FROM_HEADER, false)) {
+            opened = true;
+        }
+    }
+    descriptor.release();
+    compressed.release();
+    if (opened) {
+        for (usize i = 0u; i < sizeof(base_key); ++i) base_key[i] = 0u;
+        return true;
+    }
+
+    if (stealth_decrypt_blob(data + STEALTH_CONTAINER_PREFIX_BYTES + STEALTH_VISIBLE_DESCRIPTOR_BYTES,
+                             STEALTH_HIDDEN_DESCRIPTOR_BYTES,
+                             base_key, nonce_seed, aad, STEALTH_CONTAINER_PREFIX_BYTES,
+                             "hidden descriptor", descriptor) && descriptor.size == 24u) {
+        is_container = true;
+        u64 body_offset = read_le_u64(descriptor.data);
+        u64 body_length = read_le_u64(descriptor.data + 8u);
+        u64 hidden_capacity = read_le_u64(descriptor.data + 16u);
+        if (body_offset >= STEALTH_CONTAINER_HEADER_BYTES &&
+            body_offset <= (u64)data_length &&
+            body_length >= ENCRYPTION_TAG_BYTES &&
+            body_length <= (u64)data_length - body_offset &&
+            body_length <= hidden_capacity &&
+            hidden_capacity <= (u64)data_length - body_offset &&
+            body_length <= (u64)USIZE_MAX_VALUE &&
+            stealth_decrypt_blob(data + (usize)body_offset, (usize)body_length,
+                                 base_key, nonce_seed, aad,
+                                 STEALTH_CONTAINER_PREFIX_BYTES,
+                                 "hidden body", compressed) &&
+            lzma_decompress(compressed.data, compressed.size * 8u,
+                            archive_out, LZMA_SIZE_FROM_HEADER, false)) {
+            opened = true;
+        }
+    }
+    for (usize i = 0u; i < sizeof(base_key); ++i) base_key[i] = 0u;
+    descriptor.release();
+    compressed.release();
+    return opened;
+}
+
 
 static const u16 RS_FIELD_PRIMITIVE = 0x11d;
 static const u16 RS_FIELD_SIZE = 255u;
@@ -6592,6 +6789,7 @@ struct EncoderContext {
     ByteBuffer encryption_random_data;
     bool configured;
     bool encryption_enabled;
+    bool payload_is_preencoded;
 
     EccSummary ecc_summary;
 
@@ -6603,6 +6801,7 @@ struct EncoderContext {
           encryption_random_data(),
           configured(false),
           encryption_enabled(false),
+          payload_is_preencoded(false),
           ecc_summary() {}
 
     ~EncoderContext() {
@@ -6616,6 +6815,7 @@ struct EncoderContext {
         encryption_random_data.release();
         configured = false;
         encryption_enabled = false;
+        payload_is_preencoded = false;
         ecc_summary = EccSummary();
     }
 
@@ -6667,12 +6867,14 @@ struct EncoderContext {
         ecc_summary = EccSummary();
         ecc_summary.overlay_bits = config.overlay_bits;
         ByteBuffer compressed;
-        if (!encode_payload(compressed)) {
-            return false;
+        if (!payload_is_preencoded) {
+            if (!encode_payload(compressed)) {
+                return false;
+            }
         }
-        const ByteBuffer* payload_source = &compressed;
+        const ByteBuffer* payload_source = payload_is_preencoded ? &payload_bytes : &compressed;
         ByteBuffer encrypted;
-        if (encryption_enabled && encryption_password.size > 0u) {
+        if (!payload_is_preencoded && encryption_enabled && encryption_password.size > 0u) {
             if (!encrypt_payload_buffer(compressed, (const char*)encryption_password.data, encryption_password.size, encryption_random_data.data, encrypted)) {
                 return false;
             }
@@ -7886,31 +8088,61 @@ struct DecoderContext {
                 ecc_failed = true;
                 return false;
             }
-            const ByteBuffer* working = &compressed;
+            ByteBuffer stealth_archive;
+            bool stealth_container = false;
+            bool stealth_opened = decode_stealth_container(compressed.data,
+                                                           compressed.size,
+                                                           password,
+                                                           password_length,
+                                                           stealth_archive,
+                                                           stealth_container);
+            if (stealth_container) {
+                password_attempted = true;
+                if (!stealth_opened) {
+                    password_failed = true;
+                    return false;
+                }
+                payload.release();
+                payload.data = stealth_archive.data;
+                payload.size = stealth_archive.size;
+                payload.capacity = stealth_archive.capacity;
+                stealth_archive.data = 0;
+                stealth_archive.size = 0u;
+                stealth_archive.capacity = 0u;
+                has_payload = true;
+                encoded_metadata.ecc_present = true;
+                encoded_metadata.ecc = header.encoded_header;
+                return true;
+            }
+            const u8* compressed_data = compressed.data;
+            usize compressed_size = compressed.size;
+            const u8* working_data = compressed_data;
+            usize working_size = compressed_size;
             ByteBuffer decrypted;
             if (have_password) {
                 password_attempted = true;
-                DecryptStatus status = decrypt_payload_buffer(compressed.data,
-                                                              compressed.size,
+                DecryptStatus status = decrypt_payload_buffer(compressed_data,
+                                                              compressed_size,
                                                               password,
                                                               password_length,
                                                               decrypted);
                 if (status == DecryptStatus_NotEncrypted) {
                     password_not_encrypted = true;
                 } else if (status == DecryptStatus_Success) {
-                    working = &decrypted;
+                    working_data = decrypted.data;
+                    working_size = decrypted.size;
                 } else {
                     password_failed = true;
                     return false;
                 }
             }
-            u64 bit_total = (u64)working->size * 8u;
+            u64 bit_total = (u64)working_size * 8u;
             if (bit_total > (u64)USIZE_MAX_VALUE) {
                 ecc_failed = true;
                 return false;
             }
             
-            if (!lzma_decompress(working->data,
+            if (!lzma_decompress(working_data,
                                  (usize)bit_total,
                                  payload,
                                  external_lzma_uncompressed_size,
@@ -7920,28 +8152,28 @@ struct DecoderContext {
             }
             encoded_metadata.ecc_present = true;
             encoded_metadata.ecc = header.encoded_header;
-            if (working == &decrypted) {
+            if (working_data == decrypted.data && decrypted.data) {
                 encoded_metadata.encryption_present = true;
                 for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
-                    encoded_metadata.encryption_header[i] = compressed.data[i];
+                    encoded_metadata.encryption_header[i] = compressed_data[i];
                 }
                 for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
-                    encoded_metadata.encryption_tag[i] = compressed.data[compressed.size - ENCRYPTION_TAG_BYTES + i];
+                    encoded_metadata.encryption_tag[i] = compressed_data[compressed_size - ENCRYPTION_TAG_BYTES + i];
                 }
             }
             if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
                 encoded_metadata.lzma_present = true;
                 for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
                     encoded_metadata.lzma_header[i] = lzma_properties_embedded
-                                                          ? working->data[i]
+                                                          ? working_data[i]
                                                           : LZMA_FIXED_PROPERTIES[i];
                 }
                 write_le_u64(encoded_metadata.lzma_header + LZMA_PROPS_SIZE,
                              external_lzma_uncompressed_size);
-            } else if (working->size >= LZMA_HEADER_BYTES) {
+            } else if (working_size >= LZMA_HEADER_BYTES) {
                 encoded_metadata.lzma_present = true;
                 for (usize i = 0u; i < LZMA_HEADER_BYTES; ++i) {
-                    encoded_metadata.lzma_header[i] = working->data[i];
+                    encoded_metadata.lzma_header[i] = working_data[i];
                 }
             }
             has_payload = true;
@@ -7951,13 +8183,39 @@ struct DecoderContext {
             ecc_failed = true;
             return false;
         }
-        const u8* decode_data = data;
-        usize decode_bits = size_in_bits;
+        ByteBuffer stealth_archive;
+        bool stealth_container = false;
+        bool stealth_opened = decode_stealth_container(data,
+                                                       byte_count,
+                                                       password,
+                                                       password_length,
+                                                       stealth_archive,
+                                                       stealth_container);
+        if (stealth_container) {
+            password_attempted = true;
+            if (!stealth_opened) {
+                password_failed = true;
+                return false;
+            }
+            payload.release();
+            payload.data = stealth_archive.data;
+            payload.size = stealth_archive.size;
+            payload.capacity = stealth_archive.capacity;
+            stealth_archive.data = 0;
+            stealth_archive.size = 0u;
+            stealth_archive.capacity = 0u;
+            has_payload = true;
+            return true;
+        }
+        const u8* compressed_data = data;
+        usize compressed_size = byte_count;
+        const u8* decode_data = compressed_data;
+        usize decode_bits = compressed_size * 8u;
         ByteBuffer decrypted;
         if (have_password) {
             password_attempted = true;
-            DecryptStatus status = decrypt_payload_buffer(data,
-                                                          byte_count,
+            DecryptStatus status = decrypt_payload_buffer(compressed_data,
+                                                          compressed_size,
                                                           password,
                                                           password_length,
                                                           decrypted);
@@ -7981,10 +8239,10 @@ struct DecoderContext {
         if (decode_data == decrypted.data && decrypted.data) {
             encoded_metadata.encryption_present = true;
             for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
-                encoded_metadata.encryption_header[i] = data[i];
+                encoded_metadata.encryption_header[i] = compressed_data[i];
             }
             for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
-                encoded_metadata.encryption_tag[i] = data[byte_count - ENCRYPTION_TAG_BYTES + i];
+                encoded_metadata.encryption_tag[i] = compressed_data[compressed_size - ENCRYPTION_TAG_BYTES + i];
             }
         }
         if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
@@ -24691,7 +24949,7 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
         return false;
     }
     if (!MetadataTile::derive_schema_payload_layout(tile_values) ||
-        tile_values.page_bits != frame_bit_count) {
+        tile_values.page_bits > frame_bit_count) {
         return false;
     }
     return MetadataTile::build_tile_bits(tile_values, tile_bitfield, &tile_active_mask);
@@ -26067,7 +26325,12 @@ static void write_encode_help() {
     console_line(1, "                       --overlay-fraction also requires --overlay-ppm. Overlay bits are reserved per RS block.");
     console_line(1, "  --overlay-ignore-colors LIST  Skip overlay pixels matching named or hex colors.");
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
-    console_line(1, "  --random-data HEX    Required with --password: 28 random bytes as 56 hex digits (16-byte salt + 12-byte nonce).");
+    console_line(1, "  --random-data HEX    28 random bytes as 56 hex digits; required with --password and page filler.");
+    console_line(1, "  --hidden R|fill      Hidden-capacity ratio to visible data, or fill the current page; 0 disables it.");
+    console_line(1, "  --hidden-input PATH  Add a hidden file/directory; requires --hidden-password.");
+    console_line(1, "  --hidden-password TEXT  Password for hidden archive; must differ from --password.");
+    console_line(1, "  --fill-pages N       Fill through N physical pages; requires --hidden fill or --ecc fill.");
+    console_line(1, "                       --hidden fill and --ecc fill cannot be combined.");
     console_line(1, "");
     console_line(1, "Footer customization:");
     console_line(1, "  --footer TEXT        Footer template; %page and %totalpages expand per page, \\% is literal %.");
@@ -26586,8 +26849,15 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
         }
     }
 
-    if (!MetadataTile::fisher_yates_unshuffle(erased_symbols.data,
-                                              erased_symbols.size)) return false;
+    u64 protected_bytes_u64 = ecc_summary.original_bytes;
+    if (ecc_summary.enabled) {
+        u64 block_total = (u64)ecc_summary.block_data_symbols + ecc_summary.parity_symbols;
+        if (!block_total || ecc_summary.block_count > U64_MAX_VALUE / block_total) return false;
+        protected_bytes_u64 = block_total * ecc_summary.block_count;
+    }
+    if (protected_bytes_u64 == 0u || protected_bytes_u64 > frame_bytes_u64 ||
+        !MetadataTile::fisher_yates_unshuffle(erased_symbols.data,
+                                              (usize)protected_bytes_u64)) return false;
     u32 worst_block_erasures = 0u;
     if (ecc_summary.enabled) {
         if (!ecc_summary.block_data_symbols || !ecc_summary.parity_symbols ||
@@ -27085,13 +27355,22 @@ static int command_encode(int arg_count, char** args) {
     static const usize MAX_INPUT_ITEMS = 512u;
     const char* input_paths[MAX_INPUT_ITEMS];
     usize input_count = 0u;
+    const char* hidden_input_paths[MAX_INPUT_ITEMS];
+    usize hidden_input_count = 0u;
     makocode::ByteBuffer footer_buffer;
     makocode::ByteBuffer password_buffer;
+    makocode::ByteBuffer hidden_password_buffer;
     makocode::ByteBuffer random_data_buffer;
     makocode::ByteBuffer output_dir_buffer;
     makocode::ByteBuffer prefix_buffer;
     bool have_password = false;
+    bool have_hidden_password = false;
     bool have_random_data = false;
+    bool hidden_option_specified = false;
+    bool hidden_fill = false;
+    double hidden_ratio = 0.0;
+    bool fill_pages_specified = false;
+    u64 fill_pages = 0u;
     bool have_footer = false;
     const char* output_dir = ".";
     bool have_output_dir = false;
@@ -27345,6 +27624,68 @@ static int command_encode(int arg_count, char** args) {
             ecc_mode = ECC_EXPLICIT_RATIO;
             continue;
         }
+        const char hidden_prefix[] = "--hidden=";
+        const char* hidden_value = 0;
+        usize hidden_value_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--hidden")) {
+            if (hidden_option_specified || (i + 1) >= arg_count) {
+                console_line(2, "encode: --hidden requires a ratio or 'fill' and may be specified only once");
+                return 1;
+            }
+            hidden_value = args[++i];
+            hidden_value_length = ascii_length(hidden_value);
+        } else if (ascii_starts_with(arg, hidden_prefix)) {
+            if (hidden_option_specified) {
+                console_line(2, "encode: --hidden may be specified only once");
+                return 1;
+            }
+            hidden_value = arg + sizeof(hidden_prefix) - 1u;
+            hidden_value_length = ascii_length(hidden_value);
+        }
+        if (hidden_value) {
+            if (!hidden_value_length) {
+                console_line(2, "encode: --hidden requires a ratio or 'fill'");
+                return 1;
+            }
+            hidden_option_specified = true;
+            if (ascii_equals_token(hidden_value, hidden_value_length, "fill")) {
+                hidden_fill = true;
+            } else {
+                u64 numerator = 0u;
+                u64 denominator = 1u;
+                if (!ascii_to_fraction(hidden_value, hidden_value_length, numerator, denominator) ||
+                    (long double)numerator / (long double)denominator > 64.0L) {
+                    console_line(2, "encode: --hidden ratio must be between 0 and 64, or 'fill'");
+                    return 1;
+                }
+                hidden_ratio = (double)numerator / (double)denominator;
+            }
+            continue;
+        }
+        const char fill_pages_prefix[] = "--fill-pages=";
+        const char* fill_pages_value = 0;
+        if (ascii_equals_token(arg, ascii_length(arg), "--fill-pages")) {
+            if ((i + 1) >= arg_count) {
+                console_line(2, "encode: --fill-pages requires a positive page count and may be specified once");
+                return 1;
+            }
+            fill_pages_value = args[++i];
+        } else if (ascii_starts_with(arg, fill_pages_prefix)) {
+            fill_pages_value = arg + sizeof(fill_pages_prefix) - 1u;
+        }
+        if (fill_pages_value) {
+            if (fill_pages_specified) {
+                console_line(2, "encode: --fill-pages may be specified only once");
+                return 1;
+            }
+            usize length = ascii_length(fill_pages_value);
+            if (!ascii_to_u64(fill_pages_value, length, &fill_pages) || !fill_pages || fill_pages > 1000000u) {
+                console_line(2, "encode: --fill-pages must be between 1 and 1000000");
+                return 1;
+            }
+            fill_pages_specified = true;
+            continue;
+        }
         const char input_prefix[] = "--input=";
         const char* input_value = 0;
         if (ascii_equals_token(arg, ascii_length(arg), "--input")) {
@@ -27371,6 +27712,25 @@ static int command_encode(int arg_count, char** args) {
                 return 1;
             }
             input_paths[input_count++] = input_value;
+            continue;
+        }
+        const char hidden_input_prefix[] = "--hidden-input=";
+        const char* hidden_input_value = 0;
+        if (ascii_equals_token(arg, ascii_length(arg), "--hidden-input")) {
+            if ((i + 1) >= arg_count || !args[i + 1] || args[i + 1][0] == '\0') {
+                console_line(2, "encode: --hidden-input requires a file or directory path");
+                return 1;
+            }
+            hidden_input_value = args[++i];
+        } else if (ascii_starts_with(arg, hidden_input_prefix)) {
+            hidden_input_value = arg + sizeof(hidden_input_prefix) - 1u;
+        }
+        if (hidden_input_value) {
+            if (!hidden_input_value[0] || hidden_input_count >= MAX_INPUT_ITEMS) {
+                console_line(2, "encode: invalid or too many --hidden-input paths");
+                return 1;
+            }
+            hidden_input_paths[hidden_input_count++] = hidden_input_value;
             continue;
         }
         const char footer_prefix[] = "--footer=";
@@ -27519,6 +27879,40 @@ static int command_encode(int arg_count, char** args) {
             have_password = true;
             continue;
         }
+        const char hidden_password_prefix[] = "--hidden-password=";
+        const char* hidden_password_value = 0;
+        usize hidden_password_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--hidden-password")) {
+            if (have_hidden_password || (i + 1) >= arg_count) {
+                console_line(2, "encode: --hidden-password requires a non-empty value and may be specified once");
+                return 1;
+            }
+            hidden_password_value = args[++i];
+            hidden_password_length = ascii_length(hidden_password_value);
+        } else if (ascii_starts_with(arg, hidden_password_prefix)) {
+            if (have_hidden_password) {
+                console_line(2, "encode: --hidden-password may be specified only once");
+                return 1;
+            }
+            hidden_password_value = arg + sizeof(hidden_password_prefix) - 1u;
+            hidden_password_length = ascii_length(hidden_password_value);
+        }
+        if (hidden_password_value) {
+            if (!hidden_password_length) {
+                console_line(2, "encode: --hidden-password requires a non-empty value");
+                return 1;
+            }
+            if (!hidden_password_buffer.ensure(hidden_password_length)) {
+                console_line(2, "encode: failed to allocate hidden password buffer");
+                return 1;
+            }
+            for (usize j = 0u; j < hidden_password_length; ++j) {
+                hidden_password_buffer.data[j] = (u8)hidden_password_value[j];
+            }
+            hidden_password_buffer.size = hidden_password_length;
+            have_hidden_password = true;
+            continue;
+        }
         console_write(2, "encode: unknown option: ");
         console_line(2, arg);
         return 1;
@@ -27531,8 +27925,42 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --overlay-ignore-colors requires --overlay-ppm");
         return 1;
     }
-    if (have_password != have_random_data) {
-        console_line(2, "encode: --password and --random-data must be supplied together");
+    if (have_password && !have_random_data) {
+        console_line(2, "encode: --password requires --random-data");
+        return 1;
+    }
+    if (have_random_data && !have_password && !fill_pages_specified) {
+        console_line(2, "encode: --random-data requires --password or --fill-pages");
+        return 1;
+    }
+    if (fill_pages_specified && !have_random_data) {
+        console_line(2, "encode: --fill-pages requires --random-data for cryptographic filler");
+        return 1;
+    }
+    bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
+    if ((hidden_input_count > 0u) != have_hidden_password) {
+        console_line(2, "encode: --hidden-input and --hidden-password must be supplied together");
+        return 1;
+    }
+    if ((hidden_input_count > 0u || have_hidden_password) && !hidden_mode_enabled) {
+        console_line(2, "encode: hidden inputs and password require --hidden with a positive ratio or 'fill'");
+        return 1;
+    }
+    if (hidden_mode_enabled && (!have_password || !have_random_data)) {
+        console_line(2, "encode: --hidden requires --password and --random-data to protect the visible volume length");
+        return 1;
+    }
+    if (have_hidden_password && password_buffer.size == hidden_password_buffer.size &&
+        MetadataTile::constant_time_equal(password_buffer.data, hidden_password_buffer.data, password_buffer.size)) {
+        console_line(2, "encode: visible and hidden passwords must differ");
+        return 1;
+    }
+    if (hidden_fill && ecc_mode == ECC_FILL) {
+        console_line(2, "encode: --hidden fill and --ecc fill compete for the same page capacity");
+        return 1;
+    }
+    if (fill_pages_specified && !hidden_fill && ecc_mode != ECC_FILL) {
+        console_line(2, "encode: --fill-pages requires --hidden fill or --ecc fill");
         return 1;
     }
     if (mapping.palette_set) {
@@ -27669,6 +28097,52 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: failed to finalize archive");
         return 1;
     }
+    ArchiveBuildContext hidden_archive;
+    if (hidden_input_count > 0u) {
+        if (!archive_init(hidden_archive)) {
+            console_line(2, "encode: failed to initialize hidden archive buffer");
+            return 1;
+        }
+        for (usize path_index = 0u; path_index < hidden_input_count; ++path_index) {
+            const char* input_path = hidden_input_paths[path_index];
+            struct stat path_info;
+            if (stat(input_path, &path_info) != 0) {
+                console_write(2, "encode: unable to stat hidden input ");
+                console_line(2, input_path);
+                return 1;
+            }
+            makocode::ByteBuffer normalized_path;
+            if (!normalize_store_path(input_path, normalized_path)) {
+                console_write(2, "encode: failed to normalize hidden input path ");
+                console_line(2, input_path);
+                return 1;
+            }
+            const char* stored_rel = (const char*)normalized_path.data;
+            if (S_ISDIR(path_info.st_mode)) {
+                if (!archive_collect_directory(input_path, stored_rel, hidden_archive)) return 1;
+            } else if (S_ISREG(path_info.st_mode)) {
+                makocode::ByteBuffer file_data;
+                if (!read_entire_file(input_path, file_data)) {
+                    console_write(2, "encode: failed to read hidden input ");
+                    console_line(2, input_path);
+                    return 1;
+                }
+                if (!archive_add_file(hidden_archive, stored_rel, file_data.data, file_data.size)) {
+                    file_data.release();
+                    return 1;
+                }
+                file_data.release();
+            } else {
+                console_write(2, "encode: unsupported hidden input type for ");
+                console_line(2, input_path);
+                return 1;
+            }
+        }
+        if (!hidden_archive.entry_count || !archive_finalize(hidden_archive)) {
+            console_line(2, "encode: failed to finalize hidden archive");
+            return 1;
+        }
+    }
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     compute_page_dimensions(mapping, width_pixels, height_pixels);
@@ -27681,8 +28155,277 @@ static int command_encode(int arg_count, char** args) {
         return 1;
     }
     usize ecc_payload_bytes = compressed_for_sizing.size;
-    compressed_for_sizing.release();
-    if (have_password) {
+    makocode::ByteBuffer stealth_container;
+    if (hidden_mode_enabled) {
+        makocode::ByteBuffer visible_body;
+        makocode::ByteBuffer hidden_compressed;
+        makocode::ByteBuffer hidden_body;
+        makocode::ByteBuffer visible_descriptor;
+        makocode::ByteBuffer hidden_descriptor;
+        u8 visible_key[32];
+        u8 hidden_key[32];
+        const u8* salt = random_data_buffer.data;
+        const u8* nonce_seed = random_data_buffer.data + MetadataTile::ENCRYPTION_SALT_BYTES;
+        u8 prefix[MetadataTile::STEALTH_CONTAINER_PREFIX_BYTES];
+        for (usize i = 0u; i < MetadataTile::ENCRYPTION_SALT_BYTES; ++i) prefix[i] = salt[i];
+        for (usize i = 0u; i < MetadataTile::ENCRYPTION_NONCE_BYTES; ++i) {
+            prefix[MetadataTile::ENCRYPTION_SALT_BYTES + i] = nonce_seed[i];
+        }
+        bool container_ok = MetadataTile::stealth_derive_base_key((const char*)password_buffer.data,
+                                                    password_buffer.size, salt, visible_key) &&
+                            MetadataTile::stealth_encrypt_blob(compressed_for_sizing.data,
+                                                 compressed_for_sizing.size,
+                                                 visible_key, nonce_seed, prefix, sizeof(prefix),
+                                                 "visible body", visible_body);
+        if (container_ok && hidden_input_count) {
+            container_ok = lzma_compress(hidden_archive.buffer.data,
+                                         hidden_archive.buffer.size,
+                                         hidden_compressed,
+                                         true) &&
+                           MetadataTile::stealth_derive_base_key((const char*)hidden_password_buffer.data,
+                                                   hidden_password_buffer.size, salt, hidden_key) &&
+                           MetadataTile::stealth_encrypt_blob(hidden_compressed.data,
+                                                hidden_compressed.size,
+                                                hidden_key, nonce_seed, prefix, sizeof(prefix),
+                                                "hidden body", hidden_body);
+        }
+        u64 hidden_capacity = 0u;
+        if (container_ok && hidden_fill) {
+            PageFooterConfig capacity_footer = footer_config;
+            FooterLayout capacity_layout;
+            u64 capacity_bits_per_page = 0u;
+            u64 capacity_pages = fill_pages_specified ? fill_pages : 1u;
+            capacity_footer.max_text_length = footer_compute_max_text_length(capacity_footer, capacity_pages);
+            if (!compute_footer_layout(width_pixels, height_pixels, capacity_footer, capacity_layout) ||
+                !compute_bits_per_page(mapping, width_pixels, height_pixels,
+                                       capacity_layout.data_height_pixels, capacity_bits_per_page)) {
+                container_ok = false;
+            } else {
+                if (capacity_bits_per_page > U64_MAX_VALUE / capacity_pages) {
+                    container_ok = false;
+                }
+                u64 total_capacity_bits = container_ok
+                                              ? capacity_bits_per_page * capacity_pages
+                                              : 0u;
+                u64 used = (u64)MetadataTile::STEALTH_CONTAINER_HEADER_BYTES + (u64)visible_body.size;
+                double capacity_redundancy = ecc_mode == ECC_EXPLICIT_RATIO
+                                                 ? ecc_redundancy
+                                                 : (ecc_mode == ECC_AUTO_MINIMUM ? 0.5 : 0.0);
+                u64 low = 0u;
+                u64 high = total_capacity_bits / 8u;
+                if (high > (u64)USIZE_MAX_VALUE) high = (u64)USIZE_MAX_VALUE;
+                while (container_ok && low < high) {
+                    u64 middle = low + (high - low + 1u) / 2u;
+                    u64 required_bits = 0u;
+                    if (capacity_redundancy > 0.0) {
+                        u16 block_data = 0u;
+                        u16 parity_symbols = 0u;
+                        u64 block_count = 0u;
+                        if (!makocode::compute_ecc_layout((usize)middle,
+                                                          capacity_redundancy,
+                                                          block_data,
+                                                          parity_symbols,
+                                                          block_count) ||
+                            !block_data || !parity_symbols || !block_count) {
+                            high = middle - 1u;
+                            continue;
+                        }
+                        u64 block_total = (u64)block_data + parity_symbols;
+                        if (block_count > U64_MAX_VALUE / block_total / 8u) {
+                            high = middle - 1u;
+                            continue;
+                        }
+                        required_bits = block_count * block_total * 8u;
+                    } else {
+                        required_bits = middle * 8u;
+                    }
+                    if (required_bits <= total_capacity_bits) low = middle;
+                    else high = middle - 1u;
+                }
+                if (container_ok && low > used) {
+                    hidden_capacity = low - used;
+                } else {
+                    container_ok = false;
+                }
+            }
+        } else if (container_ok && hidden_ratio > 0.0) {
+            long double requested = ceill((long double)visible_body.size *
+                                          (long double)hidden_ratio);
+            if (requested > (long double)U64_MAX_VALUE) container_ok = false;
+            else hidden_capacity = (u64)requested;
+        }
+        if (container_ok && hidden_capacity < (u64)hidden_body.size) {
+            console_line(2, "encode: hidden payload exceeds the --hidden capacity");
+            container_ok = false;
+        }
+        u64 carrier_minimum_size = 0u;
+        if (container_ok &&
+            ((u64)visible_body.size > U64_MAX_VALUE -
+                 (u64)MetadataTile::STEALTH_CONTAINER_HEADER_BYTES ||
+             hidden_capacity > U64_MAX_VALUE -
+                 (u64)MetadataTile::STEALTH_CONTAINER_HEADER_BYTES -
+                 (u64)visible_body.size)) {
+            container_ok = false;
+        } else if (container_ok) {
+            carrier_minimum_size = (u64)MetadataTile::STEALTH_CONTAINER_HEADER_BYTES +
+                                   (u64)visible_body.size + hidden_capacity;
+        }
+        u64 carrier_size = carrier_minimum_size;
+        if (container_ok && !hidden_fill) {
+            double capacity_redundancy = ecc_mode == ECC_EXPLICIT_RATIO
+                                             ? ecc_redundancy
+                                             : (ecc_mode == ECC_AUTO_MINIMUM ? 0.5 : 3.0);
+            u64 target_page_count = 1u;
+            u64 capacity_bits_per_page = 0u;
+            u64 total_capacity_bits = 0u;
+            for (u64 pass = 0u; pass < 1000000u; ++pass) {
+                PageFooterConfig capacity_footer = footer_config;
+                capacity_footer.max_text_length = footer_compute_max_text_length(
+                    capacity_footer, target_page_count);
+                FooterLayout capacity_layout;
+                if (!compute_footer_layout(width_pixels, height_pixels,
+                                           capacity_footer, capacity_layout) ||
+                    !compute_bits_per_page(mapping, width_pixels, height_pixels,
+                                           capacity_layout.data_height_pixels,
+                                           capacity_bits_per_page) ||
+                    !capacity_bits_per_page ||
+                    capacity_bits_per_page > U64_MAX_VALUE / target_page_count) {
+                    container_ok = false;
+                    break;
+                }
+                total_capacity_bits = capacity_bits_per_page * target_page_count;
+                u64 required_bits = 0u;
+                if (capacity_redundancy > 0.0) {
+                    u16 block_data = 0u;
+                    u16 parity_symbols = 0u;
+                    u64 block_count = 0u;
+                    u64 block_total = 0u;
+                    if (!makocode::compute_ecc_layout((usize)carrier_minimum_size,
+                                                      capacity_redundancy,
+                                                      block_data,
+                                                      parity_symbols,
+                                                      block_count) ||
+                        !block_data || !parity_symbols || !block_count) {
+                        container_ok = false;
+                        break;
+                    }
+                    block_total = (u64)block_data + parity_symbols;
+                    if (block_count > U64_MAX_VALUE / block_total / 8u) {
+                        container_ok = false;
+                        break;
+                    }
+                    required_bits = block_count * block_total * 8u;
+                } else {
+                    if (carrier_minimum_size > U64_MAX_VALUE / 8u) {
+                        container_ok = false;
+                        break;
+                    }
+                    required_bits = carrier_minimum_size * 8u;
+                }
+                if (required_bits <= total_capacity_bits) break;
+                ++target_page_count;
+                if (target_page_count == 1000000u) container_ok = false;
+            }
+            if (container_ok) {
+                u64 low = 0u;
+                u64 high = total_capacity_bits / 8u;
+                if (high > (u64)USIZE_MAX_VALUE) high = (u64)USIZE_MAX_VALUE;
+                while (low < high) {
+                    u64 middle = low + (high - low + 1u) / 2u;
+                    u64 required_bits = 0u;
+                    if (capacity_redundancy > 0.0) {
+                        u16 block_data = 0u;
+                        u16 parity_symbols = 0u;
+                        u64 block_count = 0u;
+                        if (!makocode::compute_ecc_layout((usize)middle,
+                                                          capacity_redundancy,
+                                                          block_data,
+                                                          parity_symbols,
+                                                          block_count) ||
+                            !block_data || !parity_symbols || !block_count) {
+                            high = middle - 1u;
+                            continue;
+                        }
+                        u64 block_total = (u64)block_data + parity_symbols;
+                        if (block_count > U64_MAX_VALUE / block_total / 8u) {
+                            high = middle - 1u;
+                            continue;
+                        }
+                        required_bits = block_count * block_total * 8u;
+                    } else {
+                        required_bits = middle * 8u;
+                    }
+                    if (required_bits <= total_capacity_bits) low = middle;
+                    else high = middle - 1u;
+                }
+                if (low < carrier_minimum_size) container_ok = false;
+                else carrier_size = low;
+            }
+        }
+        if (container_ok) {
+            if (carrier_size > (u64)USIZE_MAX_VALUE ||
+                !MetadataTile::stealth_fill_random(stealth_container, (usize)carrier_size,
+                                     random_data_buffer.data, random_data_buffer.size,
+                                     "makocode hidden-region fill v1")) {
+                container_ok = false;
+            }
+        }
+        if (container_ok) {
+            memcpy(stealth_container.data, prefix, sizeof(prefix));
+            u8 visible_descriptor_plain[8];
+            write_le_u64(visible_descriptor_plain, (u64)visible_body.size);
+            container_ok = MetadataTile::stealth_encrypt_blob(visible_descriptor_plain,
+                                                sizeof(visible_descriptor_plain),
+                                                visible_key, nonce_seed, prefix, sizeof(prefix),
+                                                "visible descriptor", visible_descriptor);
+            if (container_ok && hidden_input_count) {
+                u8 hidden_descriptor_plain[24];
+                write_le_u64(hidden_descriptor_plain,
+                             (u64)MetadataTile::STEALTH_CONTAINER_HEADER_BYTES + (u64)visible_body.size);
+                write_le_u64(hidden_descriptor_plain + 8u, (u64)hidden_body.size);
+                write_le_u64(hidden_descriptor_plain + 16u, hidden_capacity);
+                container_ok = MetadataTile::stealth_encrypt_blob(hidden_descriptor_plain,
+                                                    sizeof(hidden_descriptor_plain),
+                                                    hidden_key, nonce_seed, prefix, sizeof(prefix),
+                                                    "hidden descriptor", hidden_descriptor);
+            }
+            if (container_ok && visible_descriptor.size == MetadataTile::STEALTH_VISIBLE_DESCRIPTOR_BYTES &&
+                (hidden_descriptor.size == 0u || hidden_descriptor.size == MetadataTile::STEALTH_HIDDEN_DESCRIPTOR_BYTES)) {
+                memcpy(stealth_container.data + MetadataTile::STEALTH_CONTAINER_PREFIX_BYTES,
+                       visible_descriptor.data, visible_descriptor.size);
+                if (hidden_descriptor.size) {
+                    memcpy(stealth_container.data + MetadataTile::STEALTH_CONTAINER_PREFIX_BYTES +
+                               MetadataTile::STEALTH_VISIBLE_DESCRIPTOR_BYTES,
+                           hidden_descriptor.data, hidden_descriptor.size);
+                }
+                memcpy(stealth_container.data + MetadataTile::STEALTH_CONTAINER_HEADER_BYTES,
+                       visible_body.data, visible_body.size);
+                if (hidden_body.size) {
+                    memcpy(stealth_container.data + MetadataTile::STEALTH_CONTAINER_HEADER_BYTES +
+                               visible_body.size,
+                           hidden_body.data, hidden_body.size);
+                }
+            } else {
+                container_ok = false;
+            }
+        }
+        for (usize i = 0u; i < sizeof(visible_key); ++i) visible_key[i] = 0u;
+        for (usize i = 0u; i < sizeof(hidden_key); ++i) hidden_key[i] = 0u;
+        visible_body.release();
+        hidden_compressed.release();
+        hidden_body.release();
+        visible_descriptor.release();
+        hidden_descriptor.release();
+        compressed_for_sizing.release();
+        if (!container_ok) {
+            console_line(2, "encode: failed to construct hidden-capable data section");
+            return 1;
+        }
+        ecc_payload_bytes = stealth_container.size;
+    } else {
+        compressed_for_sizing.release();
+    }
+    if (have_password && !hidden_mode_enabled) {
         usize encryption_overhead = makocode::ENCRYPTION_HEADER_BYTES + makocode::ENCRYPTION_TAG_BYTES;
         if (ecc_payload_bytes > USIZE_MAX_VALUE - encryption_overhead) {
             console_line(2, "encode: encrypted payload size overflow");
@@ -28024,7 +28767,7 @@ static int command_encode(int arg_count, char** args) {
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
     encoder.config.overlay_bits = overlay_bits;
-    if (have_password) {
+    if (have_password && !hidden_mode_enabled) {
         if (!encoder.set_password((const char*)password_buffer.data, password_buffer.size)) {
             console_line(2, "encode: failed to set encryption password");
             return 1;
@@ -28034,7 +28777,11 @@ static int command_encode(int arg_count, char** args) {
             return 1;
         }
     }
-    if (!encoder.set_payload(archive.buffer.data, archive.buffer.size)) {
+    if (hidden_mode_enabled) {
+        encoder.payload_is_preencoded = true;
+    }
+    if (!encoder.set_payload(hidden_mode_enabled ? stealth_container.data : archive.buffer.data,
+                             hidden_mode_enabled ? stealth_container.size : archive.buffer.size)) {
         console_line(2, "encode: failed to set payload");
         return 1;
     }
@@ -28075,6 +28822,63 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: payload does not fit the maximum automatic page dimensions");
         return 1;
     }
+    if (fill_pages_specified || hidden_fill) {
+        u64 target_page_count = fill_pages_specified ? fill_pages : 1u;
+        PageFooterConfig fill_footer = footer_config;
+        fill_footer.max_text_length = footer_compute_max_text_length(fill_footer, target_page_count);
+        FooterLayout fill_layout;
+        u64 fill_bits_per_page = 0u;
+        if (!compute_footer_layout(width_pixels, height_pixels, fill_footer, fill_layout) ||
+            !compute_bits_per_page(mapping,
+                                   width_pixels,
+                                   height_pixels,
+                                   fill_layout.data_height_pixels,
+                                   fill_bits_per_page) ||
+            !fill_bits_per_page || fill_bits_per_page > U64_MAX_VALUE / target_page_count) {
+            console_line(2, "encode: unable to determine --fill-pages capacity");
+            return 1;
+        }
+        u64 target_bits = (fill_bits_per_page * target_page_count) & ~7ull;
+        if (frame_bit_count > target_bits) {
+            console_line(2, "encode: encoded data exceeds the requested --fill-pages capacity");
+            return 1;
+        }
+        u64 target_bytes_u64 = target_bits >> 3u;
+        if (target_bytes_u64 > (u64)USIZE_MAX_VALUE ||
+            (frame_bit_count & 7u) != 0u ||
+            frame_bits.size != (usize)(frame_bit_count >> 3u)) {
+            console_line(2, "encode: --fill-pages size is too large");
+            return 1;
+        }
+        usize original_bytes = frame_bits.size;
+        usize target_bytes = (usize)target_bytes_u64;
+        if (!frame_bits.ensure(target_bytes)) {
+            console_line(2, "encode: failed to prepare random page filler");
+            return 1;
+        }
+        makocode::ByteBuffer random_fill;
+        if (!MetadataTile::stealth_fill_random(random_fill,
+                                               target_bytes,
+                                               random_data_buffer.data,
+                                               random_data_buffer.size,
+                                               "makocode page fill v1")) {
+            console_line(2, "encode: failed to generate random page filler");
+            return 1;
+        }
+        if (target_bytes > original_bytes) {
+            memcpy(frame_bits.data + original_bytes,
+                   random_fill.data + original_bytes,
+                   target_bytes - original_bytes);
+            if (mapping.color_channels == 3u) {
+                for (usize i = original_bytes; i < target_bytes; ++i) {
+                    u8 rotate = (u8)((i % 3u) + 1u);
+                    frame_bits.data[i] = rotate_left_u8(frame_bits.data[i], rotate);
+                }
+            }
+        }
+        frame_bits.size = target_bytes;
+        frame_bit_count = target_bits;
+    }
     FooterLayout footer_layout;
     u32 layout_data_height = height_pixels;
     u64 bits_per_page = 0u;
@@ -28093,6 +28897,11 @@ static int command_encode(int arg_count, char** args) {
                              unknown_parity_budget,
                              overlay_erasure_budget)) {
         console_line(2, "encode: footer layout did not converge");
+        return 1;
+    }
+    if (overlay_fraction > 0.0 && page_count > 1u &&
+        ecc_mode == ECC_EXPLICIT_RATIO && ecc_redundancy < 0.5) {
+        console_line(2, "encode: multi-page overlays require --ecc of at least 0.5; larger overlays may require more");
         return 1;
     }
     if (overlay_ppm_path) {
@@ -28913,7 +29722,26 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         return false;
     }
     u64 page_bit_offset = (tile.page_index - 1u) * bits_per_page;
-    if (page_bit_offset >= tile.page_bits) return false;
+    if (page_bit_offset >= tile.page_bits) {
+        for (u32 row = 0u; row < apply_height; ++row) {
+            for (u32 column = 0u; column < base_page.width; ++column) {
+                usize pixel_index = (usize)row * (usize)base_page.width + (usize)column;
+                if (base_mask.data[pixel_index]) continue;
+                usize byte_index = pixel_index * 3u;
+                if (ignore_list &&
+                    overlay_color_matches_ignore(*ignore_list,
+                                                 overlay_page.pixels.data[byte_index],
+                                                 overlay_page.pixels.data[byte_index + 1u],
+                                                 overlay_page.pixels.data[byte_index + 2u])) {
+                    continue;
+                }
+                memcpy(base_page.pixels.data + byte_index,
+                       overlay_page.pixels.data + byte_index,
+                       3u);
+            }
+        }
+        return true;
+    }
     u64 centered_segment_bits = tile.page_bits - page_bit_offset;
     if (centered_segment_bits > bits_per_page) centered_segment_bits = bits_per_page;
     MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
@@ -29838,6 +30666,32 @@ retry_decode:
                                  aggregate_state.has_ecc_parity &&
                                  aggregate_state.has_ecc_block_count &&
                                  aggregate_state.has_ecc_original_bytes;
+
+    if (metadata_v2_layout && ecc_metadata_complete) {
+        u64 block_total = aggregate_state.ecc_block_data_value +
+                          aggregate_state.ecc_parity_value;
+        if (!block_total || aggregate_state.ecc_block_count_value > U64_MAX_VALUE / block_total) {
+            console_line(2, "decode: invalid metadata ECC block layout");
+            return 1;
+        }
+        u64 protected_bytes_u64 = block_total * aggregate_state.ecc_block_count_value;
+        if (protected_bytes_u64 > (u64)USIZE_MAX_VALUE ||
+            protected_bytes_u64 > U64_MAX_VALUE / 8u ||
+            protected_bytes_u64 > bitstream.size ||
+            protected_bytes_u64 * 8u > bit_count) {
+            console_line(2, "decode: metadata ECC payload length exceeds extracted data");
+            return 1;
+        }
+        bitstream.size = (usize)protected_bytes_u64;
+        bit_count = protected_bytes_u64 * 8u;
+        if (erased_payload_symbols.data) {
+            if (protected_bytes_u64 > erased_payload_symbols.size) {
+                console_line(2, "decode: metadata ECC erasure map is truncated");
+                return 1;
+            }
+            erased_payload_symbols.size = (usize)protected_bytes_u64;
+        }
+    }
     
     if (!metadata_v2_layout && !bitstream_header_valid) {
         if (ecc_metadata_complete &&

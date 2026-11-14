@@ -397,3 +397,6 @@ test_case 0105_footer_geometry roundtrip "Page with a footer taller than 32 rows
 test_case 0106_overlay_footer_geometry overlay "Overlay preserves a page with a 40-row human footer" \
     MAKO_OVERLAY_PAGE_WIDTH=640 MAKO_OVERLAY_PAGE_HEIGHT=400 \
     MAKO_OVERLAY_SIZE=4096     "MAKO_OVERLAY_FOOTER=Archive title" MAKO_OVERLAY_FONT_SIZE=5
+
+test_case 0107_hidden_volumes_e2e script "Hidden-capacity, filler, ECC, overlay, and CLI validation matrix" \
+    test_hidden_volumes_e2e.sh
