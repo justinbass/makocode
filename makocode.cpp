@@ -12442,7 +12442,8 @@ static const GlyphPattern FOOTER_GLYPHS[] = {
     FOOTER_GLYPH_SIMPLE('v', "00000", "00000", "10001", "10001", "10001", "01010", "00100"),
     FOOTER_GLYPH_SIMPLE('w', "00000", "00000", "10001", "10001", "10101", "11011", "10001"),
     FOOTER_GLYPH_SIMPLE('x', "00000", "00000", "10001", "01010", "00100", "01010", "10001"),
-    FOOTER_GLYPH_CUSTOM('y', "00000", "00000", "10001", "10001", "01010", "00100", "00100", "01000")
+    FOOTER_GLYPH_CUSTOM('y', "00000", "00000", "10001", "10001", "01010", "00100", "00100", "01000"),
+    FOOTER_GLYPH_SIMPLE('z', "00000", "00000", "11111", "00010", "00100", "01000", "11111")
 };
 
 #undef FOOTER_GLYPH_CUSTOM
@@ -26496,8 +26497,11 @@ static void write_decode_help() {
 
 static void write_minify_help() {
     console_line(1, "makocode minify");
-    console_line(1, "Usage: makocode minify");
+    console_line(1, "Usage: makocode minify [--width PX] [--height PX]");
     console_line(1, "Strips comments/whitespace from makocode.cpp and emits makocode_minified.cpp.");
+    console_line(1, "With --width and/or --height, also renders PPM pages (2480x3508 defaults).");
+    console_line(1, "Source continues on numbered pages when it exceeds the page capacity.");
+    console_line(1, "Each LF is shown inline as a solid 5x7 block; the C++ output keeps its LF.");
 }
 
 static bool footer_char_is_allowed(char c) {
@@ -31631,10 +31635,68 @@ static int command_minify(int arg_count, char** args) {
         write_minify_help();
         return 0;
     }
-    (void)args;
-    if (arg_count > 0) {
-        console_line(2, "minify: this command does not accept arguments");
-        return 1;
+    bool have_width = false;
+    bool have_height = false;
+    u32 requested_width = 0u;
+    u32 requested_height = 0u;
+    for (int i = 0; i < arg_count; ++i) {
+        const char* arg = args[i];
+        const char* value_text = 0;
+        usize value_length = 0u;
+        bool is_width = false;
+        bool is_height = false;
+        if (ascii_equals_token(arg, ascii_length(arg), "--width") ||
+            ascii_equals_token(arg, ascii_length(arg), "--height")) {
+            if (i + 1 >= arg_count || !args[i + 1][0]) {
+                console_line(2, "minify: option requires a value");
+                return 1;
+            }
+            if (ascii_equals_token(arg, ascii_length(arg), "--width")) {
+                is_width = true;
+            } else {
+                is_height = true;
+            }
+            value_text = args[++i];
+            value_length = ascii_length(value_text);
+        } else if (ascii_starts_with(arg, "--width=")) {
+            is_width = true;
+            value_text = arg + 8u;
+            value_length = ascii_length(value_text);
+        } else if (ascii_starts_with(arg, "--height=")) {
+            is_height = true;
+            value_text = arg + 9u;
+            value_length = ascii_length(value_text);
+        } else {
+            console_line(2, "minify: this command does not accept arguments");
+            return 1;
+        }
+        if (!value_length) {
+            console_line(2, "minify: option requires a non-empty value");
+            return 1;
+        }
+        if (is_width || is_height) {
+            u64 parsed_value = 0u;
+            if (!ascii_to_u64(value_text, value_length, &parsed_value) ||
+                parsed_value == 0u || parsed_value > 0xFFFFFFFFu) {
+                console_line(2, "minify: width and height must be positive 32-bit integers");
+                return 1;
+            }
+            if (is_width) {
+                if (have_width) {
+                    console_line(2, "minify: --width may only be specified once");
+                    return 1;
+                }
+                have_width = true;
+                requested_width = (u32)parsed_value;
+            } else {
+                if (have_height) {
+                    console_line(2, "minify: --height may only be specified once");
+                    return 1;
+                }
+                have_height = true;
+                requested_height = (u32)parsed_value;
+            }
+        }
     }
     makocode::ByteBuffer source;
     if (!read_file_into_buffer("makocode.cpp", source)) {
@@ -31733,6 +31795,144 @@ static int command_minify(int arg_count, char** args) {
         return 1;
     }
     console_line(1, "minify: wrote makocode_minified.cpp");
+    if (!have_width && !have_height) {
+        return 0;
+    }
+
+    const u64 cell_width = (u64)FOOTER_BASE_GLYPH_WIDTH + 1u;
+    const u64 cell_height = (u64)FOOTER_BASE_GLYPH_HEIGHT;
+    u64 text_cells = (u64)stripped.size;
+    u64 image_width = have_width ? (u64)requested_width : (u64)DEFAULT_PAGE_WIDTH_PIXELS;
+    u64 image_height = have_height ? (u64)requested_height : (u64)DEFAULT_PAGE_HEIGHT_PIXELS;
+    if (image_width < cell_width || image_height < cell_height) {
+        console_line(2, "minify: page dimensions must fit at least one 5x8 character cell");
+        return 1;
+    }
+    if (image_width > 0xFFFFFFFFu || image_height > 0xFFFFFFFFu ||
+        image_width > U64_MAX_VALUE / image_height) {
+        console_line(2, "minify: rendered PPM dimensions exceed the supported range");
+        return 1;
+    }
+    u64 columns = image_width / cell_width;
+    u64 rows = image_height / cell_height;
+    if (columns > U64_MAX_VALUE / rows) {
+        console_line(2, "minify: page capacity exceeds the supported range");
+        return 1;
+    }
+    u64 page_capacity = columns * rows;
+    u64 page_count = text_cells / page_capacity + ((text_cells % page_capacity) ? 1u : 0u);
+    if (!page_count) page_count = 1u;
+    u64 pixel_count = image_width * image_height;
+    if (pixel_count > U64_MAX_VALUE / 3u ||
+        image_width > (u64)(USIZE_MAX_VALUE / 3u)) {
+        console_line(2, "minify: rendered PPM is too large");
+        return 1;
+    }
+    for (usize i = 0u; i < stripped.size; ++i) {
+        u8 ch = stripped.data[i];
+        if (ch != '\n' && (ch < 32u || ch > 126u)) {
+            console_line(2, "minify: PPM output supports printable ASCII and LF only");
+            return 1;
+        }
+    }
+    usize scanline_size = (usize)(image_width * 3u);
+    u8* scanline = (u8*)malloc((unsigned long)scanline_size);
+    if (!scanline) {
+        console_line(2, "minify: failed to allocate PPM scanline");
+        return 1;
+    }
+    bool ppm_ok = true;
+    char page_path[64];
+    for (u64 page_index = 0u; ppm_ok && page_index < page_count; ++page_index) {
+        int page_path_length = snprintf(page_path,
+                                        sizeof(page_path),
+                                        "makocode_minified_%04llu.ppm",
+                                        (unsigned long long)page_index);
+        if (page_path_length <= 0 || (usize)page_path_length >= sizeof(page_path)) {
+            ppm_ok = false;
+            break;
+        }
+        int ppm_fd = creat(page_path, 0644);
+        if (ppm_fd < 0) {
+            ppm_ok = false;
+            break;
+        }
+        char ppm_header[64];
+        int ppm_header_length = snprintf(ppm_header,
+                                         sizeof(ppm_header),
+                                         "P6\n%u %u\n255\n",
+                                         (u32)image_width,
+                                         (u32)image_height);
+        ppm_ok = ppm_header_length > 0 &&
+                 (usize)ppm_header_length < sizeof(ppm_header) &&
+                 write_all_fd(ppm_fd, (const u8*)ppm_header, (usize)ppm_header_length);
+        u64 page_start = page_index * page_capacity;
+        for (u64 y = 0u; ppm_ok && y < image_height; ++y) {
+            for (usize i = 0u; i < scanline_size; ++i) {
+                scanline[i] = 255u;
+            }
+            if (y < rows * cell_height) {
+                u64 glyph_row = y % cell_height;
+                u64 text_row = y / cell_height;
+                for (u64 column = 0u; column < columns; ++column) {
+                    u64 character_index = page_start + text_row * columns + column;
+                    if (character_index >= text_cells) {
+                        break;
+                    }
+                    u8 ch = stripped.data[(usize)character_index];
+                    const char* glyph_row_pattern = 0;
+                    if (ch == '\n') {
+                        if (glyph_row < 7u) {
+                            glyph_row_pattern = "11111";
+                        }
+                    } else {
+                        const GlyphPattern* glyph = footer_lookup_glyph((char)ch);
+                        if (glyph) {
+                            glyph_row_pattern = glyph->rows[glyph_row];
+                        }
+                    }
+                    if (glyph_row_pattern) {
+                        u64 pixel_left = column * cell_width;
+                        for (u32 glyph_column = 0u;
+                             glyph_column < FOOTER_BASE_GLYPH_WIDTH;
+                             ++glyph_column) {
+                            if (glyph_row_pattern[glyph_column] == '1') {
+                                u64 pixel_offset = (pixel_left + glyph_column) * 3u;
+                                scanline[(usize)pixel_offset] = 0u;
+                                scanline[(usize)pixel_offset + 1u] = 0u;
+                                scanline[(usize)pixel_offset + 2u] = 0u;
+                            }
+                        }
+                    }
+                }
+            }
+            ppm_ok = write_all_fd(ppm_fd, scanline, scanline_size);
+        }
+        close(ppm_fd);
+        if (!ppm_ok) {
+            unlink(page_path);
+        }
+    }
+    free(scanline);
+    if (!ppm_ok) {
+        console_line(2, "minify: failed to write PPM output");
+        return 1;
+    }
+    for (u64 stale_page = page_count; ; ++stale_page) {
+        int stale_path_length = snprintf(page_path,
+                                         sizeof(page_path),
+                                         "makocode_minified_%04llu.ppm",
+                                         (unsigned long long)stale_page);
+        if (stale_path_length <= 0 || (usize)stale_path_length >= sizeof(page_path) ||
+            unlink(page_path) != 0) {
+            break;
+        }
+    }
+    char page_count_text[32];
+    u64_to_ascii(page_count, page_count_text, sizeof(page_count_text));
+    console_write(1, "minify: wrote ");
+    console_write(1, page_count_text);
+    console_line(1, " PPM page(s)");
     return 0;
 }
 

@@ -1,10 +1,11 @@
 TODO
 
 Features:
-- Write minifed source code out using internal font, given page size. Write \r for newline? Improve font to handle most ASCII?
+- Default 2480x3508? Remove everywhere...
 - Multiple overlay images, an overlay image per page, or page range per overlay image(s)
 - Restic-like archive support
   - Content chunks, dedupe, append (based on previous scans, or store local). A new makocode subarg, not baked into encode/decode.
+  - Chunks can be approximately sized to fit the page given encoding parameters (usually pretty big)
 - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
   - Confirm that metadata includes all encoder inputs
