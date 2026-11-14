@@ -6573,7 +6573,8 @@ static bool lzma_decompress(const u8* input,
                             ByteBuffer& output,
                             u64 external_uncompressed_size = LZMA_SIZE_FROM_HEADER,
                             bool properties_embedded = true,
-                            usize* consumed_bytes_out = 0) {
+                            usize* consumed_bytes_out = 0,
+                            bool allow_partial = false) {
     if (consumed_bytes_out) *consumed_bytes_out = 0u;
     output.release();
     if (!input) {
@@ -6622,6 +6623,10 @@ static bool lzma_decompress(const u8* input,
                                  properties,
                                  LZMA_PROPS_SIZE);
     if (status != SZ_OK) {
+        if (allow_partial && dest_len > 0u) {
+            output.size = (usize)dest_len;
+            return true;
+        }
         return false;
     }
     if (consumed_bytes_out) *consumed_bytes_out = header_bytes + (usize)src_len;
@@ -6766,6 +6771,7 @@ struct EccDecodeStats {
     u64 total_parity_symbols;
     u64 total_blocks;
     u64 blocks_with_errors;
+    u64 unrecoverable_blocks;
     u64 header_copy_repairs;
 
     EccDecodeStats()
@@ -6773,6 +6779,7 @@ struct EccDecodeStats {
           total_parity_symbols(0u),
           total_blocks(0u),
           blocks_with_errors(0u),
+          unrecoverable_blocks(0u),
           header_copy_repairs(0u) {}
 };
 
@@ -7778,6 +7785,7 @@ static bool decode_ecc_payload(const u8* bytes,
     if (stats) {
         stats->corrected_symbols = 0u;
         stats->blocks_with_errors = 0u;
+        stats->unrecoverable_blocks = 0u;
         stats->total_blocks = header.block_count;
         stats->total_parity_symbols = (u64)header.parity * header.block_count;
         stats->header_copy_repairs = 0u;
@@ -7809,14 +7817,20 @@ static bool decode_ecc_payload(const u8* bytes,
                              &block_errors,
                              block_erasures,
                              block_erasure_count)) {
-            if (block_erasure_count == 0u) return false;
-            memcpy(block_buffer, original_block, block_total);
-            block_errors = 0u;
-            if (!rs_decode_block(block_buffer,
-                                 header.block_data,
-                                 header.parity,
-                                 &block_errors)) {
-                return false;
+            bool recovered_without_erasures = false;
+            if (block_erasure_count > 0u) {
+                memcpy(block_buffer, original_block, block_total);
+                block_errors = 0u;
+                recovered_without_erasures = rs_decode_block(block_buffer,
+                                                              header.block_data,
+                                                              header.parity,
+                                                              &block_errors);
+            }
+            if (!recovered_without_erasures) {
+                memcpy(block_buffer, original_block, block_total);
+                if (stats) {
+                    stats->unrecoverable_blocks += 1u;
+                }
             }
         }
         if (stats && block_errors > 0u) {
@@ -7885,6 +7899,7 @@ struct DecoderContext {
     ByteBuffer payload;
     bool has_payload;
     bool ecc_failed;
+    bool partial_payload;
     bool password_attempted;
     bool password_failed;
     bool password_not_encrypted;
@@ -7895,6 +7910,7 @@ struct DecoderContext {
         : payload(),
           has_payload(false),
           ecc_failed(false),
+          partial_payload(false),
           password_attempted(false),
           password_failed(false),
           password_not_encrypted(false),
@@ -7908,6 +7924,7 @@ struct DecoderContext {
         payload.release();
         has_payload = false;
         ecc_failed = false;
+        partial_payload = false;
         password_attempted = false;
         password_failed = false;
         password_not_encrypted = false;
@@ -7933,6 +7950,7 @@ struct DecoderContext {
         payload.release();
         has_payload = false;
         ecc_failed = false;
+        partial_payload = false;
         password_attempted = false;
         password_failed = false;
         password_not_encrypted = false;
@@ -8146,10 +8164,13 @@ struct DecoderContext {
                                  (usize)bit_total,
                                  payload,
                                  external_lzma_uncompressed_size,
-                                 lzma_properties_embedded)) {
+                                 lzma_properties_embedded,
+                                 (usize*)0,
+                                 ecc_stats.unrecoverable_blocks > 0u)) {
                 ecc_failed = true;
                 return false;
             }
+            partial_payload = ecc_stats.unrecoverable_blocks > 0u;
             encoded_metadata.ecc_present = true;
             encoded_metadata.ecc = header.encoded_header;
             if (working_data == decrypted.data && decrypted.data) {
@@ -26006,7 +26027,8 @@ typedef bool (*ArchiveEntryCallback)(u8,
 static bool archive_parse(const makocode::ByteBuffer& archive,
                           ArchiveEntryCallback callback,
                           void* callback_context,
-                          u64* entry_count_out) {
+                          u64* entry_count_out,
+                          bool allow_partial = false) {
     if (!archive.data || archive.size == 0u ||
         archive.size > (usize)(USIZE_MAX_VALUE / 8u)) return false;
     makocode::BitReader reader;
@@ -26019,17 +26041,28 @@ static bool archive_parse(const makocode::ByteBuffer& archive,
     if (entry_count == 0u) {
         u64 stream_size_value = 0u;
         if (!MetadataTile::read_compact_u64(reader, stream_size_value) ||
-            stream_size_value > (u64)USIZE_MAX_VALUE ||
-            stream_size_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
+            stream_size_value > (u64)USIZE_MAX_VALUE) {
             return false;
         }
-        usize stream_size = (usize)stream_size_value;
+        usize available_size = (usize)((reader.bit_count - reader.cursor) / 8u);
+        bool truncated = stream_size_value > (u64)available_size;
+        if (truncated && !allow_partial) return false;
+        usize stream_size = truncated ? available_size : (usize)stream_size_value;
         makocode::ByteBuffer stream_data;
         if (stream_size && !stream_data.ensure(stream_size)) return false;
         stream_data.size = stream_size;
         for (usize i = 0u; i < stream_size; ++i) {
             stream_data.data[i] = (u8)reader.read_bits(8u);
             if (reader.failed) return false;
+        }
+        if (truncated) {
+            return !callback || callback(2u,
+                                         (const char*)0,
+                                         0u,
+                                         stream_data.data,
+                                         stream_size,
+                                         0u,
+                                         callback_context);
         }
         usize remaining_bits = reader.bit_count - reader.cursor;
         if (remaining_bits > 7u) return false;
@@ -26045,16 +26078,22 @@ static bool archive_parse(const makocode::ByteBuffer& archive,
                                       0u,
                                       callback_context));
     }
-    if (entry_count > (u64)((reader.bit_count - reader.cursor) / 14u)) return false;
+    if (!allow_partial && entry_count > (u64)((reader.bit_count - reader.cursor) / 14u)) return false;
+    bool emitted_entry = false;
     for (u64 entry = 0u; entry < entry_count; ++entry) {
         u8 entry_type = reader.read_bit();
         u64 path_length_value = 0u;
-        if (reader.failed || entry_type > 1u ||
-            !MetadataTile::read_compact_u64(reader, path_length_value) ||
-            path_length_value == 0u ||
-            path_length_value > (u64)(USIZE_MAX_VALUE - 1u) ||
-            path_length_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
-            return false;
+        if (reader.failed) return allow_partial && emitted_entry;
+        if (entry_type > 1u) return allow_partial && emitted_entry;
+        if (!MetadataTile::read_compact_u64(reader, path_length_value)) {
+            return allow_partial && emitted_entry;
+        }
+        if (path_length_value == 0u ||
+            path_length_value > (u64)(USIZE_MAX_VALUE - 1u)) {
+            return allow_partial && emitted_entry;
+        }
+        if (path_length_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
+            return allow_partial && emitted_entry;
         }
         usize path_length = (usize)path_length_value;
         makocode::ByteBuffer path;
@@ -26065,18 +26104,25 @@ static bool archive_parse(const makocode::ByteBuffer& archive,
         }
         path.data[path_length] = 0u;
         path.size = path_length;
-        if (!is_safe_archive_path((const char*)path.data, path_length)) return false;
+        if (!is_safe_archive_path((const char*)path.data, path_length)) {
+            return allow_partial && emitted_entry;
+        }
 
         makocode::ByteBuffer file_data;
         usize file_size = 0u;
+        bool truncated_file = false;
         if (entry_type == 0u) {
             u64 file_size_value = 0u;
-            if (!MetadataTile::read_compact_u64(reader, file_size_value) ||
-                file_size_value > (u64)USIZE_MAX_VALUE ||
-                file_size_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
-                return false;
+            if (!MetadataTile::read_compact_u64(reader, file_size_value)) {
+                return allow_partial && emitted_entry;
             }
-            file_size = (usize)file_size_value;
+            if (file_size_value > (u64)USIZE_MAX_VALUE) {
+                return allow_partial && emitted_entry;
+            }
+            usize available_file_size = (usize)((reader.bit_count - reader.cursor) / 8u);
+            truncated_file = file_size_value > (u64)available_file_size;
+            if (truncated_file && !allow_partial) return false;
+            file_size = truncated_file ? available_file_size : (usize)file_size_value;
             if (file_size && !file_data.ensure(file_size)) return false;
             file_data.size = file_size;
             for (usize i = 0u; i < file_size; ++i) {
@@ -26093,11 +26139,13 @@ static bool archive_parse(const makocode::ByteBuffer& archive,
                                   callback_context)) {
             return false;
         }
+        emitted_entry = true;
+        if (truncated_file) return true;
     }
     usize remaining_bits = reader.bit_count - reader.cursor;
-    if (remaining_bits > 7u) return false;
+    if (remaining_bits > 7u) return allow_partial && emitted_entry;
     while (reader.cursor < reader.bit_count) {
-        if (reader.read_bit() != 0u) return false;
+        if (reader.read_bit() != 0u) return allow_partial && emitted_entry;
     }
     return !reader.failed;
 }
@@ -26227,7 +26275,8 @@ static bool join_output_path(const char* base_dir,
 }
 
 static bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
-                                        const char* output_dir) {
+                                        const char* output_dir,
+                                        bool allow_partial = false) {
     auto unpack_entry = [](u8 entry_type,
                            const char* entry_path,
                            usize,
@@ -26269,7 +26318,7 @@ static bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
         }
         return true;
     };
-    return archive_parse(payload, unpack_entry, (void*)output_dir, (u64*)0);
+    return archive_parse(payload, unpack_entry, (void*)output_dir, (u64*)0, allow_partial);
 }
 
 static void write_usage() {
@@ -30944,6 +30993,7 @@ retry_decode:
         }
     }
     if (decoder.has_payload &&
+        !decoder.partial_payload &&
         !archive_is_well_formed(decoder.payload) &&
         force_tile_center_sampling &&
         aggregate_state.has_encoded_tile &&
@@ -30956,6 +31006,9 @@ retry_decode:
         goto retry_decode;
     }
     frame_bits_for_length_recovery.release();
+    if (decoder.partial_payload) {
+        console_line(2, "decode: warning: ECC could not repair all payload blocks; recovered partial data");
+    }
     if (decoder.password_attempt_made() && decoder.password_was_ignored()) {
         console_line(2, "decode: warning: payload was not encrypted; password ignored");
     }
@@ -31126,7 +31179,8 @@ retry_decode:
         ok = ok && archive.data && archive_parse(archive,
                                                   append_decoded_archive_entry,
                                                   &archive_output,
-                                                  (u64*)0);
+                                                  (u64*)0,
+                                                  decoder.partial_payload);
         ok = ok && archive_output.started && decoded.append_ascii("end-archive\nend\n");
         if (decoded_stdout_requested) {
             if (!ok || !write_all_fd(1, decoded.data, decoded.size)) {
@@ -31161,7 +31215,9 @@ retry_decode:
         console_line(1, (const char*)output_path.data);
         return 0;
     }
-    if (!unpack_archive_to_directory(decoder.payload, output_dir)) {
+    if (!unpack_archive_to_directory(decoder.payload,
+                                    output_dir,
+                                    decoder.partial_payload)) {
         const char* raw_fallback = getenv("MAKOCODE_DECODE_RAW_FALLBACK");
         bool allow_raw_fallback = (raw_fallback && *raw_fallback && raw_fallback[0] != '0');
         if (allow_raw_fallback && output_dir) {

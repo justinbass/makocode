@@ -6,18 +6,16 @@ Design:
   - What is the extent of text written on the page? Why only footer? Can overlay solve this?
   - Difficult to detect for error recovery? We would need to write the input text to metadata, which is expensive, still might not help.
   - Color choice for font
-  - Footer title wrap, confirm page-height/width applies as a hard limit
+  - Footer title wrap, confirm page-height/width applies as a hard limit. Encoding may fail if there's not enough room for data, ecc, overlay. Overlay doesn't write to footer, generally overlay can apply to only the internal region of the page when there's margins
   - Footer title and metadata just on selected pages
   - Data should write to the end of the page even with a footer. A footer only minimally overwrites the data. ECC is padded to cover it. Might be automatically able to detect the damage, or might need metadata value... Modes for white BG, or just write over the random data.
 
 Features:
-- --overlay-fill arg, can't be used with --ecc-fill, maybe we need --ecc-overlay-fill, with 0->100 to determine where to allocate the padding (0 = ecc, 1 = overlay)
-- Partial data recovery (ECC insufficient for damage), print warning not failure
+- Black fiducials appearing in some images: 0011, 0013...
 - Write minifed source code out using internal font, given page size. Write \r for newline? Improve font to handle most ASCII?
-- Overlay can apply to only the internal region of the page when there's margins
 - Multiple overlay images, an overlay image per page, or page range per overlay image(s)
 - Restic-like archive support
-  - Content chunks, dedupe, append (based on previous scans, or store local)
+  - Content chunks, dedupe, append (based on previous scans, or store local). A new makocode subarg, not baked into encode/decode.
 - Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
   - Confirm that metadata includes all encoder inputs
@@ -39,7 +37,7 @@ Improvements:
 - Improve overlay approaching ~100% ECC
     - README example, given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
-- With no metadata/fiducials and very high overlay, makocode should be useful as steganography. Do a security review of this.
+- With no metadata/fiducials and very high overlay, makocode should be useful as steganography. Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
 - Improve minification algorithm to reduce size, E2E test compiles it
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger

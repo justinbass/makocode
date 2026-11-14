@@ -33,6 +33,9 @@ test/ppm_transform: test/ppm_transform.cpp
 test/canonical_tile_harness: test/test_canonical_tile_harness.cpp makocode
 	@$(STATUS) build "compile canonical tile harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
+test/partial_ecc_recovery_harness: test/test_partial_ecc_recovery_harness.cpp makocode.cpp
+	@$(STATUS) build "compile partial ECC recovery harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+
 test: $(TEST_CASE_TARGETS)
 
 test-setup:
@@ -56,6 +59,8 @@ $(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform test/c
 		fi; \
 	fi
 
+test-case-0108_partial_ecc_recovery: test/partial_ecc_recovery_harness
+
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
 	@$(STATUS) coverage "check genhtml" sh -c 'command -v genhtml >/dev/null 2>&1'
@@ -69,6 +74,7 @@ clean:
 	@$(STATUS) clean "binary" rm -f makocode
 	@$(STATUS) clean "symbol bundle" rm -rf makocode.dSYM
 	@$(STATUS) clean "ppm_transform helper" rm -f test/ppm_transform
+	@$(STATUS) clean "partial ECC recovery harness" rm -f test/partial_ecc_recovery_harness
 	@$(STATUS) clean "ppm_transform symbol bundle" rm -rf test/ppm_transform.dSYM
 	@$(STATUS) clean "test artifacts" rm -rf test_output
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp

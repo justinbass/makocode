@@ -400,3 +400,6 @@ test_case 0106_overlay_footer_geometry overlay "Overlay preserves a page with a 
 
 test_case 0107_hidden_volumes_e2e script "Hidden-capacity, filler, ECC, overlay, and CLI validation matrix" \
     test_hidden_volumes_e2e.sh
+
+test_case 0108_partial_ecc_recovery script "Uncorrectable ECC block preserves recoverable archive data" \
+    test_partial_ecc_recovery.sh
