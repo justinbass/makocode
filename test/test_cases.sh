@@ -406,3 +406,6 @@ test_case 0107_hidden_volumes_e2e script "Hidden-capacity, filler, ECC, overlay,
 
 test_case 0108_partial_ecc_recovery script "Uncorrectable ECC block preserves recoverable archive data" \
     test_partial_ecc_recovery.sh
+
+test_case 0109_checkpoint_restore script "Checkpoint deduplication, page round-trip, and partial recovery" \
+    test_checkpoint_restore.sh

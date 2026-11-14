@@ -116,6 +116,7 @@ run_expect_help encode-footer-help 'Usage: makocode encode' '--footer TEXT' "$ma
 run_expect_help encode-ecc-help 'Omit to use the minimum ECC' 'supported overlay fraction' \
     "$makocode_bin" encode --help
 run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" decode --help
+run_expect_help checkpoint-help 'makocode checkpoint' 'checkpoint restore' "$makocode_bin" checkpoint --help
 run_expect_help encode-overlay-help '--overlay-fraction F' '--overlay-pages LIST' \
     "$makocode_bin" encode --help
 run_expect_help removed-overlay-command 'Usage:' 'makocode encode [options]' \

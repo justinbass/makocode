@@ -32,6 +32,21 @@ make test
 ./makocode decode --decoded-stdout scan.ppm
 ```
 
+### Incremental checkpoints
+
+`checkpoint create` builds a single checkpoint bundle from the supplied file or directory inputs. Repeat `--base` for previously decoded trees whose chunks may be reused. The bundle contains a full snapshot manifest and only chunk bodies not found in the base data. `--chunk-size` sets the average content-defined chunk target (default `4M`; accepted range `256` bytes through `1G`). Chunk sizes are approximate page targets; normal `encode` compression and layout determine the actual page use.
+
+```sh
+./makocode checkpoint create --input current --base previous --output current.mcp --chunk-size 4M
+./makocode encode --input current.mcp --output-dir pages --password 'secret' --random-data="$random"
+./makocode decode --output-dir decoded --password 'secret' pages/*.ppm
+./makocode checkpoint restore --input decoded/current.mcp --base previous --output restored
+```
+
+Checkpoint bundles are files, so the existing `encode`/`decode` options remain in control of page layout, encryption, ECC, hidden capacity, and filler. A bundle and its decoded bases are plaintext local files; encrypted page output protects the manifest and chunk references. Page count and dimensions remain observable. Checkpoint IDs use SHA-256 and the manifest is inside the encoded payload.
+
+Restore uses every matching chunk it can find in the bundle and supplied bases. If some chunks are unavailable or damaged, it still writes the available data: incomplete files receive a `.partial` suffix, missing byte ranges are zero-filled, and `checkpoint_recovery.txt` lists missing ranges and chunk IDs. For example, checkpoint 2 can be restored with checkpoint 0 even if checkpoint 1 is missing; references available only in checkpoint 1 become missing ranges in the partial output. Empty files and directories are preserved. As with ordinary archive inputs, checkpoint creation supports regular files and directories.
+
 Decode restores the original file tree by default. `--decoded-file` writes a timestamped `makocode_decoded_YYYYMMDDHHMMSS.txt` containing page and payload metadata and escaped archive entries. `--decoded-stdout` prints the same content without creating files; it cannot be combined with `--decoded-file` or `--debug`. Archive paths cannot be absolute or contain `..`. Extraction may follow symlinks in the output directory; use a fresh, trusted directory for untrusted input.
 
 ### Encryption randomness
