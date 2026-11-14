@@ -90,22 +90,21 @@ if [[ ${#ppms[@]} -ne 1 || ${ppms[0]} != "$encoded_ppm" ]]; then
     exit 1
 fi
 
-# The 4x4 default marker at the upper-left fiducial location follows the
-# brightest palette color, cyan. This checks the marker color directly.
+# The upper-left 2x2 fiducial marker follows the brightest palette color, cyan.
 if ! python3 - "$script_dir" "$encoded_ppm" <<'PYTHON'
 import sys
 sys.path.insert(0, sys.argv[1])
 from ppm_test_utils import read_ppm
 width, height, pixels = read_ppm(sys.argv[2])
-background = 0
-for y in range(10, 14):
-    for x in range(10, 14):
+marker = 0
+for y in range(15, 17):
+    for x in range(15, 17):
         index = (y * width + x) * 3
-        background += pixels[index:index + 3] == [0, 255, 255]
-raise SystemExit(0 if width >= 14 and height >= 14 and background == 16 else 1)
+        marker += pixels[index:index + 3] == [0, 255, 255]
+raise SystemExit(0 if width >= 17 and height >= 17 and marker == 4 else 1)
 PYTHON
 then
-    echo 'test_prefix_ends_encoded: expected the upper-left 4x4 fiducial marker to match the cyan background' >&2
+    echo 'test_prefix_ends_encoded: expected the upper-left 2x2 fiducial marker to match cyan' >&2
     exit 1
 fi
 

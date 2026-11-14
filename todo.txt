@@ -1,7 +1,6 @@
 TODO
 
 Features:
-- Black fiducials appearing in some images: 0011, 0013...
 - Footer title
   - Footer title wrap, confirm page-height/width applies as a hard limit. Encoding may fail if there's not enough room for data, ecc, overlay. Overlay doesn't write to footer, generally overlay can apply to only the internal region of the page when there's margins
   - Footer title on selected pages

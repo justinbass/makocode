@@ -12993,6 +12993,36 @@ static void footer_select_colors(const ImageMappingConfig& mapping,
     }
 }
 
+static void fiducial_select_color(const ImageMappingConfig& mapping,
+                                  u8* fiducial_rgb) {
+    u8 darkest_rgb[3] = {};
+    u8 brightest_rgb[3] = {};
+    footer_select_colors(mapping, darkest_rgb, brightest_rgb);
+    if (mapping_has_custom_palette(mapping)) {
+        memcpy(fiducial_rgb, brightest_rgb, 3u);
+        return;
+    }
+    if (mapping.color_channels == 1u) {
+        fiducial_rgb[0] = 0u;
+        fiducial_rgb[1] = 255u;
+        fiducial_rgb[2] = 255u;
+        return;
+    }
+    if (mapping.color_channels == 2u) {
+        fiducial_rgb[0] = PALETTE_CMYW[1].r;
+        fiducial_rgb[1] = PALETTE_CMYW[1].g;
+        fiducial_rgb[2] = PALETTE_CMYW[1].b;
+        return;
+    }
+    if (mapping.color_channels == 3u) {
+        fiducial_rgb[0] = PALETTE_RGB_CMY_WB[4].r;
+        fiducial_rgb[1] = PALETTE_RGB_CMY_WB[4].g;
+        fiducial_rgb[2] = PALETTE_RGB_CMY_WB[4].b;
+        return;
+    }
+    memcpy(fiducial_rgb, brightest_rgb, 3u);
+}
+
 static u8 bits_per_sample(u8 mode) {
     if (mode == 1u) {
         return 1u;
@@ -14632,9 +14662,8 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     double fiducial_size_pixels = (double)FIDUCIAL_MARKER_SIZE_PIXELS;
     fiducial_size_pixels *= scale_est;
     u8 fiducial_rgb[3] = {};
-    u8 fiducial_background_rgb[3] = {};
     if (mapping_hint) {
-        footer_select_colors(*mapping_hint, fiducial_rgb, fiducial_background_rgb);
+        fiducial_select_color(*mapping_hint, fiducial_rgb);
     }
     MetadataTile::Placement logical_tile = {};
     bool use_affine_hint = affine_hint && affine_hint->pitch_pixels > 0.0 &&
@@ -29061,8 +29090,7 @@ static int command_encode(int arg_count, char** args) {
     bool debug_reapplied_by_filename = debug_requested &&
                                        path_contains_substring(page_name_prefix, "_encoded");
     u8 fiducial_rgb[3] = {0u, 0u, 0u};
-    u8 fiducial_background_rgb[3] = {255u, 255u, 255u};
-    footer_select_colors(mapping, fiducial_rgb, fiducial_background_rgb);
+    fiducial_select_color(mapping, fiducial_rgb);
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
     if (debug_requested) {

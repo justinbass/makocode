@@ -105,6 +105,23 @@ if ! awk -F, '
     exit 1
 fi
 
+if ! python3 - "$script_dir" "$encoded_ppm" <<'PYTHON'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ppm_test_utils import read_ppm
+width, height, pixels = read_ppm(sys.argv[2])
+marker = 0
+for y in range(29, 31):
+    for x in range(29, 31):
+        index = (y * width + x) * 3
+        marker += pixels[index:index + 3] == [0, 255, 255]
+raise SystemExit(0 if width >= 31 and height >= 31 and marker == 4 else 1)
+PYTHON
+then
+    echo 'test_fiducials: expected the first grayscale-page marker to use cyan' >&2
+    exit 1
+fi
+
 "$makocode_bin" decode "$encoded_ppm" "--output-dir=$decoded_dir" >/dev/null
 if [[ ! -f $decoded_payload ]] || ! cmp --silent "$payload" "$decoded_payload"; then
     echo 'test_fiducials: decoded payload differs from encoded payload' >&2
