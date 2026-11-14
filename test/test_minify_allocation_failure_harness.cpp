@@ -33,7 +33,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "minify allocation failure harness: expected at most one argument\n");
         return 1;
     }
-    if (command_minify(0, 0) != 1) {
+    char width_option[] = "--width";
+    char width_value[] = "240";
+    char height_option[] = "--height";
+    char height_value[] = "80";
+    char* minify_args[] = {width_option, width_value, height_option, height_value};
+    if (command_minify(4, minify_args) != 1) {
         fprintf(stderr, "minify allocation failure harness: expected exit status 1\n");
         return 1;
     }

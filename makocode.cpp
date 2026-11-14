@@ -8308,9 +8308,6 @@ struct DecoderContext {
 
 } // namespace makocode
 
-static const u32 DEFAULT_PAGE_WIDTH_PIXELS  = 2480u; // decode fallback and encode sizing seed
-static const u32 DEFAULT_PAGE_HEIGHT_PIXELS = 3508u; // decode fallback and encode sizing seed
-
 static void byte_buffer_move(makocode::ByteBuffer& dest, makocode::ByteBuffer& src) {
     dest.release();
     dest.data = src.data;
@@ -8352,9 +8349,9 @@ struct ImageMappingConfig {
 
     ImageMappingConfig()
         : color_channels(1u),
-          page_width_pixels(DEFAULT_PAGE_WIDTH_PIXELS),
+          page_width_pixels(0u),
           page_width_set(false),
-          page_height_pixels(DEFAULT_PAGE_HEIGHT_PIXELS),
+          page_height_pixels(0u),
           page_height_set(false),
           palette_text_length(0u),
           palette_set(false),
@@ -8370,14 +8367,6 @@ struct ImageMappingConfig {
         }
     }
 };
-
-static bool compute_page_dimensions(const ImageMappingConfig& config,
-                                    u32& out_width_pixels,
-                                    u32& out_height_pixels) {
-    out_width_pixels = config.page_width_pixels;
-    out_height_pixels = config.page_height_pixels;
-    return true;
-}
 
 static u64 estimate_square_page_from_image(u64 image_width, u64 image_height) {
     double best_score = 1e9;
@@ -26485,8 +26474,8 @@ static void write_decode_help() {
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
-    console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable (default 2480).");
-    console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable (default 3508).");
+    console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable.");
+    console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable.");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
     console_line(1, "  --debug              Write decode_fiducials.csv and decode_affine.csv under --output-dir.");
     console_line(1, "");
@@ -26497,10 +26486,11 @@ static void write_decode_help() {
 
 static void write_minify_help() {
     console_line(1, "makocode minify");
-    console_line(1, "Usage: makocode minify [--width PX] [--height PX]");
+    console_line(1, "Usage: makocode minify --width PX --height PX");
     console_line(1, "Strips comments/whitespace from makocode.cpp and emits makocode_minified.cpp.");
-    console_line(1, "With --width and/or --height, also renders PPM pages (2480x3508 defaults).");
+    console_line(1, "Both --width and --height are required to render PPM pages.");
     console_line(1, "Source continues on numbered pages when it exceeds the page capacity.");
+    console_line(1, "Example: makocode minify --width 2398 --height 2957");
     console_line(1, "Each LF is shown inline as a solid 5x7 block; the C++ output keeps its LF.");
 }
 
@@ -28208,6 +28198,10 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --fill-pages requires --hidden fill or --ecc fill");
         return 1;
     }
+    if (hidden_fill && (!mapping.page_width_set || !mapping.page_height_set)) {
+        console_line(2, "encode: --hidden fill requires --page-width and --page-height");
+        return 1;
+    }
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "encode")) {
             return 1;
@@ -28390,7 +28384,8 @@ static int command_encode(int arg_count, char** args) {
     }
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
-    compute_page_dimensions(mapping, width_pixels, height_pixels);
+    if (mapping.page_width_set) width_pixels = mapping.page_width_pixels;
+    if (mapping.page_height_set) height_pixels = mapping.page_height_pixels;
     makocode::ByteBuffer compressed_for_sizing;
     if (!lzma_compress(archive.buffer.data,
                        archive.buffer.size,
@@ -28400,6 +28395,22 @@ static int command_encode(int arg_count, char** args) {
         return 1;
     }
     usize ecc_payload_bytes = compressed_for_sizing.size;
+    if (!mapping.page_width_set || !mapping.page_height_set) {
+        makocode::EccSummary initial_sizing_ecc;
+        initial_sizing_ecc.original_bytes = (u64)ecc_payload_bytes;
+        if ((u64)ecc_payload_bytes > U64_MAX_VALUE / 8u ||
+            !fit_page_dimensions(mapping,
+                                 footer_config,
+                                 (u64)ecc_payload_bytes * 8u,
+                                 !mapping.page_width_set,
+                                 !mapping.page_height_set,
+                                 width_pixels,
+                                 height_pixels,
+                                 &initial_sizing_ecc)) {
+            console_line(2, "encode: failed to fit automatic page dimensions");
+            return 1;
+        }
+    }
     makocode::ByteBuffer stealth_container;
     if (hidden_mode_enabled) {
         makocode::ByteBuffer visible_body;
@@ -31698,6 +31709,10 @@ static int command_minify(int arg_count, char** args) {
             }
         }
     }
+    if (!have_width || !have_height) {
+        console_line(2, "minify: both --width and --height are required");
+        return 1;
+    }
     makocode::ByteBuffer source;
     if (!read_file_into_buffer("makocode.cpp", source)) {
         console_line(2, "minify: failed to read makocode.cpp");
@@ -31795,15 +31810,12 @@ static int command_minify(int arg_count, char** args) {
         return 1;
     }
     console_line(1, "minify: wrote makocode_minified.cpp");
-    if (!have_width && !have_height) {
-        return 0;
-    }
 
     const u64 cell_width = (u64)FOOTER_BASE_GLYPH_WIDTH + 1u;
     const u64 cell_height = (u64)FOOTER_BASE_GLYPH_HEIGHT;
     u64 text_cells = (u64)stripped.size;
-    u64 image_width = have_width ? (u64)requested_width : (u64)DEFAULT_PAGE_WIDTH_PIXELS;
-    u64 image_height = have_height ? (u64)requested_height : (u64)DEFAULT_PAGE_HEIGHT_PIXELS;
+    u64 image_width = (u64)requested_width;
+    u64 image_height = (u64)requested_height;
     if (image_width < cell_width || image_height < cell_height) {
         console_line(2, "minify: page dimensions must fit at least one 5x8 character cell");
         return 1;

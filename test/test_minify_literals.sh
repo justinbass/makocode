@@ -50,6 +50,7 @@ fi
 
 mkdir -p "$repo_root/test_output"
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_minify.XXXXXX")
+minify_args=(--width 240 --height 80)
 cat > "$work_dir/makocode.cpp" <<'CPP'
   #define MINIFY_DIRECTIVE_SWITCH 1
 #if MINIFY_DIRECTIVE_SWITCH
@@ -87,7 +88,7 @@ CPP
 
 (
     cd "$work_dir"
-    "$makocode_bin" minify >/dev/null
+    "$makocode_bin" minify "${minify_args[@]}" >/dev/null
 )
 minified_source="$work_dir/makocode_minified.cpp"
 if [[ ! -s $minified_source ]]; then
@@ -109,7 +110,7 @@ mkdir -p "$empty_source_dir"
 : > "$empty_source_dir/makocode.cpp"
 (
     cd "$empty_source_dir"
-    "$makocode_bin" minify >/dev/null
+    "$makocode_bin" minify "${minify_args[@]}" >/dev/null
 )
 if [[ ! -f "$empty_source_dir/makocode_minified.cpp" ||
       -s "$empty_source_dir/makocode_minified.cpp" ]]; then
@@ -121,7 +122,7 @@ mkdir -p "$control_whitespace_dir"
 printf 'int\fvalue;\vint\tother;\n' > "$control_whitespace_dir/makocode.cpp"
 (
     cd "$control_whitespace_dir"
-    "$makocode_bin" minify >/dev/null
+    "$makocode_bin" minify "${minify_args[@]}" >/dev/null
 )
 if [[ $(cat "$control_whitespace_dir/makocode_minified.cpp") != 'int value; int other;' ]] ||
    LC_ALL=C grep -q $'[\t\f\v]' "$control_whitespace_dir/makocode_minified.cpp"; then
@@ -134,7 +135,7 @@ printf '%s' "'abc" > "$char_trailing_escape_dir/makocode.cpp"
 printf '\\' >> "$char_trailing_escape_dir/makocode.cpp"
 (
     cd "$char_trailing_escape_dir"
-    "$makocode_bin" minify >/dev/null
+    "$makocode_bin" minify "${minify_args[@]}" >/dev/null
 )
 if ! cmp -s "$char_trailing_escape_dir/makocode.cpp" \
     "$char_trailing_escape_dir/makocode_minified.cpp"; then
@@ -147,7 +148,7 @@ printf '%s' '"abc' > "$string_trailing_escape_dir/makocode.cpp"
 printf '\\' >> "$string_trailing_escape_dir/makocode.cpp"
 (
     cd "$string_trailing_escape_dir"
-    "$makocode_bin" minify >/dev/null
+    "$makocode_bin" minify "${minify_args[@]}" >/dev/null
 )
 if ! cmp -s "$string_trailing_escape_dir/makocode.cpp" \
     "$string_trailing_escape_dir/makocode_minified.cpp"; then
@@ -166,6 +167,16 @@ if [[ $invalid_args_status -ne 1 ]] ||
     cat "$invalid_args_output" >&2
     exit 1
 fi
+missing_dimensions_output="$work_dir/missing_dimensions_output.txt"
+if "$makocode_bin" minify >"$missing_dimensions_output" 2>&1; then
+    echo 'test_minify_literals: minify accepted missing page dimensions' >&2
+    exit 1
+fi
+if ! grep -Fq 'minify: both --width and --height are required' "$missing_dimensions_output"; then
+    echo 'test_minify_literals: required minify dimensions were not reported' >&2
+    cat "$missing_dimensions_output" >&2
+    exit 1
+fi
 crlf_dir="$work_dir/crlf"
 mkdir -p "$crlf_dir"
 while IFS= read -r line || [[ -n $line ]]; do
@@ -173,7 +184,7 @@ while IFS= read -r line || [[ -n $line ]]; do
 done < "$work_dir/makocode.cpp" > "$crlf_dir/makocode.cpp"
 (
     cd "$crlf_dir"
-    "$makocode_bin" minify >/dev/null
+    "$makocode_bin" minify "${minify_args[@]}" >/dev/null
 )
 crlf_minified_source="$crlf_dir/makocode_minified.cpp"
 if LC_ALL=C grep -q $'\r' "$crlf_minified_source"; then
@@ -188,7 +199,7 @@ mkdir -p "$write_failure_dir/makocode_minified.cpp"
 cp "$work_dir/makocode.cpp" "$write_failure_dir/makocode.cpp"
 write_failure_output="$work_dir/write_failure_output.txt"
 write_failure_status=0
-if (cd "$write_failure_dir" && "$makocode_bin" minify) >"$write_failure_output" 2>&1; then
+if (cd "$write_failure_dir" && "$makocode_bin" minify "${minify_args[@]}") >"$write_failure_output" 2>&1; then
     write_failure_status=0
 else
     write_failure_status=$?
@@ -228,7 +239,7 @@ fi
 read_error_dir="$work_dir/read_error"
 mkdir -p "$read_error_dir/makocode.cpp"
 read_error_output="$work_dir/read_error_output.txt"
-if (cd "$read_error_dir" && "$makocode_bin" minify) >"$read_error_output" 2>&1; then
+if (cd "$read_error_dir" && "$makocode_bin" minify "${minify_args[@]}") >"$read_error_output" 2>&1; then
     read_error_status=0
 else
     read_error_status=$?

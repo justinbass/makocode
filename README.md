@@ -23,6 +23,8 @@ make
 make test
 ./makocode encode --input=file.txt
 ./makocode encode --input=file.txt --palette "White Black"
+# Render the minified source at an explicit page size
+./makocode minify --width 2398 --height 2957
 # Print, store, scan the output shown above
 ./makocode decode scan.ppm
 # To write one decoded file instead:
