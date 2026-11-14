@@ -12,8 +12,6 @@ Features:
   - Multiple overlay images
     - An overlay image per page, or page range per overlay image(s)
     - README - PPM / SVG examples for a grid of images lines up like a mosaic. May depend on external tools, not sure if I want this to be native functionality...
-- Security concerns with altered code, invalid dir attacks, etc. How to prove encoder/decoder is not altered? Security concerns with password protection. Security concerns with steganography.
-  - GNUPG or Minisign to avoid modification? Might just be optional, in data area - could integrate source code though.
 - Restic-like archive support
   - Content chunks, dedupe, append (based on previous scans, or store local)
 - Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
