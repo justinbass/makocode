@@ -179,6 +179,9 @@ test_case 0045_overlay_bw_base_color_cmwy overlay "Black/white base with CMYW ci
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1 \
     "MAKO_OVERLAY_ALLOWED_COLORS=0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
+test_case 0109_footer_features script "Footer wrapping, page selection, over-barcode ECC, and page bounds" \
+    test_footer_features.sh
+
 test_case 0046_overlay_cmy_base_bw overlay "CMYW base with black/white circle overlay" \
     MAKO_OVERLAY_FRACTION=0.1 \
     MAKO_OVERLAY_ENCODE_OPTS=--ecc=fill \

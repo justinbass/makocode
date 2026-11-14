@@ -1,10 +1,6 @@
 TODO
 
 Features:
-- Footer title
-  - Footer title wrap, confirm page-height/width applies as a hard limit. Encoding may fail if there's not enough room for data, ecc, overlay. Overlay doesn't write to footer, generally overlay can apply to only the internal region of the page when there's margins
-  - Footer title on selected pages
-  - Footer text mode to write over the barcode, pad ECC with unknown positions to cover it.
 - Write minifed source code out using internal font, given page size. Write \r for newline? Improve font to handle most ASCII?
 - Multiple overlay images, an overlay image per page, or page range per overlay image(s)
 - Restic-like archive support
