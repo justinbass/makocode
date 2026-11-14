@@ -89,6 +89,10 @@ The `archive` section gives `entries COUNT`, followed by `directory PATH` and `f
 
 `encode --overlay-fraction F --overlay-ppm overlay.ppm` reserves an overlay erasure budget and applies the supplied PPM to every generated page. The two options must be supplied together, and the PPM dimensions must match the encoded pages. `F` ranges from `0.0` through `1.0` and is relative to the protected data size: `1.0` requests an overlay budget equal to the data size. Reed–Solomon works in byte symbols and distributes an equal selector count across blocks, so the realized budget can differ slightly from the requested fraction. Schema 0 stores the actual ECC parity-bit count and overlay-budget bit count as compact `u64` values, along with the exact RS block layout. Overlay positions are selected deterministically per block. If the requested overlay budget exceeds available parity, encoding fails with a sufficient `--ecc` ratio and/or the maximum supported `--overlay-fraction`.
 
+Decode marks the full reserved selector as erased, including symbols left unchanged because `--overlay-ignore-colors` skipped their overlay pixels. That option does not reduce the ECC erasure budget.
+
+If erasure decoding fails, decode retries without erasure hints. The retry can use the same parity to correct overlay changes and other errors together as unknown errors, up to half the block's parity-symbol count. For example, 100 parity symbols can correct 40 overlay errors and 10 other errors.
+
 Multi-page overlays with an explicit numeric ECC ratio require at least `--ecc 0.5`; larger overlay fractions may require more parity. Lower ratios are rejected before page output because they can exceed the correction budget across filled pages.
 
 ## Tests
