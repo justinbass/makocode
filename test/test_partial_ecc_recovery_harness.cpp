@@ -11,30 +11,6 @@ struct PartialArchiveCheck {
     usize expected_second_size;
 };
 
-static bool check_partial_archive_entry(u8 type,
-                                        const char* path,
-                                        usize path_size,
-                                        const u8* data,
-                                        usize data_size,
-                                        u64,
-                                        void* context) {
-    PartialArchiveCheck* check = (PartialArchiveCheck*)context;
-    static const char expected_path[] = "00-first.txt";
-    static const char expected_data[] = "recovered before the damaged block\n";
-    if (type == 0u && path_size == sizeof(expected_path) - 1u &&
-        memcmp(path, expected_path, path_size) == 0) {
-        check->found_first_file =
-            data_size == sizeof(expected_data) - 1u &&
-            memcmp(data, expected_data, data_size) == 0;
-    } else if (type == 0u && path_size == sizeof("99-large.bin") - 1u &&
-               memcmp(path, "99-large.bin", path_size) == 0) {
-        check->second_file_intact =
-            data_size == check->expected_second_size &&
-            memcmp(data, check->expected_second_file, data_size) == 0;
-    }
-    return true;
-}
-
 int main() {
     BitWriter archive_writer;
     static const char first_path[] = "00-first.txt";
@@ -133,6 +109,29 @@ int main() {
                                  false,
                                  second_data.data,
                                  second_data.size};
+    auto check_partial_archive_entry = [](u8 type,
+                                          const char* path,
+                                          usize path_size,
+                                          const u8* data,
+                                          usize data_size,
+                                          u64,
+                                          void* context) -> bool {
+        PartialArchiveCheck* archive_check = (PartialArchiveCheck*)context;
+        static const char expected_path[] = "00-first.txt";
+        static const char expected_data[] = "recovered before the damaged block\n";
+        if (type == 0u && path_size == sizeof(expected_path) - 1u &&
+            memcmp(path, expected_path, path_size) == 0) {
+            archive_check->found_first_file =
+                data_size == sizeof(expected_data) - 1u &&
+                memcmp(data, expected_data, data_size) == 0;
+        } else if (type == 0u && path_size == sizeof("99-large.bin") - 1u &&
+                   memcmp(path, "99-large.bin", path_size) == 0) {
+            archive_check->second_file_intact =
+                data_size == archive_check->expected_second_size &&
+                memcmp(data, archive_check->expected_second_file, data_size) == 0;
+        }
+        return true;
+    };
     if (!archive_parse(decoder.payload,
                        check_partial_archive_entry,
                        &check,

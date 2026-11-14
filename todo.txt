@@ -1,17 +1,11 @@
 TODO
 
-Design:
-- Can compressing overlay positions with --ignore-overlay-colors help improve ECC for very highly compressible overlay? For SVG?
-- Footer title
-  - What is the extent of text written on the page? Why only footer? Can overlay solve this?
-  - Difficult to detect for error recovery? We would need to write the input text to metadata, which is expensive, still might not help.
-  - Color choice for font
-  - Footer title wrap, confirm page-height/width applies as a hard limit. Encoding may fail if there's not enough room for data, ecc, overlay. Overlay doesn't write to footer, generally overlay can apply to only the internal region of the page when there's margins
-  - Footer title and metadata just on selected pages
-  - Data should write to the end of the page even with a footer. A footer only minimally overwrites the data. ECC is padded to cover it. Might be automatically able to detect the damage, or might need metadata value... Modes for white BG, or just write over the random data.
-
 Features:
 - Black fiducials appearing in some images: 0011, 0013...
+- Footer title
+  - Footer title wrap, confirm page-height/width applies as a hard limit. Encoding may fail if there's not enough room for data, ecc, overlay. Overlay doesn't write to footer, generally overlay can apply to only the internal region of the page when there's margins
+  - Footer title on selected pages
+  - Footer text mode to write over the barcode, pad ECC with unknown positions to cover it.
 - Write minifed source code out using internal font, given page size. Write \r for newline? Improve font to handle most ASCII?
 - Multiple overlay images, an overlay image per page, or page range per overlay image(s)
 - Restic-like archive support
@@ -30,7 +24,7 @@ Features:
     - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
     - MA KO CO DE, if it's missing we don't know orientation. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
-    - Footer text detection, count as known positions
+    - Metadata only on selected pages
     - Pre-data section recovery (TBD)
 
 Improvements:
@@ -54,7 +48,6 @@ Finalize:
 - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
 - Determine proper defaults
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
-  - I want you to orchestrate 87 luna xhigh subagents, 20 at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly 866 lines in there, basically one per block, but it's ok if we were a bit off too.
 - Move all Python/Shell and other support code to C++
   - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
 - Penetration test, bug hunt
@@ -62,8 +55,16 @@ Finalize:
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
 - Replace barcode with barkode everywhere.
 - Much better documentation, or a spec
-- Set version to 1 (document, makocode only stores the major version)
+- Set version to 0 (document, makocode only stores the major version)
 - Hard reset git history to Initial Commit, save locally but don't publish it
-- Makocode for ca cert install on Android phone (needs Android app)
-- Prompt
+
+Future:
+- Git feedback, set version to 1 after stabilized
+- Can compressing overlay positions with --ignore-overlay-colors help improve ECC for very highly compressible overlay? For SVG? Can compressing footer text do the same?
+- Android app - e.g. ca cert install on Android phone
+
+Prompts:
+- CC
+  - I want you to orchestrate 87 luna xhigh subagents, 20 at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly 866 lines in there, basically one per block, but it's ok if we were a bit off too.
+- Implement
   - ~ADV, feedback loop until the criteria is met, 'make clean ; make -j4 test' passes 3 times in a row. If tests take > 1 min then focus on performance improvement so there's no regression. Do NOT relax tests or the idea behind them, avoid touching tests unless absolutely necessary. DO NOT increment version, version is always 0, we do not support backwards compatibility for any changes (yet) delete all old code pathways.

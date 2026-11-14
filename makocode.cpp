@@ -8106,6 +8106,7 @@ struct DecoderContext {
                 ecc_failed = true;
                 return false;
             }
+            partial_payload = ecc_stats.unrecoverable_blocks > 0u;
             ByteBuffer stealth_archive;
             bool stealth_container = false;
             bool stealth_opened = decode_stealth_container(compressed.data,
@@ -8170,7 +8171,6 @@ struct DecoderContext {
                 ecc_failed = true;
                 return false;
             }
-            partial_payload = ecc_stats.unrecoverable_blocks > 0u;
             encoded_metadata.ecc_present = true;
             encoded_metadata.ecc = header.encoded_header;
             if (working_data == decrypted.data && decrypted.data) {
