@@ -43,7 +43,7 @@ mkdir -p "$work/ecc_budget/pages"
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1200 --height 1200
 (cd "$work" && "$bin" encode --input=payload.bin  --overlay-fraction=0.10 \
-    --overlay-ppm="$work/ecc_budget/overlay.ppm" \
+    --overlay-ppm="$work/ecc_budget/overlay.ppm" --overlay-pages=all \
     --page-width=1200 --page-height=1200 \
     --prefix=budget --output-dir="$work/ecc_budget/pages" >/dev/null)
 shopt -s nullglob
@@ -66,7 +66,7 @@ no_overlay_page=$(find "$work/no_overlay_fraction/pages" -maxdepth 1 -type f -na
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1000 --height 1000
 if (cd "$work" && "$bin" encode --input=payload.bin --ecc=0 \
-    --overlay-fraction=0.10 --overlay-ppm="$work/overlay_mask.ppm" \
+    --overlay-fraction=0.10 --overlay-ppm="$work/overlay_mask.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 --output-dir="$work/no_overlay_attempt") \
     >"$work/no_overlay_error.log" 2>&1; then
     echo "canonical tile: overlay accepted --ecc=0" >&2

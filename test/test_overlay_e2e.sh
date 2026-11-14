@@ -70,7 +70,7 @@ encode_cmd=(
     "$makocode_bin" encode
     "--input=payload.bin"
     "--overlay-fraction=$fraction"
-    "--overlay-ppm=$overlay_path"
+    "--overlay-ppm=$overlay_path" "--overlay-pages=all"
     "--page-width=$page_width"
     "--page-height=$page_height"
     "--output-dir=$encoded_dir"

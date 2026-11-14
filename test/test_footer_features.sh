@@ -99,7 +99,7 @@ pixels[-3:] = bytes((255, 0, 255))
 Path(sys.argv[1]).write_bytes(f"P6\n{width} {height}\n255\n".encode() + pixels)
 PY
 cat "$payload" | "$repo_root/makocode" encode --page-width=180 --page-height=180 \
-    --footer=MARK --overlay-fraction=0.1 --overlay-ppm "$overlay_mask" --ecc=fill \
+    --footer=MARK --overlay-fraction=0.1 --overlay-ppm "$overlay_mask" "--overlay-pages=all" --ecc=fill \
     --output-dir "$overlay_dir" --prefix overlay >/dev/null
 shopt -s nullglob
 overlay_pages=("$overlay_dir"/*.ppm)

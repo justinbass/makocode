@@ -26439,8 +26439,10 @@ static void write_encode_help() {
     console_line(1, "                       0 disables payload ECC and is rejected when required erasures cannot be recovered.");
     console_line(1, "                       RS blocks max out at 255 total symbols.");
     console_line(1, "  --overlay-fraction F Overlay budget as a share of protected data bits (0.0-1.0).");
-    console_line(1, "  --overlay-ppm PATH   PPM image to apply to every encoded page; requires --overlay-fraction.");
-    console_line(1, "                       --overlay-fraction also requires --overlay-ppm. Overlay bits are reserved per RS block.");
+    console_line(1, "  --overlay-ppm PATH   PPM image to apply to pages selected by the next --overlay-pages.");
+    console_line(1, "  --overlay-pages LIST Pages/ranges for the preceding image (all, 1,3-5,middle,last).");
+    console_line(1, "                       Repeat the pair; each encoded page may have at most one overlay.");
+    console_line(1, "                       Overlay images and --overlay-fraction must be supplied together.");
     console_line(1, "  --overlay-ignore-colors LIST  Skip overlay pixels matching named or hex colors.");
     console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
     console_line(1, "  --random-data HEX    28 random bytes as 56 hex digits; required with --password and page filler.");
@@ -27489,6 +27491,17 @@ struct OverlayPage {
     }
 };
 
+struct EncodeOverlay {
+    const char* path;
+    const char* pages;
+    usize pages_length;
+    OverlayPage image;
+    bool pages_specified;
+
+    EncodeOverlay()
+        : path(0), pages(0), pages_length(0u), image(), pages_specified(false) {}
+};
+
 static bool load_overlay_page(const char* path, OverlayPage& page);
 static bool merge_overlay_into_encoded_page(const char* page_path,
                                             const OverlayPage& overlay_page,
@@ -27508,8 +27521,11 @@ static int command_encode(int arg_count, char** args) {
     double overlay_fraction = 0.0;
     u64 overlay_fraction_numerator = 0u;
     u64 overlay_fraction_denominator = 1u;
-    const char* overlay_ppm_path = 0;
-    OverlayPage overlay_ppm_page;
+    static const usize MAX_OVERLAY_IMAGES = 64u;
+    EncodeOverlay overlays[MAX_OVERLAY_IMAGES];
+    usize overlay_count = 0u;
+    int pending_overlay = -1;
+    makocode::ByteBuffer overlay_page_assignments;
     const char* overlay_ignore_colors_text = 0;
     usize overlay_ignore_colors_length = 0u;
     double ecc_redundancy = 0.0;
@@ -27538,7 +27554,6 @@ static int command_encode(int arg_count, char** args) {
     bool have_prefix = false;
     bool ecc_option_specified = false;
     bool overlay_fraction_specified = false;
-    bool overlay_ppm_specified = false;
     bool overlay_ignore_colors_specified = false;
     bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
@@ -27681,8 +27696,8 @@ static int command_encode(int arg_count, char** args) {
         const char overlay_ppm_prefix[] = "--overlay-ppm=";
         const char* overlay_ppm_value = 0;
         if (ascii_equals_token(arg, ascii_length(arg), "--overlay-ppm")) {
-            if (overlay_ppm_specified) {
-                console_line(2, "encode: --overlay-ppm specified multiple times");
+            if (pending_overlay >= 0) {
+                console_line(2, "encode: each --overlay-ppm requires a following --overlay-pages");
                 return 1;
             }
             if ((i + 1) >= arg_count || !args[i + 1] || args[i + 1][0] == '\0') {
@@ -27692,10 +27707,6 @@ static int command_encode(int arg_count, char** args) {
             overlay_ppm_value = args[i + 1];
             i += 1;
         } else if (ascii_starts_with(arg, overlay_ppm_prefix)) {
-            if (overlay_ppm_specified) {
-                console_line(2, "encode: --overlay-ppm specified multiple times");
-                return 1;
-            }
             overlay_ppm_value = arg + (sizeof(overlay_ppm_prefix) - 1u);
             if (*overlay_ppm_value == '\0') {
                 console_line(2, "encode: --overlay-ppm requires a PPM path");
@@ -27703,8 +27714,85 @@ static int command_encode(int arg_count, char** args) {
             }
         }
         if (overlay_ppm_value) {
-            overlay_ppm_path = overlay_ppm_value;
-            overlay_ppm_specified = true;
+            if (pending_overlay >= 0) {
+                console_line(2, "encode: each --overlay-ppm requires a following --overlay-pages");
+                return 1;
+            }
+            if (overlay_count >= MAX_OVERLAY_IMAGES) {
+                console_line(2, "encode: too many overlay images (maximum 64)");
+                return 1;
+            }
+            overlays[overlay_count].path = overlay_ppm_value;
+            pending_overlay = (int)overlay_count;
+            ++overlay_count;
+            continue;
+        }
+        const char overlay_pages_prefix[] = "--overlay-pages=";
+        const char* overlay_pages_value = 0;
+        if (ascii_equals_token(arg, ascii_length(arg), "--overlay-pages")) {
+            if ((i + 1) >= arg_count || !args[i + 1] || !args[i + 1][0]) {
+                console_line(2, "encode: --overlay-pages requires all, page numbers, or ranges");
+                return 1;
+            }
+            overlay_pages_value = args[++i];
+        } else if (ascii_starts_with(arg, overlay_pages_prefix)) {
+            overlay_pages_value = arg + sizeof(overlay_pages_prefix) - 1u;
+        }
+        if (overlay_pages_value) {
+            if (pending_overlay < 0) {
+                console_line(2, "encode: --overlay-pages must follow an --overlay-ppm image");
+                return 1;
+            }
+            EncodeOverlay& overlay = overlays[(usize)pending_overlay];
+            overlay.pages_length = ascii_length(overlay_pages_value);
+            if (!overlay.pages_length || overlay.pages_specified) {
+                console_line(2, "encode: --overlay-pages requires a non-empty page list");
+                return 1;
+            }
+            overlay.pages = overlay_pages_value;
+            if (overlay.pages_length == 3u && memcmp(overlay.pages, "all", 3u) == 0) {
+                overlay.pages_specified = true;
+                pending_overlay = -1;
+                continue;
+            }
+            usize item_start = 0u;
+            while (item_start < overlay.pages_length) {
+                usize item_end = item_start;
+                while (item_end < overlay.pages_length && overlay.pages[item_end] != ',') ++item_end;
+                usize dash = item_start;
+                while (dash < item_end && overlay.pages[dash] != '-') ++dash;
+                bool keyword = (item_end - item_start == 6u &&
+                                memcmp(overlay.pages + item_start, "middle", 6u) == 0) ||
+                               (item_end - item_start == 4u &&
+                                memcmp(overlay.pages + item_start, "last", 4u) == 0);
+                u64 first_page = 0u;
+                u64 last_page = 0u;
+                bool numeric = dash > item_start &&
+                    ascii_to_u64(overlay.pages + item_start, dash - item_start, &first_page) &&
+                    first_page > 0u;
+                if (numeric) {
+                    last_page = first_page;
+                    if (dash < item_end) {
+                        numeric = dash + 1u < item_end &&
+                                  ascii_to_u64(overlay.pages + dash + 1u,
+                                               item_end - dash - 1u,
+                                               &last_page) &&
+                                  last_page >= first_page;
+                    }
+                }
+                if ((!keyword && !numeric) || item_end == item_start) {
+                    console_line(2, "encode: invalid --overlay-pages item");
+                    return 1;
+                }
+                if (item_end == overlay.pages_length) break;
+                item_start = item_end + 1u;
+                if (item_start == overlay.pages_length) {
+                    console_line(2, "encode: invalid --overlay-pages item");
+                    return 1;
+                }
+            }
+            overlay.pages_specified = true;
+            pending_overlay = -1;
             continue;
         }
         const char overlay_fraction_prefix[] = "--overlay-fraction=";
@@ -28152,12 +28240,16 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --footer-pages and --footer-over-barcode require --footer");
         return 1;
     }
-    if (overlay_fraction_specified != overlay_ppm_specified) {
-        console_line(2, "encode: --overlay-fraction and --overlay-ppm must be used together");
+    if (pending_overlay >= 0) {
+        console_line(2, "encode: each --overlay-ppm requires a following --overlay-pages");
         return 1;
     }
-    if (overlay_ignore_colors_specified && !overlay_ppm_specified) {
-        console_line(2, "encode: --overlay-ignore-colors requires --overlay-ppm");
+    if (overlay_fraction_specified != (overlay_count > 0u)) {
+        console_line(2, "encode: --overlay-fraction and overlay images must be used together");
+        return 1;
+    }
+    if (overlay_ignore_colors_specified && overlay_count == 0u) {
+        console_line(2, "encode: --overlay-ignore-colors requires an overlay image");
         return 1;
     }
     if (have_password && !have_random_data) {
@@ -29198,12 +29290,76 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: multi-page overlays require --ecc of at least 0.5; larger overlays may require more");
         return 1;
     }
-    if (overlay_ppm_path) {
-        if (!load_overlay_page(overlay_ppm_path, overlay_ppm_page)) return 1;
-        if (overlay_ppm_page.width != width_pixels ||
-            overlay_ppm_page.height != height_pixels) {
-            console_line(2, "encode: --overlay-ppm dimensions must match the encoded pages");
+    if (overlay_count > 0u) {
+        if (page_count > (u64)USIZE_MAX_VALUE ||
+            !overlay_page_assignments.ensure((usize)page_count)) {
+            console_line(2, "encode: failed to allocate overlay page assignments");
             return 1;
+        }
+        overlay_page_assignments.size = (usize)page_count;
+        memset(overlay_page_assignments.data, 0, overlay_page_assignments.size);
+        for (usize overlay_index = 0u; overlay_index < overlay_count; ++overlay_index) {
+            EncodeOverlay& overlay = overlays[overlay_index];
+            if (!load_overlay_page(overlay.path, overlay.image)) return 1;
+            if (overlay.image.width != width_pixels || overlay.image.height != height_pixels) {
+                console_line(2, "encode: --overlay-ppm dimensions must match the encoded pages");
+                return 1;
+            }
+            if (overlay.pages_length == 3u && memcmp(overlay.pages, "all", 3u) == 0) {
+                for (u64 page = 1u; page <= page_count; ++page) {
+                    usize page_offset = (usize)(page - 1u);
+                    u8 assignment = (u8)(overlay_index + 1u);
+                    if (overlay_page_assignments.data[page_offset] != 0u &&
+                        overlay_page_assignments.data[page_offset] != assignment) {
+                        console_line(2, "encode: a page cannot have more than one overlay image");
+                        return 1;
+                    }
+                    overlay_page_assignments.data[page_offset] = assignment;
+                }
+                continue;
+            }
+            usize item_start = 0u;
+            while (item_start < overlay.pages_length) {
+                usize item_end = item_start;
+                while (item_end < overlay.pages_length && overlay.pages[item_end] != ',') ++item_end;
+                usize dash = item_start;
+                while (dash < item_end && overlay.pages[dash] != '-') ++dash;
+                u64 first_page = 0u;
+                u64 last_page = 0u;
+                if (item_end - item_start == 6u &&
+                    memcmp(overlay.pages + item_start, "middle", 6u) == 0) {
+                    first_page = page_count / 2u + page_count % 2u;
+                    last_page = first_page;
+                } else if (item_end - item_start == 4u &&
+                           memcmp(overlay.pages + item_start, "last", 4u) == 0) {
+                    first_page = page_count;
+                    last_page = page_count;
+                } else {
+                    ascii_to_u64(overlay.pages + item_start, dash - item_start, &first_page);
+                    last_page = first_page;
+                    if (dash < item_end) {
+                        ascii_to_u64(overlay.pages + dash + 1u,
+                                     item_end - dash - 1u,
+                                     &last_page);
+                    }
+                    if (last_page > page_count) {
+                        console_line(2, "encode: --overlay-pages contains a page beyond the encoded page count");
+                        return 1;
+                    }
+                }
+                for (u64 page = first_page; page <= last_page; ++page) {
+                    usize page_offset = (usize)(page - 1u);
+                    u8 assignment = (u8)(overlay_index + 1u);
+                    if (overlay_page_assignments.data[page_offset] != 0u &&
+                        overlay_page_assignments.data[page_offset] != assignment) {
+                        console_line(2, "encode: a page cannot have more than one overlay image");
+                        return 1;
+                    }
+                    overlay_page_assignments.data[page_offset] = assignment;
+                }
+                if (item_end == overlay.pages_length) break;
+                item_start = item_end + 1u;
+            }
         }
     }
     u16 required_parity = 0u;
@@ -29394,9 +29550,12 @@ static int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
-        if (overlay_ppm_path && overlay_bits > 0u &&
+        u8 overlay_assignment = overlay_page_assignments.size
+                                   ? overlay_page_assignments.data[0u]
+                                   : 0u;
+        if (overlay_assignment && overlay_bits > 0u &&
             !merge_overlay_into_encoded_page((const char*)output_path.data,
-                                             overlay_ppm_page,
+                                             overlays[(usize)overlay_assignment - 1u].image,
                                              overlay_ignore_colors_text,
                                              overlay_ignore_colors_length,
                                              debug_requested)) return 1;
@@ -29469,9 +29628,12 @@ static int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }
-            if (overlay_ppm_path && overlay_bits > 0u &&
+            u8 overlay_assignment = overlay_page_assignments.size
+                                        ? overlay_page_assignments.data[(usize)page]
+                                        : 0u;
+            if (overlay_assignment && overlay_bits > 0u &&
                 !merge_overlay_into_encoded_page((const char*)path_buffer.data,
-                                                 overlay_ppm_page,
+                                                 overlays[(usize)overlay_assignment - 1u].image,
                                                  overlay_ignore_colors_text,
                                                  overlay_ignore_colors_length,
                                                  debug_requested)) return 1;

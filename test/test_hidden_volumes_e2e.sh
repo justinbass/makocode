@@ -209,7 +209,7 @@ run_e2e_case hidden_ratio_auto 1 "$visible_password" "$hidden_password" 1 0 --hi
 run_e2e_case hidden_ratio_ecc 1 "$visible_password" "$hidden_password" 1 0 --hidden=2 --ecc=0.5
 run_e2e_case hidden_ratio_filler_only 1 "$visible_password" "" 1 0 --hidden=0.5 --ecc=0.5
 run_e2e_case hidden_ratio_auto_overlay_filler 1 "$visible_password" "" 1 0 \
-    --hidden=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --hidden=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 run_e2e_case hidden_ratio_ecc_fill_one_page 1 "$visible_password" "$hidden_password" 1 0 \
     --hidden=2 --ecc=fill
 run_e2e_case hidden_ratio_ecc_fill 2 "$visible_password" "$hidden_password" 1 0 \
@@ -226,18 +226,18 @@ run_e2e_case hidden_fill_two_pages 2 "$visible_password" "$hidden_password" 1 0 
 run_e2e_case hidden_fill_auto_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --fill-pages=2
 run_e2e_case hidden_fill_overlay 1 "$visible_password" "$hidden_password" 1 0 \
-    --hidden=fill --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --hidden=fill --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 run_e2e_case hidden_fill_overlay_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --ecc=0.5 --fill-pages=2 --overlay-fraction=0.1 \
-    "--overlay-ppm=$work_dir/overlay.ppm"
+    "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 run_e2e_case hidden_ratio_overlay 1 "$visible_password" "$hidden_password" 1 0 \
-    --hidden=0.5 --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --hidden=0.5 --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 run_e2e_case visible_ratio_overlay 1 "" "" 0 0 --ecc=0.5 \
-    --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 run_e2e_case hidden_ratio_ecc_fill_overlay 2 "$visible_password" "$hidden_password" 1 0 \
-    --hidden=2 --ecc=fill --fill-pages=2 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --hidden=2 --ecc=fill --fill-pages=2 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 run_e2e_case ecc_fill_overlay 1 "" "" 0 1 --ecc=fill --fill-pages=1 \
-    --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 
 # Password failures and every unsupported option pairing stay failures.
 if "$makocode_bin" decode --output-dir="$work_dir/wrong-password" \
@@ -279,20 +279,20 @@ expect_encode_reject duplicate_fill_pages "--fill-pages may be specified only on
     --ecc=fill --fill-pages=1 --fill-pages=2
 expect_encode_reject fill_pages_with_numeric_modes "--fill-pages requires --hidden fill or --ecc fill" \
     --hidden=0.5 --ecc=0.5 --fill-pages=1 "--password=$visible_password"
-expect_encode_reject overlay_fraction_without_ppm "--overlay-fraction and --overlay-ppm must be used together" \
+expect_encode_reject overlay_fraction_without_ppm "--overlay-fraction and overlay images must be used together" \
     --ecc=0.5 --overlay-fraction=0.1
-expect_encode_reject overlay_ppm_without_fraction "--overlay-fraction and --overlay-ppm must be used together" \
-    --ecc=0.5 "--overlay-ppm=$work_dir/overlay.ppm"
+expect_encode_reject overlay_ppm_without_fraction "--overlay-fraction and overlay images must be used together" \
+    --ecc=0.5 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 expect_encode_reject overlay_fraction_too_large "--overlay-fraction must be between 0.0 and 1.0" \
-    --ecc=0.5 --overlay-fraction=1.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --ecc=0.5 --overlay-fraction=1.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 expect_encode_reject overlay_without_ecc "overlay requires ECC" --ecc=0 \
-    --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm"
+    --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 expect_encode_reject multipage_overlay_ecc_too_low "multi-page overlays require --ecc of at least 0.5" \
     --hidden=fill --hidden-input=hidden_tree "--hidden-password=$hidden_password" \
     --password="$visible_password" --ecc=0.25 --fill-pages=2 --overlay-fraction=0.1 \
-    "--overlay-ppm=$work_dir/overlay.ppm"
+    "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 expect_encode_reject overlay_wrong_dimensions "--overlay-ppm dimensions must match" \
-    --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay_wrong_size.ppm"
+    --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay_wrong_size.ppm" "--overlay-pages=all"
 expect_encode_reject random_data_without_password_or_fill "--random-data requires --password or --fill-pages" \
     --random-data=ffeeddccbbaa99887766554433221100123456789abcdef012345678
 expect_encode_reject hidden_missing_value "--hidden requires a ratio or 'fill'" --hidden

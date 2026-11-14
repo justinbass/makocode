@@ -116,7 +116,7 @@ run_expect_help encode-footer-help 'Usage: makocode encode' '--footer TEXT' "$ma
 run_expect_help encode-ecc-help 'Omit to use the minimum ECC' 'supported overlay fraction' \
     "$makocode_bin" encode --help
 run_expect_help decode-help 'Usage: makocode decode' 'stdin' "$makocode_bin" decode --help
-run_expect_help encode-overlay-help '--overlay-fraction F' '--overlay-ppm PATH' \
+run_expect_help encode-overlay-help '--overlay-fraction F' '--overlay-pages LIST' \
     "$makocode_bin" encode --help
 run_expect_help removed-overlay-command 'Usage:' 'makocode encode [options]' \
     "$makocode_bin" overlay --help
@@ -125,9 +125,9 @@ run_expect_reject ecc-range '--ecc ratio must be between 0 and 254' \
     "$makocode_bin" encode --ecc=254.01
 run_expect_reject overlay-fraction-range '--overlay-fraction must be between 0.0 and 1.0' \
     "$makocode_bin" encode --overlay-fraction=1.01
-run_expect_reject overlay-fraction-alone '--overlay-fraction and --overlay-ppm must be used together' \
+run_expect_reject overlay-fraction-alone '--overlay-fraction and overlay images must be used together' \
     "$makocode_bin" encode --overlay-fraction=0.5
-run_expect_reject overlay-ppm-alone '--overlay-fraction and --overlay-ppm must be used together' \
+run_expect_reject overlay-ppm-without-pages 'each --overlay-ppm requires a following --overlay-pages' \
     "$makocode_bin" encode --overlay-ppm=missing.ppm
 
 printf 'x' > "$tmp_dir/payload.bin"
@@ -168,7 +168,7 @@ fi
     --width 1000 --height 1000)
 overlay_rejection="$tmp_dir/overlay-ecc-rejection.txt"
 if (cd "$tmp_dir" && "$makocode_bin" encode --input=default.bin \
-    --ecc=0.01 --overlay-fraction=1.0 --overlay-ppm="$tmp_dir/overlay.ppm" \
+    --ecc=0.01 --overlay-fraction=1.0 --overlay-ppm="$tmp_dir/overlay.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 \
     "--output-dir=$tmp_dir/overlay_rejected") >"$overlay_rejection" 2>&1; then
     echo "test_cli_help: unsupported overlay fraction unexpectedly succeeded" >&2
@@ -181,7 +181,7 @@ if ! grep -Fq -- 'use at least --ecc' "$overlay_rejection" ||
     exit 1
 fi
 (cd "$tmp_dir" && "$makocode_bin" encode --input=default.bin \
-    --overlay-fraction=0.20 --overlay-ppm="$tmp_dir/overlay.ppm" \
+    --overlay-fraction=0.20 --overlay-ppm="$tmp_dir/overlay.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 "--output-dir=$tmp_dir/overlay_fraction" \
     --prefix=overlay_fraction >/dev/null)
 overlay_page="$tmp_dir/overlay_fraction/overlay_fraction.ppm"

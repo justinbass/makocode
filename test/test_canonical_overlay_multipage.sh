@@ -28,17 +28,40 @@ PY
 "$ppm_transform_bin" overlay-mask --output "$work/overlay.ppm" \
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1000 --height 1000
+"$ppm_transform_bin" overlay-mask --output "$work/overlay_second.ppm" \
+    --circle-color "0 255 255" --background-color "255 255 255" \
+    --width 1000 --height 1000
 
 mkdir -p "$work/pages"
 (cd "$work" && "$bin" encode --input=payload.bin --ecc=fill --overlay-fraction=0.01 \
-    --overlay-ppm="$work/overlay.ppm" \
+    --overlay-ppm="$work/overlay.ppm" --overlay-pages=1-1,1 \
+    --overlay-ppm="$work/overlay_second.ppm" --overlay-pages=2-2 \
     --page-width=1000 --page-height=1000 \
-    --prefix=page --output-dir="$work/pages" >/dev/null)
+    --prefix=page --output-dir="$work/pages" --debug >"$work/multiple_overlay.log" 2>&1)
 shopt -s nullglob
 pages=("$work"/pages/*.ppm)
 shopt -u nullglob
 if [[ ${#pages[@]} -lt 2 ]]; then
     echo "canonical overlay: expected a multipage encoding, found ${#pages[@]} page(s)" >&2
+    exit 1
+fi
+overlay_count=$(rg -c 'debug: overlay bits used=' "$work/multiple_overlay.log" || true)
+if [[ $overlay_count -ne 2 ]]; then
+    echo "canonical overlay: expected exactly two selected page overlays, found $overlay_count" >&2
+    cat "$work/multiple_overlay.log" >&2
+    exit 1
+fi
+if (cd "$work" && "$bin" encode --input=payload.bin --ecc=fill --overlay-fraction=0.01 \
+    --overlay-ppm="$work/overlay.ppm" --overlay-pages=all \
+    --overlay-ppm="$work/overlay_second.ppm" --overlay-pages=all \
+    --page-width=1000 --page-height=1000 --output-dir="$work/overlap_pages") \
+    >"$work/overlap_overlay.log" 2>&1; then
+    echo "canonical overlay: accepted two overlay images on the same pages" >&2
+    exit 1
+fi
+if ! rg -q 'a page cannot have more than one overlay image' "$work/overlap_overlay.log"; then
+    echo "canonical overlay: overlapping image assignments failed for the wrong reason" >&2
+    cat "$work/overlap_overlay.log" >&2
     exit 1
 fi
 
@@ -52,7 +75,7 @@ with open(sys.argv[1], 'wb') as stream:
 PY
 mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
 (cd "$work" && "$bin" encode --input=mixed_payload.bin  --overlay-fraction=0.01 \
-    --overlay-ppm="$work/overlay.ppm" \
+    --overlay-ppm="$work/overlay.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
 (cd "$work" && "$bin" encode --input=mixed_payload.bin  \
