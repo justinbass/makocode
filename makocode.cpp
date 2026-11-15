@@ -9545,7 +9545,9 @@ namespace MetadataTile {
                                     Values& out_values,
                                     ByteBuffer& out_palette_text,
                                     double* out_tag_mismatch = 0,
-                                    double* out_alignment_score = 0) {
+                                    double* out_alignment_score = 0,
+                                    u32 max_marker_errors = 12u,
+                                    bool ignore_marker = false) {
         if (!tile_rgb || !module_luminances) return false;
         auto module_luminance = [&](u32 x, u32 y) -> double {
             return module_luminances[(usize)y * TILE_SIDE + x];
@@ -9612,7 +9614,7 @@ namespace MetadataTile {
                                           ? threshold - luminance
                                           : luminance - threshold) / 255.0;
                 }
-                if (tag_errors > 12u) {
+                if (!ignore_marker && tag_errors > max_marker_errors) {
                     continue;
                 }
                 u32 square_y0 = tag_y + TILE_HEADER_ROWS;
@@ -10056,7 +10058,9 @@ namespace MetadataTile {
                                      bool tag_only = false,
                                      bool sample_scaled_cells = false,
                                      u32* tag_y_out = 0,
-                                     u32* metadata_bit_count_out = 0) {
+                                     u32* metadata_bit_count_out = 0,
+                                     u32 max_marker_errors = 0xFFFFFFFFu,
+                                     bool ignore_marker = false) {
         tag_out = 0u;
         inverted_out = false;
         confidence_out = 0.0;
@@ -10115,7 +10119,9 @@ namespace MetadataTile {
         u32 best_tag_y = 0u;
         u32 best_metadata_bit_count = 0u;
         const u32 max_tag_y = (TILE_SIDE - TILE_HEADER_ROWS - 1u) / 2u;
-        const u32 max_tag_errors = allow_incomplete_palette ? 12u : 0u;
+        const u32 max_tag_errors = max_marker_errors == 0xFFFFFFFFu
+                                       ? (allow_incomplete_palette ? 12u : 0u)
+                                       : max_marker_errors;
         for (u32 tag_y = 0u; tag_y <= max_tag_y; ++tag_y) {
             u8 tag_row_rgb[TILE_SIDE * 3u];
             for (u32 x = 0u; x < TILE_SIDE; ++x) {
@@ -10162,7 +10168,7 @@ namespace MetadataTile {
                 bool balanced_tag = balanced_errors < legacy_errors;
                 u32 tag_magic = balanced_tag ? BALANCED_GROUPED_PALETTE_TAG_MAGIC : LEGACY_TAG_MAGIC;
                 u32 errors = balanced_tag ? balanced_errors : legacy_errors;
-                if (errors > max_tag_errors) continue;
+                if (!ignore_marker && errors > max_tag_errors) continue;
                 double marker_margin = 0.0;
                 for (u32 bit = 0u; bit < 32u; ++bit) {
                     u32 module_x = tag_marker_x0() + (bit & 7u);
@@ -10179,7 +10185,7 @@ namespace MetadataTile {
                                           ? tag_threshold - luminance
                                           : luminance - tag_threshold) / 255.0;
                 }
-                if (errors > max_tag_errors) continue;
+                if (!ignore_marker && errors > max_tag_errors) continue;
 
                 u32 metadata_bit_count = 0u;
                 if (!tag_only) {
@@ -10274,7 +10280,7 @@ namespace MetadataTile {
                 }
             }
         }
-        if (best_errors > max_tag_errors) return false;
+        if (!ignore_marker && best_errors > max_tag_errors) return false;
         tag_out = best_tag;
         inverted_out = best_inverted;
         confidence_out = (32.0 - (double)best_errors) / 32.0 +
@@ -10295,7 +10301,9 @@ namespace MetadataTile {
                                    double* out_border_mismatch = 0,
                                    bool sample_scaled_cells = false,
                                    double* out_alignment_score = 0,
-                                   bool prefix_parity_only = false) {
+                                   bool prefix_parity_only = false,
+                                   u32 max_marker_errors = 12u,
+                                   bool ignore_marker = false) {
         (void)prefix_parity_only;
         if (!pixel_data_rgb || width_pixels == 0u || height_pixels == 0u || data_height_pixels == 0u ||
             !(affine.pitch_pixels > 0.0)) return false;
@@ -10369,7 +10377,8 @@ namespace MetadataTile {
             }
         }
         bool decoded = decode_tile_samples(tile_rgb, tile_luminances, out_values, out_palette_text,
-                                           out_border_mismatch, out_alignment_score);
+                                           out_border_mismatch, out_alignment_score,
+                                           max_marker_errors, ignore_marker);
         return decoded;
     }
 
@@ -15691,6 +15700,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return false;
     }
     u8* pixel_data = pixel_buffer.data;
+    bool marker_orientation_detected = false;
     // The 4x8 tag is the only orientation-independent cue in a scan: locate
     // its known bit pattern around the centered metadata tile, then normalize
     // the raster before the regular (unoriented) tile decoder runs.
@@ -15815,6 +15825,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 width = normalized_width;
                 height = normalized_height;
                 raw_pixel_count = width * height;
+                marker_orientation_detected = true;
             }
         }
     }
@@ -15993,6 +16004,94 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return values.fiducial_columns == expected_columns &&
                values.fiducial_rows == expected_rows;
     };
+    auto probe_centered_metadata = [&](bool ignore_marker, u32 max_marker_errors) -> bool {
+        if (known_tile_override || width < MetadataTile::TILE_SIDE ||
+            height < MetadataTile::TILE_SIDE || width > 0xFFFFFFFFull ||
+            height > 0xFFFFFFFFull) return false;
+        double minimum_dimension = (double)(width < height ? width : height);
+        double max_pitch = minimum_dimension / (double)MetadataTile::TILE_SIDE;
+        if (max_pitch > 64.0) max_pitch = 64.0;
+        double center_x = ((double)width - 1.0) * 0.5;
+        double center_y = ((double)height - 1.0) * 0.5;
+        u32 ecc_attempts = 0u;
+        for (int radius = 0; radius <= 2 && ecc_attempts < 64u; ++radius) {
+            for (int offset_y = -radius; offset_y <= radius && ecc_attempts < 64u; ++offset_y) {
+                for (int offset_x = -radius; offset_x <= radius && ecc_attempts < 64u; ++offset_x) {
+                    int abs_x = offset_x < 0 ? -offset_x : offset_x;
+                    int abs_y = offset_y < 0 ? -offset_y : offset_y;
+                    if ((abs_x > abs_y ? abs_x : abs_y) != radius) continue;
+                    for (u32 pitch_range = 0u; pitch_range < 2u && ecc_attempts < 64u; ++pitch_range) {
+                        double pitch_start = pitch_range == 0u ? 1.0 : 13.0;
+                        double pitch_step = pitch_range == 0u ? 0.25 : 1.0;
+                        for (double pitch = pitch_start;
+                             pitch <= max_pitch + 1e-9 && ecc_attempts < 64u;
+                             pitch += pitch_step) {
+                            for (u32 quarter = 0u; quarter < 2u && ecc_attempts < 64u; ++quarter) {
+                                double angle = (double)quarter *
+                                    (3.14159265358979323846 / 2.0);
+                                for (int sign_x = -1; sign_x <= 1 && ecc_attempts < 64u; sign_x += 2) {
+                                    for (int sign_y = -1; sign_y <= 1 && ecc_attempts < 64u; sign_y += 2) {
+                                        MetadataTile::AffineParams candidate_affine = {};
+                                        candidate_affine.pitch_pixels = pitch;
+                                        candidate_affine.pitch_x_pixels = pitch * (double)sign_x;
+                                        candidate_affine.pitch_y_pixels = pitch * (double)sign_y;
+                                        candidate_affine.angle_rad = angle;
+                                        candidate_affine.center_x = center_x +
+                                            (double)offset_x * 0.5 * pitch;
+                                        candidate_affine.center_y = center_y +
+                                            (double)offset_y * 0.5 * pitch;
+                                        u64 candidate_tag = 0u;
+                                        bool candidate_inverted = false;
+                                        double candidate_confidence = 0.0;
+                                        if (!MetadataTile::match_tile_tag_affine(
+                                                pixel_data, (u32)width, (u32)height, (u32)height,
+                                                candidate_affine, candidate_tag, candidate_inverted,
+                                                candidate_confidence, true, false,
+                                                sample_scaled_metadata_tile, 0, 0,
+                                                max_marker_errors, ignore_marker)) continue;
+                                        ++ecc_attempts;
+                                        MetadataTile::Values candidate_values;
+                                        makocode::ByteBuffer candidate_palette_text;
+                                        if (!MetadataTile::decode_tile_affine(
+                                                pixel_data, (u32)width, (u32)height, (u32)height,
+                                                candidate_affine, candidate_values,
+                                                candidate_palette_text, 0,
+                                                sample_scaled_metadata_tile, 0, false,
+                                                max_marker_errors, ignore_marker)) continue;
+                                        tile_values = candidate_values;
+                                        byte_buffer_move(tile_palette_text, candidate_palette_text);
+                                        tile_values.footer_rows = MetadataTile::infer_footer_rows_from_affine(
+                                            tile_values, candidate_affine, (u32)width, (u32)height);
+                                        tile_affine_hint = candidate_affine;
+                                        tile_affine_hint_available = true;
+                                        tile_available = true;
+                                        apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+                                        if (debug_fiducial_csv) {
+                                            console_line(2, ignore_marker
+                                                ? "decode: metadata ECC recovered from header length row"
+                                                : "decode: partial MAKO/CODE marker recovered by metadata ECC");
+                                        }
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    };
+    if (!tile_available && !marker_orientation_detected) {
+        // A half-matching marker only nominates the tile; decode_tile_affine accepts it
+        // only when the metadata Reed-Solomon codeword decodes successfully.
+        probe_centered_metadata(false, 16u);
+    }
+    if (!tile_available && !marker_orientation_detected) {
+        // If the marker is unusable, the intact palette and compact length rows bound
+        // the metadata sample; Reed-Solomon remains the acceptance check.
+        probe_centered_metadata(true, 32u);
+    }
     if (!known_tile_override && !tile_available && sample_scaled_metadata_tile &&
         metadata_width_hint == 80u && metadata_height_hint == 80u &&
         metadata_pitch_hint_x >= 1.20 && metadata_pitch_hint_x <= 1.40 &&

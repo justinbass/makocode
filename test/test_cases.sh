@@ -421,3 +421,6 @@ test_case 0112_decode_recover_palette script "Damaged palette rows recover from 
 
 test_case 0113_decode_orientation_scan script "Rotated and mirrored print scans round-trip" \
     test_decode_orientation_scan.sh
+
+test_case 0114_decode_partial_tag_scan script "ECC recovers a scan with half the marker erased" \
+    test_decode_partial_tag_scan.sh
