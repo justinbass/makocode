@@ -6,7 +6,7 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
 harness=${BLOB_ERASURE_HARNESS_BIN:-"$repo_root/test/blob_erasure_harness"}
 ppm_transform="$repo_root/test/ppm_transform"
-work=$(mktemp -d "$repo_root/test_output/decode_blob_erasures.XXXXXX")
+work=$(mktemp -d "$repo_root/test_output/0110_decode_blob_erasures_work.XXXXXX")
 seed=1944
 
 if [[ ! -x $bin || ! -x $harness || ! -x $ppm_transform ]]; then

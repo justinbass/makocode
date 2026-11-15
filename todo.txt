@@ -1,20 +1,10 @@
 TODO
 
 Features:
+- Make fidicuals optional, test for large page without them
+- Metadata only on selected pages (including middle)
 - ECC can be stored as num from 0 -> 255, could be compact_u16 or even a new compact_u8.
-- Metadata recovery
-  - Confirm that metadata includes all encoder inputs
-    - Data size, start with measured one, but clipping can affect it. Search one by one around starting point.
-    - Page height/width, start with measured one, but clipping can affect it. Search one by one around starting point.
-    - Overlay (0 -> 65535), overlay looks like non-random data
-    - ECC (0 -> 65535), difficult to distinguish from data. Come up with a good encoder default, to use as a starting point. Measured from real tests.
-    - Fiducials are easy to visibly measure, may not be needed in metadata at all...
-    - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
-    - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
-    - Metadata only on selected pages
-    - Pre-data section recovery (TBD)
-    - Considering ordering by increasing cardinality
-- Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
+- Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
 
 Improvements:
 - Improve overlay approaching ~100% ECC
@@ -24,6 +14,7 @@ Improvements:
 - Improve minification algorithm to reduce size, E2E test compiles it
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
+  - Largest page possible that takes <5s.
 - Run physical tests, against calibration script. Improve calibration script until max data density is found.
   - Tests for physical row/column skip/expand (scan/print damage)
   - Increase all distortions until decoding breaks, make improvements

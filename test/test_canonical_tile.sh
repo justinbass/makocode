@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$root/makocode"}
-work=$(mktemp -d "$root/test_output/canonical_tile_work.XXXXXX")
+work=$(mktemp -d "$root/test_output/0101_canonical_tile_work.XXXXXX")
 harness=${CANONICAL_TILE_HARNESS_BIN:-"$root/test/canonical_tile_harness"}
 if [[ ! -x $harness ]]; then
     harness="$work/canonical_tile_harness"
