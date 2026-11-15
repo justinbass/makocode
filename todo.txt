@@ -3,7 +3,6 @@ TODO
 Features:
 - Metadata recovery
   - Confirm that metadata includes all encoder inputs
-    - MA KO CO DE, if it's missing we don't know orientation or where the metadata middle is at all. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Metadata size, get the most common ones for total pages and search one by one around the known measured one
     - Data size, start with measured one, but clipping can affect it. Search one by one around starting point.
     - Page height/width, start with measured one, but clipping can affect it. Search one by one around starting point.

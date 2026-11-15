@@ -424,3 +424,6 @@ test_case 0113_decode_orientation_scan script "Rotated and mirrored print scans 
 
 test_case 0114_decode_partial_tag_scan script "ECC recovers a scan with half the marker erased" \
     test_decode_partial_tag_scan.sh
+
+test_case 0115_decode_erased_tag_orientation_scan script "ECC recovers fully erased markers across orientations" \
+    test_decode_erased_tag_orientation_scan.sh

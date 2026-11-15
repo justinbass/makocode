@@ -10140,6 +10140,8 @@ namespace MetadataTile {
                                                              palette[palette_count - 1u].b));
                 u32 legacy_errors = 0u;
                 u32 balanced_errors = 0u;
+                u32 observed_dark_modules = 0u;
+                u32 observed_light_modules = 0u;
                 for (u32 bit = 0u; bit < 32u; ++bit) {
                     u32 module_x = tag_marker_x0() + (bit & 7u);
                     u32 module_y = tag_y + 1u + bit / 8u;
@@ -10161,6 +10163,8 @@ namespace MetadataTile {
                             pixel_data_rgb, width_pixels, height_pixels, sample_x, sample_y);
                     }
                     bool value = luminance < tag_threshold;
+                    if (value) ++observed_dark_modules;
+                    else ++observed_light_modules;
                     if (inversion) value = !value;
                     if (value != makocode_tag_bit(bit)) ++legacy_errors;
                     if (value != makocode_tag_bit(bit, BALANCED_GROUPED_PALETTE_TAG_MAGIC)) ++balanced_errors;
@@ -10168,6 +10172,8 @@ namespace MetadataTile {
                 bool balanced_tag = balanced_errors < legacy_errors;
                 u32 tag_magic = balanced_tag ? BALANCED_GROUPED_PALETTE_TAG_MAGIC : LEGACY_TAG_MAGIC;
                 u32 errors = balanced_tag ? balanced_errors : legacy_errors;
+                if (!ignore_marker &&
+                    (observed_dark_modules == 0u || observed_light_modules == 0u)) continue;
                 if (!ignore_marker && errors > max_tag_errors) continue;
                 double marker_margin = 0.0;
                 for (u32 bit = 0u; bit < 32u; ++bit) {
@@ -16013,24 +16019,42 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         if (max_pitch > 64.0) max_pitch = 64.0;
         double center_x = ((double)width - 1.0) * 0.5;
         double center_y = ((double)height - 1.0) * 0.5;
+        const double preferred_pitches[] = {
+            1.0, 2.0, 4.0, 3.0, 5.0, 6.0, 8.0, 10.0, 12.0,
+            7.0, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5};
+        double pitch_candidates[sizeof(preferred_pitches) / sizeof(preferred_pitches[0])] = {};
+        u32 pitch_candidate_count = 0u;
+        for (u32 pitch_index = 0u;
+             pitch_index < sizeof(preferred_pitches) / sizeof(preferred_pitches[0]);
+             ++pitch_index) {
+            if (preferred_pitches[pitch_index] <= max_pitch + 1e-9) {
+                pitch_candidates[pitch_candidate_count++] = preferred_pitches[pitch_index];
+            }
+        }
         u32 ecc_attempts = 0u;
-        for (int radius = 0; radius <= 2 && ecc_attempts < 64u; ++radius) {
-            for (int offset_y = -radius; offset_y <= radius && ecc_attempts < 64u; ++offset_y) {
-                for (int offset_x = -radius; offset_x <= radius && ecc_attempts < 64u; ++offset_x) {
+        u32 candidate_checks = 0u;
+        int max_center_radius = ignore_marker ? 2 : 0;
+        for (int radius = 0; radius <= max_center_radius && ecc_attempts < 64u &&
+                             candidate_checks < 1024u; ++radius) {
+            for (int offset_y = -radius; offset_y <= radius && ecc_attempts < 64u &&
+                                candidate_checks < 1024u; ++offset_y) {
+                for (int offset_x = -radius; offset_x <= radius && ecc_attempts < 64u &&
+                                    candidate_checks < 1024u; ++offset_x) {
                     int abs_x = offset_x < 0 ? -offset_x : offset_x;
                     int abs_y = offset_y < 0 ? -offset_y : offset_y;
                     if ((abs_x > abs_y ? abs_x : abs_y) != radius) continue;
-                    for (u32 pitch_range = 0u; pitch_range < 2u && ecc_attempts < 64u; ++pitch_range) {
-                        double pitch_start = pitch_range == 0u ? 1.0 : 13.0;
-                        double pitch_step = pitch_range == 0u ? 0.25 : 1.0;
-                        for (double pitch = pitch_start;
-                             pitch <= max_pitch + 1e-9 && ecc_attempts < 64u;
-                             pitch += pitch_step) {
-                            for (u32 quarter = 0u; quarter < 2u && ecc_attempts < 64u; ++quarter) {
+                    for (u32 pitch_index = 0u;
+                         pitch_index < pitch_candidate_count && ecc_attempts < 64u &&
+                         candidate_checks < 1024u; ++pitch_index) {
+                        double pitch = pitch_candidates[pitch_index];
+                        for (u32 quarter = 0u; quarter < 2u && ecc_attempts < 64u &&
+                                             candidate_checks < 1024u; ++quarter) {
                                 double angle = (double)quarter *
                                     (3.14159265358979323846 / 2.0);
-                                for (int sign_x = -1; sign_x <= 1 && ecc_attempts < 64u; sign_x += 2) {
-                                    for (int sign_y = -1; sign_y <= 1 && ecc_attempts < 64u; sign_y += 2) {
+                                for (int sign_x = -1; sign_x <= 1 && ecc_attempts < 64u &&
+                                                      candidate_checks < 1024u; sign_x += 2) {
+                                    for (int sign_y = -1; sign_y <= 1 && ecc_attempts < 64u &&
+                                                          candidate_checks < 1024u; sign_y += 2) {
                                         MetadataTile::AffineParams candidate_affine = {};
                                         candidate_affine.pitch_pixels = pitch;
                                         candidate_affine.pitch_x_pixels = pitch * (double)sign_x;
@@ -16043,6 +16067,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                         u64 candidate_tag = 0u;
                                         bool candidate_inverted = false;
                                         double candidate_confidence = 0.0;
+                                        ++candidate_checks;
                                         if (!MetadataTile::match_tile_tag_affine(
                                                 pixel_data, (u32)width, (u32)height, (u32)height,
                                                 candidate_affine, candidate_tag, candidate_inverted,
@@ -16058,6 +16083,94 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                                 candidate_palette_text, 0,
                                                 sample_scaled_metadata_tile, 0, false,
                                                 max_marker_errors, ignore_marker)) continue;
+                                        double original_center_x = ((double)width - 1.0) * 0.5;
+                                        double original_center_y = ((double)height - 1.0) * 0.5;
+                                        int orientation_sign_x =
+                                            candidate_affine.pitch_x_pixels < 0.0 ? -1 : 1;
+                                        int orientation_sign_y =
+                                            candidate_affine.pitch_y_pixels < 0.0 ? -1 : 1;
+                                        double absolute_pitch_x = fabs(candidate_affine.pitch_x_pixels);
+                                        double absolute_pitch_y = fabs(candidate_affine.pitch_y_pixels);
+                                        double quarter_turns = candidate_affine.angle_rad /
+                                            (3.14159265358979323846 / 2.0);
+                                        int nearest_quarter = (int)floor(quarter_turns + 0.5);
+                                        bool normalize_orientation = nearest_quarter != 0 ||
+                                            orientation_sign_x != 1 || orientation_sign_y != 1;
+                                        if (normalize_orientation) {
+                                            u32 normalized_width = (u32)width;
+                                            u32 normalized_height = (u32)height;
+                                            if (nearest_quarter & 1) {
+                                                normalized_width = (u32)height;
+                                                normalized_height = (u32)width;
+                                            }
+                                            u64 normalized_pixels =
+                                                (u64)normalized_width * normalized_height;
+                                            makocode::ByteBuffer normalized;
+                                            if (normalized_pixels > (u64)USIZE_MAX_VALUE / 3u ||
+                                                !normalized.ensure((usize)normalized_pixels * 3u)) {
+                                                return false;
+                                            }
+                                            normalized.size = (usize)normalized_pixels * 3u;
+                                            double normalized_center_x =
+                                                ((double)normalized_width - 1.0) * 0.5;
+                                            double normalized_center_y =
+                                                ((double)normalized_height - 1.0) * 0.5;
+                                            double cosine = cos(candidate_affine.angle_rad);
+                                            double sine = sin(candidate_affine.angle_rad);
+                                            for (u32 y = 0u; y < normalized_height; ++y) {
+                                                for (u32 x = 0u; x < normalized_width; ++x) {
+                                                    double dx = ((double)x - normalized_center_x) *
+                                                        (double)orientation_sign_x;
+                                                    double dy = ((double)y - normalized_center_y) *
+                                                        (double)orientation_sign_y;
+                                                    double source_x = original_center_x +
+                                                        cosine * dx - sine * dy;
+                                                    double source_y = original_center_y +
+                                                        sine * dx + cosine * dy;
+                                                    int sx = (int)floor(source_x + 0.5);
+                                                    int sy = (int)floor(source_y + 0.5);
+                                                    usize destination =
+                                                        ((usize)y * normalized_width + x) * 3u;
+                                                    if (sx >= 0 && sy >= 0 &&
+                                                        (u64)sx < width && (u64)sy < height) {
+                                                        usize source =
+                                                            ((usize)sy * (usize)width +
+                                                             (usize)sx) * 3u;
+                                                        memcpy(normalized.data + destination,
+                                                               pixel_data + source, 3u);
+                                                    } else {
+                                                        normalized.data[destination] = 255u;
+                                                        normalized.data[destination + 1u] = 255u;
+                                                        normalized.data[destination + 2u] = 255u;
+                                                    }
+                                                }
+                                            }
+                                            double offset_x =
+                                                candidate_affine.center_x - original_center_x;
+                                            double offset_y =
+                                                candidate_affine.center_y - original_center_y;
+                                            double normalized_offset_x =
+                                                (double)orientation_sign_x *
+                                                (cosine * offset_x + sine * offset_y);
+                                            double normalized_offset_y =
+                                                (double)orientation_sign_y *
+                                                (-sine * offset_x + cosine * offset_y);
+                                            byte_buffer_move(pixel_buffer, normalized);
+                                            pixel_data = pixel_buffer.data;
+                                            width = normalized_width;
+                                            height = normalized_height;
+                                            raw_pixel_count = normalized_pixels;
+                                            candidate_affine.center_x =
+                                                normalized_center_x + normalized_offset_x;
+                                            candidate_affine.center_y =
+                                                normalized_center_y + normalized_offset_y;
+                                            candidate_affine.pitch_pixels = 0.5 *
+                                                (absolute_pitch_x + absolute_pitch_y);
+                                            candidate_affine.pitch_x_pixels = absolute_pitch_x;
+                                            candidate_affine.pitch_y_pixels = absolute_pitch_y;
+                                            candidate_affine.angle_rad = 0.0;
+                                            marker_orientation_detected = true;
+                                        }
                                         tile_values = candidate_values;
                                         byte_buffer_move(tile_palette_text, candidate_palette_text);
                                         tile_values.footer_rows = MetadataTile::infer_footer_rows_from_affine(
@@ -16076,7 +16189,6 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                 }
                             }
                         }
-                    }
                 }
             }
         }
