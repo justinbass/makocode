@@ -418,3 +418,6 @@ test_case 0111_decode_missing_pages script "Metadata-indexed missing pages becom
 
 test_case 0112_decode_recover_palette script "Damaged palette rows recover from ordered color candidates" \
     test_decode_recover_palette.sh
+
+test_case 0113_decode_orientation_scan script "Rotated and mirrored print scans round-trip" \
+    test_decode_orientation_scan.sh

@@ -15691,6 +15691,133 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         return false;
     }
     u8* pixel_data = pixel_buffer.data;
+    // The 4x8 tag is the only orientation-independent cue in a scan: locate
+    // its known bit pattern around the centered metadata tile, then normalize
+    // the raster before the regular (unoriented) tile decoder runs.
+    if (!use_rgb_pixels_override && width >= 80u && height >= 80u &&
+        width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
+        double best_separation = 0.0;
+        u32 best_errors = 33u;
+        double best_angle = 0.0;
+        int best_sign_x = 1;
+        int best_sign_y = 1;
+        bool found_orientation = false;
+        double image_center_x = ((double)width - 1.0) * 0.5;
+        double image_center_y = ((double)height - 1.0) * 0.5;
+        double max_pitch = (double)(width < height ? width : height) / 48.0 * 2.0;
+        if (max_pitch > 24.0) max_pitch = 24.0;
+        for (u32 quarter = 0u; quarter < 2u; ++quarter) {
+            double quarter_angle = (double)quarter * (3.14159265358979323846 / 2.0);
+            for (int sign_x = -1; sign_x <= 1; sign_x += 2) {
+                for (int sign_y = -1; sign_y <= 1; sign_y += 2) {
+                    for (int angle_step = 0; angle_step <= 0; ++angle_step) {
+                        double angle = quarter_angle;
+                        double cosine = cos(angle);
+                        double sine = sin(angle);
+                        for (double pitch = 1.0; pitch <= max_pitch + 1e-9; pitch += 0.2) {
+                            for (u32 center_shift = 0u; center_shift < 4u; ++center_shift) {
+                            double shift_x = (center_shift & 1u) ? -0.5 * pitch : 0.0;
+                            double shift_y = (center_shift & 2u) ? -0.5 * pitch : 0.0;
+                            for (int tag_y = 0; tag_y <= 21; ++tag_y) {
+                                double one_sum = 0.0;
+                                double zero_sum = 0.0;
+                                double samples[32];
+                                for (u32 bit = 0u; bit < 32u; ++bit) {
+                                    double module_x = (double)(20u + (bit & 7u)) - 23.5;
+                                    double module_y = (double)(tag_y + 1 + (int)(bit / 8u)) - 23.5;
+                                    double logical_x = module_x * (double)sign_x;
+                                    double logical_y = module_y * (double)sign_y;
+                                    double sample_x = image_center_x + shift_x + pitch *
+                                        (cosine * logical_x - sine * logical_y);
+                                    double sample_y = image_center_y + shift_y + pitch *
+                                        (sine * logical_x + cosine * logical_y);
+                                    int px = (int)floor(sample_x + 0.5);
+                                    int py = (int)floor(sample_y + 0.5);
+                                    if (px < 0 || py < 0 || (u64)px >= width || (u64)py >= height) {
+                                        samples[bit] = 127.5;
+                                    } else {
+                                        usize rgb = ((usize)py * (usize)width + (usize)px) * 3u;
+                                        samples[bit] = 0.2126 * (double)pixel_data[rgb] +
+                                                       0.7152 * (double)pixel_data[rgb + 1u] +
+                                                       0.0722 * (double)pixel_data[rgb + 2u];
+                                    }
+                                    if (MetadataTile::makocode_tag_bit(bit)) one_sum += samples[bit];
+                                    else zero_sum += samples[bit];
+                                }
+                                double one_mean = one_sum / 16.0;
+                                double zero_mean = zero_sum / 16.0;
+                                double separation = fabs(one_mean - zero_mean);
+                                if (separation < 24.0) continue;
+                                double threshold = (one_mean + zero_mean) * 0.5;
+                                for (u32 polarity = 0u; polarity < 2u; ++polarity) {
+                                    u32 errors = 0u;
+                                    for (u32 bit = 0u; bit < 32u; ++bit) {
+                                        bool observed = samples[bit] < threshold;
+                                        if (polarity) observed = !observed;
+                                        if (observed != MetadataTile::makocode_tag_bit(bit)) ++errors;
+                                    }
+                                    if (errors < best_errors ||
+                                        (errors == best_errors && separation > best_separation)) {
+                                        best_errors = errors;
+                                        best_separation = separation;
+                                        best_angle = angle;
+                                        best_sign_x = sign_x;
+                                        best_sign_y = sign_y;
+                                        found_orientation = true;
+                                    }
+                                }
+                            }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (found_orientation && best_errors <= 3u) {
+            u32 normalized_width = (u32)width;
+            u32 normalized_height = (u32)height;
+            double quarter_turns = best_angle / (3.14159265358979323846 / 2.0);
+            int nearest_quarter = (int)floor(quarter_turns + 0.5);
+            if (nearest_quarter & 1) {
+                normalized_width = (u32)height;
+                normalized_height = (u32)width;
+            }
+            u64 normalized_pixels = (u64)normalized_width * (u64)normalized_height;
+            makocode::ByteBuffer normalized;
+            if (normalized_pixels <= (u64)USIZE_MAX_VALUE / 3u &&
+                normalized.ensure((usize)normalized_pixels * 3u)) {
+                normalized.size = (usize)normalized_pixels * 3u;
+                double normalized_center_x = ((double)normalized_width - 1.0) * 0.5;
+                double normalized_center_y = ((double)normalized_height - 1.0) * 0.5;
+                double cosine = cos(best_angle);
+                double sine = sin(best_angle);
+                for (u32 y = 0u; y < normalized_height; ++y) {
+                    for (u32 x = 0u; x < normalized_width; ++x) {
+                        double dx = ((double)x - normalized_center_x) * (double)best_sign_x;
+                        double dy = ((double)y - normalized_center_y) * (double)best_sign_y;
+                        double source_x = image_center_x + cosine * dx - sine * dy;
+                        double source_y = image_center_y + sine * dx + cosine * dy;
+                        int sx = (int)floor(source_x + 0.5);
+                        int sy = (int)floor(source_y + 0.5);
+                        usize destination = ((usize)y * normalized_width + x) * 3u;
+                        if (sx >= 0 && sy >= 0 && (u64)sx < width && (u64)sy < height) {
+                            usize source = ((usize)sy * (usize)width + (usize)sx) * 3u;
+                            memcpy(normalized.data + destination, pixel_data + source, 3u);
+                        } else {
+                            normalized.data[destination] = 255u;
+                            normalized.data[destination + 1u] = 255u;
+                            normalized.data[destination + 2u] = 255u;
+                        }
+                    }
+                }
+                byte_buffer_move(pixel_buffer, normalized);
+                pixel_data = pixel_buffer.data;
+                width = normalized_width;
+                height = normalized_height;
+                raw_pixel_count = width * height;
+            }
+        }
+    }
     makocode::ByteBuffer quarter_scale_deblurred_pixels;
     if (raw_pixel_count <= 262144u) {
         u8 first_r = pixel_data[0u];

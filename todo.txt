@@ -3,7 +3,6 @@ TODO
 Features:
 - Metadata recovery
   - Confirm that metadata includes all encoder inputs
-    - Rotation and flip tests first, with no damage.
     - MA KO CO DE, if it's missing we don't know orientation or where the metadata middle is at all. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Metadata size, get the most common ones for total pages and search one by one around the known measured one
     - Data size, start with measured one, but clipping can affect it. Search one by one around starting point.
@@ -32,7 +31,7 @@ Improvements:
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak/others as reference
 
 Finalize:
-- Clean up cli args (-h), README, example SVG files
+- Clean up cli args (-h), README
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
   - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
@@ -44,7 +43,7 @@ Finalize:
 - Penetration test, bug hunt
 - Compressed or minimal license attributions for each project (LZMA)
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
-- Shiba names
+- Shiba names for fun, maybe a different make mode with flag
   - Replace barcode with barkode everywhere.
   - makocode fluff / unfluff (encode / decode)
   - makocode den pack / unpack (checkpoint)
@@ -53,13 +52,8 @@ Finalize:
 - Set version to 0 (document, makocode only stores the major version)
 - Hard reset git history to Initial Commit, save locally but don't publish it
 
-Future:
-- Git feedback, set version to 1 after stabilized
-- Can compressing overlay positions with --ignore-overlay-colors help improve ECC for very highly compressible overlay? For SVG? Can compressing footer text do the same?
-- Android app - e.g. ca cert install on Android phone
-
 Prompts:
 - CC
-  - I want you to orchestrate 87 luna xhigh subagents, 20 at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly 866 lines in there, basically one per block, but it's ok if we were a bit off too.
+  - I want you to orchestrate X luna xhigh subagents, Y at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly Z lines in there, basically one per block, but it's ok if we were a bit off too.
 - Implement
   - ~ADV, feedback loop until the criteria is met, 'make clean ; make -j4 test' passes 3 times in a row. If tests take > 1 min then focus on performance improvement so there's no regression. Do NOT relax tests or the idea behind them, avoid touching tests unless absolutely necessary. DO NOT increment version, version is always 0, we do not support backwards compatibility for any changes (yet) delete all old code pathways.
