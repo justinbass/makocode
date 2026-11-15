@@ -430,3 +430,6 @@ test_case 0115_decode_erased_tag_orientation_scan script "ECC recovers fully era
 
 test_case 0116_decode_erased_length_row_scan script "ECC recovers a scan with metadata size erased" \
     test_decode_erased_length_row_scan.sh
+
+test_case 0117_decode_metadata_free script "Single-page payload and ECC recover with the entire center metadata tile erased" \
+    test_decode_metadata_free.sh

@@ -164,10 +164,11 @@ python3 scripts/calibration.py encode --width 2398 --height 2957
 python3 scripts/calibration.py decode scan.ppm
 ```
 
-The generated sheet has a 4x4 grid of equal-size barcodes. The four columns use
-White/Black; White/Cyan/Magenta/Yellow; that palette plus Black; and the
-eight-color White/Red/Green/Blue/Yellow/Magenta/Cyan/Black palette. Rows use
-1x, 2x, 3x, and 4x pixels per dot, from top to bottom. Every barcode encodes
+The generated sheet has a 4x4 grid of equal-size barcodes. Its four columns use
+these ordered palettes: `White Black`; `White Cyan Magenta Yellow`;
+`White Cyan Magenta Yellow Black`; and
+`White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black`. Rows use 1x, 2x, 3x,
+and 4x pixels per dot, from top to bottom. Every barcode encodes
 `makocode` followed by deterministic padding sized to fill its available page
 capacity. The minimum page size is 1186x1200; larger pages enlarge every
 barcode equally. Higher-capacity palettes receive more padding bytes, so the

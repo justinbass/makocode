@@ -153,6 +153,23 @@ run_e2e_case() {
     printf 'hidden-e2e %s PASS (%d page(s))\n' "$name" "$expected_pages"
 }
 
+case_pids=()
+wait_case_pids() {
+    local case_pid
+    for case_pid in "${case_pids[@]}"; do
+        wait "$case_pid" || return 1
+    done
+    case_pids=()
+}
+
+queue_e2e_case() {
+    run_e2e_case "$@" &
+    case_pids+=("$!")
+    if [[ ${#case_pids[@]} -ge 4 ]]; then
+        wait_case_pids
+    fi
+}
+
 expect_encode_reject() {
     local name=$1 expected=$2
     shift 2
@@ -193,51 +210,61 @@ expect_encode_reject() {
     printf 'hidden-e2e %s REJECT PASS\n' "$name"
 }
 
+queue_encode_reject() {
+    expect_encode_reject "$@" &
+    case_pids+=("$!")
+    if [[ ${#case_pids[@]} -ge 4 ]]; then
+        wait_case_pids
+    fi
+}
+
 visible_password="visible test password"
 hidden_password="hidden test password"
 
 # Ordinary volume options, including the explicit 0 value and both page-fill modes.
-run_e2e_case visible_default 1 "" "" 0 0
-run_e2e_case visible_hidden_zero 1 "" "" 0 0 --hidden=0 --ecc=0.5
-run_e2e_case visible_password_hidden_zero 1 "$visible_password" "" 0 0 --hidden=0
-run_e2e_case ecc_fill_one_page 1 "" "" 0 1 --ecc=fill --fill-pages=1
-run_e2e_case ecc_fill_two_pages 2 "" "" 0 1 --ecc=fill --fill-pages=2
-run_e2e_case ecc_fill_current_page 1 "" "" 0 0 --ecc=fill
+queue_e2e_case visible_default 1 "" "" 0 0
+queue_e2e_case visible_hidden_zero 1 "" "" 0 0 --hidden=0 --ecc=0.5
+queue_e2e_case visible_password_hidden_zero 1 "$visible_password" "" 0 0 --hidden=0
+queue_e2e_case ecc_fill_one_page 1 "" "" 0 1 --ecc=fill --fill-pages=1
+queue_e2e_case ecc_fill_two_pages 2 "" "" 0 1 --ecc=fill --fill-pages=2
+queue_e2e_case ecc_fill_current_page 1 "" "" 0 0 --ecc=fill
 
 # Ratio modes cover both a real hidden tree and a filler-only region.
-run_e2e_case hidden_ratio_auto 1 "$visible_password" "$hidden_password" 1 0 --hidden=0.5
-run_e2e_case hidden_ratio_ecc 1 "$visible_password" "$hidden_password" 1 0 --hidden=2 --ecc=0.5
-run_e2e_case hidden_ratio_filler_only 1 "$visible_password" "" 1 0 --hidden=0.5 --ecc=0.5
-run_e2e_case hidden_ratio_auto_overlay_filler 1 "$visible_password" "" 1 0 \
+queue_e2e_case hidden_ratio_auto 1 "$visible_password" "$hidden_password" 1 0 --hidden=0.5
+queue_e2e_case hidden_ratio_ecc 1 "$visible_password" "$hidden_password" 1 0 --hidden=2 --ecc=0.5
+queue_e2e_case hidden_ratio_filler_only 1 "$visible_password" "" 1 0 --hidden=0.5 --ecc=0.5
+queue_e2e_case hidden_ratio_auto_overlay_filler 1 "$visible_password" "" 1 0 \
     --hidden=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-run_e2e_case hidden_ratio_ecc_fill_one_page 1 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_ratio_ecc_fill_one_page 1 "$visible_password" "$hidden_password" 1 0 \
     --hidden=2 --ecc=fill
-run_e2e_case hidden_ratio_ecc_fill 2 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_ratio_ecc_fill 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=2 --ecc=fill --fill-pages=2
 
 # Fill modes include no hidden archive, a hidden tree, multiple pages, and overlay recovery.
-run_e2e_case hidden_fill_filler_only 1 "$visible_password" "" 1 0 --hidden=fill
-run_e2e_case hidden_fill_archive_auto 1 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_fill_filler_only 1 "$visible_password" "" 1 0 --hidden=fill
+queue_e2e_case hidden_fill_archive_auto 1 "$visible_password" "$hidden_password" 1 0 \
     --hidden fill
-run_e2e_case hidden_fill_archive 1 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_fill_archive 1 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --ecc=0.5 --fill-pages=1
-run_e2e_case hidden_fill_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_fill_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --ecc=0.25 --fill-pages=2
-run_e2e_case hidden_fill_auto_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_fill_auto_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --fill-pages=2
-run_e2e_case hidden_fill_overlay 1 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_fill_overlay 1 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-run_e2e_case hidden_fill_overlay_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_fill_overlay_two_pages 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=fill --ecc=0.5 --fill-pages=2 --overlay-fraction=0.1 \
     "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-run_e2e_case hidden_ratio_overlay 1 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_ratio_overlay 1 "$visible_password" "$hidden_password" 1 0 \
     --hidden=0.5 --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-run_e2e_case visible_ratio_overlay 1 "" "" 0 0 --ecc=0.5 \
+queue_e2e_case visible_ratio_overlay 1 "" "" 0 0 --ecc=0.5 \
     --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-run_e2e_case hidden_ratio_ecc_fill_overlay 2 "$visible_password" "$hidden_password" 1 0 \
+queue_e2e_case hidden_ratio_ecc_fill_overlay 2 "$visible_password" "$hidden_password" 1 0 \
     --hidden=2 --ecc=fill --fill-pages=2 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-run_e2e_case ecc_fill_overlay 1 "" "" 0 1 --ecc=fill --fill-pages=1 \
+queue_e2e_case ecc_fill_overlay 1 "" "" 0 1 --ecc=fill --fill-pages=1 \
     --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
+
+wait_case_pids
 
 # Password failures and every unsupported option pairing stay failures.
 if "$makocode_bin" decode --output-dir="$work_dir/wrong-password" \
@@ -246,60 +273,61 @@ if "$makocode_bin" decode --output-dir="$work_dir/wrong-password" \
     echo "test_hidden_volumes_e2e: wrong hidden password unexpectedly opened the archive" >&2
     exit 1
 fi
-expect_encode_reject hidden_fill_ecc_fill "--hidden fill and --ecc fill compete" \
+queue_encode_reject hidden_fill_ecc_fill "--hidden fill and --ecc fill compete" \
     --hidden=fill --ecc=fill "--password=$visible_password"
-expect_encode_reject ecc_disabled_visible "ECC cannot cover structural erasures" --ecc=0
-expect_encode_reject ecc_disabled_hidden_ratio "ECC cannot cover structural erasures" \
+queue_encode_reject ecc_disabled_visible "ECC cannot cover structural erasures" --ecc=0
+queue_encode_reject ecc_disabled_hidden_ratio "ECC cannot cover structural erasures" \
     --hidden=64 --ecc=0 "--password=$visible_password"
-expect_encode_reject ecc_disabled_hidden_fill "ECC cannot cover structural erasures" \
+queue_encode_reject ecc_disabled_hidden_fill "ECC cannot cover structural erasures" \
     --hidden=fill --ecc=0 --fill-pages=1 "--password=$visible_password"
-expect_encode_reject fill_pages_without_fill "--fill-pages requires --hidden fill or --ecc fill" \
+queue_encode_reject fill_pages_without_fill "--fill-pages requires --hidden fill or --ecc fill" \
     --hidden=2 --ecc=0.5 --fill-pages=1 "--password=$visible_password"
-expect_encode_reject hidden_inputs_without_mode "hidden inputs and password require --hidden" \
+queue_encode_reject hidden_inputs_without_mode "hidden inputs and password require --hidden" \
     --hidden-input=hidden_tree "--hidden-password=$hidden_password"
-expect_encode_reject hidden_input_without_password "--hidden-input and --hidden-password must be supplied together" \
+queue_encode_reject hidden_input_without_password "--hidden-input and --hidden-password must be supplied together" \
     --hidden=0.5 --hidden-input=hidden_tree "--password=$visible_password"
-expect_encode_reject hidden_password_without_input "--hidden-input and --hidden-password must be supplied together" \
+queue_encode_reject hidden_password_without_input "--hidden-input and --hidden-password must be supplied together" \
     --hidden=0.5 "--password=$visible_password" "--hidden-password=$hidden_password"
-expect_encode_reject hidden_options_with_zero "hidden inputs and password require --hidden" \
+queue_encode_reject hidden_options_with_zero "hidden inputs and password require --hidden" \
     --hidden=0 --hidden-input=hidden_tree "--hidden-password=$hidden_password" "--password=$visible_password"
-expect_encode_reject hidden_without_visible_password "--hidden requires --password and --random-data" \
+queue_encode_reject hidden_without_visible_password "--hidden requires --password and --random-data" \
     --hidden=0.5
-expect_encode_reject identical_passwords "visible and hidden passwords must differ" \
+queue_encode_reject identical_passwords "visible and hidden passwords must differ" \
     --hidden=0.5 --hidden-input=hidden_tree "--hidden-password=$visible_password" \
     "--password=$visible_password"
-expect_encode_reject hidden_capacity_too_small "hidden payload exceeds the --hidden capacity" \
+queue_encode_reject hidden_capacity_too_small "hidden payload exceeds the --hidden capacity" \
     --hidden=0.001 --hidden-input=hidden_tree "--hidden-password=$hidden_password" \
     "--password=$visible_password"
-expect_encode_reject hidden_ratio_negative "--hidden ratio must be between 0 and 64" --hidden=-1
-expect_encode_reject hidden_ratio_too_large "--hidden ratio must be between 0 and 64" --hidden=65
-expect_encode_reject duplicate_hidden_option "--hidden may be specified only once" --hidden=0.5 --hidden=2
-expect_encode_reject fill_pages_zero "--fill-pages must be between 1 and 1000000" --ecc=fill --fill-pages=0
-expect_encode_reject duplicate_fill_pages "--fill-pages may be specified only once" \
+queue_encode_reject hidden_ratio_negative "--hidden ratio must be between 0 and 64" --hidden=-1
+queue_encode_reject hidden_ratio_too_large "--hidden ratio must be between 0 and 64" --hidden=65
+queue_encode_reject duplicate_hidden_option "--hidden may be specified only once" --hidden=0.5 --hidden=2
+queue_encode_reject fill_pages_zero "--fill-pages must be between 1 and 1000000" --ecc=fill --fill-pages=0
+queue_encode_reject duplicate_fill_pages "--fill-pages may be specified only once" \
     --ecc=fill --fill-pages=1 --fill-pages=2
-expect_encode_reject fill_pages_with_numeric_modes "--fill-pages requires --hidden fill or --ecc fill" \
+queue_encode_reject fill_pages_with_numeric_modes "--fill-pages requires --hidden fill or --ecc fill" \
     --hidden=0.5 --ecc=0.5 --fill-pages=1 "--password=$visible_password"
-expect_encode_reject overlay_fraction_without_ppm "--overlay-fraction and overlay images must be used together" \
+queue_encode_reject overlay_fraction_without_ppm "--overlay-fraction and overlay images must be used together" \
     --ecc=0.5 --overlay-fraction=0.1
-expect_encode_reject overlay_ppm_without_fraction "--overlay-fraction and overlay images must be used together" \
+queue_encode_reject overlay_ppm_without_fraction "--overlay-fraction and overlay images must be used together" \
     --ecc=0.5 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-expect_encode_reject overlay_fraction_too_large "--overlay-fraction must be between 0.0 and 1.0" \
+queue_encode_reject overlay_fraction_too_large "--overlay-fraction must be between 0.0 and 1.0" \
     --ecc=0.5 --overlay-fraction=1.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-expect_encode_reject overlay_without_ecc "overlay requires ECC" --ecc=0 \
+queue_encode_reject overlay_without_ecc "overlay requires ECC" --ecc=0 \
     --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-expect_encode_reject multipage_overlay_ecc_too_low "multi-page overlays require --ecc of at least 0.5" \
+queue_encode_reject multipage_overlay_ecc_too_low "multi-page overlays require --ecc of at least 0.5" \
     --hidden=fill --hidden-input=hidden_tree "--hidden-password=$hidden_password" \
     --password="$visible_password" --ecc=0.25 --fill-pages=2 --overlay-fraction=0.1 \
     "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-expect_encode_reject overlay_wrong_dimensions "--overlay-ppm dimensions must match" \
+queue_encode_reject overlay_wrong_dimensions "--overlay-ppm dimensions must match" \
     --ecc=0.5 --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay_wrong_size.ppm" "--overlay-pages=all"
-expect_encode_reject random_data_without_password_or_fill "--random-data requires --password or --fill-pages" \
+queue_encode_reject random_data_without_password_or_fill "--random-data requires --password or --fill-pages" \
     --random-data=ffeeddccbbaa99887766554433221100123456789abcdef012345678
-expect_encode_reject hidden_missing_value "--hidden requires a ratio or 'fill'" --hidden
-expect_encode_reject hidden_ratio_not_numeric "--hidden ratio must be between 0 and 64" --hidden=secret
-expect_encode_reject fill_pages_missing_value "--fill-pages requires a positive page count" --ecc=fill --fill-pages
-expect_encode_reject fill_pages_over_limit "--fill-pages must be between 1 and 1000000" \
+queue_encode_reject hidden_missing_value "--hidden requires a ratio or 'fill'" --hidden
+queue_encode_reject hidden_ratio_not_numeric "--hidden ratio must be between 0 and 64" --hidden=secret
+queue_encode_reject fill_pages_missing_value "--fill-pages requires a positive page count" --ecc=fill --fill-pages
+queue_encode_reject fill_pages_over_limit "--fill-pages must be between 1 and 1000000" \
     --ecc=fill --fill-pages=1000001
+wait_case_pids
 
 if (cd "$source_dir" && "$makocode_bin" encode --input=visible.bin \
     --page-width=1000 --page-height=1000 --password="$visible_password" \

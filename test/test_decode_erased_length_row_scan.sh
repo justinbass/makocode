@@ -21,7 +21,7 @@ fi
 
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-mkdir -p "$work_dir/encoded" "$work_dir/decoded"
+mkdir -p "$work_dir/encoded"
 printf 'erased metadata length row scan payload' > "$work_dir/payload.bin"
 
 (
@@ -41,7 +41,9 @@ cases=(
     '0 0 1'
 )
 
+case_pids=()
 for case_spec in "${cases[@]}"; do
+(
     read -r angle flip_x flip_y <<<"$case_spec"
     scan="$work_dir/scan_${angle}_${flip_x}_${flip_y}.ppm"
     python3 - "$work_dir/encoded/source.ppm" "$scan" "$layout" "$angle" "$flip_x" "$flip_y" <<'PY'
@@ -109,8 +111,10 @@ for y in range(out_h):
 write_ppm(output_path, out_w, out_h, pixels)
 PY
 
+    decoded_dir="$work_dir/decoded_${angle}_${flip_x}_${flip_y}"
+    mkdir -p "$decoded_dir"
     log="$work_dir/decode_${angle}_${flip_x}_${flip_y}.log"
-    if ! "$makocode_bin" decode --debug "--output-dir=$work_dir/decoded" \
+    if ! "$makocode_bin" decode --debug "--output-dir=$decoded_dir" \
         "$scan" >"$log" 2>&1; then
         cat "$log" >&2
         echo "test_decode_erased_length_row_scan: scan failed for angle=$angle flip_x=$flip_x flip_y=$flip_y" >&2
@@ -121,8 +125,17 @@ PY
         echo 'test_decode_erased_length_row_scan: guessed-size path was not used' >&2
         exit 1
     fi
-    cmp --silent "$work_dir/payload.bin" "$work_dir/decoded/payload.bin"
-    rm -f "$work_dir/decoded/payload.bin"
+    cmp --silent "$work_dir/payload.bin" "$decoded_dir/payload.bin"
+    rm -f "$decoded_dir/payload.bin"
+) &
+    case_pids+=("$!")
+    if [[ ${#case_pids[@]} -ge 4 ]]; then
+        wait "${case_pids[0]}"
+        case_pids=("${case_pids[@]:1}")
+    fi
+done
+for case_pid in "${case_pids[@]}"; do
+    wait "$case_pid"
 done
 
 printf 'fully erased metadata length row scan round-trip passed (label=%s)\n' "$label"
