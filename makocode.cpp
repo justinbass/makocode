@@ -15400,6 +15400,172 @@ static bool frame_bits_to_payload(const u8*, u64, const PpmParserState&,
                                   const u8* = 0, u64 = 0,
                                   makocode::ByteBuffer* = 0);
 
+static bool detect_uniform_payload_regions(const u8* symbols,
+                                           u32 width,
+                                           u32 height,
+                                           const u64* payload_ranks,
+                                           const u8* reservation_mask,
+                                           usize reservation_mask_size,
+                                           const MetadataTile::Placement& metadata_placement,
+                                           u32 bits_per_symbol,
+                                           u64 page_segment_bits,
+                                           makocode::ByteBuffer& blot_cells) {
+    blot_cells.release();
+    if (!symbols || !payload_ranks || !width || !height || !bits_per_symbol ||
+        (u64)width > U64_MAX_VALUE / height) return false;
+    u64 cell_count_u64 = (u64)width * height;
+    if (cell_count_u64 > (u64)USIZE_MAX_VALUE || cell_count_u64 > 0xFFFFFFFFu) return false;
+    usize cell_count = (usize)cell_count_u64;
+    if (cell_count && (!blot_cells.ensure(cell_count))) return false;
+    blot_cells.size = cell_count;
+    if (cell_count) memset(blot_cells.data, 0, cell_count);
+    bool broad_uniform_run = false;
+    for (u32 y = 0u; y < height && !broad_uniform_run; ++y) {
+        u32 run_length = 0u;
+        u8 run_symbol = 0u;
+        for (u32 x = 0u; x < width; ++x) {
+            u8 symbol = symbols[(usize)y * width + x];
+            if (run_length && symbol == run_symbol) ++run_length;
+            else {
+                run_symbol = symbol;
+                run_length = 1u;
+            }
+            if (run_length >= 24u) {
+                broad_uniform_run = true;
+                break;
+            }
+        }
+    }
+    if (!broad_uniform_run) return true;
+    u64 prefix_width = (u64)width + 1u;
+    u64 prefix_height = (u64)height + 1u;
+    if (prefix_width > U64_MAX_VALUE / prefix_height) return false;
+    u64 prefix_cells_u64 = prefix_width * prefix_height;
+    if (prefix_cells_u64 > (u64)USIZE_MAX_VALUE / sizeof(u32)) return false;
+    makocode::ByteBuffer prefix_storage;
+    if (prefix_cells_u64 && !prefix_storage.ensure((usize)prefix_cells_u64 * sizeof(u32))) {
+        blot_cells.release();
+        return false;
+    }
+    prefix_storage.size = (usize)prefix_cells_u64 * sizeof(u32);
+    u32* prefix = (u32*)prefix_storage.data;
+    memset(prefix, 0, prefix_storage.size);
+    u64 eligible_count = 0u;
+    u64 candidate_count = 0u;
+    for (u32 y = 0u; y < height; ++y) {
+        for (u32 x = 0u; x < width; ++x) {
+            usize index = (usize)y * width + x;
+            u64 rank = payload_ranks[index];
+            bool eligible = rank != U64_MAX_VALUE &&
+                rank <= U64_MAX_VALUE / bits_per_symbol &&
+                rank * bits_per_symbol < page_segment_bits &&
+                !(reservation_mask && index < reservation_mask_size &&
+                  reservation_mask[index]);
+            if (eligible && metadata_placement.valid) {
+                bool in_metadata_square = x >= metadata_placement.x0 &&
+                    x < metadata_placement.x0 + MetadataTile::TILE_SIDE &&
+                    y >= metadata_placement.y0 &&
+                    y < metadata_placement.y0 + MetadataTile::TILE_SIDE;
+                bool above_metadata_square = x >= metadata_placement.x0 &&
+                    x < metadata_placement.x0 + MetadataTile::TILE_SIDE &&
+                    y < metadata_placement.y0 &&
+                    metadata_placement.y0 - y <= 6u;
+                if (in_metadata_square || above_metadata_square) eligible = false;
+            }
+            if (eligible) {
+                ++eligible_count;
+                blot_cells.data[index] = 1u;
+            }
+            usize prefix_index = (usize)((u64)y + 1u) * (usize)prefix_width + x + 1u;
+            usize prefix_left = prefix_index - 1u;
+            usize prefix_above = prefix_index - (usize)prefix_width;
+            usize prefix_diagonal = prefix_above - 1u;
+            prefix[prefix_index] = (symbols[index] == 0u ? 1u : 0u) +
+                                   prefix[prefix_left] + prefix[prefix_above] -
+                                   prefix[prefix_diagonal];
+        }
+    }
+    if (eligible_count < 256u) {
+        if (cell_count) memset(blot_cells.data, 0, cell_count);
+        return true;
+    }
+    for (u32 y = 0u; y < height; ++y) {
+        u32 y0 = y > 5u ? y - 5u : 0u;
+        u32 y1 = y + 6u < height ? y + 6u : height;
+        for (u32 x = 0u; x < width; ++x) {
+            usize index = (usize)y * width + x;
+            if (blot_cells.data[index] != 1u) continue;
+            u32 x0 = x > 5u ? x - 5u : 0u;
+            u32 x1 = x + 6u < width ? x + 6u : width;
+            usize top_left = (usize)y0 * (usize)prefix_width + x0;
+            usize top_right = (usize)y0 * (usize)prefix_width + x1;
+            usize bottom_left = (usize)y1 * (usize)prefix_width + x0;
+            usize bottom_right = (usize)y1 * (usize)prefix_width + x1;
+            u64 zeros = (prefix[bottom_right] - prefix[top_right]) -
+                        (prefix[bottom_left] - prefix[top_left]);
+            u64 area = (u64)(x1 - x0) * (u64)(y1 - y0);
+            u64 matching = symbols[index] == 0u ? zeros : area - zeros;
+            if (area && matching * 100u >= area * 90u) {
+                blot_cells.data[index] = 2u;
+                ++candidate_count;
+            }
+        }
+    }
+    if (candidate_count < 256u ||
+        candidate_count > (u64)USIZE_MAX_VALUE / sizeof(u32)) {
+        if (cell_count) memset(blot_cells.data, 0, cell_count);
+        return true;
+    }
+    makocode::ByteBuffer queue_storage;
+    if (!queue_storage.ensure((usize)candidate_count * sizeof(u32))) return false;
+    u32* queue = (u32*)queue_storage.data;
+    for (u32 y = 0u; y < height; ++y) {
+        for (u32 x = 0u; x < width; ++x) {
+            usize start = (usize)y * width + x;
+            if (blot_cells.data[start] != 2u) continue;
+            u8 symbol = symbols[start];
+            usize head = 0u;
+            usize tail = 0u;
+            queue[tail++] = (u32)start;
+            blot_cells.data[start] = 3u;
+            u32 min_x = x, max_x = x, min_y = y, max_y = y;
+            while (head < tail) {
+                usize index = queue[head++];
+                u32 cell_x = (u32)(index % width);
+                u32 cell_y = (u32)(index / width);
+                if (cell_x < min_x) min_x = cell_x;
+                if (cell_x > max_x) max_x = cell_x;
+                if (cell_y < min_y) min_y = cell_y;
+                if (cell_y > max_y) max_y = cell_y;
+                usize neighbors[4];
+                u32 neighbor_count = 0u;
+                if (cell_x > 0u) neighbors[neighbor_count++] = index - 1u;
+                if (cell_x + 1u < width) neighbors[neighbor_count++] = index + 1u;
+                if (cell_y > 0u) neighbors[neighbor_count++] = index - width;
+                if (cell_y + 1u < height) neighbors[neighbor_count++] = index + width;
+                for (u32 neighbor_index = 0u; neighbor_index < neighbor_count; ++neighbor_index) {
+                    usize neighbor = neighbors[neighbor_index];
+                    if (blot_cells.data[neighbor] != 2u || symbols[neighbor] != symbol) continue;
+                    blot_cells.data[neighbor] = 3u;
+                    queue[tail++] = (u32)neighbor;
+                }
+            }
+            u64 box_width = (u64)max_x - min_x + 1u;
+            u64 box_height = (u64)max_y - min_y + 1u;
+            u64 box_area = box_width * box_height;
+            if (tail >= 256u && box_width >= 16u && box_height >= 16u &&
+                box_area > 0u && (u64)tail * 100u >= box_area * 60u &&
+                (u64)tail * 100u <= eligible_count * 35u) {
+                for (usize i = 0u; i < tail; ++i) blot_cells.data[queue[i]] = 4u;
+            }
+        }
+    }
+    for (usize i = 0u; i < cell_count; ++i) {
+        blot_cells.data[i] = blot_cells.data[i] == 4u ? 1u : 0u;
+    }
+    return true;
+}
+
 static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    const ImageMappingConfig& overrides,
                                    makocode::ByteBuffer& frame_bits,
@@ -15422,7 +15588,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    const u8* known_rgb_pixels_override = 0,
                                    u32 known_rgb_width_override = 0u,
                                    u32 known_rgb_height_override = 0u,
-                                   u32 small_scan_geometry_variant = 0u) {
+                                   u32 small_scan_geometry_variant = 0u,
+                                   bool detect_uniform_blots = true) {
     if (frame_erasure_bits) frame_erasure_bits->release();
     if (overlay_selector_seed_out) *overlay_selector_seed_out = 0u;
     if (overlay_selector_counts_out) overlay_selector_counts_out->release();
@@ -19355,6 +19522,26 @@ struct RotationEstimateCandidate {
         return false;
     }
     const u64* payload_ranks = (const u64*)payload_rank_map.data;
+    makocode::ByteBuffer logical_palette_symbols;
+    bool binary_fixed_width_page =
+        (use_custom_palette && custom_fixed_width && active_mapping.custom_palette_count == 2u) ||
+        (!use_custom_palette && color_mode == 1u && sample_bits == 1u && samples_per_pixel == 1u);
+    u32 uniform_symbol_bits = use_custom_palette ? custom_symbol_bits : 1u;
+    bool record_uniform_palette_symbols = detect_uniform_blots && prefix_payload_order &&
+        binary_fixed_width_page && uniform_symbol_bits == 1u &&
+        state.has_encoded_tile &&
+        metadata_schema_is_current(state.encoded_tile.schema_version) &&
+        state.encoded_tile.page_bits >= 4096u &&
+        logical_width <= 0xFFFFFFFFu && data_height <= 0xFFFFFFFFu &&
+        logical_width <= U64_MAX_VALUE / data_height &&
+        logical_width * data_height >= 256u &&
+        logical_width * data_height <= 0xFFFFFFFFu &&
+        logical_width * data_height <= (u64)USIZE_MAX_VALUE &&
+        logical_palette_symbols.ensure((usize)(logical_width * data_height));
+    if (record_uniform_palette_symbols) {
+        logical_palette_symbols.size = (usize)(logical_width * data_height);
+        memset(logical_palette_symbols.data, 0, logical_palette_symbols.size);
+    }
     auto write_sample_bits_at = [&](u64 start_bit, u32 value, u32 bit_count) -> bool {
         if (start_bit >= capacity_with_reserve) return true;
         for (u32 bit = 0u; bit < bit_count && start_bit + bit < capacity_with_reserve; ++bit) {
@@ -23551,6 +23738,9 @@ struct RotationEstimateCandidate {
                         } else {
                             u32 symbol = 0u;
                             map_rgb_to_custom_symbol(payload_custom_mapping, rgb, symbol);
+                            if (record_uniform_palette_symbols && symbol < 2u) {
+                                logical_palette_symbols.data[(usize)pixel_index] = (u8)symbol;
+                            }
                             if (!write_sample_bits_at(start_bit, symbol, custom_symbol_bits)) {
                                 return false;
                             }
@@ -23582,6 +23772,10 @@ struct RotationEstimateCandidate {
             } else {
                 map_rgb_to_samples(color_mode, rgb, samples_raw);
             }
+            if (record_uniform_palette_symbols && !use_custom_palette && color_mode == 1u) {
+                usize symbol_index = (usize)(logical_row * logical_width + logical_col);
+                logical_palette_symbols.data[symbol_index] = (u8)(samples_raw[0] & 1u);
+            }
             u32 packed_sample = 0u;
             for (u8 sample_index = 0u; sample_index < samples_per_pixel; ++sample_index) {
                 packed_sample |= samples_raw[sample_index] << ((u32)sample_index * sample_bits);
@@ -23595,6 +23789,46 @@ struct RotationEstimateCandidate {
                     mark_sample_erased(start_bit, bit_count);
                 } else if (!write_sample_bits_at(start_bit, packed_sample, bit_count)) {
                     return false;
+                }
+            }
+        }
+    }
+
+    if (record_uniform_palette_symbols && frame_erasure_bits && frame_erasure_bits->data) {
+        u64 blot_page_capacity_bits = capacity_with_reserve;
+        u64 blot_page_index = state.encoded_tile.page_index
+                                  ? state.encoded_tile.page_index : debug_page;
+        if (blot_page_capacity_bits > 0u && blot_page_index > 0u &&
+            blot_page_index - 1u <= U64_MAX_VALUE / blot_page_capacity_bits) {
+            u64 page_offset = (blot_page_index - 1u) * blot_page_capacity_bits;
+            if (state.encoded_tile.page_bits > page_offset) {
+                u64 page_segment_bits = state.encoded_tile.page_bits - page_offset;
+                if (page_segment_bits > blot_page_capacity_bits) {
+                    page_segment_bits = blot_page_capacity_bits;
+                }
+                makocode::ByteBuffer blot_cells;
+                if (detect_uniform_payload_regions(logical_palette_symbols.data,
+                                                   (u32)logical_width,
+                                                   (u32)data_height,
+                                                   payload_ranks,
+                                                   reservation_mask,
+                                                   reservation_size,
+                                                   metadata_placement,
+                                                   uniform_symbol_bits,
+                                                   page_segment_bits,
+                                                   blot_cells)) {
+                    u64 pixel_count = logical_width * data_height;
+                    for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
+                        if (!blot_cells.data[pixel]) continue;
+                        u64 rank = payload_ranks[pixel];
+                        if (rank == U64_MAX_VALUE || rank > U64_MAX_VALUE / uniform_symbol_bits) {
+                            continue;
+                        }
+                        u64 start_bit = rank * uniform_symbol_bits;
+                        if (start_bit < page_segment_bits) {
+                            mark_sample_erased(start_bit, uniform_symbol_bits);
+                        }
+                    }
                 }
             }
         }
@@ -30471,6 +30705,7 @@ static int command_decode(int arg_count, char** args) {
     usize file_count = 0u;
     MetadataTile::Values encoded_pages[MAX_INPUT_FILES];
     bool encoded_page_present[MAX_INPUT_FILES] = {};
+    u64 encoded_page_indices[MAX_INPUT_FILES] = {};
     usize encoded_page_count = 0u;
     bool decoded_file_requested = false;
     bool decoded_stdout_requested = false;
@@ -30696,6 +30931,7 @@ retry_decode:
         makocode::ByteBuffer frame_bits;
         makocode::ByteBuffer frame_erasure_bits;
         u64 frame_bit_count = 0u;
+        u64 single_page_capacity_bits = 0u;
         PpmParserState single_state;
         bool retry_without_subgrid_allowed = false;
         bool single_color_rotation = false;
@@ -30716,7 +30952,7 @@ retry_decode:
                                                       &single_color_rotation,
                                                       (const AffineTransform*)0,
                                                       force_tile_center_sampling,
-                                                      0,
+                                                      &single_page_capacity_bits,
                                                       single_retry_tile_available
                                                           ? &single_retry_tile
                                                           : (const MetadataTile::Values*)0,
@@ -30758,6 +30994,107 @@ retry_decode:
             console_line(2, "decode: failed to write fiducial CSV");
             return 1;
         }
+        if (single_state.has_encoded_tile &&
+            metadata_schema_is_current(single_state.encoded_tile.schema_version) &&
+            single_state.encoded_tile.page_bits && single_page_capacity_bits) {
+            const MetadataTile::Values& tile = single_state.encoded_tile;
+            u64 page_index = tile.page_index ? tile.page_index : 1u;
+            if (page_index - 1u > U64_MAX_VALUE / single_page_capacity_bits) {
+                console_line(2, "decode: single page index overflows frame offset");
+                return 1;
+            }
+            u64 page_offset = (page_index - 1u) * single_page_capacity_bits;
+            bool page_has_payload = page_offset < tile.page_bits;
+            if ((page_index <= tile.page_count) != page_has_payload) {
+                console_line(2, "decode: single page index conflicts with payload length");
+                return 1;
+            }
+        }
+        if (single_state.has_encoded_tile &&
+            metadata_schema_is_current(single_state.encoded_tile.schema_version) &&
+            single_state.encoded_tile.page_count > 1u) {
+            const MetadataTile::Values& tile = single_state.encoded_tile;
+            u64 page_index = tile.page_index ? tile.page_index : 1u;
+            if (!single_page_capacity_bits || !tile.page_bits) {
+                console_line(2, "decode: single page has invalid missing-page metadata");
+                return 1;
+            }
+            makocode::BitWriter assembled_bits;
+            makocode::BitWriter assembled_erasures;
+            auto append_missing_bits = [&](u64 bits) -> bool {
+                while (bits > 0u) {
+                    u32 chunk = bits >= 64u ? 64u : (u32)bits;
+                    u64 ones = chunk == 64u ? U64_MAX_VALUE : (((u64)1u << chunk) - 1u);
+                    if (!assembled_bits.write_bits(0u, chunk) ||
+                        !assembled_erasures.write_bits(ones, chunk)) return false;
+                    bits -= chunk;
+                }
+                return true;
+            };
+            for (u64 current_page = 1u; current_page <= tile.page_count; ++current_page) {
+                if (current_page - 1u > U64_MAX_VALUE / single_page_capacity_bits) {
+                    console_line(2, "decode: single page frame offset overflow");
+                    return 1;
+                }
+                u64 page_offset = (current_page - 1u) * single_page_capacity_bits;
+                if (page_offset >= tile.page_bits) break;
+                u64 segment_bits = tile.page_bits - page_offset;
+                if (segment_bits > single_page_capacity_bits) segment_bits = single_page_capacity_bits;
+                if (current_page != page_index) {
+                    if (!append_missing_bits(segment_bits)) {
+                        console_line(2, "decode: failed to mark missing stdin page as erased");
+                        return 1;
+                    }
+                    continue;
+                }
+                u64 observed_bits = frame_bit_count < segment_bits ? frame_bit_count : segment_bits;
+                if (!append_bits_from_buffer(assembled_bits, frame_bits.data, observed_bits)) {
+                    console_line(2, "decode: failed to assemble stdin page bits");
+                    return 1;
+                }
+                if (frame_erasure_bits.data && frame_erasure_bits.size) {
+                    if (!append_bits_from_buffer(assembled_erasures,
+                                                 frame_erasure_bits.data,
+                                                 observed_bits)) {
+                        console_line(2, "decode: failed to assemble stdin page erasures");
+                        return 1;
+                    }
+                } else {
+                    u64 clean_bits = observed_bits;
+                    while (clean_bits > 0u) {
+                        u32 chunk = clean_bits >= 64u ? 64u : (u32)clean_bits;
+                        if (!assembled_erasures.write_bits(0u, chunk)) {
+                            console_line(2, "decode: failed to assemble stdin page erasures");
+                            return 1;
+                        }
+                        clean_bits -= chunk;
+                    }
+                }
+                if (observed_bits < segment_bits &&
+                    !append_missing_bits(segment_bits - observed_bits)) {
+                    console_line(2, "decode: failed to mark truncated stdin page as erased");
+                    return 1;
+                }
+            }
+            usize assembled_bytes = assembled_bits.byte_size();
+            usize assembled_erasure_bytes = assembled_erasures.byte_size();
+            frame_bits.release();
+            frame_erasure_bits.release();
+            if ((assembled_bytes && !frame_bits.ensure(assembled_bytes)) ||
+                (assembled_erasure_bytes && !frame_erasure_bits.ensure(assembled_erasure_bytes))) {
+                console_line(2, "decode: failed to allocate assembled stdin pages");
+                return 1;
+            }
+            if (assembled_bytes) memcpy(frame_bits.data, assembled_bits.data(), assembled_bytes);
+            if (assembled_erasure_bytes) {
+                memcpy(frame_erasure_bits.data,
+                       assembled_erasures.data(),
+                       assembled_erasure_bytes);
+            }
+            frame_bits.size = assembled_bytes;
+            frame_erasure_bits.size = assembled_erasure_bytes;
+            frame_bit_count = assembled_bits.bit_size();
+        }
         if (single_color_rotation) {
             for (usize i = 0u; i < frame_bits.size; ++i) {
                 u8 rotate = (u8)((i % 3u) + 1u);
@@ -30780,6 +31117,9 @@ retry_decode:
 
         encoded_page_present[0] = single_state.has_encoded_tile;
         encoded_pages[0] = single_state.encoded_tile;
+        encoded_page_indices[0] = single_state.has_page_index &&
+                                  single_state.page_index_value > 0u
+                                      ? single_state.page_index_value : 1u;
         encoded_page_count = 1u;
         if (single_state.has_encoded_tile) {
             single_retry_tile = single_state.encoded_tile;
@@ -30809,13 +31149,19 @@ retry_decode:
         makocode::BitWriter erasure_aggregator;
         frame_aggregator.reset();
         erasure_aggregator.reset();
+        makocode::ByteBuffer indexed_frame_bits;
+        makocode::ByteBuffer indexed_erasure_bits;
         bool aggregate_initialized = false;
+        bool page_assembly_mode_initialized = false;
+        bool indexed_page_assembly = false;
         bool first_page_has_selector_tile = false;
         bool have_first_page_selector_tile = false;
         bool aggregate_color_rotation = false;
         bool have_aggregate_color_rotation = false;
         MetadataTile::Values first_page_selector_tile;
         u64 expected_page_index = 1u;
+        u64 indexed_frame_bit_total = 0u;
+        u64 aggregate_page_capacity_bits = 0u;
         AffineTransform previous_page_affine_hint = {};
         bool previous_page_affine_hint_available = false;
         for (usize file_index = 0u; file_index < file_count; ++file_index) {
@@ -30878,6 +31224,49 @@ retry_decode:
                 console_write(2, "decode: invalid ppm in ");
                 console_line(2, input_files[file_index]);
                 return 1;
+            }
+            bool has_explicit_page_index = page_state.has_page_index &&
+                                           page_state.page_index_value > 0u;
+            if (!has_explicit_page_index) {
+                page_state.has_page_index = true;
+                page_state.page_index_value = expected_page_index;
+            }
+            bool page_has_indexed_metadata = page_state.has_encoded_tile &&
+                metadata_schema_is_current(page_state.encoded_tile.schema_version) &&
+                page_state.has_page_bits && has_explicit_page_index &&
+                page_capacity_bits > 0u;
+            if (!page_assembly_mode_initialized) {
+                page_assembly_mode_initialized = true;
+                indexed_page_assembly = page_has_indexed_metadata;
+                if (indexed_page_assembly) {
+                    indexed_frame_bit_total = page_state.page_bits_value;
+                    u64 frame_bytes_u64 = (indexed_frame_bit_total >> 3u) +
+                                          ((indexed_frame_bit_total & 7u) ? 1u : 0u);
+                    if (frame_bytes_u64 > (u64)USIZE_MAX_VALUE ||
+                        (frame_bytes_u64 &&
+                         (!indexed_frame_bits.ensure((usize)frame_bytes_u64) ||
+                          !indexed_erasure_bits.ensure((usize)frame_bytes_u64)))) {
+                        console_line(2, "decode: failed to allocate metadata-indexed pages");
+                        return 1;
+                    }
+                    indexed_frame_bits.size = (usize)frame_bytes_u64;
+                    indexed_erasure_bits.size = (usize)frame_bytes_u64;
+                    if (frame_bytes_u64) {
+                        memset(indexed_frame_bits.data, 0, (usize)frame_bytes_u64);
+                        memset(indexed_erasure_bits.data, 0xFF, (usize)frame_bytes_u64);
+                    }
+                }
+            } else if (indexed_page_assembly != page_has_indexed_metadata) {
+                console_line(2, "decode: pages have incompatible index metadata");
+                return 1;
+            }
+            if (aggregate_page_capacity_bits &&
+                aggregate_page_capacity_bits != page_capacity_bits) {
+                console_line(2, "decode: page capacity differs between pages");
+                return 1;
+            }
+            if (!aggregate_page_capacity_bits) {
+                aggregate_page_capacity_bits = page_capacity_bits;
             }
             if (page_state.affine_fit_covers_page && page_state.has_affine_transform) {
                 previous_page_affine_hint = page_state.affine_transform;
@@ -30980,22 +31369,23 @@ retry_decode:
                     return 1;
                 }
             }
-            encoded_page_present[encoded_page_count] = page_state.has_encoded_tile;
-            encoded_pages[encoded_page_count++] = page_state.encoded_tile;
-            if (!page_state.has_page_index || page_state.page_index_value == 0u) {
-                page_state.has_page_index = true;
-                page_state.page_index_value = expected_page_index;
+            for (usize previous_page = 0u; previous_page < encoded_page_count; ++previous_page) {
+                if (encoded_page_indices[previous_page] == page_state.page_index_value) {
+                    console_line(2, "decode: duplicate page index");
+                    return 1;
+                }
             }
-            if (page_state.page_index_value != expected_page_index) {
-                char expected_buffer[32];
-                char actual_buffer[32];
-                u64_to_ascii(expected_page_index, expected_buffer, sizeof(expected_buffer));
-                u64_to_ascii(page_state.page_index_value, actual_buffer, sizeof(actual_buffer));
-                console_write(2, "decode: unexpected page order (expected: ");
-                console_write(2, expected_buffer);
-                console_write(2, ", actual: ");
-                console_write(2, actual_buffer);
-                console_line(2, ")");
+            if (!indexed_page_assembly &&
+                page_state.page_index_value != expected_page_index) {
+                console_line(2, "decode: pages without current metadata must be supplied in order");
+                return 1;
+            }
+            usize encoded_page_slot = encoded_page_count++;
+            encoded_page_present[encoded_page_slot] = page_state.has_encoded_tile;
+            encoded_pages[encoded_page_slot] = page_state.encoded_tile;
+            encoded_page_indices[encoded_page_slot] = page_state.page_index_value;
+            if (page_state.page_index_value == U64_MAX_VALUE) {
+                console_line(2, "decode: page index is too large");
                 return 1;
             }
             u64 effective_bits = page_bit_count;
@@ -31026,50 +31416,105 @@ retry_decode:
                        page_state.page_bits_value <= effective_bits) {
                 effective_bits = page_state.page_bits_value;
             }
-            if (!append_bits_from_buffer(frame_aggregator, page_bits.data, effective_bits)) {
-                console_line(2, "decode: failed to assemble bitstream");
-                return 1;
-            }
-            if (page_erasure_bits.data && page_erasure_bits.size) {
-                if (!append_bits_from_buffer(erasure_aggregator,
-                                             page_erasure_bits.data,
-                                             effective_bits)) {
-                    console_line(2, "decode: failed to assemble erasure map");
+            if (indexed_page_assembly) {
+                u64 page_index = page_state.page_index_value;
+                if (page_index - 1u > U64_MAX_VALUE / page_capacity_bits) {
+                    console_line(2, "decode: page frame offset overflow");
                     return 1;
                 }
-            } else {
+                u64 page_offset = (page_index - 1u) * page_capacity_bits;
+                bool page_has_payload = page_offset < indexed_frame_bit_total;
+                if ((page_index <= page_state.encoded_tile.page_count) != page_has_payload) {
+                    console_line(2, "decode: page index conflicts with payload length");
+                    return 1;
+                }
+                if (page_offset >= indexed_frame_bit_total) {
+                    effective_bits = 0u;
+                } else if (effective_bits > indexed_frame_bit_total - page_offset) {
+                    effective_bits = indexed_frame_bit_total - page_offset;
+                }
                 for (u64 bit_index = 0u; bit_index < effective_bits; ++bit_index) {
-                    if (!erasure_aggregator.write_bit(0u)) {
+                    u64 destination_bit = page_offset + bit_index;
+                    usize destination_byte = (usize)(destination_bit >> 3u);
+                    u8 destination_mask = (u8)(1u << (destination_bit & 7u));
+                    usize source_byte = (usize)(bit_index >> 3u);
+                    u8 source_mask = (u8)(1u << (bit_index & 7u));
+                    bool bit_value = page_bits.data && source_byte < page_bits.size &&
+                                     (page_bits.data[source_byte] & source_mask) != 0u;
+                    if (bit_value) indexed_frame_bits.data[destination_byte] |= destination_mask;
+                    else indexed_frame_bits.data[destination_byte] &= (u8)~destination_mask;
+                    bool erased_value = page_erasure_bits.data &&
+                                        source_byte < page_erasure_bits.size &&
+                                        (page_erasure_bits.data[source_byte] & source_mask) != 0u;
+                    if (erased_value) indexed_erasure_bits.data[destination_byte] |= destination_mask;
+                    else indexed_erasure_bits.data[destination_byte] &= (u8)~destination_mask;
+                }
+            } else {
+                if (!append_bits_from_buffer(frame_aggregator, page_bits.data, effective_bits)) {
+                    console_line(2, "decode: failed to assemble bitstream");
+                    return 1;
+                }
+                if (page_erasure_bits.data && page_erasure_bits.size) {
+                    if (!append_bits_from_buffer(erasure_aggregator,
+                                                 page_erasure_bits.data,
+                                                 effective_bits)) {
                         console_line(2, "decode: failed to assemble erasure map");
                         return 1;
                     }
+                } else {
+                    for (u64 bit_index = 0u; bit_index < effective_bits; ++bit_index) {
+                        if (!erasure_aggregator.write_bit(0u)) {
+                            console_line(2, "decode: failed to assemble erasure map");
+                            return 1;
+                        }
+                    }
                 }
             }
-            ++expected_page_index;
+            if (page_state.page_index_value >= expected_page_index) {
+                expected_page_index = page_state.page_index_value + 1u;
+            }
         }
-        u64 frame_bit_total = frame_aggregator.bit_size();
+        u64 frame_bit_total = indexed_page_assembly
+                                  ? indexed_frame_bit_total
+                                  : frame_aggregator.bit_size();
+        if (indexed_page_assembly && aggregate_state.has_encoded_tile) {
+            aggregate_state.encoded_tile.page_index = 1u;
+            aggregate_state.has_page_index = true;
+            aggregate_state.page_index_value = 1u;
+        }
         if (aggregate_color_rotation) {
-            usize frame_bytes = frame_aggregator.byte_size();
+            usize frame_bytes = indexed_page_assembly
+                                    ? indexed_frame_bits.size
+                                    : frame_aggregator.byte_size();
             for (usize i = 0u; i < frame_bytes; ++i) {
                 u8 rotate = (u8)((i % 3u) + 1u);
-                frame_aggregator.buffer.data[i] =
-                    rotate_right_u8(frame_aggregator.buffer.data[i], rotate);
+                u8* frame_byte = indexed_page_assembly
+                                     ? &indexed_frame_bits.data[i]
+                                     : &frame_aggregator.buffer.data[i];
+                *frame_byte = rotate_right_u8(*frame_byte, rotate);
             }
-            usize erasure_bytes = erasure_aggregator.byte_size();
+            usize erasure_bytes = indexed_page_assembly
+                                      ? indexed_erasure_bits.size
+                                      : erasure_aggregator.byte_size();
             for (usize i = 0u; i < erasure_bytes; ++i) {
                 u8 rotate = (u8)((i % 3u) + 1u);
-                erasure_aggregator.buffer.data[i] =
-                    rotate_right_u8(erasure_aggregator.buffer.data[i], rotate);
+                u8* erasure_byte = indexed_page_assembly
+                                       ? &indexed_erasure_bits.data[i]
+                                       : &erasure_aggregator.buffer.data[i];
+                *erasure_byte = rotate_right_u8(*erasure_byte, rotate);
             }
         }
-        const u8* frame_data = frame_aggregator.data();
+        const u8* frame_data = indexed_page_assembly
+                                   ? indexed_frame_bits.data : frame_aggregator.data();
+        const u8* erasure_data = indexed_page_assembly
+                                     ? indexed_erasure_bits.data : erasure_aggregator.data();
         bool payload_extracted = frame_bits_to_payload(frame_data,
                                                        frame_bit_total,
                                                        aggregate_state,
                                                        bitstream,
                                                        bit_count,
                                                        &encoded_frame_bits,
-                                                       erasure_aggregator.data(),
+                                                       erasure_data,
                                                        frame_bit_total,
                                                        &erased_payload_symbols);
 
@@ -31085,7 +31530,11 @@ retry_decode:
             return 1;
         }
         if (aggregate_state.has_ecc_flag && !aggregate_state.ecc_flag_value) {
-            byte_buffer_move(frame_bits_for_length_recovery, frame_aggregator.buffer);
+            if (indexed_page_assembly) {
+                byte_buffer_move(frame_bits_for_length_recovery, indexed_frame_bits);
+            } else {
+                byte_buffer_move(frame_bits_for_length_recovery, frame_aggregator.buffer);
+            }
             frame_bit_count_for_length_recovery = frame_bit_total;
         }
         have_metadata = true;
@@ -31448,7 +31897,9 @@ retry_decode:
         bool ok = decoded.append_ascii("MAKOCODE-DECODED\n");
         char number[32];
         for (usize page = 0; ok && page < encoded_page_count; ++page) {
-            u64_to_ascii(page + 1u, number, sizeof(number));
+            u64_to_ascii(encoded_page_indices[page] ? encoded_page_indices[page] : page + 1u,
+                         number,
+                         sizeof(number));
             ok = decoded.append_ascii("page ") && decoded.append_ascii(number) && decoded.append_char('\n');
             if (encoded_page_present[page]) {
                 const MetadataTile::Values& tile = encoded_pages[page];

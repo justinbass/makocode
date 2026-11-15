@@ -1,11 +1,12 @@
 TODO
 
 Features:
-- Blot tests or missing pages could be improved by marking their positions as known, probably by looking for big pools of a single color after thresholding.
 - Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
   - Confirm that metadata includes all encoder inputs
   - Metadata can be input as overrides in decoding, as a starting point, or guessed. ./makocode decode recovery? Use Data + ECC as a CRC type check. Go in increasing cardinality (e.g. try 4 rotation status first, then page orientations... 
     - Colors, use thresholding to guess, start with common ones and try different color orientations in 4/5/8 bit...
+    - Rotation and flip tests first, with no damage.
+    - MA KO CO DE, if it's missing we don't know orientation or where the metadata middle is at all. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Metadata size, get the most common ones for total pages and search one by one around the known measured one
     - Data size, start with measured one, but clipping can affect it. Search one by one around starting point.
     - Page height/width, start with measured one, but clipping can affect it. Search one by one around starting point.
@@ -13,7 +14,6 @@ Features:
     - ECC (0 -> 65535), difficult to distinguish from data. Come up with a good encoder default, to use as a starting point. Measured from real tests.
     - Fiducials are easy to visibly measure, may not be needed in metadata at all...
     - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
-    - MA KO CO DE, if it's missing we don't know orientation. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
     - Metadata only on selected pages
     - Pre-data section recovery (TBD)

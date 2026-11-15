@@ -409,3 +409,9 @@ test_case 0108_partial_ecc_recovery script "Uncorrectable ECC block preserves re
 
 test_case 0109_checkpoint_restore script "Checkpoint deduplication, page round-trip, and partial recovery" \
     test_checkpoint_restore.sh
+
+test_case 0110_decode_blob_erasures script "Solid-color blot positions become ECC erasures" \
+    test_decode_blob_erasures.sh
+
+test_case 0111_decode_missing_pages script "Metadata-indexed missing pages become ECC erasures" \
+    test_decode_missing_pages.sh
