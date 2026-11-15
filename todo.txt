@@ -1,10 +1,8 @@
 TODO
 
 Features:
-- Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
+- Metadata recovery
   - Confirm that metadata includes all encoder inputs
-  - Metadata can be input as overrides in decoding, as a starting point, or guessed. ./makocode decode recovery? Use Data + ECC as a CRC type check. Go in increasing cardinality (e.g. try 4 rotation status first, then page orientations... 
-    - Colors, use thresholding to guess, start with common ones and try different color orientations in 4/5/8 bit...
     - Rotation and flip tests first, with no damage.
     - MA KO CO DE, if it's missing we don't know orientation or where the metadata middle is at all. Rotation 90/180/270 and flip horizontal/vertical tests, try each orientation.
     - Metadata size, get the most common ones for total pages and search one by one around the known measured one
@@ -17,6 +15,8 @@ Features:
     - Shuffle metadata middle tile throughout the image in bytes. Some might need to not be shuffled, think it through.
     - Metadata only on selected pages
     - Pre-data section recovery (TBD)
+    - Considering ordering by increasing cardinality
+- Make metadata/fidicuals optional, fully damageable, or resizable. Tests that damage or alter the metadata.
 
 Improvements:
 - Improve overlay approaching ~100% ECC

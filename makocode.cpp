@@ -8346,6 +8346,9 @@ struct ImageMappingConfig {
     u32 custom_palette_count;
     u32 custom_palette_base;
     bool custom_palette_valid;
+    bool recover_palette;
+    const char* recover_limit_text;
+    usize recover_limit_length;
 
     ImageMappingConfig()
         : color_channels(1u),
@@ -8357,7 +8360,10 @@ struct ImageMappingConfig {
           palette_set(false),
           custom_palette_count(0u),
           custom_palette_base(0u),
-          custom_palette_valid(false) {
+          custom_palette_valid(false),
+          recover_palette(false),
+          recover_limit_text("4"),
+          recover_limit_length(1u) {
         palette_text[0] = '\0';
         for (u32 i = 0u; i < MAX_CUSTOM_PALETTE_COLORS; ++i) {
             custom_palette[i].r = 0u;
@@ -8535,6 +8541,9 @@ struct AffineTransform {
 
 namespace MetadataTile {
     using namespace makocode;
+
+    static const PaletteColor* g_decode_palette_override = 0;
+    static u32 g_decode_palette_override_count = 0u;
 
     // Scratch sampling window. The encoded metadata footprint is derived from
     // its content; this size is only used by the existing scan samplers.
@@ -8746,6 +8755,23 @@ namespace MetadataTile {
         palette_count_out = 0u;
         if (!row_rgb || !palette_out) return false;
         (void)inverted;
+        if (g_decode_palette_override &&
+            g_decode_palette_override_count >= 2u &&
+            g_decode_palette_override_count <= MAX_CUSTOM_PALETTE_COLORS) {
+            for (u32 i = 0u; i < g_decode_palette_override_count; ++i) {
+                palette_out[i] = g_decode_palette_override[i];
+            }
+            palette_count_out = g_decode_palette_override_count;
+            double first_luma = rgb_luminance_u8(palette_out[0].r,
+                                                 palette_out[0].g,
+                                                 palette_out[0].b);
+            double last_luma = rgb_luminance_u8(palette_out[palette_count_out - 1u].r,
+                                                palette_out[palette_count_out - 1u].g,
+                                                palette_out[palette_count_out - 1u].b);
+            if (fabs(first_luma - last_luma) < 12.0) return false;
+            if (threshold_out) *threshold_out = (first_luma + last_luma) * 0.5;
+            return true;
+        }
         u32 best_color_count = 0u;
         for (u32 color_count = 2u; color_count <= MAX_CUSTOM_PALETTE_COLORS; ++color_count) {
             u32 color_x0 = palette_tag_x0(color_count);
@@ -12626,6 +12652,20 @@ static const PaletteColor NAMED_COLOR_VALUES[] = {
     {0u, 0u, 0u}
 };
 
+struct PaletteRecoveryCandidate {
+    u32 color_count;
+    PaletteColor colors[MAX_CUSTOM_PALETTE_COLORS];
+};
+
+static bool palette_recovery_candidates_equal(const PaletteRecoveryCandidate& left,
+                                              const PaletteRecoveryCandidate& right) {
+    if (left.color_count != right.color_count) return false;
+    for (u32 i = 0u; i < left.color_count; ++i) {
+        if (!palette_colors_equal(left.colors[i], right.colors[i])) return false;
+    }
+    return true;
+}
+
 static bool decode_hex_palette_color(const char* token,
                                      usize length,
                                      PaletteColor& color) {
@@ -15954,6 +15994,430 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                 tile_values.page_height_pixels == height;
         apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
     }
+    if (!tile_available && overrides.recover_palette &&
+        base_width <= 0xFFFFFFFFull && base_height <= 0xFFFFFFFFull) {
+        makocode::ByteBuffer remaining_limit;
+        makocode::ByteBuffer attempts_text;
+        if (!remaining_limit.ensure(overrides.recover_limit_length) ||
+            !attempts_text.ensure(2u)) {
+            return false;
+        }
+        remaining_limit.size = overrides.recover_limit_length;
+        memcpy(remaining_limit.data,
+               overrides.recover_limit_text,
+               overrides.recover_limit_length);
+        attempts_text.data[0] = '0';
+        attempts_text.data[1] = '\0';
+        attempts_text.size = 1u;
+        usize remaining_first_digit = 0u;
+        while (remaining_first_digit + 1u < remaining_limit.size &&
+               remaining_limit.data[remaining_first_digit] == '0') {
+            ++remaining_first_digit;
+        }
+        auto has_remaining_recovery_budget = [&]() -> bool {
+            return remaining_first_digit + 1u < remaining_limit.size ||
+                   remaining_limit.data[remaining_first_digit] != '0';
+        };
+        auto decrement_recovery_budget = [&]() {
+            usize position = remaining_limit.size;
+            while (position > remaining_first_digit &&
+                   remaining_limit.data[position - 1u] == '0') {
+                remaining_limit.data[position - 1u] = '9';
+                --position;
+            }
+            if (position > remaining_first_digit) {
+                --remaining_limit.data[position - 1u];
+            }
+            while (remaining_first_digit + 1u < remaining_limit.size &&
+                   remaining_limit.data[remaining_first_digit] == '0') {
+                ++remaining_first_digit;
+            }
+        };
+        auto increment_attempt_count = [&]() -> bool {
+            usize position = attempts_text.size;
+            while (position > 0u && attempts_text.data[position - 1u] == '9') {
+                attempts_text.data[position - 1u] = '0';
+                --position;
+            }
+            if (position > 0u) {
+                ++attempts_text.data[position - 1u];
+            } else {
+                if (!attempts_text.ensure(attempts_text.size + 2u)) return false;
+                memmove(attempts_text.data + 1u,
+                        attempts_text.data,
+                        attempts_text.size);
+                attempts_text.data[0] = '1';
+                ++attempts_text.size;
+            }
+            attempts_text.data[attempts_text.size] = '\0';
+            return true;
+        };
+        bool exhaustive_started = false;
+        u32 exhaustive_color_count = 0u;
+        u32 exhaustive_rgb_values[MAX_CUSTOM_PALETTE_COLORS] = {};
+        PaletteRecoveryCandidate common_candidates[4];
+        u32 recovery_limit_small = 0u;
+        for (usize digit = 0u; digit < overrides.recover_limit_length; ++digit) {
+            if (recovery_limit_small >= 10u) {
+                recovery_limit_small = 100u;
+                break;
+            }
+            recovery_limit_small = recovery_limit_small * 10u +
+                                   (u32)(overrides.recover_limit_text[digit] - '0');
+            if (recovery_limit_small > 100u) {
+                recovery_limit_small = 100u;
+                break;
+            }
+        }
+        u32 explicit_candidate_count =
+            (overrides.palette_set && overrides.custom_palette_valid) ? 1u : 0u;
+        u32 common_slots = recovery_limit_small > explicit_candidate_count
+                               ? recovery_limit_small - explicit_candidate_count
+                               : 0u;
+        u32 common_candidate_count = common_slots < 4u ? common_slots : 4u;
+        PaletteColor two_colors[2] = {
+            {255u, 255u, 255u}, {0u, 0u, 0u}};
+        PaletteColor five_colors[5] = {
+            {255u, 255u, 255u}, {0u, 255u, 255u}, {255u, 0u, 255u},
+            {255u, 255u, 0u}, {0u, 0u, 0u}};
+        for (u32 common_index = 0u; common_index < common_candidate_count; ++common_index) {
+            PaletteRecoveryCandidate& common = common_candidates[common_index];
+            common = PaletteRecoveryCandidate();
+            const PaletteColor* preset = 0;
+            u32 preset_count = 0u;
+            switch (common_index) {
+                case 0u:
+                    preset = two_colors;
+                    preset_count = 2u;
+                    break;
+                case 1u:
+                    preset = PALETTE_CMYW;
+                    preset_count = 4u;
+                    break;
+                case 2u:
+                    preset = five_colors;
+                    preset_count = 5u;
+                    break;
+                case 3u:
+                    preset = PALETTE_RGB_CMY_WB;
+                    preset_count = 8u;
+                    break;
+            }
+            common.color_count = preset_count;
+            for (u32 color = 0u; color < preset_count; ++color) {
+                common.colors[color] = preset[color];
+            }
+            // Sample the whole page for scan-shifted colors while preserving
+            // each preset position and its base-N symbol mapping.
+            usize image_pixel_count = (usize)(base_width * base_height);
+            usize sample_step = image_pixel_count / 65536u;
+            if (sample_step == 0u) sample_step = 1u;
+            for (u32 color = 0u; color < preset_count; ++color) {
+                u64 best_distance = U64_MAX_VALUE;
+                PaletteColor best_sample = preset[color];
+                for (usize pixel = 0u; pixel < image_pixel_count; pixel += sample_step) {
+                    usize offset = pixel * 3u;
+                    i64 dr = (i64)pixel_buffer.data[offset] - preset[color].r;
+                    i64 dg = (i64)pixel_buffer.data[offset + 1u] - preset[color].g;
+                    i64 db = (i64)pixel_buffer.data[offset + 2u] - preset[color].b;
+                    u64 distance = (u64)(dr * dr + dg * dg + db * db);
+                    if (distance < best_distance) {
+                        best_distance = distance;
+                        best_sample.r = pixel_buffer.data[offset];
+                        best_sample.g = pixel_buffer.data[offset + 1u];
+                        best_sample.b = pixel_buffer.data[offset + 2u];
+                    }
+                }
+                if (best_distance <= 3u * 48u * 48u) common.colors[color] = best_sample;
+            }
+        }
+        PaletteRecoveryCandidate image_candidate;
+        bool image_candidate_available = false;
+        if (recovery_limit_small > explicit_candidate_count + 4u) {
+            usize image_pixel_count = (usize)(base_width * base_height);
+            u32 histogram[32768] = {};
+            usize sample_step = image_pixel_count / 65536u;
+            if (sample_step == 0u) sample_step = 1u;
+            u64 sample_count = 0u;
+            for (usize pixel = 0u; pixel < image_pixel_count; pixel += sample_step) {
+                usize offset = pixel * 3u;
+                u32 bin = ((u32)(pixel_buffer.data[offset] >> 3u) << 10u) |
+                          ((u32)(pixel_buffer.data[offset + 1u] >> 3u) << 5u) |
+                          (u32)(pixel_buffer.data[offset + 2u] >> 3u);
+                if (histogram[bin] != 0xFFFFFFFFu) ++histogram[bin];
+                ++sample_count;
+            }
+            u32 selected_bins[MAX_CUSTOM_PALETTE_COLORS] = {};
+            u32 selected_count = 0u;
+            u32 minimum_support = (u32)(sample_count / 10000u);
+            if (minimum_support == 0u) minimum_support = 1u;
+            while (sample_count && selected_count < MAX_CUSTOM_PALETTE_COLORS) {
+                u32 best_bin = 0u;
+                u32 best_count = 0u;
+                for (u32 bin = 0u; bin < 32768u; ++bin) {
+                    if (histogram[bin] <= best_count || histogram[bin] < minimum_support) continue;
+                    u32 r = ((bin >> 10u) & 31u) * 8u + 4u;
+                    u32 g = ((bin >> 5u) & 31u) * 8u + 4u;
+                    u32 b = (bin & 31u) * 8u + 4u;
+                    bool distinct = true;
+                    for (u32 selected = 0u; selected < selected_count; ++selected) {
+                        u32 other = selected_bins[selected];
+                        i64 dr = (i64)r - (i64)(((other >> 10u) & 31u) * 8u + 4u);
+                        i64 dg = (i64)g - (i64)(((other >> 5u) & 31u) * 8u + 4u);
+                        i64 db = (i64)b - (i64)((other & 31u) * 8u + 4u);
+                        if ((u64)(dr * dr + dg * dg + db * db) < 3u * 20u * 20u) {
+                            distinct = false;
+                            break;
+                        }
+                    }
+                    if (distinct) {
+                        best_bin = bin;
+                        best_count = histogram[bin];
+                    }
+                }
+                if (!best_count) break;
+                selected_bins[selected_count++] = best_bin;
+            }
+            if (selected_count >= 2u) {
+                image_candidate.color_count = selected_count;
+                for (u32 color = 0u; color < selected_count; ++color) {
+                    u32 bin = selected_bins[color];
+                    image_candidate.colors[color].r =
+                        (u8)(((bin >> 10u) & 31u) * 8u + 4u);
+                    image_candidate.colors[color].g =
+                        (u8)(((bin >> 5u) & 31u) * 8u + 4u);
+                    image_candidate.colors[color].b =
+                        (u8)((bin & 31u) * 8u + 4u);
+                }
+                // Begin with high-to-low luminance, then enumerate the other
+                // orderings within the candidate budget.
+                for (u32 i = 0u; i < selected_count; ++i) {
+                    for (u32 j = i + 1u; j < selected_count; ++j) {
+                        u32 li = (u32)image_candidate.colors[i].r * 299u +
+                                 (u32)image_candidate.colors[i].g * 587u +
+                                 (u32)image_candidate.colors[i].b * 114u;
+                        u32 lj = (u32)image_candidate.colors[j].r * 299u +
+                                 (u32)image_candidate.colors[j].g * 587u +
+                                 (u32)image_candidate.colors[j].b * 114u;
+                        if (lj > li) {
+                            PaletteColor swap = image_candidate.colors[i];
+                            image_candidate.colors[i] = image_candidate.colors[j];
+                            image_candidate.colors[j] = swap;
+                        }
+                    }
+                }
+                image_candidate_available = true;
+            }
+        }
+        u64 image_permutation_count = 0u;
+        if (image_candidate_available) {
+            image_permutation_count = 1u;
+            for (u32 value = 2u; value <= image_candidate.color_count; ++value) {
+                image_permutation_count *= value;
+            }
+        }
+        PaletteRecoveryCandidate explicit_candidate;
+        if (explicit_candidate_count) {
+            explicit_candidate.color_count = overrides.custom_palette_count;
+            for (u32 color = 0u; color < explicit_candidate.color_count; ++color) {
+                explicit_candidate.colors[color] = overrides.custom_palette[color];
+            }
+        }
+        bool explicit_candidate_pending = explicit_candidate_count != 0u;
+        u32 next_common_candidate = 0u;
+        u64 next_image_permutation = 0u;
+        while (has_remaining_recovery_budget() && !tile_available) {
+            PaletteRecoveryCandidate candidate;
+            bool candidate_available = false;
+            bool candidate_is_explicit = false;
+            bool candidate_is_common = false;
+            u32 common_candidate_index = 0u;
+            if (explicit_candidate_pending) {
+                candidate_is_explicit = true;
+                candidate = explicit_candidate;
+                candidate_available = true;
+                explicit_candidate_pending = false;
+            } else if (next_common_candidate < common_candidate_count) {
+                candidate_is_common = true;
+                common_candidate_index = next_common_candidate++;
+                candidate = common_candidates[common_candidate_index];
+                candidate_available = candidate.color_count >= 2u;
+            } else if (image_candidate_available &&
+                       next_image_permutation < image_permutation_count) {
+                u64 permutation_index = next_image_permutation++;
+                u32 available[MAX_CUSTOM_PALETTE_COLORS];
+                u32 available_count = image_candidate.color_count;
+                for (u32 color = 0u; color < available_count; ++color) {
+                    available[color] = color;
+                }
+                candidate = PaletteRecoveryCandidate();
+                candidate.color_count = image_candidate.color_count;
+                candidate_available = true;
+                for (u32 position = 0u;
+                     position < image_candidate.color_count;
+                     ++position) {
+                    u64 factorial = 1u;
+                    for (u32 value = 2u; value < available_count; ++value) {
+                        factorial *= value;
+                    }
+                    u32 selected = factorial
+                                       ? (u32)(permutation_index / factorial)
+                                       : 0u;
+                    if (factorial) permutation_index %= factorial;
+                    if (selected >= available_count) {
+                        candidate_available = false;
+                        break;
+                    }
+                    candidate.colors[position] =
+                        image_candidate.colors[available[selected]];
+                    for (u32 i = selected; i + 1u < available_count; ++i) {
+                        available[i] = available[i + 1u];
+                    }
+                    --available_count;
+                }
+            } else {
+                bool exhaustive_exhausted = false;
+                if (!exhaustive_started) {
+                    exhaustive_started = true;
+                    exhaustive_color_count = 2u;
+                    for (u32 i = 0u; i < MAX_CUSTOM_PALETTE_COLORS; ++i) {
+                        exhaustive_rgb_values[i] = 0u;
+                    }
+                } else {
+                    bool carried = true;
+                    for (u32 position = exhaustive_color_count;
+                         position > 0u && carried;
+                         --position) {
+                        u32 index = position - 1u;
+                        if (exhaustive_rgb_values[index] < 0xFFFFFFu) {
+                            ++exhaustive_rgb_values[index];
+                            carried = false;
+                        } else {
+                            exhaustive_rgb_values[index] = 0u;
+                        }
+                    }
+                    if (carried) {
+                        if (exhaustive_color_count >= MAX_CUSTOM_PALETTE_COLORS) {
+                            break;
+                        }
+                        ++exhaustive_color_count;
+                    }
+                }
+                for (;;) {
+                    bool distinct = true;
+                    for (u32 i = 0u; i < exhaustive_color_count && distinct; ++i) {
+                        for (u32 j = 0u; j < i; ++j) {
+                            if (exhaustive_rgb_values[i] == exhaustive_rgb_values[j]) {
+                                distinct = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (distinct) break;
+                    bool carried = true;
+                    for (u32 position = exhaustive_color_count;
+                         position > 0u && carried;
+                         --position) {
+                        u32 index = position - 1u;
+                        if (exhaustive_rgb_values[index] < 0xFFFFFFu) {
+                            ++exhaustive_rgb_values[index];
+                            carried = false;
+                        } else {
+                            exhaustive_rgb_values[index] = 0u;
+                        }
+                    }
+                    if (carried) {
+                        if (exhaustive_color_count >= MAX_CUSTOM_PALETTE_COLORS) {
+                            exhaustive_exhausted = true;
+                            break;
+                        }
+                        ++exhaustive_color_count;
+                    }
+                }
+                if (exhaustive_exhausted) break;
+                if (exhaustive_color_count > MAX_CUSTOM_PALETTE_COLORS) break;
+                candidate = PaletteRecoveryCandidate();
+                candidate.color_count = exhaustive_color_count;
+                for (u32 color = 0u; color < exhaustive_color_count; ++color) {
+                    candidate.colors[color].r =
+                        (u8)(exhaustive_rgb_values[color] >> 16u);
+                    candidate.colors[color].g =
+                        (u8)(exhaustive_rgb_values[color] >> 8u);
+                    candidate.colors[color].b = (u8)exhaustive_rgb_values[color];
+                }
+                candidate_available = true;
+            }
+            if (!candidate_available) break;
+            bool duplicate_candidate = false;
+            if (!candidate_is_explicit) {
+                if (explicit_candidate_count) {
+                    duplicate_candidate = palette_recovery_candidates_equal(candidate,
+                                                                             explicit_candidate);
+                }
+                u32 prior_common_count = candidate_is_common
+                                             ? common_candidate_index
+                                             : common_candidate_count;
+                for (u32 common_index = 0u;
+                     common_index < prior_common_count && !duplicate_candidate;
+                     ++common_index) {
+                    if (palette_recovery_candidates_equal(candidate,
+                                                           common_candidates[common_index])) {
+                        duplicate_candidate = true;
+                    }
+                }
+                if (!candidate_is_common && image_candidate_available &&
+                    next_image_permutation > 1u &&
+                    palette_recovery_candidates_equal(candidate, image_candidate)) {
+                    duplicate_candidate = true;
+                }
+            }
+            if (duplicate_candidate) {
+                continue;
+            }
+            if (!increment_attempt_count()) return false;
+            decrement_recovery_budget();
+            MetadataTile::g_decode_palette_override = candidate.colors;
+            MetadataTile::g_decode_palette_override_count = candidate.color_count;
+            for (u32 footer_rows_test = 0u;
+                 footer_rows_test < (u32)base_height && !tile_available;
+                 footer_rows_test += 2u) {
+                u32 data_height_test = (u32)base_height - footer_rows_test;
+                MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
+                    (u32)base_width, data_height_test);
+                MetadataTile::Values candidate_values;
+                makocode::ByteBuffer candidate_palette_text;
+                if (!placement.valid ||
+                    !MetadataTile::decode_tile(pixel_buffer.data,
+                                               (u32)base_width,
+                                               (u32)base_height,
+                                               data_height_test,
+                                               placement,
+                                               candidate_values,
+                                               candidate_palette_text) ||
+                    !metadata_tile_plausible(candidate_values,
+                                             (u32)base_width,
+                                             (u32)base_height)) {
+                    continue;
+                }
+                tile_values = candidate_values;
+                tile_values.footer_rows = footer_rows_test;
+                byte_buffer_move(tile_palette_text, candidate_palette_text);
+                tile_affine_hint_available = false;
+                native_tile_available = true;
+                tile_available = true;
+                apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+            }
+        }
+        MetadataTile::g_decode_palette_override = 0;
+        MetadataTile::g_decode_palette_override_count = 0u;
+        if (attempts_text.data[0] != '0') {
+            console_write(2, "decode: palette recovery tried ");
+            console_write(2, (const char*)attempts_text.data);
+            console_line(2, tile_available ? " candidate(s)" : " candidate(s); no palette matched");
+        }
+        if (!tile_available) return false;
+    }
+
     if (!tile_available && !metadata_affine_scale_hint &&
         width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
         // Search pixel-aligned vertical centers for the native metadata tile.
@@ -26661,7 +27125,7 @@ static void write_encode_help() {
     console_line(1, "  --prefix TEXT        Base filename prefix for generated pages (default UTC timestamp, no '/' or '\\\\').");
     console_line(1, "");
     console_line(1, "Layout:");
-    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
+    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 ordered names or #RRGGBB values; default is \"White Black\").");
     console_line(1, "  --page-width PX      Page width in pixels; omitted width fits the encoded payload.");
     console_line(1, "  --page-height PX     Page height in pixels; omitted height fits the encoded payload.");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
@@ -26710,9 +27174,11 @@ static void write_decode_help() {
     console_line(1, "  --password TEXT      Supply the decryption password for protected payloads.");
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
-    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 unique entries from White/Cyan/Magenta/Yellow/Black; default is \"White Black\").");
+    console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 ordered names or #RRGGBB values; default is \"White Black\").");
     console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable.");
     console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable.");
+    console_line(1, "  --recover-palette    Usually only needed when the embedded palette row is damaged.");
+    console_line(1, "  --recover-limit N    Palette candidates to try (default 4; common 2/4/5/8-color modes first).");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
     console_line(1, "  --debug              Write decode_fiducials.csv and decode_affine.csv under --output-dir.");
     console_line(1, "");
@@ -30716,6 +31182,7 @@ static int command_decode(int arg_count, char** args) {
     const char* output_dir = ".";
     bool have_output_dir = false;
     bool debug_requested = false;
+    bool recover_limit_specified = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "decode", &handled)) {
@@ -30742,6 +31209,43 @@ static int command_decode(int arg_count, char** args) {
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
             debug_requested = true;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--recover-palette")) {
+            mapping.recover_palette = true;
+            continue;
+        }
+        const char recover_limit_prefix[] = "--recover-limit=";
+        const char* recover_limit_text = 0;
+        usize recover_limit_length = 0u;
+        if (ascii_equals_token(arg, ascii_length(arg), "--recover-limit")) {
+            if ((i + 1) >= arg_count) {
+                console_line(2, "decode: --recover-limit requires a positive integer");
+                return 1;
+            }
+            recover_limit_text = args[++i];
+            recover_limit_length = ascii_length(recover_limit_text);
+        } else if (ascii_starts_with(arg, recover_limit_prefix)) {
+            recover_limit_text = arg + (sizeof(recover_limit_prefix) - 1u);
+            recover_limit_length = ascii_length(recover_limit_text);
+        }
+        if (recover_limit_text) {
+            bool has_nonzero_digit = false;
+            bool valid_digits = recover_limit_length != 0u;
+            for (usize digit = 0u; digit < recover_limit_length; ++digit) {
+                if (recover_limit_text[digit] < '0' || recover_limit_text[digit] > '9') {
+                    valid_digits = false;
+                    break;
+                }
+                if (recover_limit_text[digit] != '0') has_nonzero_digit = true;
+            }
+            if (!valid_digits || !has_nonzero_digit) {
+                console_line(2, "decode: --recover-limit must be a positive integer");
+                return 1;
+            }
+            mapping.recover_limit_text = recover_limit_text;
+            mapping.recover_limit_length = recover_limit_length;
+            recover_limit_specified = true;
             continue;
         }
         
@@ -30833,6 +31337,10 @@ static int command_decode(int arg_count, char** args) {
 }
     if (decoded_stdout_requested && (decoded_file_requested || debug_requested)) {
         console_line(2, "decode: --decoded-stdout cannot be combined with --decoded-file or --debug");
+        return 1;
+    }
+    if (!mapping.recover_palette && recover_limit_specified) {
+        console_line(2, "decode: --recover-limit requires --recover-palette");
         return 1;
     }
     if (mapping.palette_set) {

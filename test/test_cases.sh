@@ -415,3 +415,6 @@ test_case 0110_decode_blob_erasures script "Solid-color blot positions become EC
 
 test_case 0111_decode_missing_pages script "Metadata-indexed missing pages become ECC erasures" \
     test_decode_missing_pages.sh
+
+test_case 0112_decode_recover_palette script "Damaged palette rows recover from ordered color candidates" \
+    test_decode_recover_palette.sh
