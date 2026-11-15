@@ -15900,7 +15900,9 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    u32 known_rgb_width_override = 0u,
                                    u32 known_rgb_height_override = 0u,
                                    u32 small_scan_geometry_variant = 0u,
-                                   bool detect_uniform_blots = true) {
+                                   bool detect_uniform_blots = true,
+                                   bool known_tile_is_present = true,
+                                   bool metadata_center_probe_only = false) {
     if (frame_erasure_bits) frame_erasure_bits->release();
     if (overlay_selector_seed_out) *overlay_selector_seed_out = 0u;
     if (overlay_selector_counts_out) overlay_selector_counts_out->release();
@@ -15996,7 +15998,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     // The 4x8 tag is the only orientation-independent cue in a scan: locate
     // its known bit pattern around the centered metadata tile, then normalize
     // the raster before the regular (unoriented) tile decoder runs.
-    if (!use_rgb_pixels_override && width >= 80u && height >= 80u &&
+    if (!metadata_center_probe_only && !known_tile_override &&
+        !use_rgb_pixels_override && width >= 80u && height >= 80u &&
         width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
         double best_separation = 0.0;
         u32 best_errors = 33u;
@@ -16494,6 +16497,20 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         // the metadata sample; Reed-Solomon remains the acceptance check.
         probe_centered_metadata(true, 32u);
     }
+    if (metadata_center_probe_only) {
+        if (!tile_available || marker_orientation_detected ||
+            tile_values.page_width_pixels != width ||
+            tile_values.page_height_pixels != height ||
+            !tile_affine_hint_available ||
+            fabs(tile_affine_hint.pitch_x_pixels - 1.0) > 1e-9 ||
+            fabs(tile_affine_hint.pitch_y_pixels - 1.0) > 1e-9 ||
+            fabs(tile_affine_hint.angle_rad) > 1e-9) return false;
+        metadata_out = state;
+        metadata_out.data = 0;
+        metadata_out.size = 0u;
+        metadata_out.cursor = 0u;
+        return true;
+    }
     if (!known_tile_override && !tile_available && marker_orientation_detected &&
         width >= MetadataTile::TILE_SIDE && height >= MetadataTile::TILE_SIDE &&
         width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
@@ -16732,6 +16749,7 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     if (known_tile_override) {
         tile_values = *known_tile_override;
+        tile_values.page_index = debug_page;
         if (!MetadataTile::build_palette_text_from_colors(tile_values.palette,
                                                            tile_values.palette_count,
                                                            tile_palette_text)) {
@@ -20504,7 +20522,8 @@ struct RotationEstimateCandidate {
     u64 fiducial_reserved_data_pixels = reserved_data_pixels;
     MetadataTile::Placement metadata_placement = MetadataTile::compute_center_tile_placement(
         (u32)logical_width, (u32)data_height);
-    if (metadata_placement.valid && state.encoded_tile.metadata_square_side > 0u &&
+    if ((!known_tile_override || known_tile_is_present) &&
+        metadata_placement.valid && state.encoded_tile.metadata_square_side > 0u &&
         state.encoded_tile.metadata_square_side <= MetadataTile::TILE_MAX_METADATA_SQUARE_SIDE) {
         auto mark_metadata_overwrite = [&](u32 tile_x, u32 tile_y) {
             i64 page_x = (i64)metadata_placement.x0 + (i64)tile_x -
@@ -20601,7 +20620,8 @@ struct RotationEstimateCandidate {
                                               state.encoded_tile.fiducial_spacing_pixels)) {
                 return false;
             }
-            if (metadata_placement.valid) {
+            if ((!known_tile_override || known_tile_is_present) &&
+                metadata_placement.valid) {
                 const MetadataTile::Values& tile = state.encoded_tile;
                 usize metadata_cells = (usize)tile.metadata_length_prefix_bits +
                                        tile.metadata_symbol_count;
@@ -25248,6 +25268,11 @@ struct RotationEstimateCandidate {
             if (!append_debug_fiducials()) return false;
             if (color_rotation_out) *color_rotation_out = color_mode == 3u;
             metadata_out = state;
+            if (known_tile_override && !known_tile_is_present) {
+                metadata_out.has_encoded_tile = false;
+                metadata_out.encoded_tile = MetadataTile::Values();
+                metadata_out.has_page_index = false;
+            }
             metadata_out.data = 0;
             metadata_out.size = 0u;
             metadata_out.cursor = 0u;
@@ -25319,6 +25344,11 @@ struct RotationEstimateCandidate {
         }
         if (color_rotation_out) *color_rotation_out = color_mode == 3u;
         metadata_out = state;
+        if (known_tile_override && !known_tile_is_present) {
+            metadata_out.has_encoded_tile = false;
+            metadata_out.encoded_tile = MetadataTile::Values();
+            metadata_out.has_page_index = false;
+        }
         metadata_out.data = 0;
         metadata_out.size = 0u;
         metadata_out.cursor = 0u;
@@ -25534,6 +25564,11 @@ struct RotationEstimateCandidate {
 
 
     metadata_out = state;
+    if (known_tile_override && !known_tile_is_present) {
+        metadata_out.has_encoded_tile = false;
+        metadata_out.encoded_tile = MetadataTile::Values();
+        metadata_out.has_page_index = false;
+    }
     metadata_out.data = 0;
     metadata_out.size = 0u;
     metadata_out.cursor = 0u;
@@ -27330,7 +27365,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                const FooterLayout& footer_layout,
                                makocode::ByteBuffer& output,
                                u16 unknown_parity_budget = 0u,
-                               u16 overlay_erasure_budget = 0u) {
+                               u16 overlay_erasure_budget = 0u,
+                               bool include_metadata_tile = true) {
     const u8 sample_bits = bits_per_sample(mapping.color_channels);
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
     bool has_footer_text = (footer_text && footer_length > 0u);
@@ -27437,10 +27473,10 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
 
     // Build the exact metadata codeword before placing page data. Its active
     // cells define the known erasures used by the ECC budget.
-    bool have_metadata_tile = tile_placement.valid;
-    if (!have_metadata_tile) {
+    if (!tile_placement.valid) {
         return false;
     }
+    bool have_metadata_tile = include_metadata_tile;
     PaletteColor tile_light = {255u, 255u, 255u};
     PaletteColor tile_dark = {0u, 0u, 0u};
     MetadataTile::Values tile_values;
@@ -28729,6 +28765,7 @@ static void write_encode_help() {
     console_line(1, "  --page-width PX      Page width in pixels; omitted width fits the encoded payload.");
     console_line(1, "  --page-height PX     Page height in pixels; omitted height fits the encoded payload.");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
+    console_line(1, "  --metadata-pages LIST Pages/ranges carrying the center metadata tile (all, 1,3-5,middle,last). Default: all.");
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
@@ -29827,6 +29864,9 @@ static int command_encode(int arg_count, char** args) {
     usize overlay_count = 0u;
     int pending_overlay = -1;
     makocode::ByteBuffer overlay_page_assignments;
+    makocode::ByteBuffer metadata_page_assignments;
+    const char* metadata_pages_value = 0;
+    usize metadata_pages_length = 0u;
     const char* overlay_ignore_colors_text = 0;
     usize overlay_ignore_colors_length = 0u;
     double ecc_redundancy = 0.0;
@@ -29876,7 +29916,70 @@ static int command_encode(int arg_count, char** args) {
         if (!arg) {
             continue;
         }
-        
+        const char metadata_pages_prefix[] = "--metadata-pages=";
+        const char* selected_metadata_pages = 0;
+        if (ascii_equals_token(arg, ascii_length(arg), "--metadata-pages")) {
+            if ((i + 1) >= arg_count || !args[i + 1] || !args[i + 1][0]) {
+                console_line(2, "encode: --metadata-pages requires all, page numbers, or ranges");
+                return 1;
+            }
+            selected_metadata_pages = args[++i];
+        } else if (ascii_starts_with(arg, metadata_pages_prefix)) {
+            selected_metadata_pages = arg + sizeof(metadata_pages_prefix) - 1u;
+        }
+        if (selected_metadata_pages) {
+            if (metadata_pages_value) {
+                console_line(2, "encode: --metadata-pages specified multiple times");
+                return 1;
+            }
+            metadata_pages_value = selected_metadata_pages;
+            metadata_pages_length = ascii_length(metadata_pages_value);
+            if (!metadata_pages_length) {
+                console_line(2, "encode: --metadata-pages requires all, page numbers, or ranges");
+                return 1;
+            }
+            if (metadata_pages_length == 3u &&
+                memcmp(metadata_pages_value, "all", 3u) == 0) continue;
+            usize item_start = 0u;
+            while (item_start < metadata_pages_length) {
+                usize item_end = item_start;
+                while (item_end < metadata_pages_length && metadata_pages_value[item_end] != ',') {
+                    ++item_end;
+                }
+                usize dash = item_start;
+                while (dash < item_end && metadata_pages_value[dash] != '-') ++dash;
+                bool keyword = (item_end - item_start == 6u &&
+                                memcmp(metadata_pages_value + item_start, "middle", 6u) == 0) ||
+                               (item_end - item_start == 4u &&
+                                memcmp(metadata_pages_value + item_start, "last", 4u) == 0);
+                u64 first_page = 0u;
+                u64 last_page = 0u;
+                bool numeric = dash > item_start &&
+                    ascii_to_u64(metadata_pages_value + item_start,
+                                 dash - item_start,
+                                 &first_page) && first_page > 0u;
+                if (numeric) {
+                    last_page = first_page;
+                    if (dash < item_end) {
+                        numeric = dash + 1u < item_end &&
+                                  ascii_to_u64(metadata_pages_value + dash + 1u,
+                                               item_end - dash - 1u,
+                                               &last_page) && last_page >= first_page;
+                    }
+                }
+                if ((!keyword && !numeric) || item_end == item_start) {
+                    console_line(2, "encode: invalid --metadata-pages item");
+                    return 1;
+                }
+                if (item_end == metadata_pages_length) break;
+                item_start = item_end + 1u;
+                if (item_start == metadata_pages_length) {
+                    console_line(2, "encode: invalid --metadata-pages item");
+                    return 1;
+                }
+            }
+            continue;
+        }
         const char output_prefix[] = "--output-dir=";
         const char* output_value = 0;
         usize output_length = 0u;
@@ -31586,6 +31689,61 @@ static int command_encode(int arg_count, char** args) {
             unknown_parity_budget = (u16)maximum_text_pixels;
         }
     }
+    if (page_count == 0u || page_count > (u64)USIZE_MAX_VALUE ||
+        !metadata_page_assignments.ensure((usize)page_count)) {
+        console_line(2, "encode: failed to allocate metadata page selection");
+        return 1;
+    }
+    metadata_page_assignments.size = (usize)page_count;
+    memset(metadata_page_assignments.data,
+           metadata_pages_value &&
+                   !(metadata_pages_length == 3u &&
+                     memcmp(metadata_pages_value, "all", 3u) == 0)
+               ? 0u : 1u,
+           metadata_page_assignments.size);
+    if (metadata_pages_value &&
+        !(metadata_pages_length == 3u &&
+          memcmp(metadata_pages_value, "all", 3u) == 0)) {
+        usize item_start = 0u;
+        while (item_start < metadata_pages_length) {
+            usize item_end = item_start;
+            while (item_end < metadata_pages_length && metadata_pages_value[item_end] != ',') {
+                ++item_end;
+            }
+            usize dash = item_start;
+            while (dash < item_end && metadata_pages_value[dash] != '-') ++dash;
+            u64 first_page = 0u;
+            u64 last_page = 0u;
+            if (item_end - item_start == 6u &&
+                memcmp(metadata_pages_value + item_start, "middle", 6u) == 0) {
+                first_page = page_count / 2u + page_count % 2u;
+                last_page = first_page;
+            } else if (item_end - item_start == 4u &&
+                       memcmp(metadata_pages_value + item_start, "last", 4u) == 0) {
+                first_page = page_count;
+                last_page = first_page;
+            } else {
+                ascii_to_u64(metadata_pages_value + item_start,
+                             dash - item_start,
+                             &first_page);
+                last_page = first_page;
+                if (dash < item_end) {
+                    ascii_to_u64(metadata_pages_value + dash + 1u,
+                                 item_end - dash - 1u,
+                                 &last_page);
+                }
+                if (last_page > page_count) {
+                    console_line(2, "encode: --metadata-pages contains a page beyond the encoded page count");
+                    return 1;
+                }
+            }
+            for (u64 page = first_page; page <= last_page; ++page) {
+                metadata_page_assignments.data[(usize)(page - 1u)] = 1u;
+            }
+            if (item_end == metadata_pages_length) break;
+            item_start = item_end + 1u;
+        }
+    }
     if (overlay_fraction > 0.0 && page_count > 1u &&
         ecc_mode == ECC_EXPLICIT_RATIO && ecc_redundancy < 0.5) {
         console_line(2, "encode: multi-page overlays require --ecc of at least 0.5; larger overlays may require more");
@@ -31810,7 +31968,8 @@ static int command_encode(int arg_count, char** args) {
                                 output_footer_layout,
                                 page_output,
                                 unknown_parity_budget,
-                                overlay_erasure_budget)) {
+                                overlay_erasure_budget,
+                                metadata_page_assignments.data[0u] != 0u)) {
            console_line(2, "encode: failed to format ppm");
            return 1;
        }
@@ -31890,7 +32049,8 @@ static int command_encode(int arg_count, char** args) {
                                     footer_layout,
                                     page_output,
                                     unknown_parity_budget,
-                                    overlay_erasure_budget)) {
+                                    overlay_erasure_budget,
+                                    metadata_page_assignments.data[(usize)page] != 0u)) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
             }
@@ -33284,6 +33444,36 @@ retry_decode:
         u64 aggregate_page_capacity_bits = 0u;
         AffineTransform previous_page_affine_hint = {};
         bool previous_page_affine_hint_available = false;
+        MetadataTile::Values center_probe_tile;
+        bool center_probe_available = false;
+        bool center_probe_page_present[MAX_INPUT_FILES] = {};
+        if (!force_disable_subgrid && !force_tile_center_sampling && !retried_subgrid) {
+            for (usize probe_index = 0u; probe_index < file_count; ++probe_index) {
+                makocode::ByteBuffer probe_stream;
+                if (!read_entire_file(input_files[probe_index], probe_stream)) {
+                    console_write(2, "decode: failed to read ");
+                    console_line(2, input_files[probe_index]);
+                    return 1;
+                }
+                makocode::ByteBuffer probe_bits;
+                makocode::ByteBuffer probe_erasures;
+                u64 probe_bit_count = 0u;
+                PpmParserState probe_state;
+                bool probe_found = ppm_extract_frame_bits(
+                    probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
+                    false, 0, 0, (u64)probe_index + 1u, &probe_erasures,
+                    0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, false, true, true, true);
+                if (probe_found && probe_state.has_encoded_tile &&
+                    metadata_schema_is_current(probe_state.encoded_tile.schema_version)) {
+                    center_probe_page_present[probe_index] = true;
+                    encoded_pages[probe_index] = probe_state.encoded_tile;
+                    if (!center_probe_available) {
+                        center_probe_tile = probe_state.encoded_tile;
+                        center_probe_available = true;
+                    }
+                }
+            }
+        }
         for (usize file_index = 0u; file_index < file_count; ++file_index) {
             makocode::ByteBuffer ppm_stream;
             if (!read_entire_file(input_files[file_index], ppm_stream)) {
@@ -33305,6 +33495,17 @@ retry_decode:
             u16 page_overlay_erasure_budget = 0u;
             bool page_color_rotation = false;
             bool retry_without_subgrid_allowed = false;
+            MetadataTile::Values page_tile_override;
+            const MetadataTile::Values* page_tile_override_ptr = 0;
+            bool page_tile_present = false;
+            if (center_probe_available) {
+                page_tile_present = center_probe_page_present[file_index];
+                page_tile_override = page_tile_present
+                                         ? encoded_pages[file_index]
+                                         : center_probe_tile;
+                page_tile_override.page_index = (u64)file_index + 1u;
+                page_tile_override_ptr = &page_tile_override;
+            }
             bool frame_extracted = ppm_extract_frame_bits(ppm_stream,
                                                           mapping,
                                                           page_bits,
@@ -33325,13 +33526,19 @@ retry_decode:
                                                               : (const AffineTransform*)0,
                                                           force_tile_center_sampling,
                                                           &page_capacity_bits,
-                                                          file_count == 1u && single_retry_tile_available
-                                                              ? &single_retry_tile
-                                                              : (const MetadataTile::Values*)0,
+                                                          page_tile_override_ptr
+                                                              ? page_tile_override_ptr
+                                                              : (file_count == 1u && single_retry_tile_available
+                                                                     ? &single_retry_tile
+                                                                     : (const MetadataTile::Values*)0),
                                                           (const u8*)0,
                                                           0u,
                                                           0u,
-                                                          small_scan_geometry_variant);
+                                                          small_scan_geometry_variant,
+                                                          true,
+                                                          page_tile_override_ptr
+                                                              ? page_tile_present
+                                                              : true);
 
             if (!frame_extracted) {
                 if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
@@ -33373,8 +33580,10 @@ retry_decode:
                 page_capacity_bits > 0u;
             if (!page_assembly_mode_initialized) {
                 page_assembly_mode_initialized = true;
-                indexed_page_assembly = page_has_indexed_metadata;
-                if (indexed_page_assembly) {
+            }
+            if (page_has_indexed_metadata && !indexed_page_assembly) {
+                indexed_page_assembly = true;
+                {
                     indexed_frame_bit_total = page_state.page_bits_value;
                     u64 frame_bytes_u64 = (indexed_frame_bit_total >> 3u) +
                                           ((indexed_frame_bit_total & 7u) ? 1u : 0u);
@@ -33391,10 +33600,29 @@ retry_decode:
                         memset(indexed_frame_bits.data, 0, (usize)frame_bytes_u64);
                         memset(indexed_erasure_bits.data, 0xFF, (usize)frame_bytes_u64);
                     }
+                    u64 prior_bits = frame_aggregator.bit_size();
+                    if (prior_bits > indexed_frame_bit_total ||
+                        prior_bits > erasure_aggregator.bit_size()) {
+                        console_line(2, "decode: preceding metadata-free pages exceed indexed payload length");
+                        return 1;
+                    }
+                    makocode::BitReader prior_frame_reader;
+                    makocode::BitReader prior_erasure_reader;
+                    prior_frame_reader.reset(frame_aggregator.data(), prior_bits);
+                    prior_erasure_reader.reset(erasure_aggregator.data(), prior_bits);
+                    for (u64 bit_index = 0u; bit_index < prior_bits; ++bit_index) {
+                        u8 bit = prior_frame_reader.read_bit();
+                        u8 erased = prior_erasure_reader.read_bit();
+                        if (prior_frame_reader.failed || prior_erasure_reader.failed) {
+                            console_line(2, "decode: failed to migrate preceding metadata-free pages");
+                            return 1;
+                        }
+                        usize destination_byte = (usize)(bit_index >> 3u);
+                        u8 destination_mask = (u8)(1u << (bit_index & 7u));
+                        if (bit) indexed_frame_bits.data[destination_byte] |= destination_mask;
+                        if (!erased) indexed_erasure_bits.data[destination_byte] &= (u8)~destination_mask;
+                    }
                 }
-            } else if (indexed_page_assembly != page_has_indexed_metadata) {
-                console_line(2, "decode: pages have incompatible index metadata");
-                return 1;
             }
             if (aggregate_page_capacity_bits &&
                 aggregate_page_capacity_bits != page_capacity_bits) {
@@ -33418,17 +33646,12 @@ retry_decode:
             bool page_has_selector_tile = page_state.has_encoded_tile &&
                 metadata_schema_is_current(page_state.encoded_tile.schema_version) &&
                 page_state.encoded_tile.overwrite_layout;
-            if (!have_first_page_selector_tile) {
+            if (page_has_selector_tile && !have_first_page_selector_tile) {
                 have_first_page_selector_tile = true;
-                first_page_has_selector_tile = page_has_selector_tile;
-                if (page_has_selector_tile) {
-                    first_page_selector_tile = page_state.encoded_tile;
-                }
-            } else if (page_has_selector_tile != first_page_has_selector_tile) {
-                console_line(2, "decode: conflicting overlay selector settings between pages");
-                return 1;
+                first_page_has_selector_tile = true;
+                first_page_selector_tile = page_state.encoded_tile;
             }
-            if (page_has_selector_tile &&
+            if (page_has_selector_tile && first_page_has_selector_tile &&
                 (page_state.encoded_tile.overlay_selector_present !=
                      first_page_selector_tile.overlay_selector_present ||
                  page_state.encoded_tile.overlay_selector_seed !=
@@ -33560,7 +33783,7 @@ retry_decode:
                 }
                 u64 page_offset = (page_index - 1u) * page_capacity_bits;
                 bool page_has_payload = page_offset < indexed_frame_bit_total;
-                if ((page_index <= page_state.encoded_tile.page_count) != page_has_payload) {
+                if ((page_index <= aggregate_state.encoded_tile.page_count) != page_has_payload) {
                     console_line(2, "decode: page index conflicts with payload length");
                     return 1;
                 }

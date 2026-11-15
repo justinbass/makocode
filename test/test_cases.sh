@@ -436,3 +436,6 @@ test_case 0117_decode_metadata_free script "Single-page payload and ECC recover 
 
 test_case 0118_decode_metadata_free_large script "Large single-page payload recovers with center metadata erased and no fiducials" \
     test_decode_metadata_free_large.sh
+
+test_case 0119_metadata_pages script "Metadata tiles appear only on selected pages; three-page payload still decodes" \
+    test_metadata_pages.sh
