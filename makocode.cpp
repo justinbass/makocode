@@ -9547,7 +9547,9 @@ namespace MetadataTile {
                                     double* out_tag_mismatch = 0,
                                     double* out_alignment_score = 0,
                                     u32 max_marker_errors = 12u,
-                                    bool ignore_marker = false) {
+                                    bool ignore_marker = false,
+                                    u32 forced_total_metadata_cells = 0u,
+                                    u32 forced_tag_y = 0xFFFFFFFFu) {
         if (!tile_rgb || !module_luminances) return false;
         auto module_luminance = [&](u32 x, u32 y) -> double {
             return module_luminances[(usize)y * TILE_SIDE + x];
@@ -9581,6 +9583,7 @@ namespace MetadataTile {
         };
         const u32 max_tag_y = (TILE_SIDE - TILE_HEADER_ROWS - 1u) / 2u;
         for (u32 tag_y = 0u; tag_y <= max_tag_y; ++tag_y) {
+            if (forced_tag_y != 0xFFFFFFFFu && tag_y != forced_tag_y) continue;
             const u8* tag_row = tile_rgb + (usize)tag_y * TILE_SIDE * 3u;
             for (u32 inversion = 0u; inversion < 2u; ++inversion) {
                 PaletteColor tag_palette[MAX_CUSTOM_PALETTE_COLORS];
@@ -9639,37 +9642,49 @@ namespace MetadataTile {
                     bool outer_length_read = false;
                     u32 total_metadata_cells = 0u;
                     usize outer_length_prefix_bits = 0u;
-                    for (u32 start = 0u; start < TILE_SIDE && !outer_length_read; ++start) {
-                        u8 candidate_data[(TILE_SIDE + 7u) / 8u] = {};
-                        for (u32 bit = 0u; start + bit < TILE_SIDE; ++bit) {
-                            if ((length_data[(start + bit) >> 3u] >> ((start + bit) & 7u)) & 1u) {
-                                candidate_data[bit >> 3u] |= (u8)(1u << (bit & 7u));
+                    if (forced_total_metadata_cells > 0u) {
+                        if (forced_total_metadata_cells <= square_cells) {
+                            BitWriter inferred_outer_length;
+                            if (write_compact_u16(inferred_outer_length,
+                                                  forced_total_metadata_cells)) {
+                                total_metadata_cells = forced_total_metadata_cells;
+                                outer_length_prefix_bits = inferred_outer_length.bit_size();
+                                outer_length_read = true;
                             }
                         }
-                        BitReader candidate_reader;
-                        candidate_reader.reset(candidate_data, TILE_SIDE - start);
-                        u32 candidate_cells = 0u;
-                        if (!read_compact_u16(candidate_reader, candidate_cells) ||
-                            candidate_reader.failed || candidate_cells == 0u ||
-                            candidate_cells > 0xFFFFu) continue;
-                        usize candidate_prefix_bits = (usize)candidate_reader.cursor;
-                        if (start != (TILE_SIDE - candidate_prefix_bits) / 2u) continue;
-                        bool candidate_symbols_valid = true;
-                        for (usize bit = 0u; bit < candidate_prefix_bits; ++bit) {
-                            if (!length_symbol_valid[start + (u32)bit]) {
-                                candidate_symbols_valid = false;
-                                break;
+                    } else {
+                        for (u32 start = 0u; start < TILE_SIDE && !outer_length_read; ++start) {
+                            u8 candidate_data[(TILE_SIDE + 7u) / 8u] = {};
+                            for (u32 bit = 0u; start + bit < TILE_SIDE; ++bit) {
+                                if ((length_data[(start + bit) >> 3u] >> ((start + bit) & 7u)) & 1u) {
+                                    candidate_data[bit >> 3u] |= (u8)(1u << (bit & 7u));
+                                }
                             }
+                            BitReader candidate_reader;
+                            candidate_reader.reset(candidate_data, TILE_SIDE - start);
+                            u32 candidate_cells = 0u;
+                            if (!read_compact_u16(candidate_reader, candidate_cells) ||
+                                candidate_reader.failed || candidate_cells == 0u ||
+                                candidate_cells > 0xFFFFu) continue;
+                            usize candidate_prefix_bits = (usize)candidate_reader.cursor;
+                            if (start != (TILE_SIDE - candidate_prefix_bits) / 2u) continue;
+                            bool candidate_symbols_valid = true;
+                            for (usize bit = 0u; bit < candidate_prefix_bits; ++bit) {
+                                if (!length_symbol_valid[start + (u32)bit]) {
+                                    candidate_symbols_valid = false;
+                                    break;
+                                }
+                            }
+                            if (!candidate_symbols_valid || candidate_cells > square_cells) continue;
+                            u32 expected_square_side = 1u;
+                            while ((usize)expected_square_side * expected_square_side < candidate_cells) {
+                                ++expected_square_side;
+                            }
+                            if (expected_square_side != square_side) continue;
+                            total_metadata_cells = candidate_cells;
+                            outer_length_prefix_bits = candidate_prefix_bits;
+                            outer_length_read = true;
                         }
-                        if (!candidate_symbols_valid || candidate_cells > square_cells) continue;
-                        u32 expected_square_side = 1u;
-                        while ((usize)expected_square_side * expected_square_side < candidate_cells) {
-                            ++expected_square_side;
-                        }
-                        if (expected_square_side != square_side) continue;
-                        total_metadata_cells = candidate_cells;
-                        outer_length_prefix_bits = candidate_prefix_bits;
-                        outer_length_read = true;
                     }
                     if (!outer_length_read || total_metadata_cells > square_cells) continue;
 
@@ -9762,6 +9777,10 @@ namespace MetadataTile {
                                                                                   tag_palette_count)
                                                           : (usize)metadata_symbol_count;
                         if (length_prefix_bits + codeword_symbol_count > square_cells) continue;
+                        if (forced_total_metadata_cells > 0u &&
+                            is_power_of_two_u32(tag_palette_count) &&
+                            length_prefix_bits + codeword_symbol_count !=
+                                total_metadata_cells) continue;
 
                         ByteBuffer codeword;
                         usize codeword_size = encoded_bytes;
@@ -9785,6 +9804,14 @@ namespace MetadataTile {
                                 }
                             }
                         } else {
+                            if (forced_total_metadata_cells > 0u &&
+                                codeword_symbol_count > 0u) {
+                                usize last_cell = length_prefix_bits + codeword_symbol_count - 1u;
+                                u32 last_x = square_x0 + (u32)(last_cell % square_side);
+                                u32 last_y = square_y0 + (u32)(last_cell / square_side);
+                                if (palette_symbol(last_x, last_y, tag_palette,
+                                                   tag_palette_count) == 0u) continue;
+                            }
                             for (usize symbol_index = codeword_symbol_count; symbol_index > 0u; --symbol_index) {
                                 usize square_cell = length_prefix_bits + symbol_index - 1u;
                                 u32 x = square_x0 + (u32)(square_cell % square_side);
@@ -10266,6 +10293,52 @@ namespace MetadataTile {
                         }
                         if (!inner_prefix_valid) continue;
                         metadata_bit_count = (u32)metadata_bits;
+                        if (is_power_of_two_u32(palette_count)) {
+                            const usize body_prefix_bits = 96u;
+                            u32 bits_per_symbol = log2_u32(palette_count);
+                            usize body_prefix_symbols =
+                                (body_prefix_bits + bits_per_symbol - 1u) / bits_per_symbol;
+                            if (inner_prefix_bits + body_prefix_symbols > square_cells) continue;
+                            u8 body_prefix_data[12] = {};
+                            for (usize symbol_index = 0u;
+                                 symbol_index < body_prefix_symbols; ++symbol_index) {
+                                usize cell = inner_prefix_bits + symbol_index;
+                                u32 x = square_x0 + (u32)(cell % square_side);
+                                u32 y = square_y0 + (u32)(cell / square_side);
+                                u32 symbol = sample_palette_symbol(x, y, palette, palette_count);
+                                for (u32 bit = 0u; bit < bits_per_symbol; ++bit) {
+                                    usize bit_index = symbol_index * bits_per_symbol + bit;
+                                    if (bit_index >= body_prefix_bits) break;
+                                    if ((symbol >> bit) & 1u) {
+                                        body_prefix_data[bit_index >> 3u] |=
+                                            (u8)(1u << (bit_index & 7u));
+                                    }
+                                }
+                            }
+                            BitReader body_prefix_reader;
+                            body_prefix_reader.reset(body_prefix_data, body_prefix_bits);
+                            u64 schema_hint = 0u;
+                            u32 parity_bytes = 0u;
+                            if (!read_compact_u64(body_prefix_reader, schema_hint) ||
+                                body_prefix_reader.failed || schema_hint > 0xFFFFFFFFu ||
+                                !metadata_schema_is_supported((u32)schema_hint) ||
+                                !read_compact_u16(body_prefix_reader, parity_bytes) ||
+                                body_prefix_reader.failed || parity_bytes >= 255u) continue;
+                            usize metadata_bytes = (usize)metadata_bit_count / 8u;
+                            usize encoded_bytes = metadata_bytes;
+                            if (parity_bytes > 0u) {
+                                usize block_data = 255u - parity_bytes;
+                                usize block_count = metadata_bytes / block_data +
+                                    (metadata_bytes % block_data != 0u ? 1u : 0u);
+                                if (block_count >
+                                    (USIZE_MAX_VALUE - metadata_bytes) / parity_bytes) continue;
+                                encoded_bytes += block_count * parity_bytes;
+                            }
+                            usize codeword_bits = encoded_bytes * 8u;
+                            usize codeword_symbols =
+                                (codeword_bits + bits_per_symbol - 1u) / bits_per_symbol;
+                            if (inner_prefix_bits + codeword_symbols != total_metadata_cells) continue;
+                        }
                         length_found = true;
                         (void)outer_length_bits;
                     }
@@ -10309,7 +10382,9 @@ namespace MetadataTile {
                                    double* out_alignment_score = 0,
                                    bool prefix_parity_only = false,
                                    u32 max_marker_errors = 12u,
-                                   bool ignore_marker = false) {
+                                   bool ignore_marker = false,
+                                   u32 forced_total_metadata_cells = 0u,
+                                   u32 forced_tag_y = 0xFFFFFFFFu) {
         (void)prefix_parity_only;
         if (!pixel_data_rgb || width_pixels == 0u || height_pixels == 0u || data_height_pixels == 0u ||
             !(affine.pitch_pixels > 0.0)) return false;
@@ -10384,7 +10459,8 @@ namespace MetadataTile {
         }
         bool decoded = decode_tile_samples(tile_rgb, tile_luminances, out_values, out_palette_text,
                                            out_border_mismatch, out_alignment_score,
-                                           max_marker_errors, ignore_marker);
+                                           max_marker_errors, ignore_marker,
+                                           forced_total_metadata_cells, forced_tag_y);
         return decoded;
     }
 
@@ -10551,6 +10627,8 @@ namespace MetadataTile {
         }
         if (!(pitch_guess > 0.0)) pitch_guess = 1.0;
         const bool compact_image_search = width_pixels < 512u && height_pixels < 512u;
+        // Compact scans may blur the size prefix; keep their marker-only fallback.
+        // Larger rasters use the intact prefix to reject false marker candidates early.
         auto retry_fine_pitch_search = [&]() -> bool {
             if (!compact_image_search || fine_pitch_search) return false;
             return search_decode_tile_affine(pixel_data_rgb, width_pixels, height_pixels,
@@ -10817,7 +10895,7 @@ namespace MetadataTile {
                                                        inverted,
                                                        confidence,
                                                        true,
-                                                       true,
+                                                       compact_image_search,
                                                        sample_scaled_cells) ||
                                 confidence < 0.55) continue;
                             Values candidate_values;
@@ -10890,7 +10968,7 @@ namespace MetadataTile {
                                                               inverted,
                                                               confidence,
                                                               true,
-                                                              true,
+                                                              compact_image_search,
                                                               sample_scaled_cells) ||
                                     confidence < 0.45) {
                                     continue;
@@ -10977,7 +11055,7 @@ namespace MetadataTile {
                                           inverted,
                                           confidence,
                                           true,
-                                          true,
+                                          compact_image_search,
                                           sample_scaled_cells);
             AffineParams fast_affine = affine;
             if (header_match && compact_image_search && sample_scaled_cells &&
@@ -11028,7 +11106,7 @@ namespace MetadataTile {
                                                            local_inverted,
                                                            local_confidence,
                                                            true,
-                                                           true,
+                                                           compact_image_search,
                                                            sample_scaled_cells) ||
                                     (u32)(local_header >> 32u) != 2u ||
                                     local_confidence <= refined_confidence) {
@@ -16203,6 +16281,126 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         // If the marker is unusable, the intact palette and compact length rows bound
         // the metadata sample; Reed-Solomon remains the acceptance check.
         probe_centered_metadata(true, 32u);
+    }
+    if (!known_tile_override && !tile_available && marker_orientation_detected &&
+        width >= MetadataTile::TILE_SIDE && height >= MetadataTile::TILE_SIDE &&
+        width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
+        const double preferred_pitches[] = {
+            1.0, 2.0, 4.0, 3.0, 5.0, 6.0, 8.0, 10.0, 12.0,
+            16.0, 24.0, 32.0, 48.0, 64.0};
+        const double center_offsets[] = {0.0, -0.5, 0.5};
+        double max_pitch = (double)(width < height ? width : height) /
+                           (double)MetadataTile::TILE_SIDE;
+        if (max_pitch > 64.0) max_pitch = 64.0;
+        double center_x = ((double)width - 1.0) * 0.5;
+        double center_y = ((double)height - 1.0) * 0.5;
+        u32 geometry_checks = 0u;
+        u32 size_guess_checks = 0u;
+        for (u32 pitch_index = 0u;
+             pitch_index < sizeof(preferred_pitches) / sizeof(preferred_pitches[0]) &&
+             !tile_available && geometry_checks < 256u && size_guess_checks < 256u;
+             ++pitch_index) {
+            double pitch = preferred_pitches[pitch_index];
+            if (pitch > max_pitch + 1e-9) continue;
+            for (u32 offset_y_index = 0u;
+                 offset_y_index < sizeof(center_offsets) / sizeof(center_offsets[0]) &&
+                 !tile_available && geometry_checks < 256u && size_guess_checks < 256u;
+                 ++offset_y_index) {
+                for (u32 offset_x_index = 0u;
+                     offset_x_index < sizeof(center_offsets) / sizeof(center_offsets[0]) &&
+                     !tile_available && geometry_checks < 256u && size_guess_checks < 256u;
+                     ++offset_x_index) {
+                    MetadataTile::AffineParams candidate_affine = {};
+                    candidate_affine.pitch_pixels = pitch;
+                    candidate_affine.pitch_x_pixels = pitch;
+                    candidate_affine.pitch_y_pixels = pitch;
+                    candidate_affine.center_x = center_x +
+                        center_offsets[offset_x_index] * pitch;
+                    candidate_affine.center_y = center_y +
+                        center_offsets[offset_y_index] * pitch;
+                    u64 candidate_tag = 0u;
+                    bool candidate_inverted = false;
+                    double candidate_confidence = 0.0;
+                    u32 candidate_tag_y = 0u;
+                    ++geometry_checks;
+                    if (!MetadataTile::match_tile_tag_affine(
+                            pixel_data, (u32)width, (u32)height, (u32)height,
+                            candidate_affine, candidate_tag, candidate_inverted,
+                            candidate_confidence, true, true,
+                            sample_scaled_metadata_tile, &candidate_tag_y, 0u,
+                            4u, false)) continue;
+
+                    u32 side_candidates[2] = {
+                        MetadataTile::TILE_SIDE - MetadataTile::TILE_HEADER_ROWS -
+                            2u * candidate_tag_y,
+                        MetadataTile::TILE_SIDE - MetadataTile::TILE_HEADER_ROWS -
+                            2u * candidate_tag_y - 1u};
+                    for (u32 side_index = 0u;
+                         side_index < 2u && !tile_available && size_guess_checks < 256u;
+                         ++side_index) {
+                        u32 square_side = side_candidates[side_index];
+                        if (square_side == 0u ||
+                            square_side > MetadataTile::TILE_MAX_METADATA_SQUARE_SIDE ||
+                            (MetadataTile::TILE_SIDE -
+                             (square_side + MetadataTile::TILE_HEADER_ROWS)) / 2u !=
+                                candidate_tag_y) continue;
+                        u32 lower_square_side = square_side - 1u;
+                        u32 first_candidate_cells =
+                            lower_square_side * lower_square_side + 1u;
+                        u32 last_candidate_cells = square_side * square_side;
+                        if (first_candidate_cells > last_candidate_cells) continue;
+                        u32 midpoint = first_candidate_cells +
+                            (last_candidate_cells - first_candidate_cells) / 2u;
+                        u32 maximum_distance = midpoint - first_candidate_cells;
+                        u32 upper_distance = last_candidate_cells - midpoint;
+                        if (upper_distance > maximum_distance) maximum_distance = upper_distance;
+                        for (u32 distance = 0u;
+                             distance <= maximum_distance && !tile_available &&
+                             size_guess_checks < 256u; ++distance) {
+                            u32 candidates_this_distance[2] = {
+                                midpoint + distance,
+                                midpoint >= distance ? midpoint - distance : 0u};
+                            u32 candidate_count = distance == 0u ? 1u : 2u;
+                            for (u32 candidate_index = 0u;
+                                 candidate_index < candidate_count && !tile_available &&
+                                 size_guess_checks < 256u; ++candidate_index) {
+                                u32 candidate_cells = candidates_this_distance[candidate_index];
+                                if (candidate_cells < first_candidate_cells ||
+                                    candidate_cells > last_candidate_cells) continue;
+                                ++size_guess_checks;
+                                MetadataTile::Values candidate_values;
+                                makocode::ByteBuffer candidate_palette_text;
+                                if (!MetadataTile::decode_tile_affine(
+                                        pixel_data, (u32)width, (u32)height, (u32)height,
+                                        candidate_affine, candidate_values,
+                                        candidate_palette_text, 0,
+                                        sample_scaled_metadata_tile, 0, false,
+                                        4u, false, candidate_cells, candidate_tag_y)) continue;
+                                tile_values = candidate_values;
+                                byte_buffer_move(tile_palette_text, candidate_palette_text);
+                                tile_values.footer_rows = MetadataTile::infer_footer_rows_from_affine(
+                                    tile_values, candidate_affine, (u32)width, (u32)height);
+                                tile_affine_hint = candidate_affine;
+                                tile_affine_hint_available = true;
+                                tile_available = true;
+                                apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
+                                if (debug_fiducial_csv) {
+                                    char recovery_description[192];
+                                    snprintf(recovery_description, sizeof(recovery_description),
+                                             "decode: guessed size=%u pitch=%.2f center=%.2f,%.2f tag_y=%u",
+                                             candidate_cells, candidate_affine.pitch_pixels,
+                                             candidate_affine.center_x, candidate_affine.center_y,
+                                             candidate_tag_y);
+                                    console_line(2, recovery_description);
+                                    console_line(2,
+                                        "decode: metadata ECC recovered from guessed header size");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     if (!known_tile_override && !tile_available && sample_scaled_metadata_tile &&
         metadata_width_hint == 80u && metadata_height_hint == 80u &&

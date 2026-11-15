@@ -427,3 +427,6 @@ test_case 0114_decode_partial_tag_scan script "ECC recovers a scan with half the
 
 test_case 0115_decode_erased_tag_orientation_scan script "ECC recovers fully erased markers across orientations" \
     test_decode_erased_tag_orientation_scan.sh
+
+test_case 0116_decode_erased_length_row_scan script "ECC recovers a scan with metadata size erased" \
+    test_decode_erased_length_row_scan.sh

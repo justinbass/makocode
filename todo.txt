@@ -1,9 +1,9 @@
 TODO
 
 Features:
+- ECC can be stored as num from 0 -> 255, could be compact_u16 or even a new compact_u8.
 - Metadata recovery
   - Confirm that metadata includes all encoder inputs
-    - Metadata size, get the most common ones for total pages and search one by one around the known measured one
     - Data size, start with measured one, but clipping can affect it. Search one by one around starting point.
     - Page height/width, start with measured one, but clipping can affect it. Search one by one around starting point.
     - Overlay (0 -> 65535), overlay looks like non-random data
