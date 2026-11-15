@@ -433,3 +433,6 @@ test_case 0116_decode_erased_length_row_scan script "ECC recovers a scan with me
 
 test_case 0117_decode_metadata_free script "Single-page payload and ECC recover with the entire center metadata tile erased" \
     test_decode_metadata_free.sh
+
+test_case 0118_decode_metadata_free_large script "Large single-page payload recovers with center metadata erased and no fiducials" \
+    test_decode_metadata_free_large.sh

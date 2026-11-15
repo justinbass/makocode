@@ -1,7 +1,6 @@
 TODO
 
 Features:
-- Make fidicuals optional, test for large page without them
 - Metadata only on selected pages (including middle)
 - ECC can be stored as num from 0 -> 255, could be compact_u16 or even a new compact_u8.
 - Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
