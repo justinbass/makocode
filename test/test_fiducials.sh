@@ -114,11 +114,11 @@ marker = 0
 for y in range(29, 31):
     for x in range(29, 31):
         index = (y * width + x) * 3
-        marker += pixels[index:index + 3] == [0, 255, 255]
+        marker += pixels[index:index + 3] == [255, 255, 255]
 raise SystemExit(0 if width >= 31 and height >= 31 and marker == 4 else 1)
 PYTHON
 then
-    echo 'test_fiducials: expected the first grayscale-page marker to use cyan' >&2
+    echo 'test_fiducials: expected the first grayscale-page marker to use white' >&2
     exit 1
 fi
 

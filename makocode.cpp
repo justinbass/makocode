@@ -13482,28 +13482,6 @@ static void fiducial_select_color(const ImageMappingConfig& mapping,
     u8 darkest_rgb[3] = {};
     u8 brightest_rgb[3] = {};
     footer_select_colors(mapping, darkest_rgb, brightest_rgb);
-    if (mapping_has_custom_palette(mapping)) {
-        memcpy(fiducial_rgb, brightest_rgb, 3u);
-        return;
-    }
-    if (mapping.color_channels == 1u) {
-        fiducial_rgb[0] = 0u;
-        fiducial_rgb[1] = 255u;
-        fiducial_rgb[2] = 255u;
-        return;
-    }
-    if (mapping.color_channels == 2u) {
-        fiducial_rgb[0] = PALETTE_CMYW[1].r;
-        fiducial_rgb[1] = PALETTE_CMYW[1].g;
-        fiducial_rgb[2] = PALETTE_CMYW[1].b;
-        return;
-    }
-    if (mapping.color_channels == 3u) {
-        fiducial_rgb[0] = PALETTE_RGB_CMY_WB[4].r;
-        fiducial_rgb[1] = PALETTE_RGB_CMY_WB[4].g;
-        fiducial_rgb[2] = PALETTE_RGB_CMY_WB[4].b;
-        return;
-    }
     memcpy(fiducial_rgb, brightest_rgb, 3u);
 }
 
@@ -15146,8 +15124,16 @@ static bool sample_fiducial_centers(const u8* pixel_data,
     double fiducial_size_pixels = (double)FIDUCIAL_MARKER_SIZE_PIXELS;
     fiducial_size_pixels *= scale_est;
     u8 fiducial_rgb[3] = {};
+    bool fiducial_matches_background = false;
     if (mapping_hint) {
         fiducial_select_color(*mapping_hint, fiducial_rgb);
+        u8 unused_text_rgb[3] = {};
+        u8 background_rgb[3] = {};
+        footer_select_colors(*mapping_hint, unused_text_rgb, background_rgb);
+        fiducial_matches_background =
+            fiducial_rgb[0] == background_rgb[0] &&
+            fiducial_rgb[1] == background_rgb[1] &&
+            fiducial_rgb[2] == background_rgb[2];
     }
     MetadataTile::Placement logical_tile = {};
     bool use_affine_hint = affine_hint && affine_hint->pitch_pixels > 0.0 &&
@@ -15597,7 +15583,12 @@ static bool sample_fiducial_centers(const u8* pixel_data,
                             contrast_y += weight * (double)(best_y + (int)py);
                         }
                     }
-                    if (contrast_weight > 0.0) {
+                    if (fiducial_matches_background && mapping_hint &&
+                        mapping_hint->color_channels == 1u &&
+                        !mapping_has_custom_palette(*mapping_hint)) {
+                        center_x = (double)best_x + ((double)marker_width - 1.0) * 0.5;
+                        center_y = (double)best_y + ((double)marker_height - 1.0) * 0.5;
+                    } else if (contrast_weight > 0.0) {
                         center_x = contrast_x / contrast_weight;
                         center_y = contrast_y / contrast_weight;
                     }
@@ -26868,6 +26859,8 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                         parity_end = maximum_parity;
                     } else if (candidate_parity < minimum_parity) {
                         continue;
+                    } else if (parity_start > minimum_parity) {
+                        --parity_start;
                     }
                     if (parity_start > parity_end) continue;
                     for (u32 parity = parity_start; parity <= parity_end && !recovered; ++parity) {
