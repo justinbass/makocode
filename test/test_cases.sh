@@ -1,14 +1,6 @@
 # Copyright (C) 2026 Justin Alan Bass.
-# This file is part of MakoCode. MakoCode is free software: you can
-# redistribute it and/or modify it under the terms of the GNU Affero
-# General Public License as published by the Free Software Foundation,
-# either version 3 of the License, or (at your option) any later version.
-# MakoCode is distributed without any warranty; without even the implied
-# warranty of merchantability or fitness for a particular purpose. See
-# the LICENSE file for the full license text.
-#
-# Case registry consumed by run_test_case.sh. Keep case IDs unique: they also
-# namespace the artifacts written under test_output/.
+# SPDX-License-Identifier: AGPL-3.0-or-later; see LICENSE.
+# No warranty; see LICENSE.
 
 test_case 0000_tiny_0 roundtrip "1 byte payload literal '0' encoded from stdin" \
     --size 1  \

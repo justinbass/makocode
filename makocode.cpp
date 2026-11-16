@@ -49,13 +49,11 @@
         * Footer section repeats checksums, color bars, and page/total counters.
 
     Copyright (C) 2026 Justin Alan Bass.
-    This program is free software: you can redistribute it and/or modify it
-    under the terms of the GNU Affero General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or (at
-    your option) any later version. See LICENSE for the full license text.
-    This program is distributed without any warranty; without even the implied
-    warranty of merchantability or fitness for a particular purpose.
+    SPDX-License-Identifier: AGPL-3.0-or-later; see LICENSE.
+    No warranty; see LICENSE.
 */
+
+#define MAKO_MINIFIED_NOTICE "MakoCode; AGPL-3.0-or-later; NO WARRANTY; see LICENSE"
 
 #include <dirent.h>
 #include <errno.h>

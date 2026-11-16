@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Copyright (C) 2026 Justin Alan Bass.
-# This file is part of MakoCode. MakoCode is free software: you can
-# redistribute it and/or modify it under the terms of the GNU Affero
-# General Public License, version 3 or (at your option) any later version.
-#
-set -euo pipefail
+# SPDX-License-Identifier: AGPL-3.0-or-later; see LICENSE.
+# No warranty; see LICENSE.
 
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
