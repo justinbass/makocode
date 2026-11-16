@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform="$repo_root/test/ppm_transform"
+ppm_transform="$repo_root/test_output/bin/ppm_transform"
 work=$(mktemp -d "$repo_root/test_output/0117_decode_metadata_free_work.XXXXXX")
 seed=${MAKO_TEST_SEED:-1944}
 palettes=(

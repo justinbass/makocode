@@ -12,7 +12,7 @@ fi
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 payload="$work_dir/payload.bin"
 
-"$repo_root/test/ppm_transform" bytes --output "$payload" --size 16384 --seed 732881
+"$repo_root/test_output/bin/ppm_transform" bytes --output "$payload" --size 16384 --seed 732881
 
 wrap_dir="$work_dir/wrap"
 mkdir -p "$wrap_dir"
@@ -34,7 +34,7 @@ for page in "${wrap_pages[@]}"; do
     fi
 done
 "$repo_root/makocode" decode "${wrap_pages[@]}" --decoded-stdout 2>/dev/null |
-    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
         --size 16384 --seed 732881 --label "${label} wrapped footer"
 too_short_dir="$work_dir/too_short"
 mkdir -p "$too_short_dir"
@@ -83,7 +83,7 @@ for index, count in enumerate(counts):
         raise SystemExit(f"footer page selection mismatch at page {index + 1}: {counts}")
 PY
 "$repo_root/makocode" decode "${selected_pages[@]}" --decoded-stdout 2>/dev/null |
-    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
         --size 16384 --seed 732881 --label "${label} selected footer"
 
 overlay_dir="$work_dir/overlay"
@@ -122,7 +122,7 @@ shopt -s nullglob
 over_pages=("$over_dir"/*.ppm)
 shopt -u nullglob
 "$repo_root/makocode" decode "${over_pages[@]}" --decoded-stdout 2>/dev/null |
-    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
         --size 16384 --seed 732881 --label "${label} over-barcode footer"
 "$repo_root/makocode" decode "${over_pages[@]}" --debug \
     --output-dir "$work_dir/over_debug" --decoded-file \

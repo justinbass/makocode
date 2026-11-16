@@ -42,7 +42,7 @@ if [[ ! -x $makocode_bin ]]; then
         echo "test_decode_ecc_retry: makocode binary not found at $makocode_bin" >&2
     exit 1
 fi
-ppm_transform_bin="$repo_root/test/ppm_transform"
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
 if [[ ! -x $ppm_transform_bin ]]; then
         echo "test_decode_ecc_retry: ppm_transform helper not found at $ppm_transform_bin" >&2
     exit 1

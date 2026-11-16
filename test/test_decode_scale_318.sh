@@ -38,7 +38,7 @@ printf '0' > "$work_dir/payload.bin"
         "--prefix=$label" >/dev/null
 )
 
-"$repo_root/test/ppm_transform" transform \
+"$repo_root/test_output/bin/ppm_transform" transform \
     --input "$work_dir/encoded/$label"*.ppm \
     --output "$work_dir/scaled.ppm" \
     --scale-x 3.18 \

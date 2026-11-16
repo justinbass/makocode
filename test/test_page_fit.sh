@@ -67,7 +67,7 @@ for mode in both height width; do
     elif [[ $mode == width ]]; then
         encode_cmd+=(--page-height=500)
     fi
-    "$repo_root/test/ppm_transform" bytes --output - --size 8192 --seed "$payload_seed" |
+    "$repo_root/test_output/bin/ppm_transform" bytes --output - --size 8192 --seed "$payload_seed" |
         "${encode_cmd[@]}" >/dev/null
     shopt -s nullglob
     ppms=("$local_page_dir"/*.ppm)
@@ -101,7 +101,7 @@ for mode in both height width; do
     esac
     cat "${ppms[0]}" |
         "$makocode_bin" decode --decoded-stdout 2>/dev/null |
-        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
             --size 8192 --seed "$payload_seed" --label "$label $mode fit"
 done
 
@@ -136,7 +136,7 @@ if ! awk -v white_fraction="$white_fraction" 'BEGIN { exit !(white_fraction > 0.
 fi
 cat "${margin_ppms[0]}" |
     "$makocode_bin" decode --decoded-stdout 2>/dev/null |
-    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+    python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
         --literal makocode --label "$label small-page margin"
 retained_ppm="$work_dir/${label}_small_page_white_margin.ppm"
 cp "${margin_ppms[0]}" "$retained_ppm"

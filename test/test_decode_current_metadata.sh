@@ -13,7 +13,7 @@ printf 'x' > "$work_dir/payload.bin"
 (cd "$work_dir" && "$repo_root/makocode" encode --input=payload.bin  \
     --page-width=64 --page-height=64 \
     --output-dir="$work_dir/encoded" --prefix=page >/dev/null)
-layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
+layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test_output/bin/canonical_tile_harness"} \
     "$work_dir/encoded/page.ppm" 64 64 1 --metadata-layout)
 read -r square_x square_y square_side prefix_bits tag_y symbol_count <<<"$layout"
 python3 - "$work_dir/encoded/page.ppm" "$work_dir/damaged.ppm" \

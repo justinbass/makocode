@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-harness=${BLOB_ERASURE_HARNESS_BIN:-"$repo_root/test/blob_erasure_harness"}
-ppm_transform="$repo_root/test/ppm_transform"
+harness=${BLOB_ERASURE_HARNESS_BIN:-"$repo_root/test_output/bin/blob_erasure_harness"}
+ppm_transform="$repo_root/test_output/bin/ppm_transform"
 work=$(mktemp -d "$repo_root/test_output/0110_decode_blob_erasures_work.XXXXXX")
 seed=1944
 

@@ -13,7 +13,9 @@ TEST_VERBOSE ?= 0
 
 TEST_CASES := $(shell bash ./test/run_test_case.sh --list)
 TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
-export CANONICAL_TILE_HARNESS_BIN := $(CURDIR)/test/canonical_tile_harness
+export CANONICAL_TILE_HARNESS_BIN := $(CURDIR)/test_output/bin/canonical_tile_harness
+export PARTIAL_ECC_RECOVERY_HARNESS_BIN := $(CURDIR)/test_output/bin/partial_ecc_recovery_e2e
+export BLOB_ERASURE_HARNESS_BIN := $(CURDIR)/test_output/bin/blob_erasure_harness
 
 .PHONY: all clean test test-setup coverage $(TEST_CASE_TARGETS)
 
@@ -27,16 +29,20 @@ all: makocode
 makocode: makocode.cpp
 	@$(STATUS) build "compile makocode" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test/ppm_transform: test/ppm_transform.cpp
+test_output/bin/ppm_transform: test/ppm_transform.cpp
+	@mkdir -p "$(@D)"
 	@$(STATUS) build "compile ppm_transform" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test/canonical_tile_harness: test/test_canonical_tile_harness.cpp makocode
+test_output/bin/canonical_tile_harness: test/test_canonical_tile_harness.cpp makocode
+	@mkdir -p "$(@D)"
 	@$(STATUS) build "compile canonical tile harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test/partial_ecc_recovery_e2e: test/test_partial_ecc_recovery_harness.cpp makocode.cpp
+test_output/bin/partial_ecc_recovery_e2e: test/test_partial_ecc_recovery_harness.cpp makocode.cpp
+	@mkdir -p "$(@D)"
 	@$(STATUS) build "compile partial ECC recovery harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test/blob_erasure_harness: test/test_blob_erasure_harness.cpp makocode.cpp
+test_output/bin/blob_erasure_harness: test/test_blob_erasure_harness.cpp makocode.cpp
+	@mkdir -p "$(@D)"
 	@$(STATUS) build "compile blob erasure harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 test: $(TEST_CASE_TARGETS)
@@ -44,7 +50,7 @@ test: $(TEST_CASE_TARGETS)
 test-setup:
 	@$(STATUS) test "prepare test suite" bash ./test/run_test_suite.sh --prepare
 
-$(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform test/canonical_tile_harness
+$(TEST_CASE_TARGETS): test-case-%: test-setup makocode test_output/bin/ppm_transform test_output/bin/canonical_tile_harness
 	@if [ "$(TEST_VERBOSE)" = 1 ]; then \
 		bash ./test/run_test_case.sh --run "$*"; \
 	else \
@@ -62,9 +68,9 @@ $(TEST_CASE_TARGETS): test-case-%: test-setup makocode test/ppm_transform test/c
 		fi; \
 	fi
 
-test-case-0108_partial_ecc_recovery: test/partial_ecc_recovery_e2e
+test-case-0108_partial_ecc_recovery: test_output/bin/partial_ecc_recovery_e2e
 
-test-case-0110_decode_blob_erasures: test/blob_erasure_harness
+test-case-0110_decode_blob_erasures: test_output/bin/blob_erasure_harness
 
 coverage: clean
 	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
@@ -78,10 +84,8 @@ clean:
 	@$(STATUS) --note clean "cleanup start"
 	@$(STATUS) clean "binary" rm -f makocode
 	@$(STATUS) clean "symbol bundle" rm -rf makocode.dSYM
-	@$(STATUS) clean "ppm_transform helper" rm -f test/ppm_transform
-	@$(STATUS) clean "partial ECC recovery harness" rm -f test/partial_ecc_recovery_e2e
-	@$(STATUS) clean "blob erasure harness" rm -f test/blob_erasure_harness
-	@$(STATUS) clean "ppm_transform symbol bundle" rm -rf test/ppm_transform.dSYM
+	@$(STATUS) clean "legacy ppm_transform helper" rm -f test/ppm_transform
+	@$(STATUS) clean "legacy ppm_transform symbol bundle" rm -rf test/ppm_transform.dSYM
 	@$(STATUS) clean "test artifacts" rm -rf test_output
 	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
 	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno test/*.gcda test/*.gcno $(LCOV_REPORT)

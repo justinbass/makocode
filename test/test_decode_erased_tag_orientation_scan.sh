@@ -30,7 +30,7 @@ printf 'erased marker orientation scan payload' > "$work_dir/payload.bin"
         "--output-dir=$work_dir/encoded" --prefix=source >/dev/null
 )
 
-layout=$("$repo_root/test/canonical_tile_harness" \
+layout=$("$repo_root/test_output/bin/canonical_tile_harness" \
     "$work_dir/encoded/source.ppm" 80 80 1 --metadata-layout)
 
 cases=(

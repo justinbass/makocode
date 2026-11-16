@@ -40,7 +40,7 @@ for sample in 4_5x 5x; do
     else
         pitch=2.477
     fi
-    "$repo_root/test/ppm_transform" transform \
+    "$repo_root/test_output/bin/ppm_transform" transform \
         --input "$work_dir/encoded/small_scan.ppm" \
         --output "$work_dir/${sample}_scaled.ppm" \
         --scale-x "$pitch" --scale-y "$pitch"

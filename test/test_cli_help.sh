@@ -148,7 +148,7 @@ if [[ -z $minimum_small_page_ecc ]]; then
     cat "$small_page_error" >&2
     exit 1
 fi
-"$repo_root/test/ppm_transform" bytes --output "$tmp_dir/default.bin" --size 8192 --seed 55
+"$repo_root/test_output/bin/ppm_transform" bytes --output "$tmp_dir/default.bin" --size 8192 --seed 55
 mkdir -p "$tmp_dir/defaults" "$tmp_dir/overlay_fraction" \
     "$tmp_dir/overlay_fraction_decoded"
 (cd "$tmp_dir" && "$makocode_bin" encode --input=default.bin \
@@ -156,7 +156,7 @@ mkdir -p "$tmp_dir/defaults" "$tmp_dir/overlay_fraction" \
 default_page="$tmp_dir/defaults/defaults.ppm"
 read -r _ < "$default_page"
 read -r default_width default_height < <(sed -n '2p' "$default_page")
-harness=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
+harness=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test_output/bin/canonical_tile_harness"}
 default_settings=$("$harness" "$default_page" "$default_width" "$default_height" 1 \
     --report-ecc-settings)
 IFS=$'\t' read -r default_ecc default_overlay <<<"$default_settings"
@@ -164,7 +164,7 @@ if [[ -z $default_ecc || $default_ecc -le 0 || $default_overlay != 0 ]]; then
     echo "test_cli_help: automatic ECC settings were $default_settings, expected positive ECC/zero overlay" >&2
     exit 1
 fi
-("$repo_root/test/ppm_transform" overlay-mask --output "$tmp_dir/overlay.ppm" \
+("$repo_root/test_output/bin/ppm_transform" overlay-mask --output "$tmp_dir/overlay.ppm" \
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1000 --height 1000)
 overlay_rejection="$tmp_dir/overlay-ecc-rejection.txt"

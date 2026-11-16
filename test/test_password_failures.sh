@@ -86,7 +86,7 @@ run_expect_failure() {
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/test/ppm_transform"
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
 if [[ ! -x $makocode_bin ]]; then
     echo "test_password_failures: makocode binary not found at $makocode_bin" >&2
     exit 1

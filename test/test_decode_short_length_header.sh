@@ -21,7 +21,7 @@ fi
 
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/test/ppm_transform"
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
 mkdir -p "$work_dir/encoded" "$work_dir/clean" "$work_dir/damaged" \
     "$work_dir/alias" "$work_dir/decoded_clean" "$work_dir/decoded_damaged" \
     "$work_dir/decoded_alias"

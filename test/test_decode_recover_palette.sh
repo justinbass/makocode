@@ -9,12 +9,12 @@ if [[ ${1:-} == --label ]]; then label=$2; shift 2; fi
 work_dir=$(mktemp -d "$repo_root/test_output/${label}_work.XXXXXX")
 mkdir -p "$work_dir"
 payload="$work_dir/payload.bin"
-"$repo_root/test/ppm_transform" bytes --output "$payload" --size 8192 --seed 48621
+"$repo_root/test_output/bin/ppm_transform" bytes --output "$payload" --size 8192 --seed 48621
 
 damage_palette_row() {
     local source=$1 destination=$2 palette_count=$3
     local layout
-    layout=$("$repo_root/test/canonical_tile_harness" "$source" 700 700 1 --metadata-layout)
+    layout=$("$repo_root/test_output/bin/canonical_tile_harness" "$source" 700 700 1 --metadata-layout)
     python3 - "$source" "$destination" "$palette_count" "$layout" <<'PY'
 from ppm_test_utils import read_ppm, write_ppm
 import sys

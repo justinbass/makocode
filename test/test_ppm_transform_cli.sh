@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 test_output_dir="$repo_root/test_output"
-ppm_transform_bin="$repo_root/test/ppm_transform"
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
 
 if [[ ! -x "$ppm_transform_bin" ]]; then
     echo "test_ppm_transform_cli: helper not found at $ppm_transform_bin" >&2

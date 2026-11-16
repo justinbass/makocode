@@ -294,7 +294,7 @@ encode_prefix="${label}_random_payload_encoded"
 encoded_prefix="$work_dir/$encode_prefix"
 
 if [[ -n $payload_literal ]]; then
-    payload_len=$("$repo_root/test/ppm_transform" bytes-len "$payload_literal")
+    payload_len=$("$repo_root/test_output/bin/ppm_transform" bytes-len "$payload_literal")
     if [[ $payload_len -ne $size ]]; then
         echo "run_roundtrip: --size ($size) must match --payload-literal byte length ($payload_len)" >&2
         exit 1
@@ -335,7 +335,7 @@ print_makocode_cmd "encode" "${encode_cmd[@]}"
 if [[ -n $payload_literal ]]; then
     printf '%s' "$payload_literal" | "${encode_cmd[@]}" >/dev/null
 else
-    "$repo_root/test/ppm_transform" bytes --output - --size "$size" --seed "$payload_seed" |
+    "$repo_root/test_output/bin/ppm_transform" bytes --output - --size "$size" --seed "$payload_seed" |
         "${encode_cmd[@]}" >/dev/null
 fi
 
@@ -383,11 +383,11 @@ print_makocode_cmd "decode-stdout" "${baseline_decode_cmd[@]}"
 if [[ ${#ppm_paths[@]} -eq 1 ]]; then
     cat "${ppm_paths[0]}" |
         "${baseline_decode_cmd[@]}" 2>/dev/null |
-        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
             "${expected_args[@]}" --label "$label baseline"
 else
     "${baseline_decode_cmd[@]}" "${ppm_paths[@]}" 2>/dev/null |
-        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+        python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
             "${expected_args[@]}" --label "$label baseline"
 fi
 
@@ -438,13 +438,13 @@ if [[ $transform_needed -eq 1 ]]; then
         transform_options+=(--white-checker --preserve-canonical-control)
     fi
     if [[ ${#ppm_paths[@]} -eq 1 ]]; then
-        "$repo_root/test/ppm_transform" transform --input "${ppm_paths[0]}" --output - "${transform_options[@]}" |
+        "$repo_root/test_output/bin/ppm_transform" transform --input "${ppm_paths[0]}" --output - "${transform_options[@]}" |
             "${baseline_decode_cmd[@]}" 2>/dev/null |
-            python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+            python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
                 "${expected_args[@]}" --tolerance-percent 5 --label "$label transformed"
         if [[ $affine_check_enabled -eq 1 ]]; then
             affine_page="$work_dir/affine_scan.ppm"
-            "$repo_root/test/ppm_transform" transform --input "${ppm_paths[0]}" --output "$affine_page" "${transform_options[@]}"
+            "$repo_root/test_output/bin/ppm_transform" transform --input "${ppm_paths[0]}" --output "$affine_page" "${transform_options[@]}"
             affine_dir="$work_dir/affine_decode"
             mkdir -p "$affine_dir"
             if ! "$makocode_bin" decode --debug "--output-dir=$affine_dir" "$affine_page" >/dev/null 2>&1; then
@@ -461,11 +461,11 @@ if [[ $transform_needed -eq 1 ]]; then
         for ppm in "${ppm_paths[@]}"; do
             page_index=$((page_index + 1))
             transformed_path="$work_dir/transformed_${page_index}.ppm"
-            "$repo_root/test/ppm_transform" transform --input "$ppm" --output "$transformed_path" "${transform_options[@]}"
+            "$repo_root/test_output/bin/ppm_transform" transform --input "$ppm" --output "$transformed_path" "${transform_options[@]}"
             transformed_paths+=("$transformed_path")
         done
         "${baseline_decode_cmd[@]}" "${transformed_paths[@]}" 2>/dev/null |
-            python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test/ppm_transform" \
+            python3 "$script_dir/check_decoded_stdout.py" --generator "$repo_root/test_output/bin/ppm_transform" \
                 "${expected_args[@]}" --tolerance-percent 5 --label "$label transformed"
     fi
 fi

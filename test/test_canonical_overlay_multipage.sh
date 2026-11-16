@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname "$0")" && pwd -P)
 repo_root=$(cd -- "$script_dir/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/test/ppm_transform"
-canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
+canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test_output/bin/canonical_tile_harness"}
 work=$(mktemp -d "$repo_root/test_output/0102_canonical_overlay_work.XXXXXX")
 
 if [[ ! -x "$bin" || ! -x "$ppm_transform_bin" ]]; then

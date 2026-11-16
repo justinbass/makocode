@@ -38,7 +38,7 @@ fi
 
 mako_test_seed_init "$repo_root"
 makocode_bin=${MAKOCODE_BIN:-"$repo_root/makocode"}
-ppm_transform_bin="$repo_root/test/ppm_transform"
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
 test_dir="$repo_root/test_output"
 work_dir=$(mktemp -d "$test_dir/${label}_hidden_work.XXXXXX")
 source_dir="$work_dir/source"

@@ -51,7 +51,7 @@ harness_bin="$work_dir/raw_fallback_harness"
 
 payload="$work_dir/raw_payload.bin"
 ppm="$work_dir/raw_payload.ppm"
-"$repo_root/test/ppm_transform" bytes --output "$payload" --size 4096 --seed 5066
+"$repo_root/test_output/bin/ppm_transform" bytes --output "$payload" --size 4096 --seed 5066
 "$harness_bin" "$payload" "$ppm"
 
 if env -u MAKOCODE_DECODE_RAW_FALLBACK "$makocode_bin" decode "$ppm" \

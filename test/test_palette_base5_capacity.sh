@@ -40,7 +40,7 @@ decoded_metadata_dir="${pages[0]%/*}/metadata"
 mkdir -p "$decoded_metadata_dir"
 "$repo_root/makocode" decode --decoded-file --palette "$palette" \
     --output-dir="$decoded_metadata_dir" "${pages[0]}" >/dev/null
-tile_layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"} \
+tile_layout=$(${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test_output/bin/canonical_tile_harness"} \
     "${pages[0]}" 360 360 1 --metadata-layout)
 python3 - "${pages[0]}" "$decoded_metadata_dir" "$tile_layout" <<'PY'
 from pathlib import Path

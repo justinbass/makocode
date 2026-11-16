@@ -15,7 +15,7 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/lib/test_seed.sh"
 . "$script_dir/lib/fiducials.sh"
 makocode_bin="$repo_root/makocode"
-ppm_transform_bin="$repo_root/test/ppm_transform"
+ppm_transform_bin="$repo_root/test_output/bin/ppm_transform"
 
 if [[ ! -x "$makocode_bin" ]]; then
     echo "test_overlay_e2e: makocode binary not found at $makocode_bin" >&2
@@ -39,7 +39,7 @@ export MAKOCODE_TEST_SEED
 
 test_dir="$repo_root/test_output"
 work_dir=$(mktemp -d "$test_dir/${label}_overlay_work.XXXXXX")
-canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test/canonical_tile_harness"}
+canonical_tile_harness_bin=${CANONICAL_TILE_HARNESS_BIN:-"$repo_root/test_output/bin/canonical_tile_harness"}
 payload_path="$work_dir/payload.bin"
 overlay_path="$work_dir/${label}_overlay_mask.ppm"
 encoded_dir="$work_dir/encoded_pages"

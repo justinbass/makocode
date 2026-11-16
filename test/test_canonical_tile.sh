@@ -3,7 +3,7 @@ set -euo pipefail
 root=$(cd -- "$(dirname "$0")/.." && pwd -P)
 bin=${MAKOCODE_BIN:-"$root/makocode"}
 work=$(mktemp -d "$root/test_output/0101_canonical_tile_work.XXXXXX")
-harness=${CANONICAL_TILE_HARNESS_BIN:-"$root/test/canonical_tile_harness"}
+harness=${CANONICAL_TILE_HARNESS_BIN:-"$root/test_output/bin/canonical_tile_harness"}
 if [[ ! -x $harness ]]; then
     harness="$work/canonical_tile_harness"
     "${CXX:-c++}" -std=c++17 -Wall -Wextra -pedantic -O2 \
@@ -39,7 +39,7 @@ done
 # Confirm automatic ECC includes enough parity for the configured overlay
 # erasure count.
 mkdir -p "$work/ecc_budget/pages"
-"$root/test/ppm_transform" overlay-mask --output "$work/ecc_budget/overlay.ppm" \
+"$root/test_output/bin/ppm_transform" overlay-mask --output "$work/ecc_budget/overlay.ppm" \
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1200 --height 1200
 (cd "$work" && "$bin" encode --input=payload.bin  --overlay-fraction=0.10 \
@@ -62,7 +62,7 @@ mkdir -p "$work/no_overlay_fraction/pages"
     --page-width=1000 --page-height=1000 \
     --prefix=no_overlay_fraction --output-dir="$work/no_overlay_fraction/pages" >/dev/null)
 no_overlay_page=$(find "$work/no_overlay_fraction/pages" -maxdepth 1 -type f -name '*.ppm' -print -quit)
-"$root/test/ppm_transform" overlay-mask --output "$work/overlay_mask.ppm" \
+"$root/test_output/bin/ppm_transform" overlay-mask --output "$work/overlay_mask.ppm" \
     --circle-color "0 0 0" --background-color "255 255 255" \
     --width 1000 --height 1000
 if (cd "$work" && "$bin" encode --input=payload.bin --ecc=0 \

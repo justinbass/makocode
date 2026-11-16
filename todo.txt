@@ -1,6 +1,5 @@
 TODO
 
-- Cyan fiducials in some bw images???
 - Improve overlay approaching ~100% ECC
     - README example, given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
@@ -9,16 +8,10 @@ TODO
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
   - Largest page possible that takes <5s.
-- Run physical tests, against calibration script. Improve calibration script until max data density is found.
-  - Tests for physical row/column skip/expand (scan/print damage)
-  - Increase all distortions until decoding breaks, make improvements
-- One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak/others as reference
 - Clean up cli args (-h), README
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
   - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
-- Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
-- Determine proper defaults
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
 - Move all Python/Shell and other support code to C++
   - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
@@ -30,6 +23,12 @@ TODO
   - makocode fluff / unfluff (encode / decode)
   - makocode den pack / unpack (checkpoint)
   - makocode coat (overlay)
+- Run physical tests, against calibration script. Improve calibration script until max data density is found.
+  - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
+  - Tests for physical row/column skip/expand (scan/print damage)
+  - Increase all distortions until decoding breaks, make improvements
+  - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak/others as reference
+- Determine proper defaults
 - Much better documentation, or a spec
 - Set version to 0 (document, makocode only stores the major version)
 - Hard reset git history to Initial Commit, save locally but don't publish it
