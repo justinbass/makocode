@@ -33,7 +33,7 @@ PY
     --width 1000 --height 1000
 
 mkdir -p "$work/pages"
-(cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.20 \
+(cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.75 \
     --overlay-ppm="$work/overlay.ppm" --overlay-pages=1-1,1 \
     --overlay-ppm="$work/overlay_second.ppm" --overlay-pages=2-2 \
     --page-width=1000 --page-height=1000 \
@@ -51,7 +51,7 @@ if [[ $overlay_count -ne 2 ]]; then
     cat "$work/multiple_overlay.log" >&2
     exit 1
 fi
-if (cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.20 \
+if (cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.75 \
     --overlay-ppm="$work/overlay.ppm" --overlay-pages=all \
     --overlay-ppm="$work/overlay_second.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 --output-dir="$work/overlap_pages") \
@@ -74,7 +74,7 @@ with open(sys.argv[1], 'wb') as stream:
     stream.write(bytes(rng.randrange(256) for _ in range(4096)))
 PY
 mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
-(cd "$work" && "$bin" encode --input=mixed_payload.bin  --overlay-fraction=0.20 \
+(cd "$work" && "$bin" encode --input=mixed_payload.bin  --overlay-fraction=0.75 \
     --overlay-ppm="$work/overlay.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
