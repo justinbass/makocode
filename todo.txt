@@ -1,7 +1,6 @@
 TODO
 
 - Suggestions and specs for archiving
-  - File formats (Text: txt, images: P6 PPM, Video: YUV4MPEG2, note these are all compressed).
   - C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
 - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
   - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?

@@ -47,6 +47,10 @@ Checkpoint bundles are files, so the existing `encode`/`decode` options remain i
 
 Restore uses every matching chunk it can find in the bundle and supplied bases. If some chunks are unavailable or damaged, it still writes the available data: incomplete files receive a `.partial` suffix, missing byte ranges are zero-filled, and `checkpoint_recovery.txt` lists missing ranges and chunk IDs. For example, checkpoint 2 can be restored with checkpoint 0 even if checkpoint 1 is missing; references available only in checkpoint 1 become missing ranges in the partial output. Empty files and directories are preserved. As with ordinary archive inputs, checkpoint creation supports regular files and directories.
 
+### Archival source formats
+
+Prefer simple, well-documented formats: UTF-8 `.txt` for text, binary P6 `.ppm` for still images, and YUV4MPEG2 `.y4m` for video. PPM and YUV4MPEG2 store uncompressed samples; MakoCode compresses the archive payload with LZMA. Keep a short note with encoding, dimensions, frame rate, and color/chroma settings, and retain checksums separately. These choices favor straightforward decoding, though uncompressed media can require substantial space. See the [PPM specification](https://netpbm.sourceforge.net/doc/ppm.html) and [YUV4MPEG2 format notes](https://manpages.debian.org/unstable/mjpegtools/yuv4mpeg.5.en.html).
+
 Decode restores the original file tree by default. `--decoded-file` writes a timestamped `makocode_decoded_YYYYMMDDHHMMSS.txt` containing page and payload metadata and escaped archive entries. `--decoded-stdout` prints the same content without creating files; it cannot be combined with `--decoded-file` or `--debug`. Archive paths cannot be absolute or contain `..`. Extraction may follow symlinks in the output directory; use a fresh, trusted directory for untrusted input.
 
 ### Encryption randomness
