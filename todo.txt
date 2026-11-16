@@ -1,24 +1,23 @@
 TODO
 
-- Improve overlay to 254/255?
-- ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
-- Steganography (high overlay, no metadata/fiducials). Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
+- Compressed or minimal license attributions for each project (LZMA)
+- Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
+- Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
+  - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
+- Move all Python/Shell and other support code to C++
+  - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
+- Clean up cli args (-h), README
 - Improve minification algorithm to reduce size, E2E test compiles it
+- ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
+- Improve overlay to 254/255?
+- Steganography (high overlay, no metadata/fiducials). Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
   - Largest page possible that takes <5s.
-- Clean up cli args (-h), README
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
-- Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
-  - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
-- Move all Python/Shell and other support code to C++
-  - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
 - Penetration test, bug hunt
-- Compressed or minimal license attributions for each project (LZMA)
-- Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
-- Shiba names for fun, maybe a different make mode with flag
-  - Replace barcode with barkode everywhere.
+- Replace barcode with barkode everywhere. Other fun shiba names potentially (could be a different compile mode).
 - Run physical tests, against calibration script. Improve calibration script until max data density is found.
   - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
   - Tests for physical row/column skip/expand (scan/print damage)

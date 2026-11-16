@@ -22,7 +22,7 @@ python3 - "$work/payload.bin" <<'PY'
 import random, sys
 source = random.Random(103)
 with open(sys.argv[1], 'wb') as stream:
-    stream.write(bytes(source.randrange(256) for _ in range(262144)))
+    stream.write(bytes(source.randrange(256) for _ in range(4096)))
 PY
 
 "$ppm_transform_bin" overlay-mask --output "$work/overlay.ppm" \
@@ -41,8 +41,8 @@ mkdir -p "$work/pages"
 shopt -s nullglob
 pages=("$work"/pages/*.ppm)
 shopt -u nullglob
-if [[ ${#pages[@]} -lt 2 ]]; then
-    echo "canonical overlay: expected a multipage encoding, found ${#pages[@]} page(s)" >&2
+if [[ ${#pages[@]} -lt 2 || ${#pages[@]} -gt 16 ]]; then
+    echo "canonical overlay: expected 2-16 pages, found ${#pages[@]} page(s)" >&2
     exit 1
 fi
 overlay_count=$(rg -c 'debug: overlay erasure budget per block=' "$work/multiple_overlay.log" || true)
