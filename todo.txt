@@ -1,10 +1,7 @@
 TODO
 
-- Suggestions and specs for archiving
-  - C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
-- Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.
-  - Mode for no filesystem, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution. How to handle unicode in stdin/out?
 - Move all Python/Shell and other support code to C++
+  - Split encoder, decoder, minify into their own cpp files? Plus a common?
   - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
 - Clean up cli args (-h), README
 - Improve minification algorithm to reduce size, E2E test compiles it
@@ -27,6 +24,11 @@ TODO
 - Much better documentation, or a spec
 - Set version to 0 (document, makocode only stores the major version)
 - Hard reset git history to Initial Commit, save locally but don't publish it
+
+FUTURE
+
+- Freestanding flag
+  - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module. No filesystem dependency, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution.
 
 Prompts:
 - CC
