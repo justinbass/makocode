@@ -2,7 +2,7 @@ TODO
 
 - Improve overlay to 254/255?
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
-- With no metadata/fiducials and very high overlay, makocode should be useful as steganography. Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
+- Steganography (high overlay, no metadata/fiducials). Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
 - Improve minification algorithm to reduce size, E2E test compiles it
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger

@@ -435,3 +435,15 @@ test_case 0118_decode_metadata_free_large script "Large single-page payload reco
 
 test_case 0119_metadata_pages script "Metadata tiles appear only on selected pages; three-page payload still decodes" \
     test_metadata_pages.sh
+
+test_case 0120_overlay_no_metadata_2 script "2-color high-overlay page round-trips without metadata or fiducials" \
+    test_overlay_no_metadata.sh 'White Black'
+
+test_case 0121_overlay_no_metadata_4 script "4-color high-overlay page round-trips without metadata or fiducials" \
+    test_overlay_no_metadata.sh 'White Cyan Magenta Yellow'
+
+test_case 0122_overlay_no_metadata_5 script "5-color high-overlay page round-trips without metadata or fiducials" \
+    test_overlay_no_metadata.sh 'White Cyan Magenta Yellow Black'
+
+test_case 0123_overlay_no_metadata_8 script "8-color high-overlay page round-trips without metadata or fiducials" \
+    test_overlay_no_metadata.sh 'White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black'

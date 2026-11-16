@@ -8517,6 +8517,7 @@ struct FiducialGridDefaults {
 };
 
 static FiducialGridDefaults g_fiducial_defaults;
+static bool g_encode_metadata_disabled = false;
 
 static const u32 FIDUCIAL_MARKER_SIZE_PIXELS = 2u;
 
@@ -9041,9 +9042,12 @@ namespace MetadataTile {
             values.palette_count < 2u ||
             values.palette_count > MAX_CUSTOM_PALETTE_COLORS ||
             !values.overwrite_layout ||
-            values.fiducial_spacing_pixels < FIDUCIAL_MARKER_SIZE_PIXELS ||
+            (values.fiducial_spacing_pixels != 0u &&
+             values.fiducial_spacing_pixels < FIDUCIAL_MARKER_SIZE_PIXELS) ||
             values.fiducial_columns > 0xFFFFu ||
             values.fiducial_rows > 0xFFFFu ||
+            (values.fiducial_spacing_pixels == 0u &&
+             (values.fiducial_columns != 0u || values.fiducial_rows != 0u)) ||
             values.payload_bytes > (u64)USIZE_MAX_VALUE) return false;
         Values expected = values;
         return derive_schema_payload_layout(expected) &&
@@ -13744,8 +13748,9 @@ static bool write_buffer_to_file(const char* path,
                                  makocode::ByteBuffer* debug_csv = 0,
                                  u64 debug_page = 1u,
                                  u32 data_height_pixels = 0u,
-                                 const u8* fiducial_rgb = 0) {
-    if (should_embed_fiducials_for_path(path)) {
+                                 const u8* fiducial_rgb = 0,
+                                 bool embed_fiducials = true) {
+    if (embed_fiducials && should_embed_fiducials_for_path(path)) {
         return write_ppm_with_fiducials_to_file(path,
                                                 buffer,
                                                 fiducial_rgb,
@@ -20897,7 +20902,7 @@ struct RotationEstimateCandidate {
     }
     // Bootstrap metadata defines the payload prefix and reserved cells. Missing
     // metadata is a hard failure because the payload rank map depends on it.
-    bool use_metadata_fiducial_grid = state.encoded_tile.fiducial_spacing_pixels > 0u;
+    bool use_metadata_fiducial_grid = state.has_encoded_tile;
     if (!compute_fiducial_marker_mask((u32)logical_width,
                                       (u32)logical_height,
                                       (u32)data_height,
@@ -26371,6 +26376,7 @@ static bool frame_bits_to_payload(const u8* frame_data,
 
 static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                               const ImageMappingConfig& mapping_overrides,
+                                              bool metadata_absent,
                                               makocode::ByteBuffer& frame_bits_out,
                                               makocode::ByteBuffer& frame_erasures_out,
                                               u64& frame_bit_count_out,
@@ -26442,7 +26448,7 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
             dominant_center_color = center_counts[color];
         }
     }
-    if (dominant_center_color * 100u <
+    if (!metadata_absent && dominant_center_color * 100u <
         MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE * 75u) return false;
     u32 distinct_outside_colors = 0u;
     for (usize color = 0u;
@@ -26461,7 +26467,8 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
         }
         if (found) ++distinct_outside_colors;
     }
-    if (distinct_outside_colors < 2u) return false;
+    if (distinct_outside_colors < 2u &&
+        !(metadata_absent && mapping_overrides.palette_set)) return false;
 
     static const char* PALETTE_TEXTS[4] = {
         "White Black",
@@ -26470,14 +26477,17 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
         "White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black"
     };
     const u32 maximum_square_side = MetadataTile::TILE_SIDE - MetadataTile::TILE_HEADER_ROWS;
-    for (u32 palette_index = 0u; palette_index < 4u; ++palette_index) {
+    u32 palette_attempts = mapping_overrides.palette_set ? 1u : 4u;
+    for (u32 palette_attempt = 0u; palette_attempt < palette_attempts; ++palette_attempt) {
         ImageMappingConfig candidate_mapping = mapping_overrides;
-        usize palette_text_length = ascii_length(PALETTE_TEXTS[palette_index]);
-        if (!image_mapping_set_palette_text(candidate_mapping,
-                                            PALETTE_TEXTS[palette_index],
-                                            palette_text_length,
-                                            "decode") ||
-            !image_mapping_build_custom_palette(candidate_mapping, "decode")) return false;
+        if (!mapping_overrides.palette_set) {
+            usize palette_text_length = ascii_length(PALETTE_TEXTS[palette_attempt]);
+            if (!image_mapping_set_palette_text(candidate_mapping,
+                                                PALETTE_TEXTS[palette_attempt],
+                                                palette_text_length,
+                                                "decode") ||
+                !image_mapping_build_custom_palette(candidate_mapping, "decode")) return false;
+        }
 
         makocode::ByteBuffer fiducial_mask;
         u64 reserved_pixels = 0u;
@@ -26491,9 +26501,11 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
         u64 capacity_bytes = (capacity_bits + 7u) >> 3u;
         if (capacity_bytes > (u64)USIZE_MAX_VALUE) continue;
 
-        for (u32 side_attempt = 0u; side_attempt < maximum_square_side; ++side_attempt) {
+        for (u32 side_attempt = 0u;
+             side_attempt < (metadata_absent ? 1u : maximum_square_side);
+             ++side_attempt) {
             u32 delta = (side_attempt + 1u) / 2u;
-            i64 square_side_signed = side_attempt == 0u ? 21 :
+            i64 square_side_signed = metadata_absent ? 21 : side_attempt == 0u ? 21 :
                 ((side_attempt & 1u) ? (i64)21 + (i64)delta : (i64)21 - (i64)delta);
             if (square_side_signed < 1 || square_side_signed > (i64)maximum_square_side) continue;
             u32 square_side = (u32)square_side_signed;
@@ -26539,6 +26551,10 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                 probe.metadata_tile_width = probe.palette_count + 1u;
             }
             probe.metadata_tile_height = square_side + MetadataTile::TILE_HEADER_ROWS;
+            if (metadata_absent) {
+                probe.metadata_length_prefix_bits = 0u;
+                probe.metadata_symbol_count = 0u;
+            }
 
             makocode::ByteBuffer sampled_bits;
             makocode::ByteBuffer sampled_erasures;
@@ -26573,6 +26589,8 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
             u32 symbol_bits = 0u;
             for (u32 count = palette_count; count > 1u; count >>= 1u) ++symbol_bits;
             u32 group_bits = grouped_base ? custom_palette_group_bit_count(palette_count) : 0u;
+            u64 last_overlay_erasure_bit = 0u;
+            bool have_overlay_erasure = false;
             u64 digit_count = grouped_base
                 ? ((capacity_bits + group_bits - 1u) / group_bits) * 4u
                 : 0u;
@@ -26598,12 +26616,36 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                 u64 rank = ranks[(usize)pixel];
                 if (rank == U64_MAX_VALUE) continue;
                 u32 symbol = 0u;
-                map_rgb_to_custom_symbol(candidate_mapping, pixels.data + (usize)pixel * 3u, symbol);
+                const u8* rgb = pixels.data + (usize)pixel * 3u;
+                map_rgb_to_custom_symbol(candidate_mapping, rgb, symbol);
                 symbols.data[(usize)pixel] = (u8)symbol;
                 bool reserved = fiducial_mask.data[(usize)pixel] != 0u;
+                bool palette_color = false;
+                for (u32 color = 0u; color < palette_count; ++color) {
+                    const PaletteColor& candidate = candidate_mapping.custom_palette[color];
+                    if (rgb[0] == candidate.r && rgb[1] == candidate.g && rgb[2] == candidate.b) {
+                        palette_color = true;
+                        break;
+                    }
+                }
+                bool erased = reserved || !palette_color;
+                if (!palette_color) {
+                    u64 erased_bit_start = grouped_base
+                        ? (rank / 4u) * group_bits
+                        : rank * symbol_bits;
+                    if (erased_bit_start < capacity_bits) {
+                        u64 erased_bit_end = erased_bit_start +
+                            (grouped_base ? group_bits : symbol_bits);
+                        if (erased_bit_end > capacity_bits) erased_bit_end = capacity_bits;
+                        if (!have_overlay_erasure || erased_bit_end > last_overlay_erasure_bit) {
+                            last_overlay_erasure_bit = erased_bit_end;
+                            have_overlay_erasure = true;
+                        }
+                    }
+                }
                 if (grouped_base) {
                     if (rank < digit_count) digits.data[(usize)rank] = (u8)symbol;
-                    if (reserved && rank < digit_count) {
+                    if (erased && rank < digit_count) {
                         group_erasures.data[(usize)(rank / 4u)] = 1u;
                     }
                 } else {
@@ -26614,26 +26656,28 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                 (u8)(1u << ((start_bit + bit) & 7u));
                         }
                     }
-                    if (reserved) mark_erased_bits(start_bit, symbol_bits);
+                    if (erased) mark_erased_bits(start_bit, symbol_bits);
                 }
             }
             makocode::ByteBuffer blot_cells;
-            if (!detect_uniform_payload_regions(symbols.data, width, height, ranks,
-                                                fiducial_mask.data, fiducial_mask.size,
-                                                placement, palette_count,
-                                                grouped_base ? 1u : symbol_bits,
-                                                grouped_base ? digit_count : capacity_bits,
-                                                blot_cells, true)) continue;
-            for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
-                if (!blot_cells.data[(usize)pixel]) continue;
-                u64 rank = ranks[(usize)pixel];
-                if (rank == U64_MAX_VALUE) continue;
-                if (grouped_base) {
-                    if (rank < digit_count) {
-                        group_erasures.data[(usize)(rank / 4u)] = 1u;
+            if (!metadata_absent || !have_overlay_erasure) {
+                if (!detect_uniform_payload_regions(symbols.data, width, height, ranks,
+                                                    fiducial_mask.data, fiducial_mask.size,
+                                                    placement, palette_count,
+                                                    grouped_base ? 1u : symbol_bits,
+                                                    grouped_base ? digit_count : capacity_bits,
+                                                    blot_cells, true)) continue;
+                for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
+                    if (!blot_cells.data[(usize)pixel]) continue;
+                    u64 rank = ranks[(usize)pixel];
+                    if (rank == U64_MAX_VALUE) continue;
+                    if (grouped_base) {
+                        if (rank < digit_count) {
+                            group_erasures.data[(usize)(rank / 4u)] = 1u;
+                        }
+                    } else {
+                        mark_erased_bits(rank * symbol_bits, symbol_bits);
                     }
-                } else {
-                    mark_erased_bits(rank * symbol_bits, symbol_bits);
                 }
             }
             u32 metadata_x0 = placement.x0 + probe.metadata_square_x0 - placement.offset_x;
@@ -26641,7 +26685,7 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
             u32 metadata_width = probe.metadata_tile_width;
             u32 metadata_y1 = placement.y0 + probe.metadata_square_y0 +
                               probe.metadata_square_side - placement.offset_y;
-            if (metadata_x0 <= width && metadata_width <= width - metadata_x0 &&
+            if (!metadata_absent && metadata_x0 <= width && metadata_width <= width - metadata_x0 &&
                 metadata_y0 <= metadata_y1 && metadata_y1 <= height) {
                 for (u32 y = metadata_y0; y < metadata_y1; ++y) {
                     for (u32 x = metadata_x0; x < metadata_x0 + metadata_width; ++x) {
@@ -26687,7 +26731,8 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                         }
                     }
                 }
-            } else if (palette_color_rotation) {
+            }
+            if (palette_color_rotation) {
                 for (usize byte = 0u; byte < sampled_bits.size; ++byte) {
                     sampled_bits.data[byte] = rotate_right_u8(
                         sampled_bits.data[byte], (u8)((byte % 3u) + 1u));
@@ -26738,7 +26783,13 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                     }
                 }
             }
-            if (last_nonzero < 0) continue;
+            if (metadata_absent && have_overlay_erasure) {
+                i64 overlay_last_byte = (i64)((last_overlay_erasure_bit - 1u) >> 3u);
+                if (overlay_last_byte > last_nonzero) last_nonzero = overlay_last_byte;
+            }
+            if (last_nonzero < 0) {
+                continue;
+            }
             u64 first_length = (u64)last_nonzero + 1u;
             u64 trailing_background_bytes = available_bytes - first_length;
             u64 minimum_background_tail = available_bytes / 20u;
@@ -26746,9 +26797,17 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
             if (trailing_background_bytes < minimum_background_tail) continue;
             u64 last_length = first_length + (grouped_base ? 4u : 16u);
             if (last_length > available_bytes) last_length = available_bytes;
+            u64 first_candidate_length = first_length;
+            if (metadata_absent && have_overlay_erasure) {
+                u64 overlay_unit_bits = grouped_base ? group_bits : symbol_bits;
+                u64 overlay_length_slack = (overlay_unit_bits + 7u) / 8u;
+                first_candidate_length = first_candidate_length > overlay_length_slack
+                                             ? first_candidate_length - overlay_length_slack
+                                             : 1u;
+            }
 
             bool recovered = false;
-            for (u64 stream_length = first_length;
+            for (u64 stream_length = first_candidate_length;
                  stream_length <= last_length && !recovered;
                  ++stream_length) {
                 makocode::ByteBuffer candidate_frame_bits;
@@ -26756,7 +26815,7 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                 const u8* candidate_bits_data = sampled_bits.data;
                 const u8* candidate_erasures_data = sampled_erasures.data;
                 u64 candidate_bit_count = sampled_bit_count;
-                if (grouped_base) {
+                if (grouped_base && !metadata_absent) {
                     MetadataTile::Values stream_probe = probe;
                     stream_probe.page_bits = stream_length * 8u;
                     stream_probe.payload_bytes = stream_length;
@@ -26841,7 +26900,7 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                      --block_total) {
                     if (stream_length % block_total != 0u) continue;
                     u64 block_count = stream_length / block_total;
-                    u32 maximum_parity = block_total - 2u;
+                    u32 maximum_parity = block_total - 1u;
                     if (!block_count) continue;
                     u64 best_block_index = 0u;
                     u32 best_block_erasures = block_total + 1u;
@@ -26950,8 +27009,10 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                     u32 candidate_parity = block_consistent_parity(best_block_index,
                                                                     maximum_parity,
                                                                     best_erasure_count);
-                    u32 minimum_parity = greatest_erasure_count + 8u;
-                    if (minimum_parity < best_erasure_count + 8u) {
+                    u32 minimum_parity = metadata_absent
+                                             ? greatest_erasure_count
+                                             : greatest_erasure_count + 8u;
+                    if (!metadata_absent && minimum_parity < best_erasure_count + 8u) {
                         minimum_parity = best_erasure_count + 8u;
                     }
                     if (minimum_parity < 2u) minimum_parity = 2u;
@@ -27074,7 +27135,7 @@ static bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                                                           recovered_values.palette_count,
                                                                           selected_palette_text)) return false;
                         apply_metadata_tile_metadata(state_out, recovered_values, selected_palette_text);
-                        if (grouped_base) {
+                        if (grouped_base && !metadata_absent) {
                             byte_buffer_move(frame_bits_out, candidate_frame_bits);
                             byte_buffer_move(frame_erasures_out, candidate_frame_erasures);
                         } else {
@@ -27407,9 +27468,7 @@ static bool compute_fiducial_marker_mask(u32 width_pixels,
     if (data_height_pixels > 0u && data_height_pixels < height_pixels) {
         draw_height = data_height_pixels;
     }
-    u32 spacing = use_grid_override && spacing_override > 0u
-                      ? spacing_override
-                      : g_fiducial_defaults.spacing_pixels;
+    u32 spacing = use_grid_override ? spacing_override : g_fiducial_defaults.spacing_pixels;
     u32 fiducial_columns = columns_override;
     u32 fiducial_rows = rows_override;
     if (!use_grid_override) {
@@ -27789,7 +27848,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                makocode::ByteBuffer& output,
                                u16 unknown_parity_budget = 0u,
                                u16 overlay_erasure_budget = 0u,
-                               bool include_metadata_tile = true) {
+                               bool include_metadata_tile = true,
+                               MetadataTile::Values* metadata_values_out = 0) {
     const u8 sample_bits = bits_per_sample(mapping.color_channels);
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
     bool has_footer_text = (footer_text && footer_length > 0u);
@@ -27922,6 +27982,16 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                   tile_dark)) {
         console_line(2, "encode_page_to_ppm: failed to build metadata tile");
         return false;
+    }
+    if (!have_metadata_tile && g_encode_metadata_disabled) {
+        tile_values.metadata_square_side = 21u;
+        tile_values.metadata_square_x0 = (MetadataTile::TILE_SIDE - 21u) / 2u;
+        tile_values.metadata_tag_y0 =
+            (MetadataTile::TILE_SIDE - (21u + MetadataTile::TILE_HEADER_ROWS)) / 2u;
+        tile_values.metadata_square_y0 =
+            tile_values.metadata_tag_y0 + MetadataTile::TILE_HEADER_ROWS;
+        tile_values.metadata_length_prefix_bits = 0u;
+        tile_values.metadata_symbol_count = 0u;
     }
     makocode::ByteBuffer payload_skip_mask;
     if (!payload_skip_mask.ensure(fiducial_mask.size)) return false;
@@ -28136,7 +28206,8 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                         rgb[2] = color.b;
                     } else if (reserved_pixel ||
                                (use_base_palette && reserved_data_pixel &&
-                                !metadata_tile_contains_pixel(tile_placement, column, row))) {
+                                ((g_encode_metadata_disabled && !have_metadata_tile) ||
+                                 !metadata_tile_contains_pixel(tile_placement, column, row)))) {
                         rgb[0] = background_rgb[0];
                         rgb[1] = background_rgb[1];
                         rgb[2] = background_rgb[2];
@@ -28170,6 +28241,7 @@ static bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             }
         }
     }
+    if (metadata_values_out) *metadata_values_out = tile_values;
     return true;
 }
 static bool process_fiducial_spacing_option(int arg_count,
@@ -29188,7 +29260,9 @@ static void write_encode_help() {
     console_line(1, "  --page-width PX      Page width in pixels; omitted width fits the encoded payload.");
     console_line(1, "  --page-height PX     Page height in pixels; omitted height fits the encoded payload.");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
+    console_line(1, "  --no-fiducials       Omit fiducial markers; overrides --fiducial-spacing.");
     console_line(1, "  --metadata-pages LIST Pages/ranges carrying the center metadata tile (all, 1,3-5,middle,last). Default: all.");
+    console_line(1, "  --no-metadata        Omit center metadata tiles on every page; overrides --metadata-pages.");
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
@@ -29237,6 +29311,8 @@ static void write_decode_help() {
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 ordered names or #RRGGBB values; default is \"White Black\").");
     console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable.");
     console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable.");
+    console_line(1, "  --no-metadata        Decode one page without searching for a center metadata tile.");
+    console_line(1, "  --no-fiducials       Decode using pages without reserved fiducial markers.");
     console_line(1, "  --recover-palette    Usually only needed when the embedded palette row is damaged.");
     console_line(1, "  --recover-limit N    Palette candidates to try (default 4; common 2/4/5/8-color modes first).");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
@@ -29583,7 +29659,8 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
                                            double metadata_ecc_redundancy,
                                            u16 unknown_parity_budget,
                                            u16 overlay_erasure_budget,
-                                           u16* minimum_parity_required_out = 0) {
+                                           u16* minimum_parity_required_out = 0,
+                                           bool include_metadata_tile = true) {
     if (minimum_parity_required_out) *minimum_parity_required_out = 0u;
     (void)frame_bits;
     u64 expected_bits_per_page = 0u;
@@ -29664,7 +29741,7 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
                                                       rank_count,
                                                       true)) return false;
             const u64* ranks = (const u64*)rank_map.data;
-            for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+            for (u32 y = 0u; include_metadata_tile && y < MetadataTile::TILE_SIDE; ++y) {
                 for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
                     usize local = (usize)y * MetadataTile::TILE_SIDE + x;
                     if (!tile_active_mask.data[local]) continue;
@@ -29743,7 +29820,7 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
                                                       rank_count,
                                                       true)) return false;
             const u64* ranks = (const u64*)rank_map.data;
-            for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+            for (u32 y = 0u; include_metadata_tile && y < MetadataTile::TILE_SIDE; ++y) {
                 for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
                     usize local = (usize)y * MetadataTile::TILE_SIDE + x;
                     if (!tile_active_mask.data[local]) continue;
@@ -30047,7 +30124,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                       encoded_redundancy < 0.25 ? encoded_redundancy : 0.25,
                                       unknown_budget,
                                       overlay_budget,
-                                      &required_parity)) {
+                                      &required_parity,
+                                      !g_encode_metadata_disabled)) {
             exact_budget_valid = true;
             break;
         }
@@ -30271,13 +30349,18 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                             const OverlayPage& overlay_page,
                                             const char* ignore_colors,
                                             usize ignore_colors_length,
-                                            bool debug_requested);
+                                            bool debug_requested,
+                                            const MetadataTile::Values* tile_override = 0,
+                                            const ImageMappingConfig* mapping_override = 0,
+                                            bool include_metadata_overwrites = true);
 
 static int command_encode(int arg_count, char** args) {
     if (arguments_request_help(arg_count, args)) {
         write_encode_help();
         return 0;
     }
+    g_fiducial_defaults.spacing_pixels = 24u;
+    g_encode_metadata_disabled = false;
     ImageMappingConfig mapping;
     PageFooterConfig footer_config;
     enum EccMode { ECC_AUTO_MINIMUM, ECC_EXPLICIT_RATIO, ECC_FILL };
@@ -30322,6 +30405,8 @@ static int command_encode(int arg_count, char** args) {
     bool ecc_option_specified = false;
     bool overlay_fraction_specified = false;
     bool overlay_ignore_colors_specified = false;
+    bool no_metadata = false;
+    bool no_fiducials = false;
     bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
@@ -30340,6 +30425,14 @@ static int command_encode(int arg_count, char** args) {
         }
         const char* arg = args[i];
         if (!arg) {
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--no-metadata")) {
+            no_metadata = true;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--no-fiducials")) {
+            no_fiducials = true;
             continue;
         }
         const char metadata_pages_prefix[] = "--metadata-pages=";
@@ -31125,6 +31218,8 @@ static int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --hidden fill requires --page-width and --page-height");
         return 1;
     }
+    g_encode_metadata_disabled = no_metadata;
+    if (no_fiducials) g_fiducial_defaults.spacing_pixels = 0u;
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "encode")) {
             return 1;
@@ -32146,6 +32241,9 @@ static int command_encode(int arg_count, char** args) {
             item_start = item_end + 1u;
         }
     }
+    if (no_metadata) {
+        memset(metadata_page_assignments.data, 0u, metadata_page_assignments.size);
+    }
     if (overlay_fraction > 0.0 && page_count > 1u &&
         ecc_mode == ECC_EXPLICIT_RATIO && ecc_redundancy < 0.5) {
         console_line(2, "encode: multi-page overlays require --ecc of at least 0.5; larger overlays may require more");
@@ -32236,7 +32334,8 @@ static int command_encode(int arg_count, char** args) {
                                    metadata_ecc_redundancy,
                                    unknown_parity_budget,
                                    overlay_erasure_budget,
-                                   &required_parity)) {
+                                   &required_parity,
+                                   !g_encode_metadata_disabled)) {
         char required_parity_buffer[32];
         char target_parity_buffer[32];
         char sufficient_target_buffer[32] = {};
@@ -32346,6 +32445,7 @@ static int command_encode(int arg_count, char** args) {
         u32 output_data_height_pixels = layout_data_height;
         u64 output_bits_per_page = bits_per_page;
         makocode::ByteBuffer page_output;
+        MetadataTile::Values overlay_tile_values;
         if (!footer_build_page_text(footer_config, 1u, page_count, footer_text_buffer)) {
             console_line(2, "encode: failed to build footer text");
             return 1;
@@ -32368,22 +32468,27 @@ static int command_encode(int arg_count, char** args) {
                                 page_output,
                                 unknown_parity_budget,
                                 overlay_erasure_budget,
-                                metadata_page_assignments.data[0u] != 0u)) {
+                                metadata_page_assignments.data[0u] != 0u,
+                                &overlay_tile_values)) {
            console_line(2, "encode: failed to format ppm");
            return 1;
        }
         makocode::ByteBuffer fiducial_page;
         // Clip fiducials to the data area so they don't overlap footer text.
-        if (!apply_default_fiducial_grid(page_output,
-                                         fiducial_page,
-                                         output_data_height_pixels,
-                                         fiducial_rgb,
-                                         (debug_requested && !debug_reapplied_by_filename)
-                                             ? &debug_fiducial_csv
-                                             : (makocode::ByteBuffer*)0,
-                                         1u)) {
-            console_line(2, "encode: failed to embed fiducial grid");
-            return 1;
+        if (no_fiducials) {
+            byte_buffer_move(fiducial_page, page_output);
+        } else {
+            if (!apply_default_fiducial_grid(page_output,
+                                             fiducial_page,
+                                             output_data_height_pixels,
+                                             fiducial_rgb,
+                                             (debug_requested && !debug_reapplied_by_filename)
+                                                 ? &debug_fiducial_csv
+                                                 : (makocode::ByteBuffer*)0,
+                                             1u)) {
+                console_line(2, "encode: failed to embed fiducial grid");
+                return 1;
+            }
         }
         byte_buffer_move(page_output, fiducial_page);
         makocode::ByteBuffer output_name;
@@ -32405,7 +32510,8 @@ static int command_encode(int arg_count, char** args) {
                                   debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
                                   1u,
                                   output_data_height_pixels,
-                                  fiducial_rgb)) {
+                                  fiducial_rgb,
+                                  !no_fiducials)) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
@@ -32417,7 +32523,10 @@ static int command_encode(int arg_count, char** args) {
                                              overlays[(usize)overlay_assignment - 1u].image,
                                              overlay_ignore_colors_text,
                                              overlay_ignore_colors_length,
-                                             debug_requested)) return 1;
+                                             debug_requested,
+                                             no_metadata ? &overlay_tile_values : 0,
+                                             no_metadata ? &mapping : 0,
+                                             !no_metadata)) return 1;
         console_write(1, "encode: wrote 1 page (");
         console_write(1, (const char*)output_path.data);
         console_line(1, ")");
@@ -32426,6 +32535,7 @@ static int command_encode(int arg_count, char** args) {
         makocode::ByteBuffer path_buffer;
         for (u64 page = 0u; page < page_count; ++page) {
             makocode::ByteBuffer page_output;
+            MetadataTile::Values overlay_tile_values;
             u64 bit_offset = page * bits_per_page;
             if (!footer_build_page_text(footer_config, page + 1u, page_count, footer_text_buffer)) {
                 console_line(2, "encode: failed to build footer text");
@@ -32449,22 +32559,27 @@ static int command_encode(int arg_count, char** args) {
                                     page_output,
                                     unknown_parity_budget,
                                     overlay_erasure_budget,
-                                    metadata_page_assignments.data[(usize)page] != 0u)) {
+                                    metadata_page_assignments.data[(usize)page] != 0u,
+                                    &overlay_tile_values)) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
             }
             makocode::ByteBuffer fiducial_page;
             // Clip fiducials to the data area so they don't overlap footer text.
-            if (!apply_default_fiducial_grid(page_output,
-                                             fiducial_page,
-                                             footer_layout.data_height_pixels,
-                                             fiducial_rgb,
-                                             (debug_requested && !debug_reapplied_by_filename)
-                                                 ? &debug_fiducial_csv
-                                                 : (makocode::ByteBuffer*)0,
-                                             page + 1u)) {
-                console_line(2, "encode: failed to embed fiducial grid");
-                return 1;
+            if (no_fiducials) {
+                byte_buffer_move(fiducial_page, page_output);
+            } else {
+                if (!apply_default_fiducial_grid(page_output,
+                                                 fiducial_page,
+                                                 footer_layout.data_height_pixels,
+                                                 fiducial_rgb,
+                                                 (debug_requested && !debug_reapplied_by_filename)
+                                                     ? &debug_fiducial_csv
+                                                     : (makocode::ByteBuffer*)0,
+                                                 page + 1u)) {
+                    console_line(2, "encode: failed to embed fiducial grid");
+                    return 1;
+                }
             }
             byte_buffer_move(page_output, fiducial_page);
             if (!build_page_filename(name_buffer, page_name_prefix, page + 1u, page_count)) {
@@ -32484,7 +32599,8 @@ static int command_encode(int arg_count, char** args) {
                                       debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
                                       page + 1u,
                                       footer_layout.data_height_pixels,
-                                      fiducial_rgb)) {
+                                      fiducial_rgb,
+                                      !no_fiducials)) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }
@@ -32496,7 +32612,10 @@ static int command_encode(int arg_count, char** args) {
                                                  overlays[(usize)overlay_assignment - 1u].image,
                                                  overlay_ignore_colors_text,
                                                  overlay_ignore_colors_length,
-                                                 debug_requested)) return 1;
+                                                 debug_requested,
+                                                 no_metadata ? &overlay_tile_values : 0,
+                                                 no_metadata ? &mapping : 0,
+                                                 !no_metadata)) return 1;
         }
         makocode::ByteBuffer sample_name;
         if (!build_page_filename(sample_name, page_name_prefix, 1u, page_count)) {
@@ -32531,7 +32650,7 @@ static bool build_overlay_payload_rank_reservation_mask(
     const OverlayPage& page,
     makocode::ByteBuffer& mask_out) {
     const MetadataTile::Values& tile = page.metadata.encoded_tile;
-    bool use_metadata_fiducial_grid = tile.fiducial_spacing_pixels > 0u;
+    bool use_metadata_fiducial_grid = true;
     u64 reserved_pixels = 0u;
     return compute_fiducial_marker_mask(page.width,
                                        page.height,
@@ -32836,7 +32955,8 @@ static bool load_overlay_page(const char* path, OverlayPage& page) {
 
 static bool build_overlay_mask(const OverlayPage& page,
                                makocode::ByteBuffer& mask_out,
-                               u64& reserved_pixels) {
+                               u64& reserved_pixels,
+                               bool protect_metadata_tile = true) {
     bool use_metadata_grid = page.metadata.has_fiducial_spacing &&
                              page.metadata.has_fiducial_columns &&
                              page.metadata.has_fiducial_rows;
@@ -32853,7 +32973,7 @@ static bool build_overlay_mask(const OverlayPage& page,
     }
 
     // Protect only the written metadata barcode and codeword modules.
-    if (page.metadata.has_encoded_tile) {
+    if (protect_metadata_tile && page.metadata.has_encoded_tile) {
         MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
             page.width, page.data_height);
         const MetadataTile::Values& values = page.metadata.encoded_tile;
@@ -32927,7 +33047,9 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                                const makocode::ByteBuffer& base_mask,
                                                const OverlayIgnoreColorList* ignore_list,
                                                OverlayPage& base_page,
-                                               OverlaySelector& overlay_selector) {
+                                               OverlaySelector& overlay_selector,
+                                               bool include_metadata_overwrites = true,
+                                               bool metadata_tile_present = true) {
     if (!overlay_page.pixels.data || !base_page.pixels.data ||
         overlay_page.width != base_page.width ||
         overlay_page.height != base_page.height ||
@@ -32961,14 +33083,22 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         tile.page_bits == 0u || tile.page_index == 0u) {
         return false;
     }
-    bool include_metadata_overwrites =
-        !base_page.use_custom_palette ||
-        is_power_of_two_u32(base_page.custom_mapping.custom_palette_count);
+    include_metadata_overwrites = include_metadata_overwrites &&
+        (!base_page.use_custom_palette ||
+         is_power_of_two_u32(base_page.custom_mapping.custom_palette_count));
     u64 bits_per_pixel = base_page.use_custom_palette
                              ? (u64)base_page.custom_symbol_bits
                              : (u64)bits_per_sample(base_page.color_mode) *
                                    (u64)color_mode_samples_per_pixel(base_page.color_mode);
     if (!bits_per_pixel || bits_per_pixel > 64u) return false;
+    bool grouped_base_palette = base_page.use_custom_palette &&
+        !is_power_of_two_u32(base_page.custom_mapping.custom_palette_count);
+    u32 grouped_base_bits = grouped_base_palette
+                                ? custom_palette_group_bit_count(
+                                      base_page.custom_mapping.custom_palette_count)
+                                : 0u;
+    u64 overlay_unit_bits = grouped_base_palette ? grouped_base_bits : bits_per_pixel;
+    if (!overlay_unit_bits) return false;
 
     u64 block_total_symbols = (u64)overlay_selector.block_total;
     if (block_total_symbols > U64_MAX_VALUE / overlay_selector.block_count) return false;
@@ -33001,7 +33131,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
     makocode::ByteBuffer payload_rank_reservation_mask;
     const u8* reservation_data = base_mask.data;
     usize reservation_size = base_mask.size;
-    if (include_metadata_overwrites) {
+    if (metadata_tile_present && include_metadata_overwrites) {
         if (!build_overlay_payload_rank_reservation_mask(base_page,
                                                          payload_rank_reservation_mask)) {
             return false;
@@ -33060,12 +33190,19 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                               reservation_size,
                                               payload_rank_map,
                                               payload_pixel_count,
-                                              include_metadata_overwrites) ||
-        payload_pixel_count == 0u ||
-        payload_pixel_count < (centered_segment_bits / bits_per_pixel +
-                               ((centered_segment_bits % bits_per_pixel) ? 1u : 0u))) {
+                                              metadata_tile_present
+                                                  ? include_metadata_overwrites
+                                                  : true) ||
+        payload_pixel_count == 0u) {
         return false;
     }
+    u64 required_payload_pixels = centered_segment_bits / overlay_unit_bits +
+        ((centered_segment_bits % overlay_unit_bits) ? 1u : 0u);
+    if (grouped_base_palette) {
+        if (required_payload_pixels > U64_MAX_VALUE / 4u) return false;
+        required_payload_pixels *= 4u;
+    }
+    if (payload_pixel_count < required_payload_pixels) return false;
     const u64* payload_ranks = (const u64*)payload_rank_map.data;
 
     struct OverlayPixelCandidate {
@@ -33082,12 +33219,18 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
             usize pixel_index = (usize)row * (usize)base_page.width + (usize)column;
             if (base_mask.data[pixel_index] == OVERWRITE_MASK_PIXEL) continue;
             u64 payload_rank = payload_ranks[pixel_index];
-            if (payload_rank == U64_MAX_VALUE ||
-                payload_rank > U64_MAX_VALUE / bits_per_pixel ||
-                payload_rank * bits_per_pixel >= centered_segment_bits ||
-                payload_rank * bits_per_pixel > U64_MAX_VALUE - page_bit_offset) {
+            if (payload_rank == U64_MAX_VALUE) {
                 continue;
             }
+            if ((grouped_base_palette &&
+                 payload_rank / 4u > U64_MAX_VALUE / grouped_base_bits) ||
+                (!grouped_base_palette &&
+                 payload_rank > U64_MAX_VALUE / bits_per_pixel)) continue;
+            u64 local_bit = grouped_base_palette
+                                ? (payload_rank / 4u) * grouped_base_bits
+                                : payload_rank * bits_per_pixel;
+            if (local_bit >= centered_segment_bits ||
+                local_bit > U64_MAX_VALUE - page_bit_offset) continue;
             usize byte_index = pixel_index * 3u;
             if (ignore_list &&
                 overlay_color_matches_ignore(*ignore_list,
@@ -33097,8 +33240,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                 continue;
             }
             candidates[candidate_count].pixel_index = pixel_index;
-            candidates[candidate_count].bit_start =
-                page_bit_offset + payload_rank * bits_per_pixel;
+            candidates[candidate_count].bit_start = page_bit_offset + local_bit;
             ++candidate_count;
         }
     }
@@ -33123,9 +33265,11 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
             base_page.pixels.data[byte_index + 2u] == overlay_page.pixels.data[byte_index + 2u]) {
             continue;
         }
-        if (candidate.bit_start > U64_MAX_VALUE - bits_per_pixel) continue;
+        if (candidate.bit_start > U64_MAX_VALUE - overlay_unit_bits) continue;
         u64 byte_start = candidate.bit_start >> 3u;
-        u64 bit_end = candidate.bit_start + bits_per_pixel;
+        u64 bit_end = candidate.bit_start + overlay_unit_bits;
+        u64 segment_end = page_bit_offset + centered_segment_bits;
+        if (bit_end > segment_end) bit_end = segment_end;
         if (bit_end > U64_MAX_VALUE - 7u) continue;
         u64 byte_end = (bit_end + 7u) >> 3u;
         if (byte_start < rs_region_start || byte_end > rs_region_end || byte_end <= byte_start) {
@@ -33203,13 +33347,42 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                             const OverlayPage& overlay_page,
                                             const char* ignore_colors,
                                             usize ignore_colors_length,
-                                            bool debug_requested) {
+                                            bool debug_requested,
+                                            const MetadataTile::Values* tile_override,
+                                            const ImageMappingConfig* mapping_override,
+                                            bool include_metadata_overwrites) {
     OverlayPage base_page;
     if (!load_overlay_page(page_path, base_page)) return false;
     if (base_page.width != overlay_page.width ||
         base_page.height != overlay_page.height) {
         console_line(2, "encode: --overlay-ppm dimensions must match the encoded pages");
         return false;
+    }
+    PpmParserState output_metadata = base_page.metadata;
+    if (tile_override) {
+        base_page.metadata.has_encoded_tile = true;
+        base_page.metadata.encoded_tile = *tile_override;
+        base_page.metadata.has_fiducial_spacing = true;
+        base_page.metadata.fiducial_spacing_value = tile_override->fiducial_spacing_pixels;
+        base_page.metadata.has_fiducial_columns = true;
+        base_page.metadata.fiducial_columns_value = tile_override->fiducial_columns;
+        base_page.metadata.has_fiducial_rows = true;
+        base_page.metadata.fiducial_rows_value = tile_override->fiducial_rows;
+        base_page.data_height = tile_override->page_height_pixels - tile_override->footer_rows;
+        base_page.footer_rows = tile_override->footer_rows;
+        if (mapping_override) {
+            base_page.use_custom_palette = mapping_has_custom_palette(*mapping_override);
+            base_page.custom_mapping = *mapping_override;
+            base_page.color_mode = mapping_override->color_channels;
+            base_page.custom_symbol_bits = 0u;
+            if (base_page.use_custom_palette) {
+                u32 palette_count = mapping_override->custom_palette_count;
+                while (palette_count >= 2u) {
+                    palette_count >>= 1u;
+                    ++base_page.custom_symbol_bits;
+                }
+            }
+        }
     }
     OverlayIgnoreColorList ignored_colors;
     ignored_colors.count = 0u;
@@ -33223,7 +33396,7 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
 
     makocode::ByteBuffer base_mask;
     u64 base_reserved = 0u;
-    if (!build_overlay_mask(base_page, base_mask, base_reserved)) {
+    if (!build_overlay_mask(base_page, base_mask, base_reserved, !tile_override)) {
         console_line(2, "encode: failed to prepare overlay masks");
         return false;
     }
@@ -33281,7 +33454,9 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                              base_mask,
                                              ignored_colors_ptr,
                                              base_page,
-                                             overlay_selector)) {
+                                             overlay_selector,
+                                             include_metadata_overwrites,
+                                             !tile_override)) {
         console_line(2, "encode: failed to apply overlay PPM");
         return false;
     }
@@ -33292,6 +33467,7 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
         console_line(2, budget_buffer);
     }
     makocode::ByteBuffer output;
+    if (tile_override) base_page.metadata = output_metadata;
     if (!serialize_overlay_page(base_page, output) ||
         !write_bytes_to_file(page_path, output.data, output.size)) {
         console_line(2, "encode: failed to write overlay page");
@@ -33305,6 +33481,7 @@ static int command_decode(int arg_count, char** args) {
         write_decode_help();
         return 0;
     }
+    g_fiducial_defaults.spacing_pixels = 24u;
     ImageMappingConfig mapping;
     static const usize MAX_INPUT_FILES = 1024u;
     const char* input_files[MAX_INPUT_FILES];
@@ -33323,6 +33500,8 @@ static int command_decode(int arg_count, char** args) {
     bool have_output_dir = false;
     bool debug_requested = false;
     bool recover_limit_specified = false;
+    bool no_fiducials = false;
+    bool no_metadata = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "decode", &handled)) {
@@ -33339,6 +33518,14 @@ static int command_decode(int arg_count, char** args) {
             continue;
         }
         const char* arg = args[i];
+        if (ascii_equals_token(arg, ascii_length(arg), "--no-metadata")) {
+            no_metadata = true;
+            continue;
+        }
+        if (ascii_equals_token(arg, ascii_length(arg), "--no-fiducials")) {
+            no_fiducials = true;
+            continue;
+        }
         if (ascii_equals_token(arg, ascii_length(arg), "--decoded-file")) {
             decoded_file_requested = true;
             continue;
@@ -33483,6 +33670,11 @@ static int command_decode(int arg_count, char** args) {
         console_line(2, "decode: --recover-limit requires --recover-palette");
         return 1;
     }
+    if (no_fiducials) g_fiducial_defaults.spacing_pixels = 0u;
+    if (no_metadata && file_count > 1u) {
+        console_line(2, "decode: --no-metadata currently requires one page");
+        return 1;
+    }
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "decode")) {
             return 1;
@@ -33505,6 +33697,10 @@ static int command_decode(int arg_count, char** args) {
     bool force_disable_subgrid = false;
     bool retried_subgrid = false;
     bool force_tile_center_sampling = false;
+    MetadataTile::Values center_probe_tile;
+    bool center_probe_available = false;
+    bool center_probe_page_present[MAX_INPUT_FILES] = {};
+    bool center_probe_attempted = false;
     u32 small_scan_geometry_variant = 0u;
     makocode::ByteBuffer debug_fiducial_csv;
     makocode::ByteBuffer debug_fiducial_path;
@@ -33583,7 +33779,7 @@ retry_decode:
         PpmParserState single_state;
         bool retry_without_subgrid_allowed = false;
         bool single_color_rotation = false;
-        bool frame_extracted = ppm_extract_frame_bits(ppm_stream,
+        bool frame_extracted = !no_metadata && ppm_extract_frame_bits(ppm_stream,
                                                       mapping,
                                                       frame_bits,
                                                       frame_bit_count,
@@ -33620,6 +33816,7 @@ retry_decode:
             MetadataTile::Values recovered_values;
             if (!recover_metadata_free_single_page(ppm_stream,
                                                    mapping_overrides,
+                                                   no_metadata,
                                                    frame_bits,
                                                    frame_erasure_bits,
                                                    frame_bit_count,
@@ -33824,10 +34021,9 @@ retry_decode:
         u64 aggregate_page_capacity_bits = 0u;
         AffineTransform previous_page_affine_hint = {};
         bool previous_page_affine_hint_available = false;
-        MetadataTile::Values center_probe_tile;
-        bool center_probe_available = false;
-        bool center_probe_page_present[MAX_INPUT_FILES] = {};
-        if (!force_disable_subgrid && !force_tile_center_sampling && !retried_subgrid) {
+        if (!center_probe_attempted && !force_disable_subgrid &&
+            !force_tile_center_sampling && !retried_subgrid) {
+            center_probe_attempted = true;
             for (usize probe_index = 0u; probe_index < file_count; ++probe_index) {
                 makocode::ByteBuffer probe_stream;
                 if (!read_entire_file(input_files[probe_index], probe_stream)) {
@@ -33878,15 +34074,12 @@ retry_decode:
             MetadataTile::Values page_tile_override;
             const MetadataTile::Values* page_tile_override_ptr = 0;
             bool page_tile_present = false;
-            if (center_probe_available) {
-                page_tile_present = center_probe_page_present[file_index];
-                page_tile_override = page_tile_present
-                                         ? encoded_pages[file_index]
-                                         : center_probe_tile;
+            if (center_probe_available && !center_probe_page_present[file_index]) {
+                page_tile_override = center_probe_tile;
                 page_tile_override.page_index = (u64)file_index + 1u;
                 page_tile_override_ptr = &page_tile_override;
             }
-            bool frame_extracted = ppm_extract_frame_bits(ppm_stream,
+            bool frame_extracted = !no_metadata && ppm_extract_frame_bits(ppm_stream,
                                                           mapping,
                                                           page_bits,
                                                           page_bit_count,
@@ -33932,6 +34125,7 @@ retry_decode:
                     MetadataTile::Values recovered_values;
                     if (recover_metadata_free_single_page(ppm_stream,
                                                            mapping_overrides,
+                                                           no_metadata,
                                                            page_bits,
                                                            page_erasure_bits,
                                                            page_bit_count,
