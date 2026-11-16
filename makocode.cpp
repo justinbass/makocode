@@ -29729,7 +29729,8 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
                                           double& effective_redundancy,
                                           u16& unknown_parity_budget,
                                           u16& overlay_erasure_budget,
-                                          double overlay_fraction) {
+                                          double overlay_fraction,
+                                          bool reserve_overlay_unknown_errors = false) {
     effective_redundancy = 0.0;
     unknown_parity_budget = 0u;
     overlay_erasure_budget = 0u;
@@ -29755,6 +29756,11 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
     if (overlay_symbols % block_count) ++per_block;
     if (per_block > 0xFFFFu) return false;
     overlay_erasure_budget = (u16)per_block;
+    if (reserve_overlay_unknown_errors && overlay_erasure_budget > 0u) {
+        u32 unknown_overlay_budget = (u32)overlay_erasure_budget * 2u;
+        if (unknown_overlay_budget > 0xFFFFu) return false;
+        unknown_parity_budget = (u16)unknown_overlay_budget;
+    }
     effective_redundancy = requested_redundancy;
     return true;
 }
@@ -29817,7 +29823,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         double structural_erasure_fraction,
                                         double overlay_fraction,
                                         EccFillCandidate& candidate,
-                                        u32 metadata_ecc_minimum_parity_bytes = 2u) {
+                                        u32 metadata_ecc_minimum_parity_bytes = 2u,
+                                        bool reserve_overlay_unknown_errors = false) {
     if (requested_redundancy <= 0.0 || requested_redundancy > 254.0) return false;
     double encoded_redundancy = requested_redundancy;
     u16 unknown_budget = 0u;
@@ -29828,7 +29835,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                               encoded_redundancy,
                                               unknown_budget,
                                               overlay_budget,
-                                              overlay_fraction)) {
+                                              overlay_fraction,
+                                              reserve_overlay_unknown_errors)) {
         return false;
     }
     FooterLayout layout = FooterLayout();
@@ -29861,7 +29869,8 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                                   encoded_redundancy,
                                                   unknown_budget,
                                                   overlay_budget,
-                                                  overlay_fraction)) {
+                                                  overlay_fraction,
+                                                  reserve_overlay_unknown_errors)) {
             return false;
         }
         if (overlay_budget > candidate.parity) {
@@ -31568,7 +31577,8 @@ static int command_encode(int arg_count, char** args) {
                                           structural_erasure_fraction,
                                           overlay_fraction,
                                           minimum_candidate,
-                                          metadata_ecc_minimum_parity_bytes);
+                                          metadata_ecc_minimum_parity_bytes,
+                                          true);
         if (!found_minimum) {
             for (u32 attempt = 0u; attempt < 16u && high_ratio < 254.0; ++attempt) {
                 low_ratio = high_ratio;
@@ -31585,7 +31595,8 @@ static int command_encode(int arg_count, char** args) {
                                           structural_erasure_fraction,
                                           overlay_fraction,
                                           minimum_candidate,
-                                          metadata_ecc_minimum_parity_bytes);
+                                          metadata_ecc_minimum_parity_bytes,
+                                          true);
                 if (found_minimum) break;
             }
             if (found_minimum) {
@@ -31604,7 +31615,8 @@ static int command_encode(int arg_count, char** args) {
                                                     structural_erasure_fraction,
                                                     overlay_fraction,
                                                     candidate,
-                                                    metadata_ecc_minimum_parity_bytes)) {
+                                                    metadata_ecc_minimum_parity_bytes,
+                                                    true)) {
                         high_ratio = middle;
                         minimum_candidate = candidate;
                     } else {
@@ -31657,7 +31669,8 @@ static int command_encode(int arg_count, char** args) {
                                            derived_redundancy,
                                            unknown_parity_budget,
                                            overlay_erasure_budget,
-                                           overlay_fraction)) {
+                                           overlay_fraction,
+                                           ecc_mode == ECC_AUTO_MINIMUM)) {
             console_line(2, "encode: canonical ECC fill cannot preserve structural and unknown-error budgets");
             return 1;
         }
@@ -31703,7 +31716,8 @@ static int command_encode(int arg_count, char** args) {
                                            derived_redundancy,
                                            unknown_parity_budget,
                                            overlay_erasure_budget,
-                                           overlay_fraction)) {
+                                           overlay_fraction,
+                                           ecc_mode == ECC_AUTO_MINIMUM)) {
             console_line(2, "encode: requested ECC cannot preserve structural and unknown-error budgets");
             return 1;
         } else {

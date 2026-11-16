@@ -48,5 +48,4 @@ if [[ -z $label ]]; then
 fi
 
 export MAKO_OVERLAY_FRACTION=0.25
-export MAKO_OVERLAY_ENCODE_OPTS='--ecc=fill'
 exec "$script_dir/test_overlay_e2e.sh" "$label"
