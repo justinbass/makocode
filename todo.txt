@@ -20,9 +20,6 @@ TODO
 - Suggestions and specs for archival file formats (Text: txt, images: Compressed PPM, Video: YUV4MPEG2). C++/GCC specs? FFMPEG/codecs and ImageMagick/convert standalone source code bundle, needs glue script to build.
 - Shiba names for fun, maybe a different make mode with flag
   - Replace barcode with barkode everywhere.
-  - makocode fluff / unfluff (encode / decode)
-  - makocode den pack / unpack (checkpoint)
-  - makocode coat (overlay)
 - Run physical tests, against calibration script. Improve calibration script until max data density is found.
   - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
   - Tests for physical row/column skip/expand (scan/print damage)

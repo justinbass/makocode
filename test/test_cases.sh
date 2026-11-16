@@ -84,7 +84,7 @@ test_case 0020_gray_rotate_seeded roundtrip "Grayscale rotation with determinist
     --scale 3.0 --rotate 1 --transform-seed 1337
 
 test_case 0021_gray_skew_xy_seeded roundtrip "Grayscale horizontal and vertical skew with deterministic seed" \
-    --size 65536  --width 900 --height 900 \
+    --size 65536  --width 900 --height 900 --ecc fill \
     --scale 3.0 --skew-x 5 --skew-y -5 --transform-seed 1337
 
 test_case 0022_gray_skew_xy_reverse_seeded roundtrip "Grayscale horizontal and vertical skew in reverse directions" \
@@ -295,7 +295,7 @@ test_case 0069_decode_scale_318 script "Decode a 160x160 page rendered at 3.18 p
     test_decode_scale_318.sh
 
 test_case 0070_decode_scale_2071 roundtrip "Fractional affine scan scale 2.071x" \
-    --size 4096  --width 620 --height 620 \
+    --size 4096  --width 620 --height 620 --ecc fill \
     --scale 2.071 --transform-seed 2071
 
 test_case 0071_decode_scale_2701 roundtrip "Fractional affine scan scale 2.701x" \
