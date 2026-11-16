@@ -1,10 +1,6 @@
 TODO
 
-Features:
-- ECC can be stored as num from 0 -> 255, could be compact_u16 or even a new compact_u8.
-- Remove entire page (test), with high ECC. Document user can provide blank pages for their gaps. Argument could be supplied for which pages are known missing. Guess/try missing pages.
-
-Improvements:
+- Cyan fiducials in some bw images???
 - Improve overlay approaching ~100% ECC
     - README example, given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
@@ -17,8 +13,6 @@ Improvements:
   - Tests for physical row/column skip/expand (scan/print damage)
   - Increase all distortions until decoding breaks, make improvements
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak/others as reference
-
-Finalize:
 - Clean up cli args (-h), README
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module.

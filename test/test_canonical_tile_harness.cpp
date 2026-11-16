@@ -30,22 +30,22 @@ int main(int argc, char** argv) {
             if (!MetadataTile::read_compact_u64(reader, actual) || actual != expected[i] ||
                 reader.failed || reader.cursor != writer.bit_size()) return 1;
         }
-        const u64 ecc_bit_counts[] = {0u, 8u, 65536u, U64_MAX_VALUE - 7u};
-        const u64 overlay_bit_counts[] = {0u, 8u, 65536u, U64_MAX_VALUE - 7u};
-        for (usize i = 0u; i < sizeof(ecc_bit_counts) / sizeof(ecc_bit_counts[0]); ++i) {
-            for (usize j = 0u; j < sizeof(overlay_bit_counts) / sizeof(overlay_bit_counts[0]); ++j) {
+        const u32 parity_symbols[] = {0u, 1u, 2u, 127u, 128u, 253u, 254u, 65535u};
+        const u32 overlay_erasure_symbols[] = {0u, 1u, 2u, 127u, 128u, 253u, 254u, 65535u};
+        for (usize i = 0u; i < sizeof(parity_symbols) / sizeof(parity_symbols[0]); ++i) {
+            for (usize j = 0u; j < sizeof(overlay_erasure_symbols) / sizeof(overlay_erasure_symbols[0]); ++j) {
                 MetadataTile::BitWriter writer;
-                if (!MetadataTile::write_compact_u64(writer, ecc_bit_counts[i]) ||
-                    !MetadataTile::write_compact_u64(writer, overlay_bit_counts[j]) ||
-                    (ecc_bit_counts[i] == 0u && overlay_bit_counts[j] == 0u &&
+                if (!MetadataTile::write_compact_u16(writer, parity_symbols[i], true) ||
+                    !MetadataTile::write_compact_u16(writer, overlay_erasure_symbols[j], true) ||
+                    (parity_symbols[i] == 0u && overlay_erasure_symbols[j] == 0u &&
                      writer.bit_size() != 6u)) return 1;
                 MetadataTile::BitReader reader;
                 reader.reset(writer.data(), writer.bit_size());
-                u64 actual_bits = 0u;
-                if (!MetadataTile::read_compact_u64(reader, actual_bits) ||
-                    actual_bits != ecc_bit_counts[i] ||
-                    !MetadataTile::read_compact_u64(reader, actual_bits) ||
-                    actual_bits != overlay_bit_counts[j] ||
+                u32 actual_symbols = 0u;
+                if (!MetadataTile::read_compact_u16(reader, actual_symbols, true) ||
+                    actual_symbols != parity_symbols[i] ||
+                    !MetadataTile::read_compact_u16(reader, actual_symbols, true) ||
+                    actual_symbols != overlay_erasure_symbols[j] ||
                     reader.failed || reader.cursor != writer.bit_size()) return 1;
             }
         }
@@ -56,16 +56,14 @@ int main(int argc, char** argv) {
                                           current_values.ecc_block_data,
                                           current_values.ecc_parity,
                                           current_values.ecc_block_count)) return 1;
-        current_values.ecc_bits = (u64)current_values.ecc_parity *
-                                  current_values.ecc_block_count * 8u;
         u64 overlay_symbols = 500u;
         u64 per_block_overlay = overlay_symbols / current_values.ecc_block_count +
                                 ((overlay_symbols % current_values.ecc_block_count) ? 1u : 0u);
-        current_values.overlay_bits = per_block_overlay * current_values.ecc_block_count * 8u;
+        current_values.overlay_erasure_budget = (u16)per_block_overlay;
         if (!MetadataTile::derive_schema_payload_layout(current_values) ||
             current_values.overlay_erasure_budget != per_block_overlay ||
-            current_values.ecc_bits !=
-                (u64)current_values.ecc_parity * current_values.ecc_block_count * 8u) return 1;
+            current_values.ecc_parity > 254u ||
+            current_values.overlay_erasure_budget > current_values.ecc_parity) return 1;
         return 0;
     }
     if (argc == 2 && ascii_equals_token(argv[1], ascii_length(argv[1]), "--test-metadata-rs")) {
@@ -107,8 +105,7 @@ int main(int argc, char** argv) {
                                               values.ecc_block_data,
                                               values.ecc_parity,
                                               values.ecc_block_count)) return 1;
-            values.ecc_bits = (u64)values.ecc_parity * values.ecc_block_count * 8u;
-            values.overlay_bits = 0u;
+            values.overlay_erasure_budget = 0u;
             values.page_width_pixels = MetadataTile::TILE_SIDE;
             values.page_height_pixels = MetadataTile::TILE_SIDE;
             values.fiducial_spacing_pixels = 24u;
@@ -116,6 +113,7 @@ int main(int argc, char** argv) {
             values.fiducial_rows = 1u;
             values.overwrite_layout = true;
             values.palette_background_first = true;
+            values.metadata_ecc_redundancy = 0.25;
             if (!MetadataTile::derive_schema_payload_layout(values)) {
                 fprintf(stderr, "marker layout derivation failed case=%u\n", palette_case); return 1;
             }
@@ -216,6 +214,15 @@ int main(int argc, char** argv) {
                         palette_case, values.metadata_square_side, values.metadata_tag_y0,
                         values.metadata_bit_count, values.metadata_symbol_count,
                         values.metadata_ecc_bytes); return 1;
+            }
+            makocode::ByteBuffer rebuilt_bits;
+            makocode::ByteBuffer rebuilt_active;
+            if (!MetadataTile::build_tile_bits(decoded, rebuilt_bits, &rebuilt_active) ||
+                rebuilt_bits.size != bits.size || rebuilt_active.size != active.size ||
+                memcmp(rebuilt_bits.data, bits.data, bits.size) != 0 ||
+                memcmp(rebuilt_active.data, active.data, active.size) != 0) {
+                fprintf(stderr, "metadata ECC tile rebuild mismatch case=%u\n", palette_case);
+                return 1;
             }
         }
         return 0;
@@ -493,8 +500,7 @@ int main(int argc, char** argv) {
         }
         u16 expected_unknown_budget = 0u;
         u16 expected_overlay_budget = check_overlay_budget
-                                          ? (u16)(values.overlay_bits / 8u /
-                                                   values.ecc_block_count)
+                                          ? values.overlay_erasure_budget
                                           : 0u;
         if ((check_overlay_budget && (unknown_budget != expected_unknown_budget ||
                                   overlay_budget != expected_overlay_budget)) ||
@@ -502,13 +508,13 @@ int main(int argc, char** argv) {
                  ? selector_counts.size != values.ecc_block_count
                  : selector_counts.size != 0u)) {
             fprintf(stderr,
-                    "canonical tile: selector mismatch (unknown=%u/%u, overlay=%u/%u, parity=%u, overlay_bits=%llu)\n",
+                    "canonical tile: selector mismatch (unknown=%u/%u, overlay=%u/%u, parity=%u, overlay_symbols_per_block=%u)\n",
                     (unsigned)unknown_budget,
                     (unsigned)expected_unknown_budget,
                     (unsigned)overlay_budget,
                     (unsigned)expected_overlay_budget,
                     (unsigned)values.ecc_parity,
-                    (unsigned long long)values.overlay_bits);
+                    (unsigned)values.overlay_erasure_budget);
             return 1;
         }
         for (usize block = 0u; !report_page && values.overlay_selector_present &&
@@ -736,8 +742,8 @@ int main(int argc, char** argv) {
         }
         if (report_ecc_settings) {
             printf("%llu\t%llu\n",
-                   (unsigned long long)values.ecc_bits,
-                   (unsigned long long)values.overlay_bits);
+                   (unsigned long long)values.ecc_parity,
+                   (unsigned long long)values.overlay_erasure_budget);
         }
         (void)payload_bits;
         (void)selector_seed;

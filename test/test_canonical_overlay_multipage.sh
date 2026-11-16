@@ -45,7 +45,7 @@ if [[ ${#pages[@]} -lt 2 ]]; then
     echo "canonical overlay: expected a multipage encoding, found ${#pages[@]} page(s)" >&2
     exit 1
 fi
-overlay_count=$(rg -c 'debug: overlay bits used=' "$work/multiple_overlay.log" || true)
+overlay_count=$(rg -c 'debug: overlay erasure budget per block=' "$work/multiple_overlay.log" || true)
 if [[ $overlay_count -ne 2 ]]; then
     echo "canonical overlay: expected exactly two selected page overlays, found $overlay_count" >&2
     cat "$work/multiple_overlay.log" >&2

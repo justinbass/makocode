@@ -102,8 +102,8 @@ fi
     cd "$work_dir"
     "${encode_cmd[@]}"
 ) >"$work_dir/encode.log" 2>&1
-if ! rg -q 'debug: overlay bits used=[1-9][0-9]*/' "$work_dir/encode.log"; then
-    echo "test_overlay_e2e: encoder did not apply any protected overlay bits" >&2
+if ! rg -q 'debug: overlay erasure budget per block=[1-9][0-9]*' "$work_dir/encode.log"; then
+    echo "test_overlay_e2e: encoder did not apply a positive protected overlay budget" >&2
     cat "$work_dir/encode.log" >&2
     exit 1
 fi

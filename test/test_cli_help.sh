@@ -190,11 +190,11 @@ read -r _ < "$overlay_page"
 read -r overlay_width overlay_height < <(sed -n '2p' "$overlay_page")
 overlay_settings=$("$harness" "$overlay_page" "$overlay_width" "$overlay_height" 1 \
     --report-ecc-settings)
-IFS=$'\t' read -r overlay_ecc_bits overlay_raw_bits <<<"$overlay_settings"
-if [[ -z $overlay_ecc_bits || $overlay_ecc_bits -le 0 ||
-      -z $overlay_raw_bits || $overlay_raw_bits -le 0 ||
-      $((overlay_raw_bits % 8)) -ne 0 ]]; then
-    echo "test_cli_help: automatic overlay settings were $overlay_settings, expected positive bit counts" >&2
+IFS=$'\t' read -r overlay_parity_symbols overlay_erasure_symbols <<<"$overlay_settings"
+if [[ -z $overlay_parity_symbols || $overlay_parity_symbols -le 0 ||
+      -z $overlay_erasure_symbols || $overlay_erasure_symbols -le 0 ||
+      $overlay_erasure_symbols -gt $overlay_parity_symbols ]]; then
+    echo "test_cli_help: automatic overlay settings were $overlay_settings, expected valid per-block symbol counts" >&2
     exit 1
 fi
 "$makocode_bin" decode --output-dir="$tmp_dir/overlay_fraction_decoded" \
