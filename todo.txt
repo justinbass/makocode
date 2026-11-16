@@ -1,7 +1,6 @@
 TODO
 
-- Improve overlay approaching ~100% ECC
-    - README example, given a PPM overlay, write out the maximum overlay that encodes the image losslessly, with some ECC overhead.
+- Improve overlay to 254/255?
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
 - With no metadata/fiducials and very high overlay, makocode should be useful as steganography. Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
 - Improve minification algorithm to reduce size, E2E test compiles it

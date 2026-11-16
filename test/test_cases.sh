@@ -159,16 +159,16 @@ test_case 0042_palette_white_black_blot_white roundtrip "High-ECC white blot rec
     --ink-blot-radius 180 --ink-blot-color white
 
 test_case 0043_overlay_e2e overlay "Overlay CLI merges masks and decodes" \
-    MAKO_OVERLAY_FRACTION=0.75
+    MAKO_OVERLAY_FRACTION=0.992156862745098
 
 test_case 0044_overlay_palette_cmyy overlay "Overlay CLI respects CMY+Yellow palette with yellow mask" \
-    MAKO_OVERLAY_FRACTION=0.75 \
+    MAKO_OVERLAY_FRACTION=0.992156862745098 \
     "MAKO_OVERLAY_PALETTE=White Cyan Magenta Yellow" \
     "MAKO_OVERLAY_CIRCLE_COLOR=255 255 0" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1
 
 test_case 0045_overlay_bw_base_color_cmwy overlay "Black/white base with CMYW circle overlay" \
-    MAKO_OVERLAY_FRACTION=0.75 \
+    MAKO_OVERLAY_FRACTION=0.992156862745098 \
     "MAKO_OVERLAY_PALETTE=White Black" \
     MAKO_OVERLAY_MASK_PALETTE_BASE=4 \
     "MAKO_OVERLAY_MASK_PALETTE_TEXT=White Cyan Magenta Yellow" \
@@ -181,13 +181,13 @@ test_case 0109_footer_features script "Footer wrapping, page selection, over-bar
     test_footer_features.sh
 
 test_case 0046_overlay_cmy_base_bw overlay "CMYW base with black/white circle overlay" \
-    MAKO_OVERLAY_FRACTION=0.75 \
+    MAKO_OVERLAY_FRACTION=0.992156862745098 \
     "MAKO_OVERLAY_PALETTE=White Cyan Magenta Yellow" \
     MAKO_OVERLAY_SKIP_GRAYSCALE_CHECK=1 \
     "MAKO_OVERLAY_ALLOWED_COLORS=0 0 0;255 255 255;0 255 255;255 0 255;255 255 0"
 
 test_case 0047_overlay_e2e_ignore_colors overlay "Overlay CLI skips white background when merging" \
-    MAKO_OVERLAY_FRACTION=0.75 \
+    MAKO_OVERLAY_FRACTION=0.992156862745098 \
     MAKO_OVERLAY_IGNORE_COLORS=White
 
 test_case 0048_overlay_bw_ecc_ratio_025 overlay "Black/white circle overlay with ECC ratio 0.25" \

@@ -33,7 +33,7 @@ PY
     --width 1000 --height 1000
 
 mkdir -p "$work/pages"
-(cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.75 \
+(cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.992156862745098 \
     --overlay-ppm="$work/overlay.ppm" --overlay-pages=1-1,1 \
     --overlay-ppm="$work/overlay_second.ppm" --overlay-pages=2-2 \
     --page-width=1000 --page-height=1000 \
@@ -51,7 +51,7 @@ if [[ $overlay_count -ne 2 ]]; then
     cat "$work/multiple_overlay.log" >&2
     exit 1
 fi
-if (cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.75 \
+if (cd "$work" && "$bin" encode --input=payload.bin --overlay-fraction=0.992156862745098 \
     --overlay-ppm="$work/overlay.ppm" --overlay-pages=all \
     --overlay-ppm="$work/overlay_second.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 --output-dir="$work/overlap_pages") \
@@ -74,7 +74,7 @@ with open(sys.argv[1], 'wb') as stream:
     stream.write(bytes(rng.randrange(256) for _ in range(4096)))
 PY
 mkdir -p "$work/mixed_reserved" "$work/mixed_plain"
-(cd "$work" && "$bin" encode --input=mixed_payload.bin  --overlay-fraction=0.75 \
+(cd "$work" && "$bin" encode --input=mixed_payload.bin  --overlay-fraction=0.992156862745098 \
     --overlay-ppm="$work/overlay.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 \
     --prefix=reserved --output-dir="$work/mixed_reserved" >/dev/null)
@@ -93,11 +93,20 @@ if ! rg -q "conflicting overlay selector settings between pages" "$work/mixed_de
     exit 1
 fi
 
-page_indices=()
-page_paths=()
-page_summaries=()
+report_dir="$work/page_reports"
+mkdir -p "$report_dir"
+printf '%s\0' "${pages[@]}" |
+    REPORT_DIR="$report_dir" CANONICAL_TILE_HARNESS_BIN="$canonical_tile_harness_bin" \
+        xargs -0 -n1 -P4 bash -c '
+            summary=$("$CANONICAL_TILE_HARNESS_BIN" "$1" 1000 1000 1 --report-page) || exit
+            printf "%s\n" "$summary" > "$REPORT_DIR/${1##*/}.summary"
+        ' _
+
+ordered_pages=()
+have_expected_selector=0
 for page in "${pages[@]}"; do
-    summary=$("$canonical_tile_harness_bin" "$page" 1000 1000 1 --report-page)
+    summary=
+    IFS= read -r summary < "$report_dir/${page##*/}.summary"
     IFS=$'\t' read -r page_index page_count block_count parity unknown_budget overlay_budget selector_present selector_total selector_seed selector_counts <<< "$summary"
     if [[ -z ${page_index:-} || $page_count -ne ${#pages[@]} ||
           $selector_present -ne 1 || $block_count -eq 0 || $parity -eq 0 ||
@@ -105,29 +114,37 @@ for page in "${pages[@]}"; do
         echo "canonical overlay: invalid base tile selector or ECC metadata" >&2
         exit 1
     fi
-    page_indices+=("$page_index")
-    page_paths+=("$page")
-    page_summaries+=("$summary")
+    if [[ $have_expected_selector -eq 0 ]]; then
+        expected_page_count=$page_count
+        expected_block_count=$block_count
+        expected_parity=$parity
+        expected_unknown_budget=$unknown_budget
+        expected_overlay_budget=$overlay_budget
+        expected_selector_seed=$selector_seed
+        have_expected_selector=1
+    elif [[ $page_count -ne $expected_page_count ||
+            $block_count -ne $expected_block_count ||
+            $parity -ne $expected_parity ||
+            $unknown_budget -ne $expected_unknown_budget ||
+            $overlay_budget -ne $expected_overlay_budget ||
+            $selector_seed -ne $expected_selector_seed ]]; then
+        echo "canonical overlay: selector settings differ between pages" >&2
+        exit 1
+    fi
+    ordered_index=$((page_index - 1))
+    if [[ $page_index -gt ${#pages[@]} || -n ${ordered_pages[$ordered_index]:-} ]]; then
+        echo "canonical overlay: duplicate or out-of-range serialized page index $page_index" >&2
+        exit 1
+    fi
+    ordered_pages[$ordered_index]="$page"
 done
-ordered_pages=()
-ordered_summaries=()
 for ((expected_index = 1; expected_index <= ${#pages[@]}; ++expected_index)); do
-    match=-1
-    for candidate in "${!page_indices[@]}"; do
-        if [[ ${page_indices[$candidate]} -eq $expected_index ]]; then
-            match=$candidate
-            break
-        fi
-    done
-    if [[ $match -lt 0 ]]; then
+    if [[ -z ${ordered_pages[$((expected_index - 1))]:-} ]]; then
         echo "canonical overlay: missing serialized page index $expected_index" >&2
         exit 1
     fi
-    ordered_pages+=("${page_paths[$match]}")
-    ordered_summaries+=("${page_summaries[$match]}")
 done
 pages=("${ordered_pages[@]}")
-page_summaries=("${ordered_summaries[@]}")
 
 # The right edge remains payload. Corrupting the centered protected tile must
 # fail closed because its selector and ECC budgets are authoritative.

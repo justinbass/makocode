@@ -124,7 +124,7 @@ run_expect_help removed-overlay-command 'Usage:' 'makocode encode [options]' \
 run_expect_help minify-help 'Usage: makocode minify' 'Strips comments/whitespace' "$makocode_bin" minify --help
 run_expect_reject ecc-range '--ecc ratio must be between 0 and 254' \
     "$makocode_bin" encode --ecc=254.01
-run_expect_reject overlay-fraction-range '--overlay-fraction must be between 0.0 and 1.0' \
+run_expect_reject overlay-fraction-range '--overlay-fraction must be between 0.0 and 254/255' \
     "$makocode_bin" encode --overlay-fraction=1.01
 run_expect_reject overlay-fraction-alone '--overlay-fraction and overlay images must be used together' \
     "$makocode_bin" encode --overlay-fraction=0.5
@@ -169,7 +169,7 @@ fi
     --width 1000 --height 1000)
 overlay_rejection="$tmp_dir/overlay-ecc-rejection.txt"
 if (cd "$tmp_dir" && "$makocode_bin" encode --input=default.bin \
-    --ecc=0.01 --overlay-fraction=1.0 --overlay-ppm="$tmp_dir/overlay.ppm" --overlay-pages=all \
+    --ecc=0.01 --overlay-fraction=0.98 --overlay-ppm="$tmp_dir/overlay.ppm" --overlay-pages=all \
     --page-width=1000 --page-height=1000 \
     "--output-dir=$tmp_dir/overlay_rejected") >"$overlay_rejection" 2>&1; then
     echo "test_cli_help: unsupported overlay fraction unexpectedly succeeded" >&2
@@ -208,7 +208,7 @@ if grep -Eq '^  --' "$tmp_dir/top-level.txt"; then
 fi
 if ! grep -Fq -- 'Omit to use the minimum ECC' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- '0 disables payload ECC' "$tmp_dir/encode-help.txt" ||
-   ! grep -Fq -- 'Overlay budget as a share of protected data bits' "$tmp_dir/encode-help.txt" ||
+   ! grep -Fq -- 'Overlay budget as a share of each RS codeword' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- '255 total symbols' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- 'omitted width fits the encoded payload' "$tmp_dir/encode-help.txt" ||
    ! grep -Fq -- 'omitted height fits the encoded payload' "$tmp_dir/encode-help.txt" ||

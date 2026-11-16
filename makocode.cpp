@@ -6323,12 +6323,12 @@ static bool fisher_yates_unshuffle(u8* data, usize count) {
 }
 
 static bool overlay_selector_mask(u64 selector_seed,
-                                          u32 block_index,
+                                          u64 block_index,
                                           u16 block_total,
                                           u8 selected_count,
                                           u8* mask_out,
                                           u8* rank_out = 0) {
-    if (selected_count > block_total || (selected_count && !mask_out) ||
+    if (selected_count > block_total || (selected_count && !mask_out && !rank_out) ||
         block_total > 255u) {
         return false;
     }
@@ -7457,14 +7457,64 @@ static bool rs_decode_block(u8* block,
         return false;
     }
     u16 codeword_length = (u16)codeword_length_wide;
+    u8 erasure_seen[RS_POLY_CAPACITY];
+    memset(erasure_seen, 0, sizeof(erasure_seen));
     for (u16 i = 0u; i < erasure_count; ++i) {
         if (erasure_positions[i] >= codeword_length) {
             return false;
         }
-        for (u16 j = 0u; j < i; ++j) {
-            if (erasure_positions[i] == erasure_positions[j]) {
-                return false;
+        if (erasure_seen[erasure_positions[i]]) return false;
+        erasure_seen[erasure_positions[i]] = 1u;
+    }
+    if (data_symbols == 1u && erasure_count > 0u) {
+        static u16 cached_parity_symbols = 0u;
+        static u16 cached_generator_size = 0u;
+        static u8 cached_generator[RS_POLY_CAPACITY];
+        if (cached_parity_symbols != parity_symbols) {
+            if (!rs_build_generator(parity_symbols,
+                                    cached_generator,
+                                    cached_generator_size)) return false;
+            cached_parity_symbols = parity_symbols;
+        }
+        u16 data_votes[256] = {};
+        u16 observed_symbols = 0u;
+        u16 zero_coefficient_matches = 0u;
+        for (u16 position = 0u; position < codeword_length; ++position) {
+            if (erasure_seen[position]) continue;
+            ++observed_symbols;
+            u8 coefficient = position == 0u ? 1u : cached_generator[position];
+            if (!coefficient) {
+                if (block[position] == 0u) ++zero_coefficient_matches;
+                continue;
             }
+            u8 candidate_data = position == 0u
+                                    ? block[position]
+                                    : gf_div(block[position], coefficient);
+            ++data_votes[candidate_data];
+        }
+        u8 best_data = 0u;
+        u16 best_votes = 0u;
+        for (u16 candidate_data = 0u; candidate_data < 256u; ++candidate_data) {
+            if (data_votes[candidate_data] > best_votes) {
+                best_votes = data_votes[candidate_data];
+                best_data = (u8)candidate_data;
+            }
+        }
+        u16 best_unknown_errors = (u16)(observed_symbols - best_votes - zero_coefficient_matches);
+        if (best_votes > 0u &&
+            erasure_count + 2u * best_unknown_errors <= parity_symbols) {
+            u8 recovered_parity[RS_POLY_CAPACITY];
+            rs_compute_parity(cached_generator,
+                              parity_symbols,
+                              &best_data,
+                              1u,
+                              recovered_parity);
+            block[0] = best_data;
+            memcpy(block + 1u, recovered_parity, parity_symbols);
+            if (corrected_errors) {
+                *corrected_errors = (u16)(erasure_count + best_unknown_errors);
+            }
+            return true;
         }
     }
     u8 syndromes[RS_POLY_CAPACITY];
@@ -7542,15 +7592,74 @@ static bool rs_decode_block(u8* block,
 
     u16 error_positions[RS_POLY_CAPACITY];
     u16 error_count = 0u;
-    if (erasure_count + 2u * (unknown_locator_size - 1u) > parity_symbols ||
-        !rs_find_error_locations(locator,
+    bool within_budget = erasure_count + 2u * (unknown_locator_size - 1u) <= parity_symbols;
+    bool locations_found = rs_find_error_locations(locator,
                                  locator_size,
                                  codeword_length,
                                  exponent_offset,
                                  error_positions,
                                  error_count,
-                                 parity_symbols) ||
+                                 parity_symbols);
+    if (!within_budget || !locations_found ||
         error_count != (u16)(erasure_count + unknown_locator_size - 1u)) {
+        bool roots_match_erasures = locations_found && error_count == erasure_count;
+        for (u16 root = 0u; roots_match_erasures && root < error_count; ++root) {
+            bool found_erasure = false;
+            for (u16 erased = 0u; erased < erasure_count; ++erased) {
+                if (error_positions[root] == erasure_positions[erased]) {
+                    found_erasure = true;
+                    break;
+                }
+            }
+            if (!found_erasure) roots_match_erasures = false;
+        }
+        if (roots_match_erasures) {
+            u8 erasure_locator[RS_POLY_CAPACITY] = {};
+            erasure_locator[0] = 1u;
+            u16 erasure_locator_size = 1u;
+            for (u16 erased = 0u; erased < erasure_count; ++erased) {
+                u8 location = gf_pow_alpha(codeword_length - 1u - erasure_positions[erased]);
+                u8 product[RS_POLY_CAPACITY] = {};
+                for (u16 coefficient = 0u; coefficient < erasure_locator_size; ++coefficient) {
+                    product[coefficient] ^= erasure_locator[coefficient];
+                    product[coefficient + 1u] ^= gf_mul(erasure_locator[coefficient], location);
+                }
+                ++erasure_locator_size;
+                memcpy(erasure_locator, product, erasure_locator_size);
+            }
+            erasure_locator_size = poly_trim(erasure_locator, erasure_locator_size);
+            u8 evaluator[RS_POLY_CAPACITY];
+            u16 evaluator_size = rs_compute_error_evaluator(erasure_locator,
+                                                            erasure_locator_size,
+                                                            syndromes,
+                                                            parity_symbols,
+                                                            evaluator);
+            u8 derivative[RS_POLY_CAPACITY];
+            u16 derivative_size = rs_compute_locator_derivative(erasure_locator,
+                                                                erasure_locator_size,
+                                                                derivative);
+            u8 corrected_block[RS_POLY_CAPACITY];
+            memcpy(corrected_block, block, codeword_length);
+            if (rs_correct_errors(corrected_block,
+                                  exponent_offset,
+                                  evaluator,
+                                  evaluator_size,
+                                  derivative,
+                                  derivative_size,
+                                  erasure_positions,
+                                  erasure_count)) {
+                rs_compute_syndromes(corrected_block,
+                                     codeword_length,
+                                     parity_symbols,
+                                     syndromes,
+                                     all_zero);
+                if (all_zero) {
+                    memcpy(block, corrected_block, codeword_length);
+                    if (corrected_errors) *corrected_errors = erasure_count;
+                    return true;
+                }
+            }
+        }
         return false;
     }
     u8 evaluator[RS_POLY_CAPACITY];
@@ -8025,19 +8134,6 @@ struct DecoderContext {
                 for (u32 block_index = 0u; block_index < header.block_count; ++block_index) {
                     u64 block_offset = (u64)header_span +
                                        (u64)block_index * (u64)block_total;
-                    u32 structural_erasures_in_block = 0u;
-                    for (u16 symbol = 0u; symbol < block_total; ++symbol) {
-                        u64 erased_index = block_offset + symbol;
-                        if (erased_work.data[(usize)erased_index]) {
-                            ++structural_erasures_in_block;
-                        }
-                    }
-                    if ((u64)structural_erasures_in_block +
-                            (u64)overlay_unknown_parity_budget +
-                            overlay_erasure_budget > header.parity) {
-                        ecc_failed = true;
-                        return false;
-                    }
                     u8 selector_count = overlay_selector_counts[block_index];
                     if (selector_count != overlay_erasure_budget ||
                         !overlay_selector_mask(overlay_selector_seed,
@@ -8057,19 +8153,6 @@ struct DecoderContext {
                             }
                             erased_work.data[(usize)erased_index] = 1u;
                         }
-                    }
-                    u32 erased_symbols_in_block = 0u;
-                    for (u16 symbol = 0u; symbol < block_total; ++symbol) {
-                        u64 erased_index = block_offset + symbol;
-                        if (erased_work.data[(usize)erased_index]) {
-                            ++erased_symbols_in_block;
-                        }
-                    }
-                    if ((u64)erased_symbols_in_block +
-                            (u64)overlay_unknown_parity_budget >
-                        header.parity) {
-                        ecc_failed = true;
-                        return false;
                     }
                 }
             } else if (overlay_unknown_parity_budget > 0u) {
@@ -16104,7 +16187,8 @@ static bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    u32 small_scan_geometry_variant = 0u,
                                    bool detect_uniform_blots = true,
                                    bool known_tile_is_present = true,
-                                   bool metadata_center_probe_only = false) {
+                                   bool metadata_center_probe_only = false,
+                                   bool metadata_summary_only = false) {
     if (frame_erasure_bits) frame_erasure_bits->release();
     if (overlay_selector_seed_out) *overlay_selector_seed_out = 0u;
     if (overlay_selector_counts_out) overlay_selector_counts_out->release();
@@ -21084,6 +21168,25 @@ struct RotationEstimateCandidate {
         update_metadata_field(state.has_page_count,
                               state.page_count_value,
                               derived_page_count);
+    }
+    if (metadata_summary_only) {
+        if (!state.has_encoded_tile ||
+            !metadata_schema_is_current(state.encoded_tile.schema_version) ||
+            !state.encoded_tile.page_count || !state.encoded_tile.page_index) return false;
+        if (overlay_selector_seed_out) {
+            *overlay_selector_seed_out = state.encoded_tile.overlay_selector_seed;
+        }
+        if (unknown_parity_budget_out) {
+            *unknown_parity_budget_out = state.encoded_tile.unknown_parity_budget;
+        }
+        if (overlay_erasure_budget_out) {
+            *overlay_erasure_budget_out = state.encoded_tile.overlay_erasure_budget;
+        }
+        metadata_out = state;
+        metadata_out.data = 0;
+        metadata_out.size = 0u;
+        metadata_out.cursor = 0u;
+        return true;
     }
     u64 digits_target = 0u;
     u64 grouped_bit_target = 0u;
@@ -29094,7 +29197,7 @@ static void write_encode_help() {
     console_line(1, "                       Insufficient ECC is rejected with a sufficient ratio and supported overlay fraction.");
     console_line(1, "                       0 disables payload ECC and is rejected when required erasures cannot be recovered.");
     console_line(1, "                       RS blocks max out at 255 total symbols.");
-    console_line(1, "  --overlay-fraction F Overlay budget as a share of protected data bits (0.0-1.0).");
+    console_line(1, "  --overlay-fraction F Overlay budget as a share of each RS codeword (0.0-254/255).");
     console_line(1, "  --overlay-ppm PATH   PPM image to apply to pages selected by the next --overlay-pages.");
     console_line(1, "  --overlay-pages LIST Pages/ranges for the preceding image (all, 1,3-5,middle,last).");
     console_line(1, "                       Repeat the pair; each encoded page may have at most one overlay.");
@@ -29684,14 +29787,23 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
         if (!ecc_summary.block_data_symbols || !ecc_summary.parity_symbols ||
             !ecc_summary.block_count) return false;
         u64 block_total = (u64)ecc_summary.block_data_symbols + ecc_summary.parity_symbols;
+        u8 selector_mask[makocode::RS_FIELD_SIZE];
         for (u64 block = 0u; block < ecc_summary.block_count; ++block) {
             u64 block_start = block * block_total;
             if (block_start >= frame_bytes_u64) break;
             u64 block_end = block_start + block_total;
             if (block_end > frame_bytes_u64) block_end = frame_bytes_u64;
+            if (overlay_erasure_budget &&
+                !MetadataTile::overlay_selector_mask(0u,
+                                                     block,
+                                                     (u16)block_total,
+                                                     (u8)overlay_erasure_budget,
+                                                     selector_mask)) return false;
             u32 block_erasures = 0u;
-            for (u64 byte = block_start; byte < block_end; ++byte) {
-                if (erased_symbols.data[(usize)byte]) ++block_erasures;
+            for (u64 symbol = 0u; symbol < block_end - block_start; ++symbol) {
+                bool erased = erased_symbols.data[(usize)(block_start + symbol)] != 0u;
+                if (overlay_erasure_budget && selector_mask[symbol]) erased = true;
+                if (erased) ++block_erasures;
             }
             if (block_erasures > worst_block_erasures) {
                 worst_block_erasures = block_erasures;
@@ -29711,8 +29823,7 @@ static bool validate_overwrite_budget(const ImageMappingConfig& mapping,
         }
     }
     u32 required = worst_block_erasures +
-                   (u32)unknown_parity_budget +
-                   (u32)overlay_erasure_budget;
+                   (u32)unknown_parity_budget;
     if (minimum_parity_required_out) {
         *minimum_parity_required_out = required > 0xFFFFu ? 0xFFFFu : (u16)required;
     }
@@ -29729,14 +29840,13 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
                                           double& effective_redundancy,
                                           u16& unknown_parity_budget,
                                           u16& overlay_erasure_budget,
-                                          double overlay_fraction,
-                                          bool reserve_overlay_unknown_errors = false) {
+                                          double overlay_fraction) {
     effective_redundancy = 0.0;
     unknown_parity_budget = 0u;
     overlay_erasure_budget = 0u;
     (void)structural_fraction;
     if (requested_redundancy < 0.0 || payload_bytes == 0u ||
-        overlay_fraction < 0.0 || overlay_fraction > 1.0) return false;
+        overlay_fraction < 0.0 || overlay_fraction > (254.0 / 255.0)) return false;
     if (requested_redundancy == 0.0) return true;
     u16 block_data = 0u;
     u16 block_parity = 0u;
@@ -29749,18 +29859,12 @@ static bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
         !block_data || !block_parity || !block_count) {
         return false;
     }
-    long double requested_symbols = ceill((long double)payload_bytes * overlay_fraction);
+    long double requested_symbols = ceill(
+        (long double)(block_data + block_parity) * (long double)overlay_fraction);
     if (requested_symbols > (long double)U64_MAX_VALUE) return false;
-    u64 overlay_symbols = (u64)requested_symbols;
-    u64 per_block = overlay_symbols / block_count;
-    if (overlay_symbols % block_count) ++per_block;
+    u64 per_block = (u64)requested_symbols;
     if (per_block > 0xFFFFu) return false;
     overlay_erasure_budget = (u16)per_block;
-    if (reserve_overlay_unknown_errors && overlay_erasure_budget > 0u) {
-        u32 unknown_overlay_budget = (u32)overlay_erasure_budget * 2u;
-        if (unknown_overlay_budget > 0xFFFFu) return false;
-        unknown_parity_budget = (u16)unknown_overlay_budget;
-    }
     effective_redundancy = requested_redundancy;
     return true;
 }
@@ -29823,8 +29927,7 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         double structural_erasure_fraction,
                                         double overlay_fraction,
                                         EccFillCandidate& candidate,
-                                        u32 metadata_ecc_minimum_parity_bytes = 2u,
-                                        bool reserve_overlay_unknown_errors = false) {
+                                        u32 metadata_ecc_minimum_parity_bytes = 2u) {
     if (requested_redundancy <= 0.0 || requested_redundancy > 254.0) return false;
     double encoded_redundancy = requested_redundancy;
     u16 unknown_budget = 0u;
@@ -29835,8 +29938,7 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                               encoded_redundancy,
                                               unknown_budget,
                                               overlay_budget,
-                                              overlay_fraction,
-                                              reserve_overlay_unknown_errors)) {
+                                              overlay_fraction)) {
         return false;
     }
     FooterLayout layout = FooterLayout();
@@ -29869,8 +29971,7 @@ static bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                                   encoded_redundancy,
                                                   unknown_budget,
                                                   overlay_budget,
-                                                  overlay_fraction,
-                                                  reserve_overlay_unknown_errors)) {
+                                                  overlay_fraction)) {
             return false;
         }
         if (overlay_budget > candidate.parity) {
@@ -30552,8 +30653,9 @@ static int command_encode(int arg_count, char** args) {
                                    overlay_fraction_length,
                                    overlay_fraction_numerator,
                                    overlay_fraction_denominator) ||
-                overlay_fraction_numerator > overlay_fraction_denominator) {
-                console_line(2, "encode: --overlay-fraction must be between 0.0 and 1.0");
+                overlay_fraction_numerator > overlay_fraction_denominator ||
+                overlay_fraction_numerator * 255u > overlay_fraction_denominator * 254u) {
+                console_line(2, "encode: --overlay-fraction must be between 0.0 and 254/255");
                 return 1;
             }
             overlay_fraction = (double)overlay_fraction_numerator /
@@ -31564,7 +31666,7 @@ static int command_encode(int arg_count, char** args) {
             : (double)overwritten_pixels / (double)data_pixels;
     if (ecc_mode != ECC_EXPLICIT_RATIO) {
         EccFillCandidate minimum_candidate;
-        double low_ratio = 0.01;
+        double low_ratio = overlay_fraction >= 0.9 ? 254.0 : 0.01;
         double high_ratio = low_ratio;
         bool found_minimum = evaluate_ecc_fill_candidate(ecc_payload_bytes,
                                           high_ratio,
@@ -31577,8 +31679,7 @@ static int command_encode(int arg_count, char** args) {
                                           structural_erasure_fraction,
                                           overlay_fraction,
                                           minimum_candidate,
-                                          metadata_ecc_minimum_parity_bytes,
-                                          true);
+                                          metadata_ecc_minimum_parity_bytes);
         if (!found_minimum) {
             for (u32 attempt = 0u; attempt < 16u && high_ratio < 254.0; ++attempt) {
                 low_ratio = high_ratio;
@@ -31595,8 +31696,7 @@ static int command_encode(int arg_count, char** args) {
                                           structural_erasure_fraction,
                                           overlay_fraction,
                                           minimum_candidate,
-                                          metadata_ecc_minimum_parity_bytes,
-                                          true);
+                                          metadata_ecc_minimum_parity_bytes);
                 if (found_minimum) break;
             }
             if (found_minimum) {
@@ -31615,8 +31715,7 @@ static int command_encode(int arg_count, char** args) {
                                                     structural_erasure_fraction,
                                                     overlay_fraction,
                                                     candidate,
-                                                    metadata_ecc_minimum_parity_bytes,
-                                                    true)) {
+                                                    metadata_ecc_minimum_parity_bytes)) {
                         high_ratio = middle;
                         minimum_candidate = candidate;
                     } else {
@@ -31669,8 +31768,7 @@ static int command_encode(int arg_count, char** args) {
                                            derived_redundancy,
                                            unknown_parity_budget,
                                            overlay_erasure_budget,
-                                           overlay_fraction,
-                                           ecc_mode == ECC_AUTO_MINIMUM)) {
+                                           overlay_fraction)) {
             console_line(2, "encode: canonical ECC fill cannot preserve structural and unknown-error budgets");
             return 1;
         }
@@ -31716,8 +31814,7 @@ static int command_encode(int arg_count, char** args) {
                                            derived_redundancy,
                                            unknown_parity_budget,
                                            overlay_erasure_budget,
-                                           overlay_fraction,
-                                           ecc_mode == ECC_AUTO_MINIMUM)) {
+                                           overlay_fraction)) {
             console_line(2, "encode: requested ECC cannot preserve structural and unknown-error budgets");
             return 1;
         } else {
@@ -31727,11 +31824,6 @@ static int command_encode(int arg_count, char** args) {
     metadata_ecc_redundancy = ecc_redundancy < 0.25 ? ecc_redundancy : 0.25;
     if (overlay_fraction > 0.0 && ecc_redundancy == 0.0) {
         char ratio_buffer[32] = {};
-        long double requested_symbols =
-            ceill((long double)ecc_payload_bytes * overlay_fraction);
-        u64 symbols = requested_symbols > (long double)U64_MAX_VALUE
-                          ? U64_MAX_VALUE
-                          : (u64)requested_symbols;
         for (u32 candidate_hundredths = 1u;
              candidate_hundredths <= 25400u;
              ++candidate_hundredths) {
@@ -31744,8 +31836,8 @@ static int command_encode(int arg_count, char** args) {
                                               candidate_parity,
                                               candidate_blocks) ||
                 !candidate_data || !candidate_parity || !candidate_blocks) continue;
-            u64 per_block = symbols / candidate_blocks;
-            if (symbols % candidate_blocks) ++per_block;
+            u64 per_block = (u64)ceill(
+                (long double)(candidate_data + candidate_parity) * overlay_fraction);
             if (per_block <= candidate_parity) {
                 format_fixed_3((double)candidate_hundredths / 100.0,
                                ratio_buffer,
@@ -31791,10 +31883,8 @@ static int command_encode(int arg_count, char** args) {
                                                   candidate_parity,
                                                   candidate_blocks) ||
                     !candidate_data || !candidate_parity || !candidate_blocks) continue;
-                long double requested_symbols = ceill((long double)ecc_payload_bytes * overlay_fraction);
-                u64 symbols = (u64)requested_symbols;
-                u64 per_block = symbols / candidate_blocks +
-                                ((symbols % candidate_blocks) ? 1u : 0u);
+                u64 per_block = (u64)ceill(
+                    (long double)(candidate_data + candidate_parity) * overlay_fraction);
                 if (per_block <= candidate_parity) {
                     format_fixed_3((double)candidate_hundredths / 100.0,
                                    ratio_buffer,
@@ -31803,8 +31893,11 @@ static int command_encode(int arg_count, char** args) {
                 }
             }
             long double supported_fraction =
-                ((long double)planned_parity * planned_blocks) / (long double)ecc_payload_bytes;
-            if (supported_fraction > 1.0L) supported_fraction = 1.0L;
+                ((long double)planned_parity) /
+                ((long double)planned_data + (long double)planned_parity);
+            if (supported_fraction > 254.0L / 255.0L) {
+                supported_fraction = 254.0L / 255.0L;
+            }
             supported_fraction = (long double)floor((double)(supported_fraction * 1000.0L)) /
                                  1000.0L;
             format_fixed_3((double)supported_fraction,
@@ -32167,13 +32260,8 @@ static int command_encode(int arg_count, char** args) {
                 candidate_data == 0u || candidate_parity == 0u || candidate_blocks == 0u) {
                 continue;
             }
-            long double requested_overlay_symbols =
-                ceill((long double)ecc_payload_bytes * overlay_fraction);
-            u64 overlay_symbols = requested_overlay_symbols > (long double)U64_MAX_VALUE
-                                      ? U64_MAX_VALUE
-                                      : (u64)requested_overlay_symbols;
-            u64 candidate_overlay = overlay_symbols / candidate_blocks;
-            if (overlay_symbols % candidate_blocks) ++candidate_overlay;
+            u64 candidate_overlay = (u64)ceill(
+                (long double)(candidate_data + candidate_parity) * overlay_fraction);
             if ((u32)candidate_parity >= required_without_current_overlay + candidate_overlay) {
                 format_fixed_3((double)candidate_hundredths / 100.0,
                                sufficient_target_buffer,
@@ -32185,12 +32273,14 @@ static int command_encode(int arg_count, char** args) {
             encoder.ecc_info().parity_symbols > required_without_current_overlay
                 ? (u32)encoder.ecc_info().parity_symbols - required_without_current_overlay
                 : 0u;
-        long double max_overlay_fraction = ecc_payload_bytes
-            ? ((long double)available_overlay_per_block *
-               (long double)encoder.ecc_info().block_count) /
-                  (long double)ecc_payload_bytes
+        u64 current_block_total = (u64)encoder.ecc_info().block_data_symbols +
+                                  encoder.ecc_info().parity_symbols;
+        long double max_overlay_fraction = current_block_total
+            ? (long double)available_overlay_per_block / (long double)current_block_total
             : 0.0L;
-        if (max_overlay_fraction > 1.0L) max_overlay_fraction = 1.0L;
+        if (max_overlay_fraction > 254.0L / 255.0L) {
+            max_overlay_fraction = 254.0L / 255.0L;
+        }
         max_overlay_fraction = (long double)floor((double)(max_overlay_fraction * 1000.0L)) /
                                1000.0L;
         format_fixed_3((double)max_overlay_fraction,
@@ -32883,12 +32973,10 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
     u64 block_total_symbols = (u64)overlay_selector.block_total;
     if (block_total_symbols > U64_MAX_VALUE / overlay_selector.block_count) return false;
     u64 encoded_block_bytes = block_total_symbols * overlay_selector.block_count;
-    if (encoded_block_bytes > (u64)USIZE_MAX_VALUE / (u64)sizeof(usize)) return false;
+    if (encoded_block_bytes > (u64)USIZE_MAX_VALUE / (u64)sizeof(usize) ||
+        !overlay_selector.ranks.data ||
+        overlay_selector.ranks.size != (usize)encoded_block_bytes) return false;
     usize shuffle_bytes = (usize)(encoded_block_bytes * (u64)sizeof(usize));
-    if (shuffle_bytes == 0u || !overlay_selector.ranks.data ||
-        overlay_selector.ranks.size != (usize)encoded_block_bytes) {
-        return false;
-    }
     makocode::ByteBuffer shuffle_map;
     if (!shuffle_map.ensure(shuffle_bytes)) return false;
     shuffle_map.size = shuffle_bytes;
@@ -32908,10 +32996,6 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
 
     u64 rs_region_start = 0u;
     u64 rs_region_end = encoded_block_bytes;
-    if (tile.page_bits > U64_MAX_VALUE - 7u) return false;
-    u64 page_bytes = (tile.page_bits + 7u) >> 3u;
-    if (rs_region_start >= page_bytes) return false;
-    if (rs_region_end > page_bytes) rs_region_end = page_bytes;
 
     makocode::ByteBuffer payload_rank_map;
     makocode::ByteBuffer payload_rank_reservation_mask;
@@ -32934,12 +33018,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
     for (usize pixel = 0u; pixel < (usize)total_data_pixels; ++pixel) {
         if (reservation_data[pixel]) ++fiducial_pixels;
     }
-    if (fiducial_pixels > total_data_pixels ||
-        MetadataTile::TILE_MAX_ACTIVE_CELLS > total_data_pixels - fiducial_pixels) {
-        return false;
-    }
-    u64 usable_data_pixels = total_data_pixels - fiducial_pixels -
-                             MetadataTile::TILE_MAX_ACTIVE_CELLS;
+    if (fiducial_pixels > total_data_pixels) return false;
+    u64 usable_data_pixels = total_data_pixels - fiducial_pixels;
     if (usable_data_pixels > U64_MAX_VALUE / bits_per_pixel) return false;
     u64 bits_per_page = usable_data_pixels * bits_per_pixel;
     if (bits_per_page == 0u ||
@@ -33066,12 +33146,12 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                 selector_allowed = false;
                 break;
             }
+            u64 block_index = original_index / overlay_selector.block_total;
             u8 rank = overlay_selector.ranks.data[(usize)original_index];
             if (rank == 0u || rank > overlay_selector.overlay_erasure_budget) {
                 selector_allowed = false;
                 break;
             }
-            u64 block_index = original_index / overlay_selector.block_total;
             usize pending_index = 0u;
             while (pending_index < pending_count && pending_blocks[pending_index] != block_index) {
                 ++pending_index;
@@ -33169,8 +33249,8 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
     overlay_selector.block_count = tile.ecc_block_count;
     if ((u32)overlay_selector.overlay_erasure_budget > tile.ecc_parity ||
         overlay_selector.block_count > (u64)USIZE_MAX_VALUE ||
-        !overlay_selector.counts.ensure((usize)overlay_selector.block_count) ||
         overlay_selector.block_count > (u64)USIZE_MAX_VALUE / overlay_selector.block_total ||
+        !overlay_selector.counts.ensure((usize)overlay_selector.block_count) ||
         !overlay_selector.ranks.ensure((usize)(overlay_selector.block_count *
                                                overlay_selector.block_total))) {
         console_line(2, "encode: overlay selector map is too large or exceeds ECC capacity");
@@ -33226,10 +33306,10 @@ static int command_decode(int arg_count, char** args) {
         return 0;
     }
     ImageMappingConfig mapping;
-    static const usize MAX_INPUT_FILES = 256u;
+    static const usize MAX_INPUT_FILES = 1024u;
     const char* input_files[MAX_INPUT_FILES];
     usize file_count = 0u;
-    MetadataTile::Values encoded_pages[MAX_INPUT_FILES];
+    static MetadataTile::Values encoded_pages[MAX_INPUT_FILES];
     bool encoded_page_present[MAX_INPUT_FILES] = {};
     u64 encoded_page_indices[MAX_INPUT_FILES] = {};
     usize encoded_page_count = 0u;

@@ -341,7 +341,7 @@ int main(int argc, char** argv) {
     }
     u64 pixel_count = (u64)width * height;
     makocode::ByteBuffer pixels;
-    if (!ppm_read_rgb_pixels(state, pixel_count, pixels)) {
+    if (!report_page && !ppm_read_rgb_pixels(state, pixel_count, pixels)) {
         fprintf(stderr, "canonical tile: failed to parse PPM pixels\n");
         return 1;
     }
@@ -401,6 +401,76 @@ int main(int argc, char** argv) {
             fprintf(stderr, "canonical tile: metadata is not a compact current-schema square\n");
             return 1;
         }
+        return 0;
+    }
+
+    if (report_page) {
+        ImageMappingConfig summary_mapping;
+        makocode::ByteBuffer summary_frame;
+        makocode::ByteBuffer summary_erasures;
+        u64 summary_bit_count = 0u;
+        u64 selector_seed = 0u;
+        u16 unknown_budget = 0u;
+        u16 overlay_budget = 0u;
+        PpmParserState summary_state;
+        if (!ppm_extract_frame_bits(input,
+                                    summary_mapping,
+                                    summary_frame,
+                                    summary_bit_count,
+                                    summary_state,
+                                    false,
+                                    (bool*)0,
+                                    (makocode::ByteBuffer*)0,
+                                    1u,
+                                    &summary_erasures,
+                                    &selector_seed,
+                                    (makocode::ByteBuffer*)0,
+                                    &unknown_budget,
+                                    &overlay_budget,
+                                    (bool*)0,
+                                    (const AffineTransform*)0,
+                                    false,
+                                    (u64*)0,
+                                    (const MetadataTile::Values*)0,
+                                    (const u8*)0,
+                                    0u,
+                                    0u,
+                                    0u,
+                                    true,
+                                    true,
+                                    false,
+                                    true)) {
+            fprintf(stderr, "canonical tile: failed to read current-format page metadata\n");
+            return 1;
+        }
+        const MetadataTile::Values& values = summary_state.encoded_tile;
+        if (values.schema_version != MetadataTile::TILE_SCHEMA_VERSION ||
+            !values.overwrite_layout || !values.ecc_enabled ||
+            values.ecc_block_count == 0u || values.ecc_parity == 0u ||
+            values.page_index == 0u || values.page_index > values.page_count ||
+            values.page_width_pixels != expected_width ||
+            values.page_height_pixels != expected_height ||
+            (values.overlay_selector_present
+                 ? (!values.overlay_erasure_budget ||
+                    (u32)values.unknown_parity_budget + values.overlay_erasure_budget >
+                        values.ecc_parity)
+                 : values.overlay_erasure_budget != 0u) ||
+            (values.overlay_erasure_budget > 0u &&
+             values.ecc_block_count > U64_MAX_VALUE / values.overlay_erasure_budget)) {
+            fprintf(stderr, "canonical tile: invalid ECC or overlay metadata\n");
+            return 1;
+        }
+        u64 selector_total = values.ecc_block_count * values.overlay_erasure_budget;
+        printf("%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%llu\t%llu\t\n",
+               (unsigned long long)values.page_index,
+               (unsigned long long)values.page_count,
+               (unsigned long long)values.ecc_block_count,
+               (unsigned)values.ecc_parity,
+               (unsigned)unknown_budget,
+               (unsigned)overlay_budget,
+               values.overlay_selector_present ? 1u : 0u,
+               (unsigned long long)selector_total,
+               (unsigned long long)selector_seed);
         return 0;
     }
 
@@ -558,25 +628,30 @@ int main(int argc, char** argv) {
             u64 reserve_reject_budget = 0u;
             for (u64 block = 0u; block < values.ecc_block_count; ++block) {
                 usize block_start = (usize)block * block_total;
-                u32 structural_erasures = 0u;
-                for (usize symbol = 0u; symbol < block_total; ++symbol) {
-                    if (erased_symbols.data[block_start + symbol]) ++structural_erasures;
-                }
-                u32 overlay_erasures = values.overlay_selector_present
-                                           ? (u32)selector_counts.data[(usize)block]
-                                           : 0u;
-                if (structural_erasures + overlay_erasures +
-                        (u32)unknown_budget > values.ecc_parity) {
-                    fprintf(stderr, "canonical tile: structural and overlay erasures exceed requested ECC parity\n");
+                u8 selector_mask[makocode::RS_FIELD_SIZE] = {};
+                if (values.overlay_selector_present &&
+                    !MetadataTile::overlay_selector_mask(
+                        selector_seed,
+                        block,
+                        (u16)block_total,
+                        selector_counts.data[(usize)block],
+                        selector_mask)) {
+                    fprintf(stderr, "canonical tile: failed to rebuild selector mask\n");
                     return 1;
                 }
-                if (check_reserve_reject) {
-                    u64 candidate = (u64)values.ecc_parity -
-                                    structural_erasures - unknown_budget + 1u;
-                    if (candidate <= values.ecc_parity && candidate > overlay_budget) {
-                        reserve_reject_budget = candidate;
+                u32 erased_symbols_in_block = 0u;
+                for (usize symbol = 0u; symbol < block_total; ++symbol) {
+                    if (erased_symbols.data[block_start + symbol] || selector_mask[symbol]) {
+                        ++erased_symbols_in_block;
                     }
                 }
+                if (erased_symbols_in_block + (u32)unknown_budget > values.ecc_parity) {
+                    fprintf(stderr, "canonical tile: structural and overlay erasure union exceeds requested ECC parity\n");
+                    return 1;
+                }
+            }
+            if (check_reserve_reject && overlay_budget < values.ecc_parity) {
+                reserve_reject_budget = (u64)overlay_budget + 1u;
             }
             if (check_reserve_reject) {
                 if (!values.overlay_selector_present ||
@@ -722,6 +797,10 @@ int main(int argc, char** argv) {
         if (report_page) {
             u64 selector_total = 0u;
             for (usize block = 0u; block < selector_counts.size; ++block) {
+                if (selector_counts.data[block] != overlay_budget) {
+                    fprintf(stderr, "canonical tile: incomplete deterministic selector map\n");
+                    return 1;
+                }
                 selector_total += selector_counts.data[block];
             }
             printf("%llu\t%llu\t%llu\t%u\t%u\t%u\t%u\t%llu\t%llu\t",
@@ -734,10 +813,6 @@ int main(int argc, char** argv) {
                    values.overlay_selector_present ? 1u : 0u,
                    (unsigned long long)selector_total,
                    (unsigned long long)selector_seed);
-            for (usize block = 0u; block < selector_counts.size; ++block) {
-                if (block) putchar(',');
-                printf("%u", (unsigned)selector_counts.data[block]);
-            }
             putchar('\n');
         }
         if (report_ecc_settings) {

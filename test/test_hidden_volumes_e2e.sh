@@ -310,7 +310,7 @@ queue_encode_reject overlay_fraction_without_ppm "--overlay-fraction and overlay
     --ecc=0.5 --overlay-fraction=0.1
 queue_encode_reject overlay_ppm_without_fraction "--overlay-fraction and overlay images must be used together" \
     --ecc=0.5 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
-queue_encode_reject overlay_fraction_too_large "--overlay-fraction must be between 0.0 and 1.0" \
+queue_encode_reject overlay_fraction_too_large "--overlay-fraction must be between 0.0 and 254/255" \
     --ecc=0.5 --overlay-fraction=1.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"
 queue_encode_reject overlay_without_ecc "overlay requires ECC" --ecc=0 \
     --overlay-fraction=0.1 "--overlay-ppm=$work_dir/overlay.ppm" "--overlay-pages=all"

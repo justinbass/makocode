@@ -47,5 +47,5 @@ if [[ -z $label ]]; then
     exit 1
 fi
 
-export MAKO_OVERLAY_FRACTION=0.75
+export MAKO_OVERLAY_FRACTION=0.992156862745098
 exec "$script_dir/test_overlay_e2e.sh" "$label"
