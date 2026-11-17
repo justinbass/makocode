@@ -10,9 +10,13 @@ endif
 
 LCOV_REPORT ?= test_output/coverage/makocode.info
 LCOV_HTML_DIR ?= test_output/coverage
-LCOV_FLAGS ?= --ignore-errors inconsistent,unsupported,format
-LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
-GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category
+# Clang's gcov output can assign synthesized functions to declaration lines or
+# line 0. Do not infer function ranges from those incomplete locations, and
+# fully ignore the resulting lcov metadata warnings (repeat categories per
+# lcov's ignore-errors convention).
+LCOV_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,format,format
+LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=0
+GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category,category
 
 .PHONY: all clean test coverage
 
