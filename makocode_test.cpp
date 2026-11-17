@@ -1840,8 +1840,34 @@ static unsigned crc_cksum(const std::string& bytes) {
     return ~crc;
 }
 
+static std::string stable_seed_key(const std::string& key) {
+    // Keep existing fixtures stable when their displayed case IDs are renumbered.
+    std::string result = key;
+    for (size_t i = 0; i + 5 <= result.size(); ++i) {
+        if ((i && result[i - 1] != '/') || result[i] < '0' || result[i] > '9' ||
+            result[i + 1] < '0' || result[i + 1] > '9' ||
+            result[i + 2] < '0' || result[i + 2] > '9' ||
+            result[i + 3] < '0' || result[i + 3] > '9' || result[i + 4] != '_') continue;
+        unsigned number = static_cast<unsigned>((result[i] - '0') * 1000 +
+                                                (result[i + 1] - '0') * 100 +
+                                                (result[i + 2] - '0') * 10 +
+                                                (result[i + 3] - '0'));
+        unsigned original = number;
+        if (number >= 5u && number <= 112u) original = number - 3u;
+        else if (number >= 113u && number <= 127u) original = number - 4u;
+        if (original != number) {
+            result[i] = static_cast<char>('0' + original / 1000u);
+            result[i + 1] = static_cast<char>('0' + (original / 100u) % 10u);
+            result[i + 2] = static_cast<char>('0' + (original / 10u) % 10u);
+            result[i + 3] = static_cast<char>('0' + original % 10u);
+        }
+        break;
+    }
+    return result;
+}
+
 static unsigned case_seed(const std::string& key) {
-    return crc_cksum(std::to_string(master_seed) + ":" + key) & 0x7fffffffu;
+    return crc_cksum(std::to_string(master_seed) + ":" + stable_seed_key(key)) & 0x7fffffffu;
 }
 
 static fs::path make_work_dir(const std::string& label) {
@@ -2069,7 +2095,7 @@ static void decode_failure_case(const std::string& id, const std::string& kind) 
 }
 
 static void cli_output_dir_case() {
-    const std::string id = "0029_cli_output_dir";
+    const std::string id = "0032_cli_output_dir";
     fs::path work = make_work_dir(id);
     fs::path payload = work / "cli_payload.bin";
     write_file(payload, "encode-decode-cli test payload");
@@ -2085,7 +2111,7 @@ static void cli_output_dir_case() {
 }
 
 static void palette_metadata_case(bool wrong_palette) {
-    std::string id = wrong_palette ? "0038_palette_wrong_rejected" : "0037_palette_auto_discovery";
+    std::string id = wrong_palette ? "0041_palette_wrong_rejected" : "0040_palette_auto_discovery";
     fs::path work = make_work_dir(id);
     fs::path payload = work / "payload.bin";
     generate_bytes(work, payload, 16384, case_seed("payload/" + id + (wrong_palette ? "/wrong" : "/auto")), "payload");
@@ -2107,7 +2133,7 @@ static void palette_metadata_case(bool wrong_palette) {
 }
 
 static void password_failure_case() {
-    const std::string id = "0039_password_failures";
+    const std::string id = "0042_password_failures";
     fs::path work = make_work_dir(id), payload = work / "payload.bin";
     generate_bytes(work, payload, 32768, case_seed("payload/" + id), "payload");
     const std::string password = "suite-password", prefix = id + "_page";
@@ -2127,7 +2153,7 @@ static void password_failure_case() {
 }
 
 static void header_copy_corruption_case() {
-    const std::string id = "0040_header_copy_corruption";
+    const std::string id = "0043_header_copy_corruption";
     fs::path work = make_work_dir(id), payload = work / "random.bin";
     generate_bytes(work, payload, 4096, case_seed("payload/" + id), "payload");
     const std::string prefix = id + "_page";
@@ -2147,7 +2173,7 @@ static void header_copy_corruption_case() {
 }
 
 static void decode_stdin_case() {
-    const std::string id = "0057_decode_stdin";
+    const std::string id = "0060_decode_stdin";
     fs::path work=make_work_dir(id),payload=work/"payload.bin";
     std::string contents("\0stdin coverage payload\xff\n",26); write_file(payload,contents);
     const std::string prefix=id+"_stdin";
@@ -2160,7 +2186,7 @@ static void decode_stdin_case() {
 }
 
 static void archive_tree_case() {
-    const std::string id="0054_archive_tree_roundtrip";
+    const std::string id="0057_archive_tree_roundtrip";
     fs::path work=make_work_dir(id),source=work/"source",pages_dir=work/"pages",decoded=work/"decoded";
     fs::create_directories(source/"tree/empty");fs::create_directories(source/"tree/nested/deep_empty");
     fs::create_directories(source/"empty_only/nested/leaf_empty");fs::create_directories(pages_dir);
@@ -2181,7 +2207,7 @@ static void archive_tree_case() {
 }
 
 static void archive_symlink_case() {
-    const std::string id="0061_archive_symlink_roundtrip";
+    const std::string id="0064_archive_symlink_roundtrip";
     fs::path work=make_work_dir(id),source=work/"source",input=source/"input",pages_dir=work/"pages",decoded=work/"decoded";
     fs::create_directories(input);fs::create_directories(pages_dir);
     write_file(source/"program","target contents from above the encoded directory\n");
@@ -2195,7 +2221,7 @@ static void archive_symlink_case() {
 }
 
 static void default_naming_case() {
-    const std::string id="0064_default_encode_naming";
+    const std::string id="0067_default_encode_naming";
     fs::path work=make_work_dir(id),pages_dir=work/"pages",payload=work/"payload.bin";fs::create_directories(pages_dir);
     write_file(payload,std::string("\0default timestamp naming payload\xff\n",35));
     auto result=run_cli(work,{"encode","--input=payload.bin","--palette=Cyan Black","--output-dir="+pages_dir.string(),"--debug"},"encode");expect_success(result,id+" encode");
@@ -2207,7 +2233,7 @@ static void default_naming_case() {
 }
 
 static void fiducials_case() {
-    const std::string id="0063_fiducials",prefix=id+"_fiducials";
+    const std::string id="0066_fiducials",prefix=id+"_fiducials";
     fs::path work=make_work_dir(id),pages_dir=work/"pages",decoded=work/"decoded",payload=work/"payload.bin";fs::create_directories(pages_dir);
     write_file(payload,std::string("\0fiducials custom grid payload\xff\n",31));
     auto encoded=run_cli(work,{"encode","--input=payload.bin","--page-width=240","--page-height=240","--fiducial-spacing=30","--prefix="+prefix,"--output-dir="+pages_dir.string(),"--debug"},"encode");expect_success(encoded,id+" encode");
@@ -2220,7 +2246,7 @@ static void fiducials_case() {
 }
 
 static void ppm_transform_cli_case() {
-    const std::string id="0067_ppm_transform_cli";fs::path work=make_work_dir(id);
+    const std::string id="0070_ppm_transform_cli";fs::path work=make_work_dir(id);
     auto help=run_process({test_executable.string(),"--ppm-transform","--help"},work,{},work/"help.out",work/"help.err");
     require(help.status==0&&help.err.find("Usage:")!=std::string::npos,id+": helper help did not print usage");
     auto no_command=run_process({test_executable.string(),"--ppm-transform"},work,{},work/"none.out",work/"none.err");
@@ -2232,7 +2258,7 @@ static void ppm_transform_cli_case() {
 }
 
 static void cli_help_case() {
-    const std::string id="0055_cli_help";fs::path work=make_work_dir(id);
+    const std::string id="0058_cli_help";fs::path work=make_work_dir(id);
     struct HelpCheck{std::vector<std::string> args;const char* first;const char* second;};
     std::vector<HelpCheck> help={{{},"Usage:","makocode encode [options]"},{{"--help"},"Usage:","makocode encode [options]"},{{"-h"},"Usage:","makocode encode [options]"},{{"unknown-command"},"Usage:","makocode encode [options]"},{{"encode","--help"},"Usage: makocode encode","--input PATH"},{{"decode","--help"},"Usage: makocode decode","stdin"},{{"checkpoint","--help"},"makocode checkpoint","checkpoint restore"},{{"overlay","--help"},"Usage:","makocode encode [options]"},{{"minify","--help"},"Usage: makocode minify","Strips comments/whitespace"}};
     for(size_t i=0;i<help.size();++i){auto result=run_cli(work,help[i].args,"help_"+std::to_string(i));require(result.status==0,id+": help command failed");std::string all=result.out+result.err;require(all.find(help[i].first)!=std::string::npos&&all.find(help[i].second)!=std::string::npos,id+": missing expected help text");}
@@ -2248,7 +2274,7 @@ static void cli_help_case() {
 }
 
 static void decode_ecc_retry_case() {
-    const std::string id="0068_decode_ecc_retry";fs::path work=make_work_dir(id),payload=work/"payload.bin",encoded_dir=work/"encoded",output=work/"output";fs::create_directories(encoded_dir);
+    const std::string id="0071_decode_ecc_retry";fs::path work=make_work_dir(id),payload=work/"payload.bin",encoded_dir=work/"encoded",output=work/"output";fs::create_directories(encoded_dir);
     generate_bytes(work,payload,8192,1337,"payload");
     auto encoded=run_cli(work,encode_file_args(payload,encoded_dir,id,{"--page-width=500","--page-height=500"}),"encode");expect_success(encoded,id+" encode");
     auto pages=ppm_paths(encoded_dir,id);require(pages.size()==1,id+": expected one page");
@@ -2261,7 +2287,7 @@ static void decode_ecc_retry_case() {
 }
 
 static void page_fit_case(){
-    const std::string id="0062_page_fit";fs::path work=make_work_dir(id);
+    const std::string id="0065_page_fit";fs::path work=make_work_dir(id);
     unsigned seed=case_seed("page_fit/"+id);
     fs::path payload=work/"payload.bin";
     generate_bytes(work,payload,8192,seed,"payload");
@@ -2290,7 +2316,7 @@ static void page_fit_case(){
 }
 
 static void prefix_ends_encoded_case(){
-    const std::string id="0059_prefix_ends_encoded",prefix=id+"_payload_encoded";
+    const std::string id="0062_prefix_ends_encoded",prefix=id+"_payload_encoded";
     fs::path work=make_work_dir(id),pages_dir=work/"pages",decoded=work/"decoded",payload=work/"payload.bin";fs::create_directories(pages_dir);
     std::string data("\0prefix-encoded roundtrip payload\xff\n",35);write_file(payload,data);
     auto encoded=run_cli(work,{"encode","--input=payload.bin","--page-width=80","--page-height=80","--palette=Cyan Black","--prefix="+prefix,"--output-dir="+pages_dir.string(),"--debug"},"encode");expect_success(encoded,id+" encode");
@@ -2304,7 +2330,7 @@ static void prefix_ends_encoded_case(){
 }
 
 static void metadata_pages_case(){
-    const std::string id="0119_metadata_pages";fs::path work=make_work_dir(id);fs::path payload=work/"payload.bin";
+    const std::string id="0123_metadata_pages";fs::path work=make_work_dir(id);fs::path payload=work/"payload.bin";
     unsigned seed=case_seed("metadata_pages/payload");generate_bytes(work,payload,3000,seed,"payload");std::string payload_bytes=read_file(payload);
     struct Selection{const char* name;const char* selector;std::vector<int> pages;};
     const Selection selections[]={{"middle","middle",{2}},{"one","1",{1}},{"range","2-3",{2,3}},{"list","1,3",{1,3}},{"last","last",{3}}};
@@ -2321,7 +2347,7 @@ static void metadata_pages_case(){
 }
 
 static void decoded_file_case(){
-    const std::string id="0083_decoded_file";fs::path work=make_work_dir(id),input=work/"input",pages_dir=work/"pages",out=work/"out",stdin_out=work/"stdin_out";
+    const std::string id="0086_decoded_file";fs::path work=make_work_dir(id),input=work/"input",pages_dir=work/"pages",out=work/"out",stdin_out=work/"stdin_out";
     fs::create_directories(input/"empty");fs::create_directories(input/"sub");fs::create_directories(pages_dir);fs::create_directories(out);
     write_file(input/"sub"/"a b",std::string("hello\nback\\slash\0\xff",18));write_file(input/"blank","");
     auto enc=run_cli(work,{"encode","--input=input","--password=secret","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb","--prefix=page","--output-dir=pages"},"encode",{},{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("crypto/"+id))}});
@@ -2362,7 +2388,7 @@ static void decoded_file_case(){
 }
 
 static void checkpoint_restore_case(){
-    const std::string id="0109_checkpoint_restore";fs::path work=make_work_dir(id);
+    const std::string id="0112_checkpoint_restore";fs::path work=make_work_dir(id);
     fs::create_directories(work/"base_a");fs::create_directories(work/"base_b");fs::create_directories(work/"current_a");fs::create_directories(work/"current_b");fs::create_directories(work/"pages");
     std::vector<unsigned char> a(256*20+173),b(5100);for(size_t i=0;i<a.size();++i)a[i]=static_cast<unsigned char>((i*29+i/7)&255);
     uint32_t state=0xabc123u;for(auto& v:b){state^=state<<13;state^=state>>17;state^=state<<5;v=static_cast<unsigned char>(state&255);}
@@ -2385,14 +2411,14 @@ static void checkpoint_restore_case(){
 }
 
 static void hidden_volumes_case(){
-    const std::string id="0107_hidden_volumes_e2e";fs::path work=make_work_dir(id),source=work/"source",hidden=source/"hidden_tree";
+    const std::string id="0110_hidden_volumes_e2e";fs::path work=make_work_dir(id),source=work/"source",hidden=source/"hidden_tree";
     fs::create_directories(hidden/"nested/empty");fs::create_directories(source/"pages");
     fs::path visible=source/"visible.bin",secret=hidden/"nested/secret.bin";
     // This large CLI matrix keeps fixed pseudo-random inputs so its coverage
     // stays focused on the option combinations; other roundtrip cases still
     // vary their payloads with the suite master seed.
     constexpr unsigned fixture_master_seed=255974958u;
-    auto fixture_seed=[&](const std::string& key){return crc_cksum(std::to_string(fixture_master_seed)+":"+key)&0x7fffffffu;};
+    auto fixture_seed=[&](const std::string& key){return crc_cksum(std::to_string(fixture_master_seed)+":"+stable_seed_key(key))&0x7fffffffu;};
     generate_bytes(work,visible,16384,fixture_seed("payload/"+id+"/visible"),"visible");
     generate_bytes(work,secret,1024,fixture_seed("payload/"+id+"/hidden"),"secret");
     write_file(hidden/"root.txt","hidden archive root file\n");write_file(hidden/"empty.bin","");
@@ -2698,7 +2724,7 @@ static MetadataTile::Values extract_tile_values(const fs::path& path){
 }
 
 static void affine_cell_sampling_case(){
-    const std::string id="0076_decode_affine_cell_sampling";fs::path work=make_work_dir(id),payload=work/"makocode.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);
+    const std::string id="0079_decode_affine_cell_sampling";fs::path work=make_work_dir(id),payload=work/"makocode.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);
     write_file(payload,"makocode");auto encoded=run_cli(work,encode_file_args(payload,pages,id,{"--page-width=80","--page-height=80"}),"encode");expect_success(encoded,id+" encode");
     auto source=ppm_paths(pages,id);require(source.size()==1,id+": expected source page");fs::path scaled=work/"scaled.ppm",scan=work/"fixture.ppm";
     expect_success(run_transform(work,{"transform","--input",source[0],"--output",scaled.string(),"--scale-x","3.2363636363636363","--scale-y","3.2363636363636363"},"scale"),id+" scale");
@@ -2708,14 +2734,14 @@ static void affine_cell_sampling_case(){
 }
 
 static void decode_scale_318_case(){
-    const std::string id="0069_decode_scale_318";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);
+    const std::string id="0072_decode_scale_318";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);
     write_file(payload,"0");auto encoded=run_cli(work,encode_file_args(payload,pages,id,{"--page-width=160","--page-height=160"}),"encode");expect_success(encoded,id+" encode");auto source=ppm_paths(pages,id);require(source.size()==1,id+": expected one page");
     fs::path scan=work/"scaled.ppm";expect_success(run_transform(work,{"transform","--input",source[0],"--output",scan.string(),"--scale-x","3.18","--scale-y","3.18"},"scale"),id+" scale");
     auto result=run_cli(work,decode_file_args({scan.string()},decoded),"decode");expect_success(result,id+" decode");compare_files(payload,decoded/"payload.bin",id);
 }
 
 static void small_scan_case(){
-    const std::string id="0077_decode_small_scan";fs::path work=make_work_dir(id),payload=work/"makocode.bin",pages=work/"pages";fs::create_directories(pages);write_file(payload,"makocode");
+    const std::string id="0080_decode_small_scan";fs::path work=make_work_dir(id),payload=work/"makocode.bin",pages=work/"pages";fs::create_directories(pages);write_file(payload,"makocode");
     auto encoded=run_cli(work,encode_file_args(payload,pages,"small_scan",{"--ecc=fill","--page-width=80","--page-height=80"}),"encode");expect_success(encoded,id+" encode");auto source=ppm_paths(pages,"small_scan");require(source.size()==1,id+": expected one source page");
     for(bool five:{false,true}){const double pitch=five?2.477:2.239;fs::path scaled=work/(five?"5x_scaled.ppm":"4_5x_scaled.ppm");
         expect_success(run_transform(work,{"transform","--input",source[0],"--output",scaled.string(),"--scale-x",std::to_string(pitch),"--scale-y",std::to_string(pitch)},five?"scale5":"scale45"),id+" transform");
@@ -2734,7 +2760,7 @@ static void small_scan_case(){
 }
 
 static void current_metadata_case(){
-    const std::string id="0084_decode_current_metadata";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);write_file(payload,"x");
+    const std::string id="0087_decode_current_metadata";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);write_file(payload,"x");
     auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--page-width=64","--page-height=64"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"page");require(ppms.size()==1,id+": expected page");
     MetadataTile::Values tile=extract_tile_values(ppms.front());PpmImage image=read_ppm(ppms.front());
     const unsigned tile_x=(image.width-48)/2,tile_y=(image.height-48)/2;unsigned cell=tile.metadata_length_prefix_bits+128;
@@ -2749,7 +2775,7 @@ static void current_metadata_case(){
 }
 
 static void metadata_free_case(bool large){
-    const std::string id=large?"0118_decode_metadata_free_large":"0117_decode_metadata_free";fs::path work=make_work_dir(id);
+    const std::string id=large?"0122_decode_metadata_free_large":"0121_decode_metadata_free";fs::path work=make_work_dir(id);
     const std::vector<std::string> palettes={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black"};
     const unsigned base_seed=large?master_seed+130363u:master_seed;
     const unsigned iterations=large?1u:4u;
@@ -2766,7 +2792,7 @@ static void metadata_free_case(bool large){
 }
 
 static void missing_pages_case(){
-    const std::string id="0111_decode_missing_pages";fs::path work=make_work_dir(id);fs::path payload=work/"payload.bin",out=work/"out";unsigned seed=2110;generate_bytes(work,payload,32768,seed,"payload");
+    const std::string id="0115_decode_missing_pages";fs::path work=make_work_dir(id);fs::path payload=work/"payload.bin",out=work/"out";unsigned seed=2110;generate_bytes(work,payload,32768,seed,"payload");
     auto enc=run_cli(work,{"encode","--output-dir="+work.string(),"--prefix=page","--page-width=400","--page-height=400","--ecc=0.8"},"encode",payload);expect_success(enc,id+" encode");auto pages=ppm_paths(work,"page");require(pages.size()==4,id+": expected four pages");
     for(const auto& item:std::vector<std::pair<std::string,std::vector<std::string>>>{{"middle",{pages[0],pages[2],pages[3]}},{"shuffled",{pages[3],pages[0],pages[2]}},{"first",{pages[1],pages[2],pages[3]}},{"last",{pages[0],pages[1],pages[2]}}}){
         std::vector<std::string> args={"decode","--decoded-stdout"};args.insert(args.end(),item.second.begin(),item.second.end());auto decoded=run_cli(work,args,item.first);
@@ -2777,7 +2803,7 @@ static void missing_pages_case(){
 }
 
 static void orientation_scan_case(){
-    const std::string id="0113_decode_orientation_scan";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages";fs::create_directories(pages);write_file(payload,"orientation scan round-trip payload");
+    const std::string id="0117_decode_orientation_scan";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages";fs::create_directories(pages);write_file(payload,"orientation scan round-trip payload");
     auto enc=run_cli(work,encode_file_args(payload,pages,"source",{"--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto source=ppm_paths(pages,"source");require(source.size()==1,id+": expected source page");PpmImage image=read_ppm(source.front());
     const std::array<std::array<double,3>,10> variants={{{0,0,0},{90,0,0},{180,0,0},{270,0,0},{0,1,0},{0,0,1},{91,0,0},{181,0,0},{271,0,0},{1,1,1}}};
     for(size_t i=0;i<variants.size();++i){fs::path scan=work/("scan_"+std::to_string(i)+".ppm"),out=work/("decoded_"+std::to_string(i));make_oriented_scan(image,scan,variants[i][0],variants[i][1]!=0,variants[i][2]!=0);
@@ -2785,7 +2811,7 @@ static void orientation_scan_case(){
 }
 
 static void scan_registration_noise_case(){
-    const std::string id="0085_decode_scan_registration";fs::path work=make_work_dir(id),payload=work/"input.bin",pages=work/"pages";fs::create_directories(pages);write_file(payload,"registration regression");
+    const std::string id="0088_decode_scan_registration";fs::path work=make_work_dir(id),payload=work/"input.bin",pages=work/"pages";fs::create_directories(pages);write_file(payload,"registration regression");
     auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--ecc=fill","--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto source=ppm_paths(pages,"page");require(source.size()==1,id+": expected one source page");
     const double pitch=2.75,ox=2.5,oy=2.0;fs::path scan=work/"scan.ppm";make_affine_scan(source.front(),scan,225,226,pitch,ox,oy,30,200,false,false);
     PpmImage img=read_ppm(scan);std::set<std::pair<int,int>> centers;for(int y=0;y<80;++y)for(int x=0;x<80;++x)centers.insert({static_cast<int>(std::floor((x+.5)*pitch+ox)),static_cast<int>(std::floor((y+.5)*pitch+oy))});
@@ -2813,7 +2839,7 @@ static void synthetic_scan_case(const std::string& id,bool margin_noise,bool off
 }
 
 static void lowres_rotated_scan_case(){
-    const std::string id="0082_decode_lowres_rotated_scan";fs::path work=make_work_dir(id),payload=work/"makocode.bin",pages=work/"encoded";fs::create_directories(pages);write_file(payload,"makocode");
+    const std::string id="0085_decode_lowres_rotated_scan";fs::path work=make_work_dir(id),payload=work/"makocode.bin",pages=work/"encoded";fs::create_directories(pages);write_file(payload,"makocode");
     auto enc=run_cli(work,encode_file_args(payload,pages,"source",{"--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"source");require(ppms.size()==1,id+": expected source page");PpmImage src=read_ppm(ppms.front());
     const double scale=1.75,angle=-1.25*3.14159265358979323846/180.0,cs=std::cos(angle),sn=std::sin(angle),cx=39.5,cy=39.5;const double a00=scale*cs,a01=-scale*sn,a10=scale*sn,a11=scale*cs,tx=75-(a00*cx+a01*cy),ty=75-(a10*cx+a11*cy);
     std::vector<unsigned char> gray(150u*151u,230);const double subs[]={.125,.375,.625,.875};for(unsigned y=0;y<151;++y)for(unsigned x=0;x<150;++x){unsigned sum=0;for(double sy:subs)for(double sx:subs){double px=x+sx-.5,py=y+sy-.5,dx=px-tx,dy=py-ty;int col=static_cast<int>(std::floor((a11*dx-a01*dy)/(scale*scale))),row=static_cast<int>(std::floor((-a10*dx+a00*dy)/(scale*scale)));unsigned char value=col>=0&&row>=0&&col<80&&row<80?static_cast<unsigned char>(30+std::floor(.8*static_cast<unsigned char>(src.pixels[(static_cast<size_t>(row)*80+col)*3])+.5)):230;sum+=value;}
@@ -2825,7 +2851,7 @@ static void lowres_rotated_scan_case(){
 }
 
 static void short_length_header_case(){
-    const std::string id="0081_decode_short_length_header";fs::path work=make_work_dir(id),payload=work/"makocode.bin",encoded=work/"encoded";fs::create_directories(encoded);write_file(payload,"makocode");
+    const std::string id="0084_decode_short_length_header";fs::path work=make_work_dir(id),payload=work/"makocode.bin",encoded=work/"encoded";fs::create_directories(encoded);write_file(payload,"makocode");
     auto enc=run_cli(work,encode_file_args(payload,encoded,"length_header",{"--page-width=240","--page-height=240"}),"encode");expect_success(enc,id+" encode");auto pages=ppm_paths(encoded,"length_header");require(pages.size()==1,id+": expected page");
     PpmImage original=read_ppm(pages.front());require(original.width==240&&original.height==240,id+": encoded dimensions changed");PpmImage damaged=original;size_t target=(4u*3u);unsigned char cell=static_cast<unsigned char>(damaged.pixels[target]);require(cell==0||cell==255,id+": first payload cell not binary");for(unsigned c=0;c<3;++c)damaged.pixels[target+c]=static_cast<char>(255-cell);fs::path damaged_source=work/"damaged_source.ppm";write_file(damaged_source,"P6\n240 240\n255\n"+damaged.pixels);
     const double scale=2.018181818;fs::path clean_scaled=work/"clean_scaled.ppm",bad_scaled=work/"bad_scaled.ppm";
@@ -2855,7 +2881,7 @@ static void erased_metadata_scan_case(const std::string& id,int kind){
 }
 
 static void minify_literals_case(){
-    const std::string id="0056_minify_literals";fs::path work=make_work_dir(id),fixture=work/"makocode.cpp";
+    const std::string id="0059_minify_literals";fs::path work=make_work_dir(id),fixture=work/"makocode.cpp";
     const std::string source=R"SRC(  #define MINIFY_DIRECTIVE_SWITCH 1
 #if MINIFY_DIRECTIVE_SWITCH
 #define MINIFY_DIRECTIVE_VALUE "preprocessor directive kept"
@@ -2952,7 +2978,7 @@ static fs::path damage_palette_row(const fs::path& page,const fs::path& output,u
 }
 
 static void recover_palette_case(){
-    const std::string id="0112_decode_recover_palette";fs::path work=make_work_dir(id),payload=work/"payload.bin";generate_bytes(work,payload,8192,48621,"payload");
+    const std::string id="0116_decode_recover_palette";fs::path work=make_work_dir(id),payload=work/"payload.bin";generate_bytes(work,payload,8192,48621,"payload");
     const std::vector<std::tuple<std::string,unsigned,std::string>> common={{"two_color",2,"White Black"},{"four_color",4,"White Cyan Magenta Yellow"},{"five_color",5,"White Cyan Magenta Yellow Black"},{"eight_color",8,"White Black #FF0000 #00FF00 #0000FF Cyan Magenta Yellow"}};
     for(const auto& item:common){std::string label=std::get<0>(item),palette=std::get<2>(item);unsigned count=std::get<1>(item);fs::path encoded=work/(label+"_encoded"),decoded=work/(label+"_decoded");fs::create_directories(encoded);
         auto enc=run_cli(work,encode_file_args(payload,encoded,"page",{"--page-width=700","--page-height=700","--ecc=2.0","--palette",palette}),"encode_"+label);expect_success(enc,id+" encode "+label);auto pages=ppm_paths(encoded,"page");require(pages.size()==1,id+": expected one palette page");
@@ -2964,7 +2990,7 @@ static void recover_palette_case(){
 }
 
 static void cli_decoder_paths_case(){
-    using namespace MetadataTile;const std::string id="0058_cli_decoder_paths";fs::path work=make_work_dir(id),inputs=work/"harness_inputs",archive_out=work/"archive_output";fs::create_directories(inputs);fs::create_directories(archive_out);
+    using namespace MetadataTile;const std::string id="0061_cli_decoder_paths";fs::path work=make_work_dir(id),inputs=work/"harness_inputs",archive_out=work/"archive_output";fs::create_directories(inputs);fs::create_directories(archive_out);
     write_file(inputs/"gray.pgm",std::string("P5\n3 1\n255\n",11)+std::string("\0\x7f\xff",3));write_file(inputs/"color.ppm",std::string("P6\n2 1\n255\n",11)+std::string("\x01\x02\x03\xfe\x64\0",6));write_file(inputs/"bad.ppm","P1\n1 1\n0\n");
     makocode::image::ImageBuffer loaded={};require(makocode::image::load_ppm_grayscale((inputs/"gray.pgm").c_str(),loaded,nullptr)==makocode::image::LoadSuccess&&loaded.width==3&&loaded.height==1&&loaded.pixels[0]==0&&loaded.pixels[1]==127&&loaded.pixels[2]==255,"P5 grayscale loading mismatch");
     require(makocode::image::load_ppm_grayscale((inputs/"color.ppm").c_str(),loaded,nullptr)==makocode::image::LoadSuccess&&loaded.width==2&&loaded.height==1&&loaded.pixels[0]==2&&loaded.pixels[1]==118,"P6 grayscale conversion mismatch");
@@ -2991,7 +3017,7 @@ static void cli_decoder_paths_case(){
 }
 
 static void footer_features_case(){
-    const std::string id="0109_footer_features";fs::path work=make_work_dir(id),payload=work/"payload.bin";generate_bytes(work,payload,16384,732881,"payload");
+    const std::string id="0113_footer_features";fs::path work=make_work_dir(id),payload=work/"payload.bin";generate_bytes(work,payload,16384,732881,"payload");
     auto encode=[&](const fs::path& dir,const std::string& prefix,const std::vector<std::string>& extra,const fs::path& input=fs::path()){
         fs::create_directories(dir);std::vector<std::string> args={"encode","--output-dir="+dir.string(),"--prefix="+prefix};args.insert(args.end(),extra.begin(),extra.end());return run_cli(work,args,"encode_"+prefix,input.empty()?payload:input);};
     const std::string long_footer="a very long title that wraps across multiple footer lines without growing the page";fs::path wrapped=work/"wrapped";auto wrap=encode(wrapped,"wrap",{"--page-width=220","--page-height=180","--footer="+long_footer,"--ecc=fill"});expect_success(wrap,id+" wrapped footer");auto wrap_pages=ppm_paths(wrapped,"wrap");require(!wrap_pages.empty(),id+": wrapped footer emitted no pages");
@@ -3041,7 +3067,7 @@ static void scan_registration_case(const std::string& id,double pitch,double ox,
 }
 
 static void canonical_tile_case(){
-    const std::string id="0101_canonical_tile";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);
+    const std::string id="0104_canonical_tile";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);
     std::vector<unsigned char> bytes(65536);std::mt19937 random(42);for(auto& b:bytes)b=static_cast<unsigned char>(random()&255u);write_file(payload,std::string(bytes.begin(),bytes.end()));
     for(const auto& dims:std::vector<std::pair<unsigned,unsigned>>{{23,23},{48,48},{49,48},{64,48}}){makocode::ByteBuffer mask;u64 reserved=0;require(compute_fiducial_reservation(dims.first,dims.second,dims.second,reserved,&mask,false,0,0,0),id+": canonical reservation failed");u64 overwritten=0;for(usize i=0;i<mask.size;++i){require(mask.data[i]==0||mask.data[i]==OVERWRITE_MASK_PIXEL,id+": unexpected reservation mask value");overwritten+=mask.data[i]==OVERWRITE_MASK_PIXEL;}auto p=MetadataTile::compute_center_tile_placement(dims.first,dims.second);require(p.valid&&p.x0==(dims.first>=48?(dims.first-48)/2:0)&&p.y0==(dims.second>=48?(dims.second-48)/2:0)&&p.offset_x==(dims.first<48?(48-dims.first)/2:0)&&p.offset_y==(dims.second<48?(48-dims.second)/2:0)&&overwritten==reserved&&overwritten<=static_cast<u64>(dims.first)*dims.second,id+": canonical small-page capacity layout mismatch");}
     auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--page-width=1000","--page-height=1000"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"page");require(ppms.size()==1,id+": expected a single canonical page");TileSummary summary=read_tile_summary(ppms.front(),1000,1000);require(summary.block_count>0&&summary.parity>0,id+": missing canonical ECC");
@@ -3054,7 +3080,7 @@ static void canonical_tile_case(){
 }
 
 static void palette_base5_capacity_case(){
-    const std::string id="0103_palette_base5_capacity";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);unsigned seed=case_seed("payload/"+id);generate_bytes(work,payload,34000,seed,"payload");const std::string palette="White Cyan Magenta Yellow Black";
+    const std::string id="0106_palette_base5_capacity";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);unsigned seed=case_seed("payload/"+id);generate_bytes(work,payload,34000,seed,"payload");const std::string palette="White Cyan Magenta Yellow Black";
     auto enc=run_cli(work,encode_file_args(payload,pages,id+"_random_payload_encoded",{"--page-width=360","--page-height=360","--palette",palette}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,id+"_random_payload_encoded");require(ppms.size()==1,id+": base-5 expected one page");auto normal=run_cli(work,decode_file_args(ppms,decoded,{"--palette",palette}),"decode_payload");expect_success(normal,id+" payload decode");compare_files(payload,decoded/"payload.bin",id);
     fs::path metadata=work/"metadata";auto dec=run_cli(work,decode_file_args(ppms,metadata,{"--decoded-file","--palette",palette}),"decode_metadata");expect_success(dec,id+" metadata decode");
     PpmImage image=read_ppm(ppms[0]);MetadataTile::Values tile=extract_tile_values(ppms[0]);int tx=static_cast<int>(image.width/2)-24+static_cast<int>(tile.metadata_square_x0),ty=static_cast<int>(image.height/2)-24+static_cast<int>(tile.metadata_tag_y0);size_t black_outside=0;
@@ -3063,7 +3089,7 @@ static void palette_base5_capacity_case(){
 }
 
 static void canonical_overlay_multipage_case(){
-    const std::string id="0102_canonical_overlay_multipage";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages_dir=work/"pages";generate_bytes(work,payload,4096,103,"payload");
+    const std::string id="0105_canonical_overlay_multipage";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages_dir=work/"pages";generate_bytes(work,payload,4096,103,"payload");
     fs::path black=work/"overlay.ppm",cyan=work/"overlay_second.ppm";expect_success(run_transform(work,{"overlay-mask","--output",black.string(),"--circle-color","0 0 0","--background-color","255 255 255","--width","1000","--height","1000"},"mask"),id+" black mask");expect_success(run_transform(work,{"overlay-mask","--output",cyan.string(),"--circle-color","0 255 255","--background-color","255 255 255","--width","1000","--height","1000"},"cyan"),id+" cyan mask");
     std::vector<std::string> args={"encode","--input=payload.bin","--overlay-fraction=0.992156862745098","--overlay-ppm="+black.string(),"--overlay-pages=1-1,1","--overlay-ppm="+cyan.string(),"--overlay-pages=2-2","--page-width=1000","--page-height=1000","--prefix=page","--output-dir="+pages_dir.string(),"--debug"};auto enc=run_cli(work,args,"encode");expect_success(enc,id+" encode");std::string log=enc.out+enc.err;size_t occurrences=0,offset=0;while((offset=log.find("debug: overlay erasure budget per block=",offset))!=std::string::npos){++occurrences;++offset;}require(occurrences==2,id+": expected two page overlay reservations");
     auto pages=ppm_paths(pages_dir,"page");require(pages.size()>=2&&pages.size()<=16,id+": unexpected multipage output count");std::vector<std::pair<u64,std::string>> indexed;TileSummary baseline;
@@ -3100,7 +3126,7 @@ static bool decode_blob_fixture(const fs::path& path,bool detect,BlobDecodeResul
 }
 
 static void blob_erasure_case(){
-    const std::string id="0110_decode_blob_erasures";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages";fs::create_directories(pages);generate_bytes(work,payload,24576,1944,"payload");
+    const std::string id="0114_decode_blob_erasures";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages";fs::create_directories(pages);generate_bytes(work,payload,24576,1944,"payload");
     auto enc=run_cli(work,encode_file_args(payload,pages,"blob",{"--page-width=600","--page-height=600","--palette","White Black","--ecc=0.75"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"blob");require(!ppms.empty(),id+": source page missing");
     require(test_uniform_region_detector(),id+": uniform-region detector threshold checks failed");
     for(bool black:{true,false}){PpmImage source=read_ppm(ppms[0]);require(source.width==600&&source.height==600,id+": source dimensions changed");const int cx=460,cy=400,radius=120;size_t changed=0;for(int y=cy-radius;y<=cy+radius;++y)for(int x=cx-radius;x<=cx+radius;++x)if((x-cx)*(x-cx)+(y-cy)*(y-cy)<=radius*radius){size_t at=(static_cast<size_t>(y)*source.width+x)*3;unsigned char value=black?0:255;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(value);++changed;}require(changed>40000,id+": blot mutation too small");
@@ -3110,7 +3136,7 @@ static void blob_erasure_case(){
 }
 
 static void raw_fallback_case(){
-    const std::string id="0066_decode_raw_fallback";fs::path work=make_work_dir(id),payload_path=work/"raw_payload.bin",ppm_path=work/"raw_payload.ppm";generate_bytes(work,payload_path,4096,5066,"raw_payload");makocode::ByteBuffer payload;require(read_entire_file(payload_path.c_str(),payload),id+": cannot read raw payload");
+    const std::string id="0069_decode_raw_fallback";fs::path work=make_work_dir(id),payload_path=work/"raw_payload.bin",ppm_path=work/"raw_payload.ppm";generate_bytes(work,payload_path,4096,5066,"raw_payload");makocode::ByteBuffer payload;require(read_entire_file(payload_path.c_str(),payload),id+": cannot read raw payload");
     makocode::EncoderContext encoder;encoder.config.ecc_redundancy=.5;encoder.config.overlay_erasure_budget=0;require(encoder.set_payload(payload.data,payload.size)&&encoder.build(),id+": raw fallback fixture encode failed");
     ImageMappingConfig mapping;const u32 width=500,height=500;PageFooterConfig footer_config;makocode::ByteBuffer frame;u64 frame_bits=0;FooterLayout footer;u32 data_height=height;u64 bits_per_page=0,page_count=0;
     require(build_frame_bits(encoder,mapping,frame,frame_bits)&&compute_page_layout(mapping,footer_config,frame_bits,width,height,footer,data_height,bits_per_page,page_count)&&page_count==1,id+": raw fallback fixture page layout failed");
@@ -3228,120 +3254,123 @@ static std::vector<TestCase> build_cases() {
     };
     RoundTrip r;
     r.size=1; r.literal="0"; r.tiny_dimensions_check=true; rt("0000_tiny_0", "1 byte payload literal '0' encoded from stdin", r); r={};
-    r.size=8; r.literal="makocode"; rt("0001_tiny_makocode", "8 byte payload literal 'makocode' baseline", r); r={};
-    r.size=8192; rt("0002_baseline_8k_auto", "8 KiB payload with automatically selected ECC", r); r={};
-    r.size=8192; rt("0003_baseline_8k_auto_seeded", "8 KiB payload with automatically selected ECC", r); r={};
-    r.size=131072; r.encode_args={"--page-width=700", "--page-height=700"}; r.require_multiple_pages=true; rt("0004_baseline_multi_page_auto", "128 KiB multi-page payload", r); r={};
-    r.size=12000; r.encode_args={"--ecc=fill"}; rt("0005_ecc_fill_moderate", "ECC fill moderate payload", r); r={};
-    r.size=1024; r.encode_args={"--page-width=1400", "--page-height=1800", "--ecc=fill"}; rt("0006_ecc_fill_sparse_large_page", "ECC fill sparse large page", r); r={};
+    const char* makocode_ids[]={"0001_makocode_2_colors","0002_makocode_4_colors","0003_makocode_5_colors","0004_makocode_8_colors"};
+    const char* makocode_palettes[]={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White Black #FF0000 #00FF00 #0000FF Cyan Magenta Yellow"};
+    const char* makocode_descriptions[]={"makocode encoded with 2 colors","makocode encoded with 4 colors","makocode encoded with 5 colors","makocode encoded with 8 colors"};
+    for(size_t i=0;i<4;++i){r.size=8;r.literal="makocode";r.encode_args={"--palette",makocode_palettes[i]};r.decode_args={"--palette",makocode_palettes[i]};rt(makocode_ids[i],makocode_descriptions[i],r);r={};}
+    r.size=8192; rt("0005_baseline_8k_auto", "8 KiB payload with automatically selected ECC", r); r={};
+    r.size=8192; rt("0006_baseline_8k_auto_seeded", "8 KiB payload with automatically selected ECC", r); r={};
+    r.size=131072; r.encode_args={"--page-width=700", "--page-height=700"}; r.require_multiple_pages=true; rt("0007_baseline_multi_page_auto", "128 KiB multi-page payload", r); r={};
+    r.size=12000; r.encode_args={"--ecc=fill"}; rt("0008_ecc_fill_moderate", "ECC fill moderate payload", r); r={};
+    r.size=1024; r.encode_args={"--page-width=1400", "--page-height=1800", "--ecc=fill"}; rt("0009_ecc_fill_sparse_large_page", "ECC fill sparse large page", r); r={};
     const char* palettes[] = {"White Black", "White Cyan Magenta", "White Cyan Magenta Yellow", "White Cyan Magenta Yellow Black"};
-    const char* ids[] = {"0007_palette_white_black", "0008_palette_cmy", "0009_palette_cmyk", "0010_palette_cmykw"};
+    const char* ids[] = {"0010_palette_white_black", "0011_palette_cmy", "0012_palette_cmyk", "0013_palette_cmykw"};
     const char* desc[] = {"Two-color palette stress", "Three-color palette stress", "Four-color palette stress", "Five-color palette stress"};
     for (size_t i=0;i<4;++i) { r.size=8192; r.encode_args={"--palette",palettes[i]}; r.decode_args={"--palette",palettes[i]}; rt(ids[i],desc[i],r); r={}; }
-    r.size=8192; r.encode_args={"--page-width=240","--page-height=240","--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; rt("0011_palette_hex_octet","Expanded hex octet palette",r); r={};
-    r.size=8192; r.encode_args={"--palette","White Cyan Magenta Yellow Black"}; r.decode_args={"--palette","White Cyan Magenta Yellow Black"}; rt("0012_large_canvas_cmykw","Large canvas CMYKW palette",r); r={};
-    r.size=256; r.encode_args={"--page-width=200","--page-height=64"}; rt("0013_fiducial_minimum_ecc","Minimum ECC with fiducial reservation",r); r={};
-    r.size=65536; r.encode_args={"--footer", " !\"#$%&\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy | random.bin | Page %page/%totalpages | 100\\% done", "--font-size", "2"}; rt("0014_footer_metadata","Footer metadata rendering stress",r); r={};
-    r.size=102400; rt("0015_gray_100k_single","100 KiB grayscale single page baseline",r); r={};
-    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.5","--scale-y","2.5","--seed","0"}; rt("0016_gray_100k_scaled","100 KiB scaled 2.5x",r); r={};
-    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.6","--scale-y","2.4","--seed","0"}; rt("0017_gray_100k_stretch_h26_v24","Grayscale horizontal 2.6 / vertical 2.4",r); r={};
-    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.4","--scale-y","2.6","--seed","0"}; rt("0018_gray_100k_stretch_h24_v26","Grayscale horizontal 2.4 / vertical 2.6",r); r={};
-    r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3.03","--scale-y","3.03","--seed","0"}; rt("0019_gray_scale_303_blur","Grayscale upsample 3.03x",r); r={};
-    r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--seed","1337"}; rt("0020_gray_rotate_seeded","Grayscale rotation with deterministic seed",r); r={};
-    r.size=65536; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0021_gray_skew_xy_seeded","Grayscale XY skew",r); r={};
-    r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","-5","--skew-y","5","--seed","7331"}; rt("0022_gray_skew_xy_reverse_seeded","Grayscale reverse XY skew",r); r={};
-    r.size=65536; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0023_gray_rotate_skew_seeded","Grayscale rotation and skew",r); r={};
-    r.size=32768; r.encode_args={"--password=suite-password","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--password=suite-password"}; rt("0024_password_ecc","Password-protected payload with ECC",r); r={};
-    r.size=262144; r.encode_args={"--page-width=520","--page-height=520"}; r.require_multiple_pages=true; rt("0025_ecc_multi_page_massive","262 KiB ECC multi-page stress",r); r={};
-    r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=703681913u; r.encode_args={"--page-width=620","--page-height=620","--ecc=0.41"}; r.transform_args={"--scale-x","2.10","--scale-y","2.10","--rotate","1","--seed","7331"}; r.require_multiple_pages=true; rt("0026_multi_page_distorted","Multi-page distorted payload",r); r={};
-    r.size=16384; r.encode_args={"--palette","White Cyan Magenta Yellow Black"}; r.decode_args={"--palette","White Cyan Magenta Yellow Black"}; rt("0027_palette_base5_custom","Custom palette/base-5 mode",r); r={};
-    r.size=32768; r.encode_args={"--page-width=640","--page-height=640"}; r.transform_args={"--border-thickness","12","--border-density","0.15","--seed","8675309"}; rt("0028_border_dirt_dense","Dense border-noise stress",r); r={};
-    cases.push_back({"0029_cli_output_dir","CLI respects explicit output directory",[](const fs::path&) { cli_output_dir_case(); }});
+    r.size=8192; r.encode_args={"--page-width=240","--page-height=240","--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; rt("0014_palette_hex_octet","Expanded hex octet palette",r); r={};
+    r.size=8192; r.encode_args={"--palette","White Cyan Magenta Yellow Black"}; r.decode_args={"--palette","White Cyan Magenta Yellow Black"}; rt("0015_large_canvas_cmykw","Large canvas CMYKW palette",r); r={};
+    r.size=256; r.encode_args={"--page-width=200","--page-height=64"}; rt("0016_fiducial_minimum_ecc","Minimum ECC with fiducial reservation",r); r={};
+    r.size=65536; r.encode_args={"--footer", " !\"#$%&\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy | random.bin | Page %page/%totalpages | 100\\% done", "--font-size", "2"}; rt("0017_footer_metadata","Footer metadata rendering stress",r); r={};
+    r.size=102400; rt("0018_gray_100k_single","100 KiB grayscale single page baseline",r); r={};
+    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.5","--scale-y","2.5","--seed","0"}; rt("0019_gray_100k_scaled","100 KiB scaled 2.5x",r); r={};
+    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.6","--scale-y","2.4","--seed","0"}; rt("0020_gray_100k_stretch_h26_v24","Grayscale horizontal 2.6 / vertical 2.4",r); r={};
+    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.4","--scale-y","2.6","--seed","0"}; rt("0021_gray_100k_stretch_h24_v26","Grayscale horizontal 2.4 / vertical 2.6",r); r={};
+    r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3.03","--scale-y","3.03","--seed","0"}; rt("0022_gray_scale_303_blur","Grayscale upsample 3.03x",r); r={};
+    r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--seed","1337"}; rt("0023_gray_rotate_seeded","Grayscale rotation with deterministic seed",r); r={};
+    r.size=65536; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0024_gray_skew_xy_seeded","Grayscale XY skew",r); r={};
+    r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","-5","--skew-y","5","--seed","7331"}; rt("0025_gray_skew_xy_reverse_seeded","Grayscale reverse XY skew",r); r={};
+    r.size=65536; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0026_gray_rotate_skew_seeded","Grayscale rotation and skew",r); r={};
+    r.size=32768; r.encode_args={"--password=suite-password","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--password=suite-password"}; rt("0027_password_ecc","Password-protected payload with ECC",r); r={};
+    r.size=262144; r.encode_args={"--page-width=520","--page-height=520"}; r.require_multiple_pages=true; rt("0028_ecc_multi_page_massive","262 KiB ECC multi-page stress",r); r={};
+    r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=703681913u; r.encode_args={"--page-width=620","--page-height=620","--ecc=0.41"}; r.transform_args={"--scale-x","2.10","--scale-y","2.10","--rotate","1","--seed","7331"}; r.require_multiple_pages=true; rt("0029_multi_page_distorted","Multi-page distorted payload",r); r={};
+    r.size=16384; r.encode_args={"--palette","White Cyan Magenta Yellow Black"}; r.decode_args={"--palette","White Cyan Magenta Yellow Black"}; rt("0030_palette_base5_custom","Custom palette/base-5 mode",r); r={};
+    r.size=32768; r.encode_args={"--page-width=640","--page-height=640"}; r.transform_args={"--border-thickness","12","--border-density","0.15","--seed","8675309"}; rt("0031_border_dirt_dense","Dense border-noise stress",r); r={};
+    cases.push_back({"0032_cli_output_dir","CLI respects explicit output directory",[](const fs::path&) { cli_output_dir_case(); }});
     const char* failure_kinds[]={"wrong_depth","invalid_magic","all_black","all_white","random_noise","footer_data_destroyed","footer_valid_data_too_corrupt"};
-    const char* failure_ids[]={"0030_decode_wrong_depth","0031_decode_invalid_magic","0032_decode_all_black","0033_decode_all_white","0034_decode_random_noise","0035_decode_footer_data_destroyed","0036_decode_footer_valid_data_too_corrupt"};
+    const char* failure_ids[]={"0033_decode_wrong_depth","0034_decode_invalid_magic","0035_decode_all_black","0036_decode_all_white","0037_decode_random_noise","0038_decode_footer_data_destroyed","0039_decode_footer_valid_data_too_corrupt"};
     const char* failure_desc[]={"Decoder rejects malformed PPM (wrong maxval)","Decoder rejects malformed PPM (bad magic)","Decoder rejects all-black image","Decoder rejects all-white image","Decoder rejects random noise","Decoder rejects footer with destroyed data","Decoder rejects ECC-overwhelmed payload"};
     for(size_t i=0;i<7;++i){std::string id=failure_ids[i],kind=failure_kinds[i];cases.push_back({failure_ids[i],failure_desc[i],[id,kind](const fs::path&){decode_failure_case(id,kind);}});}
-    cases.push_back({"0037_palette_auto_discovery","Decoder auto-discovers palette metadata",[](const fs::path&){palette_metadata_case(false);}});
-    cases.push_back({"0038_palette_wrong_rejected","Decoder rejects forced wrong palette",[](const fs::path&){palette_metadata_case(true);}});
-    cases.push_back({"0039_password_failures","Decoder enforces password requirement",[](const fs::path&){password_failure_case();}});
-    cases.push_back({"0040_header_copy_corruption","Payload ECC repairs former in-band header damage",[](const fs::path&){header_copy_corruption_case();}});
-    cases.push_back({"0054_archive_tree_roundtrip","Nested and empty archive directories round-trip",[](const fs::path&){archive_tree_case();}});
-    cases.push_back({"0055_cli_help","CLI usage and command help smoke test",[](const fs::path&){cli_help_case();}});
-    cases.push_back({"0056_minify_literals","Minify preserves source literals and directives",[](const fs::path&){minify_literals_case();}});
-    cases.push_back({"0058_cli_decoder_paths","Decoder image paths, LZMA, and match finder behavior",[](const fs::path&){cli_decoder_paths_case();}});
-    cases.push_back({"0109_footer_features","Footer wrapping, page selection, over-barcode ECC, and page bounds",[](const fs::path&){footer_features_case();}});
-    cases.push_back({"0100_rs_erasures","RS erasure decoder enforces mixed correction boundaries",[](const fs::path&){rs_erasures_case();}});
-    cases.push_back({"0101_canonical_tile","Canonical center tile reserves ECC and page capacity",[](const fs::path&){canonical_tile_case();}});
-    cases.push_back({"0102_canonical_overlay_multipage","Canonical overlay selectors merge across multipage streams",[](const fs::path&){canonical_overlay_multipage_case();}});
-    cases.push_back({"0103_palette_base5_capacity","Base-5 palette exceeds two bits per pixel",[](const fs::path&){palette_base5_capacity_case();}});
-    cases.push_back({"0110_decode_blob_erasures","Solid-color blot positions become ECC erasures",[](const fs::path&){blob_erasure_case();}});
-    cases.push_back({"0104_metadata_tile_format","Variable metadata fields and multi-block tile Reed-Solomon framing",[](const fs::path&){metadata_tile_format_case();}});
-    cases.push_back({"0108_partial_ecc_recovery","Partial ECC archive preserves earlier recoverable files",[](const fs::path&){partial_ecc_recovery_case();}});
-    cases.push_back({"0112_decode_recover_palette","Damaged palette rows recover from ordered color candidates",[](const fs::path&){recover_palette_case();}});
-    cases.push_back({"0057_decode_stdin","Decoder reads one PPM page from stdin",[](const fs::path&){decode_stdin_case();}});
-    cases.push_back({"0061_archive_symlink_roundtrip","Directory symlink target decodes as a regular file",[](const fs::path&){archive_symlink_case();}});
-    cases.push_back({"0063_fiducials","Custom fiducial dimensions happy path",[](const fs::path&){fiducials_case();}});
-    cases.push_back({"0064_default_encode_naming","Default encode output uses a timestamped filename",[](const fs::path&){default_naming_case();}});
-    cases.push_back({"0067_ppm_transform_cli","ppm_transform help and fatal error paths",[](const fs::path&){ppm_transform_cli_case();}});
-    cases.push_back({"0068_decode_ecc_retry","Canonical ECC failure retries without fiducial subgrid",[](const fs::path&){decode_ecc_retry_case();}});
-    cases.push_back({"0066_decode_raw_fallback","Raw decode fallback is gated and writes recovered bytes",[](const fs::path&){raw_fallback_case();}});
-    cases.push_back({"0059_prefix_ends_encoded","Prefix ending in _encoded keeps its filename and fiducials",[](const fs::path&){prefix_ends_encoded_case();}});
-    cases.push_back({"0062_page_fit","Automatic page width and height fit independently",[](const fs::path&){page_fit_case();}});
-    cases.push_back({"0119_metadata_pages","Metadata tiles appear only on selected pages",[](const fs::path&){metadata_pages_case();}});
-    cases.push_back({"0083_decoded_file","Decoded file retains metadata and archive bytes",[](const fs::path&){decoded_file_case();}});
-    cases.push_back({"0069_decode_scale_318","Decode a 160x160 page rendered at 3.18 pixels per module",[](const fs::path&){decode_scale_318_case();}});
-    cases.push_back({"0076_decode_affine_cell_sampling","Affine retry sampling preserves translated cell coordinates",[](const fs::path&){affine_cell_sampling_case();}});
-    cases.push_back({"0077_decode_small_scan","Decodes grayscale affine bias in a 193x188 scan",[](const fs::path&){small_scan_case();}});
-    cases.push_back({"0078_decode_synthetic_scan_damage","Generated blurred 4.5x scan remains decodable",[](const fs::path&){synthetic_scan_case("0078_decode_synthetic_scan_damage",false,false);}});
-    cases.push_back({"0079_decode_scan_margin_noise","Generated scan margin noise still decodes",[](const fs::path&){synthetic_scan_case("0079_decode_scan_margin_noise",true,false);}});
-    cases.push_back({"0080_decode_scan_off_center_noise","Recoverable scan with off-center specks remains decodable",[](const fs::path&){synthetic_scan_case("0080_decode_scan_off_center_noise",false,true);}});
-    cases.push_back({"0081_decode_short_length_header","Center metadata length survives damaged payload bits and aliasing",[](const fs::path&){short_length_header_case();}});
-    cases.push_back({"0082_decode_lowres_rotated_scan","Generated rotated scan below two pixels per module round-trips",[](const fs::path&){lowres_rotated_scan_case();}});
-    cases.push_back({"0114_decode_partial_tag_scan","ECC recovers a scan with half the marker erased",[](const fs::path&){erased_metadata_scan_case("0114_decode_partial_tag_scan",0);}});
-    cases.push_back({"0115_decode_erased_tag_orientation_scan","ECC recovers erased markers across orientations",[](const fs::path&){erased_metadata_scan_case("0115_decode_erased_tag_orientation_scan",1);}});
-    cases.push_back({"0116_decode_erased_length_row_scan","ECC recovers a scan with metadata size erased",[](const fs::path&){erased_metadata_scan_case("0116_decode_erased_length_row_scan",2);}});
-    cases.push_back({"0084_decode_current_metadata","Damaged canonical metadata module is RS-repaired",[](const fs::path&){current_metadata_case();}});
-    cases.push_back({"0085_decode_scan_registration","Offset noisy scan preserves decoded report",[](const fs::path&){scan_registration_noise_case();}});
-    cases.push_back({"0111_decode_missing_pages","Metadata-indexed missing pages recover payload",[](const fs::path&){missing_pages_case();}});
-    cases.push_back({"0113_decode_orientation_scan","Rotated and mirrored print scans round-trip",[](const fs::path&){orientation_scan_case();}});
-    cases.push_back({"0117_decode_metadata_free","Center metadata damage recovers under standard palettes",[](const fs::path&){metadata_free_case(false);}});
-    cases.push_back({"0118_decode_metadata_free_large","Large page recovers without center metadata",[](const fs::path&){metadata_free_case(true);}});
-    cases.push_back({"0109_checkpoint_restore","Checkpoint deduplication, page round-trip, and partial recovery",[](const fs::path&){checkpoint_restore_case();}});
-    cases.push_back({"0107_hidden_volumes_e2e","Hidden capacity, filler, ECC, overlay, and CLI validation matrix",[](const fs::path&){hidden_volumes_case();}});
-    cases.push_back({"0086_decode_unit_scale_translation","Unit-scale padded scan translation",[](const fs::path&){unit_scale_scan_case("0086_decode_unit_scale_translation",false,false);}});
-    cases.push_back({"0087_decode_unit_scale_edge_bleed","Unit-scale ink bleed keeps decoded geometry",[](const fs::path&){unit_scale_scan_case("0087_decode_unit_scale_edge_bleed",true,false);}});
-    cases.push_back({"0088_decode_unit_scale_optical_blur","Unit-scale optical blur",[](const fs::path&){unit_scale_scan_case("0088_decode_unit_scale_optical_blur",false,true);}});
-    cases.push_back({"0090_decode_lowres_optical_blur","Canonical 1.5x optical scan",[](const fs::path&){scan_registration_case("0090_decode_lowres_optical_blur",1.5,2.0,2.5,125,125,true,true);}});
-    cases.push_back({"0092_decode_quarter_scale_registration","Canonical 1.25x optical registration",[](const fs::path&){scan_registration_case("0092_decode_quarter_scale_registration",1.25,2.25,3.25,106,107,true,true,false,true,1.25,2.25,3.25);}});
-    cases.push_back({"0094_decode_midscale_low_contrast","Canonical 2.5x low contrast scan",[](const fs::path&){scan_registration_case("0094_decode_midscale_low_contrast",2.5,0.0,0.0,200,200,false,false,true);}});
-    cases.push_back({"0096_decode_scale_relative_registration","Canonical 5.8x scale-relative registration",[](const fs::path&){scan_registration_case("0096_decode_scale_relative_registration",5.8,0.0,0.0,464,464,false,false,true);}});
-    cases.push_back({"0098_decode_integer_scan_dimensions","Canonical padded integer scan dimensions",[](const fs::path&){scan_registration_case("0098_decode_integer_scan_dimensions",2.0,.25,.75,161,161,false,false,true);}});
-    r.size=4096; r.encode_args={"--page-width=600","--page-height=600","--palette","White Black","--ecc=fill"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--ink-blot-radius","180","--ink-blot-color","black","--seed","0"}; rt("0041_palette_white_black_blot_black","Black blot recovery on two-color page",r); r={};
-    r.size=4096; r.encode_args={"--page-width=600","--page-height=600","--palette","White Black","--ecc=fill"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--ink-blot-radius","180","--ink-blot-color","white","--seed","0"}; rt("0042_palette_white_black_blot_white","White blot recovery on two-color page",r); r={};
-    r.size=8192; r.encode_args={"--page-width=300","--page-height=300","--palette","White Black"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0051_paper_offwhite_bw","Off-white paper tint BW",r); r={};
-    r.size=8192; r.encode_args={"--page-width=320","--page-height=320","--palette","White Cyan Magenta Yellow"}; r.decode_args={"--palette","White Cyan Magenta Yellow"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0052_paper_offwhite_cmyk","Off-white paper tint CMYK",r); r={};
-    r.size=8192; r.encode_args={"--page-width=360","--page-height=360","--palette","FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00"}; r.decode_args={"--palette","FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0053_paper_offwhite_cmykwrbg","Off-white paper tint eight-color",r); r={};
-    r.size=4096; r.encode_args={"--page-width=640","--page-height=400","--footer","Archive title","--font-size","5"}; rt("0105_footer_geometry","Tall footer geometry roundtrip",r); r={};
-    r.size=4096; r.encode_args={"--page-width=620","--page-height=620","--ecc=fill"}; r.transform_args={"--scale-x","2.071","--scale-y","2.071","--seed","2071"}; rt("0070_decode_scale_2071","Fractional affine scan scale 2.071x",r); r={};
-    r.size=4096; r.has_payload_seed_override=true; r.payload_seed_override=2118103236u; r.encode_args={"--page-width=620","--page-height=620"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; rt("0071_decode_scale_2701","Fractional affine scan scale 2.701x",r); r={};
-    r.size=4096; r.has_payload_seed_override=true; r.payload_seed_override=282487847u; r.encode_args={"--page-width=620","--page-height=620"}; r.transform_args={"--scale-x","4.701","--scale-y","4.701","--seed","4701"}; rt("0072_decode_scale_4701","Fractional affine scan scale 4.701x",r); r={};
-    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=160","--page-height=160","--palette","White Black"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0073_tiny_palette_2_white_checker","Two-color tiny page with white checker overwrite",r); r={};
-    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=160","--page-height=160","--ecc=fill","--palette","White Cyan Magenta Yellow"}; r.decode_args={"--palette","White Cyan Magenta Yellow"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0074_tiny_palette_4_white_checker","Four-color tiny page with white checker overwrite",r); r={};
-    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=480","--page-height=480","--ecc=fill","--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0075_tiny_palette_8_white_checker","Eight-color tiny page with diagonal white damage",r); r={};
+    cases.push_back({"0040_palette_auto_discovery","Decoder auto-discovers palette metadata",[](const fs::path&){palette_metadata_case(false);}});
+    cases.push_back({"0041_palette_wrong_rejected","Decoder rejects forced wrong palette",[](const fs::path&){palette_metadata_case(true);}});
+    cases.push_back({"0042_password_failures","Decoder enforces password requirement",[](const fs::path&){password_failure_case();}});
+    cases.push_back({"0043_header_copy_corruption","Payload ECC repairs former in-band header damage",[](const fs::path&){header_copy_corruption_case();}});
+    cases.push_back({"0057_archive_tree_roundtrip","Nested and empty archive directories round-trip",[](const fs::path&){archive_tree_case();}});
+    cases.push_back({"0058_cli_help","CLI usage and command help smoke test",[](const fs::path&){cli_help_case();}});
+    cases.push_back({"0059_minify_literals","Minify preserves source literals and directives",[](const fs::path&){minify_literals_case();}});
+    cases.push_back({"0061_cli_decoder_paths","Decoder image paths, LZMA, and match finder behavior",[](const fs::path&){cli_decoder_paths_case();}});
+    cases.push_back({"0113_footer_features","Footer wrapping, page selection, over-barcode ECC, and page bounds",[](const fs::path&){footer_features_case();}});
+    cases.push_back({"0103_rs_erasures","RS erasure decoder enforces mixed correction boundaries",[](const fs::path&){rs_erasures_case();}});
+    cases.push_back({"0104_canonical_tile","Canonical center tile reserves ECC and page capacity",[](const fs::path&){canonical_tile_case();}});
+    cases.push_back({"0105_canonical_overlay_multipage","Canonical overlay selectors merge across multipage streams",[](const fs::path&){canonical_overlay_multipage_case();}});
+    cases.push_back({"0106_palette_base5_capacity","Base-5 palette exceeds two bits per pixel",[](const fs::path&){palette_base5_capacity_case();}});
+    cases.push_back({"0114_decode_blob_erasures","Solid-color blot positions become ECC erasures",[](const fs::path&){blob_erasure_case();}});
+    cases.push_back({"0107_metadata_tile_format","Variable metadata fields and multi-block tile Reed-Solomon framing",[](const fs::path&){metadata_tile_format_case();}});
+    cases.push_back({"0111_partial_ecc_recovery","Partial ECC archive preserves earlier recoverable files",[](const fs::path&){partial_ecc_recovery_case();}});
+    cases.push_back({"0116_decode_recover_palette","Damaged palette rows recover from ordered color candidates",[](const fs::path&){recover_palette_case();}});
+    cases.push_back({"0060_decode_stdin","Decoder reads one PPM page from stdin",[](const fs::path&){decode_stdin_case();}});
+    cases.push_back({"0064_archive_symlink_roundtrip","Directory symlink target decodes as a regular file",[](const fs::path&){archive_symlink_case();}});
+    cases.push_back({"0066_fiducials","Custom fiducial dimensions happy path",[](const fs::path&){fiducials_case();}});
+    cases.push_back({"0067_default_encode_naming","Default encode output uses a timestamped filename",[](const fs::path&){default_naming_case();}});
+    cases.push_back({"0070_ppm_transform_cli","ppm_transform help and fatal error paths",[](const fs::path&){ppm_transform_cli_case();}});
+    cases.push_back({"0071_decode_ecc_retry","Canonical ECC failure retries without fiducial subgrid",[](const fs::path&){decode_ecc_retry_case();}});
+    cases.push_back({"0069_decode_raw_fallback","Raw decode fallback is gated and writes recovered bytes",[](const fs::path&){raw_fallback_case();}});
+    cases.push_back({"0062_prefix_ends_encoded","Prefix ending in _encoded keeps its filename and fiducials",[](const fs::path&){prefix_ends_encoded_case();}});
+    cases.push_back({"0065_page_fit","Automatic page width and height fit independently",[](const fs::path&){page_fit_case();}});
+    cases.push_back({"0123_metadata_pages","Metadata tiles appear only on selected pages",[](const fs::path&){metadata_pages_case();}});
+    cases.push_back({"0086_decoded_file","Decoded file retains metadata and archive bytes",[](const fs::path&){decoded_file_case();}});
+    cases.push_back({"0072_decode_scale_318","Decode a 160x160 page rendered at 3.18 pixels per module",[](const fs::path&){decode_scale_318_case();}});
+    cases.push_back({"0079_decode_affine_cell_sampling","Affine retry sampling preserves translated cell coordinates",[](const fs::path&){affine_cell_sampling_case();}});
+    cases.push_back({"0080_decode_small_scan","Decodes grayscale affine bias in a 193x188 scan",[](const fs::path&){small_scan_case();}});
+    cases.push_back({"0081_decode_synthetic_scan_damage","Generated blurred 4.5x scan remains decodable",[](const fs::path&){synthetic_scan_case("0081_decode_synthetic_scan_damage",false,false);}});
+    cases.push_back({"0082_decode_scan_margin_noise","Generated scan margin noise still decodes",[](const fs::path&){synthetic_scan_case("0082_decode_scan_margin_noise",true,false);}});
+    cases.push_back({"0083_decode_scan_off_center_noise","Recoverable scan with off-center specks remains decodable",[](const fs::path&){synthetic_scan_case("0083_decode_scan_off_center_noise",false,true);}});
+    cases.push_back({"0084_decode_short_length_header","Center metadata length survives damaged payload bits and aliasing",[](const fs::path&){short_length_header_case();}});
+    cases.push_back({"0085_decode_lowres_rotated_scan","Generated rotated scan below two pixels per module round-trips",[](const fs::path&){lowres_rotated_scan_case();}});
+    cases.push_back({"0118_decode_partial_tag_scan","ECC recovers a scan with half the marker erased",[](const fs::path&){erased_metadata_scan_case("0118_decode_partial_tag_scan",0);}});
+    cases.push_back({"0119_decode_erased_tag_orientation_scan","ECC recovers erased markers across orientations",[](const fs::path&){erased_metadata_scan_case("0119_decode_erased_tag_orientation_scan",1);}});
+    cases.push_back({"0120_decode_erased_length_row_scan","ECC recovers a scan with metadata size erased",[](const fs::path&){erased_metadata_scan_case("0120_decode_erased_length_row_scan",2);}});
+    cases.push_back({"0087_decode_current_metadata","Damaged canonical metadata module is RS-repaired",[](const fs::path&){current_metadata_case();}});
+    cases.push_back({"0088_decode_scan_registration","Offset noisy scan preserves decoded report",[](const fs::path&){scan_registration_noise_case();}});
+    cases.push_back({"0115_decode_missing_pages","Metadata-indexed missing pages recover payload",[](const fs::path&){missing_pages_case();}});
+    cases.push_back({"0117_decode_orientation_scan","Rotated and mirrored print scans round-trip",[](const fs::path&){orientation_scan_case();}});
+    cases.push_back({"0121_decode_metadata_free","Center metadata damage recovers under standard palettes",[](const fs::path&){metadata_free_case(false);}});
+    cases.push_back({"0122_decode_metadata_free_large","Large page recovers without center metadata",[](const fs::path&){metadata_free_case(true);}});
+    cases.push_back({"0112_checkpoint_restore","Checkpoint deduplication, page round-trip, and partial recovery",[](const fs::path&){checkpoint_restore_case();}});
+    cases.push_back({"0110_hidden_volumes_e2e","Hidden capacity, filler, ECC, overlay, and CLI validation matrix",[](const fs::path&){hidden_volumes_case();}});
+    cases.push_back({"0089_decode_unit_scale_translation","Unit-scale padded scan translation",[](const fs::path&){unit_scale_scan_case("0089_decode_unit_scale_translation",false,false);}});
+    cases.push_back({"0090_decode_unit_scale_edge_bleed","Unit-scale ink bleed keeps decoded geometry",[](const fs::path&){unit_scale_scan_case("0090_decode_unit_scale_edge_bleed",true,false);}});
+    cases.push_back({"0091_decode_unit_scale_optical_blur","Unit-scale optical blur",[](const fs::path&){unit_scale_scan_case("0091_decode_unit_scale_optical_blur",false,true);}});
+    cases.push_back({"0093_decode_lowres_optical_blur","Canonical 1.5x optical scan",[](const fs::path&){scan_registration_case("0093_decode_lowres_optical_blur",1.5,2.0,2.5,125,125,true,true);}});
+    cases.push_back({"0095_decode_quarter_scale_registration","Canonical 1.25x optical registration",[](const fs::path&){scan_registration_case("0095_decode_quarter_scale_registration",1.25,2.25,3.25,106,107,true,true,false,true,1.25,2.25,3.25);}});
+    cases.push_back({"0097_decode_midscale_low_contrast","Canonical 2.5x low contrast scan",[](const fs::path&){scan_registration_case("0097_decode_midscale_low_contrast",2.5,0.0,0.0,200,200,false,false,true);}});
+    cases.push_back({"0099_decode_scale_relative_registration","Canonical 5.8x scale-relative registration",[](const fs::path&){scan_registration_case("0099_decode_scale_relative_registration",5.8,0.0,0.0,464,464,false,false,true);}});
+    cases.push_back({"0101_decode_integer_scan_dimensions","Canonical padded integer scan dimensions",[](const fs::path&){scan_registration_case("0101_decode_integer_scan_dimensions",2.0,.25,.75,161,161,false,false,true);}});
+    r.size=4096; r.encode_args={"--page-width=600","--page-height=600","--palette","White Black","--ecc=fill"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--ink-blot-radius","180","--ink-blot-color","black","--seed","0"}; rt("0044_palette_white_black_blot_black","Black blot recovery on two-color page",r); r={};
+    r.size=4096; r.encode_args={"--page-width=600","--page-height=600","--palette","White Black","--ecc=fill"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--ink-blot-radius","180","--ink-blot-color","white","--seed","0"}; rt("0045_palette_white_black_blot_white","White blot recovery on two-color page",r); r={};
+    r.size=8192; r.encode_args={"--page-width=300","--page-height=300","--palette","White Black"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0054_paper_offwhite_bw","Off-white paper tint BW",r); r={};
+    r.size=8192; r.encode_args={"--page-width=320","--page-height=320","--palette","White Cyan Magenta Yellow"}; r.decode_args={"--palette","White Cyan Magenta Yellow"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0055_paper_offwhite_cmyk","Off-white paper tint CMYK",r); r={};
+    r.size=8192; r.encode_args={"--page-width=360","--page-height=360","--palette","FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00"}; r.decode_args={"--palette","FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0056_paper_offwhite_cmykwrbg","Off-white paper tint eight-color",r); r={};
+    r.size=4096; r.encode_args={"--page-width=640","--page-height=400","--footer","Archive title","--font-size","5"}; rt("0108_footer_geometry","Tall footer geometry roundtrip",r); r={};
+    r.size=4096; r.encode_args={"--page-width=620","--page-height=620","--ecc=fill"}; r.transform_args={"--scale-x","2.071","--scale-y","2.071","--seed","2071"}; rt("0073_decode_scale_2071","Fractional affine scan scale 2.071x",r); r={};
+    r.size=4096; r.has_payload_seed_override=true; r.payload_seed_override=2118103236u; r.encode_args={"--page-width=620","--page-height=620"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; rt("0074_decode_scale_2701","Fractional affine scan scale 2.701x",r); r={};
+    r.size=4096; r.has_payload_seed_override=true; r.payload_seed_override=282487847u; r.encode_args={"--page-width=620","--page-height=620"}; r.transform_args={"--scale-x","4.701","--scale-y","4.701","--seed","4701"}; rt("0075_decode_scale_4701","Fractional affine scan scale 4.701x",r); r={};
+    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=160","--page-height=160","--palette","White Black"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0076_tiny_palette_2_white_checker","Two-color tiny page with white checker overwrite",r); r={};
+    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=160","--page-height=160","--ecc=fill","--palette","White Cyan Magenta Yellow"}; r.decode_args={"--palette","White Cyan Magenta Yellow"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0077_tiny_palette_4_white_checker","Four-color tiny page with white checker overwrite",r); r={};
+    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=480","--page-height=480","--ecc=fill","--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0078_tiny_palette_8_white_checker","Eight-color tiny page with diagonal white damage",r); r={};
 
     auto overlay=[&](OverlayConfig cfg){cases.push_back({cfg.id,"Overlay CLI merge and decode checks",[cfg](const fs::path&){overlay_case(cfg);}});};
-    OverlayConfig oc;oc.id="0043_overlay_e2e";oc.fraction="0.992156862745098";overlay(oc);
-    oc=OverlayConfig{};oc.id="0044_overlay_palette_cmyy";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 255 0";oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255;0 255 255;255 0 255;255 255 0";overlay(oc);
-    oc=OverlayConfig{};oc.id="0045_overlay_bw_base_color_cmwy";oc.fraction="0.992156862745098";oc.palette="White Black";oc.circle_colors="0 255 255;255 0 255;255 255 0;255 255 255";oc.background="0 0 0";oc.encode_options={"--fiducial-spacing=24"};oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255;0 255 255;255 0 255;255 255 0";overlay(oc);
-    oc=OverlayConfig{};oc.id="0046_overlay_cmy_base_bw";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255;0 255 255;255 0 255;255 255 0";overlay(oc);
-    oc=OverlayConfig{};oc.id="0047_overlay_e2e_ignore_colors";oc.fraction="0.992156862745098";oc.ignore_colors="White";overlay(oc);
-    for(const auto& item:std::vector<std::pair<std::string,std::string>>{{"0048_overlay_bw_ecc_ratio_025","0.25"},{"0049_overlay_bw_ecc_ratio_050","0.5"}}){
+    OverlayConfig oc;oc.id="0046_overlay_e2e";oc.fraction="0.992156862745098";overlay(oc);
+    oc=OverlayConfig{};oc.id="0047_overlay_palette_cmyy";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 255 0";oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255;0 255 255;255 0 255;255 255 0";overlay(oc);
+    oc=OverlayConfig{};oc.id="0048_overlay_bw_base_color_cmwy";oc.fraction="0.992156862745098";oc.palette="White Black";oc.circle_colors="0 255 255;255 0 255;255 255 0;255 255 255";oc.background="0 0 0";oc.encode_options={"--fiducial-spacing=24"};oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255;0 255 255;255 0 255;255 255 0";overlay(oc);
+    oc=OverlayConfig{};oc.id="0049_overlay_cmy_base_bw";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255;0 255 255;255 0 255;255 255 0";overlay(oc);
+    oc=OverlayConfig{};oc.id="0050_overlay_e2e_ignore_colors";oc.fraction="0.992156862745098";oc.ignore_colors="White";overlay(oc);
+    for(const auto& item:std::vector<std::pair<std::string,std::string>>{{"0051_overlay_bw_ecc_ratio_025","0.25"},{"0052_overlay_bw_ecc_ratio_050","0.5"}}){
         oc=OverlayConfig{};oc.id=item.first;oc.fraction="0.1";oc.ecc=item.second;oc.width=1840;oc.height=1840;oc.palette="White Black";oc.circle="0 0 0";oc.background="255 255 255";oc.encode_options={"--fiducial-spacing=60"};oc.skip_grayscale=true;oc.allowed_colors="0 0 0;255 255 255";overlay(oc);}
-    oc=OverlayConfig{};oc.id="0050_overlay_ecc_ratio_gray_base_color";oc.fraction="0.1";oc.ecc="0.25";oc.circle="255 0 0";oc.background="0 255 0";oc.skip_grayscale=true;overlay(oc);
-    oc=OverlayConfig{};oc.id="0060_overlay_fill";oc.fraction="0.992156862745098";oc.ecc="fill";overlay(oc);
-    oc=OverlayConfig{};oc.id="0065_overlay_fill_mixed";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 0 0";oc.background="0 255 0";oc.ignore_colors="#FF0000";oc.skip_grayscale=true;overlay(oc);
-    oc=OverlayConfig{};oc.id="0106_overlay_footer_geometry";oc.size=4096;oc.width=640;oc.height=400;oc.footer="Archive title";oc.font_size="5";overlay(oc);
-    const std::vector<std::pair<std::string,std::string>> no_metadata={{"0120_overlay_no_metadata_2","White Black"},{"0121_overlay_no_metadata_4","White Cyan Magenta Yellow"},{"0122_overlay_no_metadata_5","White Cyan Magenta Yellow Black"},{"0123_overlay_no_metadata_8","White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black"}};
+    oc=OverlayConfig{};oc.id="0053_overlay_ecc_ratio_gray_base_color";oc.fraction="0.1";oc.ecc="0.25";oc.circle="255 0 0";oc.background="0 255 0";oc.skip_grayscale=true;overlay(oc);
+    oc=OverlayConfig{};oc.id="0063_overlay_fill";oc.fraction="0.992156862745098";oc.ecc="fill";overlay(oc);
+    oc=OverlayConfig{};oc.id="0068_overlay_fill_mixed";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 0 0";oc.background="0 255 0";oc.ignore_colors="#FF0000";oc.skip_grayscale=true;overlay(oc);
+    oc=OverlayConfig{};oc.id="0109_overlay_footer_geometry";oc.size=4096;oc.width=640;oc.height=400;oc.footer="Archive title";oc.font_size="5";overlay(oc);
+    const std::vector<std::pair<std::string,std::string>> no_metadata={{"0124_overlay_no_metadata_2","White Black"},{"0125_overlay_no_metadata_4","White Cyan Magenta Yellow"},{"0126_overlay_no_metadata_5","White Cyan Magenta Yellow Black"},{"0127_overlay_no_metadata_8","White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black"}};
     for(const auto& item:no_metadata){oc=OverlayConfig{};oc.id=item.first;oc.size=24;oc.fraction="0.992156862745098";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encode_options={"--metadata-pages=all","--no-metadata","--fiducial-spacing=24","--no-fiducials"};overlay(oc);}
     return cases;
 }

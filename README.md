@@ -205,8 +205,14 @@ To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick 
 
 ## Sample Barcodes
 
-Examples of the encoded output for 2, 4, and 8 colors:
+The payload `makocode` encoded with four palette sizes:
 
-<img alt="Color 1 barcode" src="images/one_color_encoded.png">
-<img alt="Color 2 barcode" src="images/two_colors_encoded.png">
-<img alt="Color 3 barcode" src="images/three_colors_encoded.png">
+<table>
+  <tr><th>2 colors</th><th>4 colors</th><th>5 colors</th><th>8 colors</th></tr>
+  <tr>
+    <td><img alt="makocode encoded with 2 colors: white and black" src="images/makocode_2_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
+    <td><img alt="makocode encoded with 4 colors" src="images/makocode_4_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
+    <td><img alt="makocode encoded with 5 colors" src="images/makocode_5_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
+    <td><img alt="makocode encoded with 8 colors" src="images/makocode_8_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
+  </tr>
+</table>
