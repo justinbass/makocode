@@ -172,7 +172,7 @@ python3 scripts/calibration.py decode scan.ppm
 The generated sheet has a 4x4 grid of equal-size barcodes. Its four columns use
 these ordered palettes: `White Black`; `White Cyan Magenta Yellow`;
 `White Cyan Magenta Yellow Black`; and
-`White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black`. Rows use 1x, 2x, 3x,
+`White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black`. Rows use 1x, 2x, 3x,
 and 4x pixels per dot, from top to bottom. Every barcode encodes
 `makocode` followed by deterministic padding sized to fill its available page
 capacity. The minimum page size is 1186x1200; larger pages enlarge every
@@ -203,16 +203,40 @@ To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick 
 - Palette metadata is embedded per page (via `MAKOCODE_PALETTE`, `MAKOCODE_PALETTE_BASE`, and `MAKOCODE_PAGE_SYMBOLS`), so `decode` normally discovers the palette automatically, but you can still force it with `--palette ...` if desired.
 - Use `decode --recover-palette` when the embedded palette row is damaged. Recovery first tries the common ordered palettes for 2, 4, 5, and 8 colors, using colors sampled from the whole page to account for scan shifts. It then tries image-derived palette clusters and their orderings before exhaustive RGB candidates. `--recover-limit N` limits ordered palette candidates (default `4`); increase it to continue beyond the common palettes. If you already know the palette, pass the encoder-style ordered list with `--palette` to try it first.
 
+### Standard Palette Order and Metadata Marker
+
+The standard ordered palettes and the endpoint colors used by the metadata marker are:
+
+| Palette size | Ordered palette | Marker 0 → 1 |
+| --- | --- | --- |
+| 2 colors | White, Black | White → Black |
+| 4 colors | White, Cyan, Magenta, Yellow | White → Yellow |
+| 5 colors | White, Cyan, Magenta, Yellow, Black | White → Black |
+| 8 colors | White, Red (`#FF0000`), Green (`#00FF00`), Blue (`#0000FF`), Cyan, Magenta, Yellow, Black | White → Black |
+
+The metadata tile has a 4×8 marker (32 pixels) immediately below its palette row. It stores one bit per pixel, using the first palette entry for 0 and the last entry for 1. This marker is binary on every palette size; page payload symbols use the full ordered palette according to the page's encoding mode.
+
+The marker encodes the ASCII low nibbles for `MA KO CO DE`, with spaces used only for visual grouping. Read the eight letters in order, most-significant bit first within each nibble, across each row from left to right. The nibbles are `D 1 B F 3 F 4 5`, giving these four rows:
+
+```text
+11010001
+10111111
+00111111
+01000101
+```
+
+The complete marker bit pattern is `D1 BF 3F 45`. It represents the ASCII low nibbles, not the full ASCII bytes.
+
 ## Sample Barcodes
 
-The payload `makocode` encoded with four palette sizes:
+The payload `makocode` encoded by regression fixtures 0001–0004. Each PNG is a preview linked to the copied PPM output:
 
 <table>
   <tr><th>2 colors</th><th>4 colors</th><th>5 colors</th><th>8 colors</th></tr>
   <tr>
-    <td><img alt="makocode encoded with 2 colors: white and black" src="images/makocode_2_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
-    <td><img alt="makocode encoded with 4 colors" src="images/makocode_4_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
-    <td><img alt="makocode encoded with 5 colors" src="images/makocode_5_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
-    <td><img alt="makocode encoded with 8 colors" src="images/makocode_8_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></td>
+    <td><a href="images/0001_makocode_2_colors.ppm"><img alt="0001: makocode encoded with 2 colors, white and black" src="images/0001_makocode_2_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
+    <td><a href="images/0002_makocode_4_colors.ppm"><img alt="0002: makocode encoded with 4 colors" src="images/0002_makocode_4_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
+    <td><a href="images/0003_makocode_5_colors.ppm"><img alt="0003: makocode encoded with 5 colors" src="images/0003_makocode_5_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
+    <td><a href="images/0004_makocode_8_colors.ppm"><img alt="0004: makocode encoded with 8 colors" src="images/0004_makocode_8_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
   </tr>
 </table>

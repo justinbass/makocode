@@ -3,6 +3,10 @@
 *.gcda
 *.gcno
 *.ppm
+!images/0001_makocode_2_colors.ppm
+!images/0002_makocode_4_colors.ppm
+!images/0003_makocode_5_colors.ppm
+!images/0004_makocode_8_colors.ppm
 *__pycache__*
 *swp
 .tmp/

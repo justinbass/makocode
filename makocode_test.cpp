@@ -166,7 +166,7 @@ static bool read_canonical_makocode_barcode(const int* pixels,
             }
             if (matches) {
                 (void)threshold;
-                tag_out = ((uint64_t)colors << 32u) | UINT64_C(0xD1BF3F45);
+                tag_out = ((uint64_t)colors << 32u) | MetadataTile::ASCII_LOW_NIBBLE_MARKER;
                 return true;
             }
         }
@@ -2776,7 +2776,7 @@ static void current_metadata_case(){
 
 static void metadata_free_case(bool large){
     const std::string id=large?"0122_decode_metadata_free_large":"0121_decode_metadata_free";fs::path work=make_work_dir(id);
-    const std::vector<std::string> palettes={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black"};
+    const std::vector<std::string> palettes={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"};
     const unsigned base_seed=large?master_seed+130363u:master_seed;
     const unsigned iterations=large?1u:4u;
     for(unsigned i=0;i<iterations;++i){const unsigned seed=large?base_seed:base_seed+7919u*i+17u;const size_t size=large?1800u+(seed%501u):700u+(seed%151u);
@@ -2868,9 +2868,9 @@ static void erased_metadata_scan_case(const std::string& id,int kind){
     fs::path work=make_work_dir(id),payload=work/"payload.bin",encoded=work/"encoded";fs::create_directories(encoded);std::string bytes=kind==0?"partially damaged marker scan payload":kind==1?"erased marker orientation scan payload":"erased metadata length row scan payload";write_file(payload,bytes);
     auto enc=run_cli(work,encode_file_args(payload,encoded,"source",{"--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto pages=ppm_paths(encoded,"source");require(pages.size()==1,id+": expected one encoded page");MetadataTile::Values tile=extract_tile_values(pages[0]);
     PpmImage source=read_ppm(pages[0]);unsigned tile_x=(source.width-48)/2,tile_y=(source.height-48)/2;
-    if(kind==0){const u32 magic=MetadataTile::LEGACY_TAG_MAGIC;std::vector<unsigned> dark;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;if(static_cast<unsigned char>(source.pixels[at])<128)dark.push_back(bit);}
+    if(kind==0){std::vector<unsigned> dark;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;if(static_cast<unsigned char>(source.pixels[at])<128)dark.push_back(bit);}
         require(dark.size()==20,id+": expected 20 dark marker modules");for(size_t i=0;i<16;++i){unsigned bit=dark[i],x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}
-        unsigned matches=0;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;bool observed=static_cast<unsigned char>(source.pixels[at])<128,expected=MetadataTile::makocode_tag_bit(bit,magic);matches+=observed==expected;}require(matches==16,id+": partial marker fixture does not leave half the bits matched");
+        unsigned matches=0;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;bool observed=static_cast<unsigned char>(source.pixels[at])<128,expected=MetadataTile::makocode_tag_bit(bit);matches+=observed==expected;}require(matches==16,id+": partial marker fixture does not leave half the bits matched");
     }else if(kind==1){for(unsigned row=0;row<4;++row)for(unsigned col=0;col<8;++col){size_t at=(static_cast<size_t>(tile_y+tile.metadata_tag_y0+1+row)*source.width+tile_x+20+col)*3;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}}
     else{u64 metadata_cells=tile.metadata_length_prefix_bits+tile.metadata_symbol_count;unsigned value_bits=0;for(u64 n=metadata_cells;n;n>>=1)++value_bits;unsigned length_bits=1;for(unsigned remaining=value_bits-1;remaining>1;remaining>>=1)++length_bits;unsigned outer=2+length_bits+value_bits;unsigned x0=tile_x+(48-outer)/2,y=tile_y+tile.metadata_tag_y0+5;
         unsigned changed=0;for(unsigned col=0;col<outer;++col){size_t at=(static_cast<size_t>(y)*source.width+x0+col)*3;if(static_cast<unsigned char>(source.pixels[at])!=255)++changed;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}require(changed>0,id+": length row fixture changed no cells");}
@@ -2979,7 +2979,7 @@ static fs::path damage_palette_row(const fs::path& page,const fs::path& output,u
 
 static void recover_palette_case(){
     const std::string id="0116_decode_recover_palette";fs::path work=make_work_dir(id),payload=work/"payload.bin";generate_bytes(work,payload,8192,48621,"payload");
-    const std::vector<std::tuple<std::string,unsigned,std::string>> common={{"two_color",2,"White Black"},{"four_color",4,"White Cyan Magenta Yellow"},{"five_color",5,"White Cyan Magenta Yellow Black"},{"eight_color",8,"White Black #FF0000 #00FF00 #0000FF Cyan Magenta Yellow"}};
+    const std::vector<std::tuple<std::string,unsigned,std::string>> common={{"two_color",2,"White Black"},{"four_color",4,"White Cyan Magenta Yellow"},{"five_color",5,"White Cyan Magenta Yellow Black"},{"eight_color",8,"White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"}};
     for(const auto& item:common){std::string label=std::get<0>(item),palette=std::get<2>(item);unsigned count=std::get<1>(item);fs::path encoded=work/(label+"_encoded"),decoded=work/(label+"_decoded");fs::create_directories(encoded);
         auto enc=run_cli(work,encode_file_args(payload,encoded,"page",{"--page-width=700","--page-height=700","--ecc=2.0","--palette",palette}),"encode_"+label);expect_success(enc,id+" encode "+label);auto pages=ppm_paths(encoded,"page");require(pages.size()==1,id+": expected one palette page");
         fs::path damaged=damage_palette_row(pages[0],work/(label+"_damaged.ppm"),count);auto dec=run_cli(work,decode_file_args({damaged.string()},decoded,{"--recover-palette","--recover-limit","4"}),"decode_"+label);expect_success(dec,id+" recover "+label);compare_files(payload,decoded/"payload.bin",id+" "+label);
@@ -3206,6 +3206,32 @@ static void run_roundtrip(const RoundTrip& test) {
     auto pages = ppm_paths(work, prefix);
     require(!pages.empty(), test.id + ": encode produced no PPM pages");
     if (test.require_multiple_pages) require(pages.size() > 1, test.id + ": expected multiple pages");
+    if (test.id == "0001_makocode_2_colors" ||
+        test.id == "0002_makocode_4_colors" ||
+        test.id == "0003_makocode_5_colors" ||
+        test.id == "0004_makocode_8_colors") {
+        static const char* expected_marker_rows[] = {
+            "11010001", "10111111", "00111111", "01000101"};
+        require(pages.size() == 1u, test.id + ": marker fixture expected one page");
+        MetadataTile::Values tile = extract_tile_values(pages.front());
+        require(tile.palette_count >= 2u, test.id + ": marker palette missing endpoints");
+        makocode::ByteBuffer tile_bits;
+        require(MetadataTile::build_tile_bits(tile, tile_bits),
+                test.id + ": could not rebuild metadata tile");
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 8u; ++col) {
+                u32 bit = row * 8u + col;
+                bool one = expected_marker_rows[row][col] == '1';
+                usize cell = (usize)(tile.metadata_tag_y0 + 1u + row) *
+                                 MetadataTile::TILE_SIDE +
+                             MetadataTile::tag_marker_x0() + col;
+                u8 expected_palette_index = one ? (u8)(tile.palette_count - 1u) : 0u;
+                require(tile_bits.data[cell] == expected_palette_index,
+                        test.id + ": marker pixel " + std::to_string(bit) +
+                            " does not match its binary endpoint index");
+            }
+        }
+    }
     if (test.tiny_dimensions_check) {
         std::string header = read_file(pages.front());
         std::istringstream input(header);
@@ -3255,7 +3281,7 @@ static std::vector<TestCase> build_cases() {
     RoundTrip r;
     r.size=1; r.literal="0"; r.tiny_dimensions_check=true; rt("0000_tiny_0", "1 byte payload literal '0' encoded from stdin", r); r={};
     const char* makocode_ids[]={"0001_makocode_2_colors","0002_makocode_4_colors","0003_makocode_5_colors","0004_makocode_8_colors"};
-    const char* makocode_palettes[]={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White Black #FF0000 #00FF00 #0000FF Cyan Magenta Yellow"};
+    const char* makocode_palettes[]={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"};
     const char* makocode_descriptions[]={"makocode encoded with 2 colors","makocode encoded with 4 colors","makocode encoded with 5 colors","makocode encoded with 8 colors"};
     for(size_t i=0;i<4;++i){r.size=8;r.literal="makocode";r.encode_args={"--palette",makocode_palettes[i]};r.decode_args={"--palette",makocode_palettes[i]};rt(makocode_ids[i],makocode_descriptions[i],r);r={};}
     r.size=8192; rt("0005_baseline_8k_auto", "8 KiB payload with automatically selected ECC", r); r={};
@@ -3267,7 +3293,7 @@ static std::vector<TestCase> build_cases() {
     const char* ids[] = {"0010_palette_white_black", "0011_palette_cmy", "0012_palette_cmyk", "0013_palette_cmykw"};
     const char* desc[] = {"Two-color palette stress", "Three-color palette stress", "Four-color palette stress", "Five-color palette stress"};
     for (size_t i=0;i<4;++i) { r.size=8192; r.encode_args={"--palette",palettes[i]}; r.decode_args={"--palette",palettes[i]}; rt(ids[i],desc[i],r); r={}; }
-    r.size=8192; r.encode_args={"--page-width=240","--page-height=240","--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; rt("0014_palette_hex_octet","Expanded hex octet palette",r); r={};
+    r.size=8192; r.encode_args={"--page-width=240","--page-height=240","--palette","FFFFFF FF0000 00FF00 0000FF 00FFFF FF00FF FFFF00 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF 00FFFF FF00FF FFFF00 000000"}; rt("0014_palette_hex_octet","Expanded hex octet palette",r); r={};
     r.size=8192; r.encode_args={"--palette","White Cyan Magenta Yellow Black"}; r.decode_args={"--palette","White Cyan Magenta Yellow Black"}; rt("0015_large_canvas_cmykw","Large canvas CMYKW palette",r); r={};
     r.size=256; r.encode_args={"--page-width=200","--page-height=64"}; rt("0016_fiducial_minimum_ecc","Minimum ECC with fiducial reservation",r); r={};
     r.size=65536; r.encode_args={"--footer", " !\"#$%&\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy | random.bin | Page %page/%totalpages | 100\\% done", "--font-size", "2"}; rt("0017_footer_metadata","Footer metadata rendering stress",r); r={};
@@ -3349,14 +3375,14 @@ static std::vector<TestCase> build_cases() {
     r.size=4096; r.encode_args={"--page-width=600","--page-height=600","--palette","White Black","--ecc=fill"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--ink-blot-radius","180","--ink-blot-color","white","--seed","0"}; rt("0045_palette_white_black_blot_white","White blot recovery on two-color page",r); r={};
     r.size=8192; r.encode_args={"--page-width=300","--page-height=300","--palette","White Black"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0054_paper_offwhite_bw","Off-white paper tint BW",r); r={};
     r.size=8192; r.encode_args={"--page-width=320","--page-height=320","--palette","White Cyan Magenta Yellow"}; r.decode_args={"--palette","White Cyan Magenta Yellow"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0055_paper_offwhite_cmyk","Off-white paper tint CMYK",r); r={};
-    r.size=8192; r.encode_args={"--page-width=360","--page-height=360","--palette","FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00"}; r.decode_args={"--palette","FFFFFF 00FFFF FF00FF FFFF00 000000 FF0000 0000FF 00FF00"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0056_paper_offwhite_cmykwrbg","Off-white paper tint eight-color",r); r={};
+    r.size=8192; r.encode_args={"--page-width=360","--page-height=360","--palette","FFFFFF FF0000 00FF00 0000FF 00FFFF FF00FF FFFF00 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF 00FFFF FF00FF FFFF00 000000"}; r.transform_args={"--paper-color","FFF3D6","--paper-alpha","0.105","--paper-splotch-alpha","0.15","--paper-splotch-shade","0.06","--paper-splotch-px","96","--seed","424242"}; rt("0056_paper_offwhite_cmykwrbg","Off-white paper tint eight-color",r); r={};
     r.size=4096; r.encode_args={"--page-width=640","--page-height=400","--footer","Archive title","--font-size","5"}; rt("0108_footer_geometry","Tall footer geometry roundtrip",r); r={};
     r.size=4096; r.encode_args={"--page-width=620","--page-height=620","--ecc=fill"}; r.transform_args={"--scale-x","2.071","--scale-y","2.071","--seed","2071"}; rt("0073_decode_scale_2071","Fractional affine scan scale 2.071x",r); r={};
     r.size=4096; r.has_payload_seed_override=true; r.payload_seed_override=2118103236u; r.encode_args={"--page-width=620","--page-height=620"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; rt("0074_decode_scale_2701","Fractional affine scan scale 2.701x",r); r={};
     r.size=4096; r.has_payload_seed_override=true; r.payload_seed_override=282487847u; r.encode_args={"--page-width=620","--page-height=620"}; r.transform_args={"--scale-x","4.701","--scale-y","4.701","--seed","4701"}; rt("0075_decode_scale_4701","Fractional affine scan scale 4.701x",r); r={};
     r.size=8; r.literal="makocode"; r.encode_args={"--page-width=160","--page-height=160","--palette","White Black"}; r.decode_args={"--palette","White Black"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0076_tiny_palette_2_white_checker","Two-color tiny page with white checker overwrite",r); r={};
     r.size=8; r.literal="makocode"; r.encode_args={"--page-width=160","--page-height=160","--ecc=fill","--palette","White Cyan Magenta Yellow"}; r.decode_args={"--palette","White Cyan Magenta Yellow"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0077_tiny_palette_4_white_checker","Four-color tiny page with white checker overwrite",r); r={};
-    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=480","--page-height=480","--ecc=fill","--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF FFFF00 FF00FF 00FFFF 000000"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0078_tiny_palette_8_white_checker","Eight-color tiny page with diagonal white damage",r); r={};
+    r.size=8; r.literal="makocode"; r.encode_args={"--page-width=480","--page-height=480","--ecc=fill","--palette","FFFFFF FF0000 00FF00 0000FF 00FFFF FF00FF FFFF00 000000"}; r.decode_args={"--palette","FFFFFF FF0000 00FF00 0000FF 00FFFF FF00FF FFFF00 000000"}; r.transform_args={"--scale-x","2.701","--scale-y","2.701","--seed","2701"}; r.white_checker=true; rt("0078_tiny_palette_8_white_checker","Eight-color tiny page with diagonal white damage",r); r={};
 
     auto overlay=[&](OverlayConfig cfg){cases.push_back({cfg.id,"Overlay CLI merge and decode checks",[cfg](const fs::path&){overlay_case(cfg);}});};
     OverlayConfig oc;oc.id="0046_overlay_e2e";oc.fraction="0.992156862745098";overlay(oc);
@@ -3370,7 +3396,7 @@ static std::vector<TestCase> build_cases() {
     oc=OverlayConfig{};oc.id="0063_overlay_fill";oc.fraction="0.992156862745098";oc.ecc="fill";overlay(oc);
     oc=OverlayConfig{};oc.id="0068_overlay_fill_mixed";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 0 0";oc.background="0 255 0";oc.ignore_colors="#FF0000";oc.skip_grayscale=true;overlay(oc);
     oc=OverlayConfig{};oc.id="0109_overlay_footer_geometry";oc.size=4096;oc.width=640;oc.height=400;oc.footer="Archive title";oc.font_size="5";overlay(oc);
-    const std::vector<std::pair<std::string,std::string>> no_metadata={{"0124_overlay_no_metadata_2","White Black"},{"0125_overlay_no_metadata_4","White Cyan Magenta Yellow"},{"0126_overlay_no_metadata_5","White Cyan Magenta Yellow Black"},{"0127_overlay_no_metadata_8","White #FF0000 #00FF00 #0000FF Yellow Magenta Cyan Black"}};
+    const std::vector<std::pair<std::string,std::string>> no_metadata={{"0124_overlay_no_metadata_2","White Black"},{"0125_overlay_no_metadata_4","White Cyan Magenta Yellow"},{"0126_overlay_no_metadata_5","White Cyan Magenta Yellow Black"},{"0127_overlay_no_metadata_8","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"}};
     for(const auto& item:no_metadata){oc=OverlayConfig{};oc.id=item.first;oc.size=24;oc.fraction="0.992156862745098";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encode_options={"--metadata-pages=all","--no-metadata","--fiducial-spacing=24","--no-fiducials"};overlay(oc);}
     return cases;
 }
