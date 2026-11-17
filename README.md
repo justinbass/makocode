@@ -1,6 +1,6 @@
 # MakoCode🐾
 
-A standard for color barcode printing with high density, designed for long-term archiving on paper or film. Self-contained clean-room implementation with no dependencies, single file.
+A standard for color barcode printing with high density, designed for long-term archiving on paper or film. Self-contained clean-room implementation with no external codec dependencies.
 
 Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu, Mako 🐕, and about as silly as him.
 
@@ -24,7 +24,7 @@ make test
 ./makocode encode --input=file.txt
 ./makocode encode --input=file.txt --palette "White Black"
 # Render the minified source at an explicit page size
-./makocode minify --width 2398 --height 2957
+./makocode minify makocode.cpp --width 2398 --height 2957
 # Print, store, scan the output shown above
 ./makocode decode scan.ppm
 # To write one decoded file instead:
@@ -55,7 +55,7 @@ Decode restores the original file tree by default. `--decoded-file` writes a tim
 
 ### Encryption randomness
 
-Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes), split into a 16-byte salt and 12-byte nonce. Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system. This keeps the single-file source portable and avoids platform-specific random APIs and build dependencies.
+Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes), split into a 16-byte salt and 12-byte nonce. Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system.
 
 Linux and macOS:
 
@@ -120,9 +120,8 @@ Multi-page overlays with an explicit numeric ECC ratio require at least `--ecc 0
 
 ## Tests
 
-`makocode_test.cpp` contains the test suite and runs the application through its
-CLI. It builds as a separate executable and does not affect the source embedded
-by `makocode minify`. Run all cases with:
+`makocode_test.cpp` contains the test suite and drives the application through
+its CLI. Run all cases with:
 
 ```
 make -j4 test

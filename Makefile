@@ -10,6 +10,7 @@ endif
 
 LCOV_REPORT ?= test_output/coverage/makocode.info
 LCOV_HTML_DIR ?= test_output/coverage
+MAKOCODE_SOURCES := makocode.cpp makocode_common.cpp makocode_encode.cpp makocode_decode.cpp makocode_minify.cpp makocode_checkpoint.cpp makocode_platform.cpp
 # Clang's gcov output can assign synthesized functions to declaration lines or
 # line 0. Do not infer function ranges from those incomplete locations, and
 # fully ignore the resulting lcov metadata warnings (repeat categories per
@@ -35,13 +36,13 @@ endif
 
 all: makocode
 
-makocode: makocode.cpp
+makocode: $(MAKOCODE_SOURCES)
 	$(call test_status,compile makocode)
-	@$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+	@$(CXX) $(CXXFLAGS) $(MAKOCODE_SOURCES) -o $@ $(LDFLAGS)
 
-makocode_test: makocode_test.cpp makocode.cpp
+makocode_test: makocode_test.cpp $(MAKOCODE_SOURCES)
 	$(call test_status,compile makocode_test)
-	@$(CXX) $(CXXFLAGS) makocode_test.cpp -o $@ $(LDFLAGS)
+	@$(CXX) $(CXXFLAGS) -DMAKOCODE_TEST_BUILD makocode_test.cpp makocode_platform.cpp -o $@ $(LDFLAGS)
 
 test: makocode makocode_test
 	$(call test_status,run CLI test suite)

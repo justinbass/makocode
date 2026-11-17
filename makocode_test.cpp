@@ -46,21 +46,14 @@ extern "C" void* makocode_test_malloc(unsigned long size);
 #include <unistd.h>
 
 #define main makocode_embedded_cli_main
-#define read makocode_embedded_read
-#define write makocode_embedded_write
-#define malloc makocode_test_malloc
+#include "makocode_common.cpp"
+#include "makocode_encode.cpp"
+#include "makocode_decode.cpp"
+#include "makocode_minify.cpp"
+#include "makocode_checkpoint.cpp"
 #include "makocode.cpp"
-#undef malloc
-#undef write
-#undef read
 #undef main
 
-extern "C" int makocode_embedded_read(int fd, void* buffer, unsigned long count) {
-    return static_cast<int>(::read(fd, buffer, static_cast<size_t>(count)));
-}
-extern "C" int makocode_embedded_write(int fd, const void* buffer, unsigned long count) {
-    return static_cast<int>(::write(fd, buffer, static_cast<size_t>(count)));
-}
 extern "C" void* makocode_test_malloc(unsigned long size) {
     if(minify_allocation_failure_at&&++minify_allocation_count==minify_allocation_failure_at)return nullptr;
     return std::malloc(static_cast<size_t>(size));
@@ -2897,23 +2890,25 @@ const char* expected="literal: // /* */ quote: \" preserved";const char chars[]=
 if(!text_matches(literal,expected))return 1;if(chars[0]!='/'||chars[1]!='*'||chars[3]!='*'||chars[4]!='/')return 2;if(quote!='\'')return 3;
 if(!text_matches(MINIFY_DIRECTIVE_VALUE,"preprocessor directive kept"))return 4;if(before_directive!=0||after_directive!=7)return 5;return 0;}
 )SRC";
-    write_file(fixture,source);auto minify=run_cli(work,{"minify","--width","240","--height","80"},"minify");expect_success(minify,id+" minify");fs::path emitted=work/"makocode_minified.cpp";require(fs::exists(emitted)&&fs::file_size(emitted)>0,id+": missing output");
+    write_file(fixture,source);auto minify=run_cli(work,{"minify","makocode.cpp","--width","240","--height","80"},"minify");expect_success(minify,id+" minify");fs::path emitted=work/"makocode_minified.cpp";require(fs::exists(emitted)&&fs::file_size(emitted)>0,id+": missing output");
     std::string compact=read_file(emitted);require(compact.find("MINIFY_BLOCK_COMMENT_SENTINEL")==std::string::npos&&compact.find("MINIFY_LINE_COMMENT_SENTINEL")==std::string::npos,id+": comments retained");require(compact.find("  ")==std::string::npos,id+": repeated whitespace retained");
     auto compile=run_process({"g++","-std=c++17","-Wall","-Wextra","-pedantic",emitted.string(),"-o",(work/"minified_test").string()},work,{},work/"compile.out",work/"compile.err");expect_success(compile,id+" compile");
     auto execute=run_process({(work/"minified_test").string()},work,{},work/"execute.out",work/"execute.err");expect_success(execute,id+" executable");
-    fs::path empty=work/"empty";fs::create_directories(empty);write_file(empty/"makocode.cpp","");auto empty_minify=run_cli(empty,{"minify","--width","240","--height","80"},"empty_minify");expect_success(empty_minify,id+" empty source");require(fs::exists(empty/"makocode_minified.cpp")&&fs::file_size(empty/"makocode_minified.cpp")==0,id+": empty source output mismatch");
-    fs::path whitespace=work/"whitespace";fs::create_directories(whitespace);write_file(whitespace/"makocode.cpp","int\fvalue;\vint\tother;\n");auto ws=run_cli(whitespace,{"minify","--width","240","--height","80"},"whitespace");expect_success(ws,id+" control whitespace");require(read_file(whitespace/"makocode_minified.cpp")=="int value; int other;",id+": control whitespace normalization changed");
-    for(const auto& item:std::vector<std::pair<std::string,std::string>>{{"char_escape","'abc\\"},{"string_escape","\"abc\\"}}){fs::path dir=work/item.first;fs::create_directories(dir);write_file(dir/"makocode.cpp",item.second);auto run=run_cli(dir,{"minify","--width","240","--height","80"},item.first);expect_success(run,id+" trailing escape");compare_files(dir/"makocode.cpp",dir/"makocode_minified.cpp",id+" trailing escape");}
-    auto invalid=run_cli(work,{"minify","unexpected"},"invalid");expect_failure(invalid,id+" invalid arguments");require(invalid.out.find("minify: this command does not accept arguments")!=std::string::npos||invalid.err.find("minify: this command does not accept arguments")!=std::string::npos,id+": invalid-argument diagnostic changed");
-    auto missing=run_cli(work,{"minify"},"missing_dimensions");expect_failure(missing,id+" missing dimensions");require(missing.out.find("minify: both --width and --height are required")!=std::string::npos||missing.err.find("minify: both --width and --height are required")!=std::string::npos,id+": missing-dimensions diagnostic changed");
-    fs::path crlf=work/"crlf";fs::create_directories(crlf);std::string crlf_source;for(char c:source){if(c=='\n')crlf_source.push_back('\r');crlf_source.push_back(c);}write_file(crlf/"makocode.cpp",crlf_source);auto crlf_min=run_cli(crlf,{"minify","--width","240","--height","80"},"crlf");expect_success(crlf_min,id+" CRLF");std::string crlf_result=read_file(crlf/"makocode_minified.cpp");require(crlf_result.find('\r')==std::string::npos,id+": CRLF remains");
+    fs::path empty=work/"empty";fs::create_directories(empty);write_file(empty/"makocode.cpp","");auto empty_minify=run_cli(empty,{"minify","makocode.cpp","--width","240","--height","80"},"empty_minify");expect_success(empty_minify,id+" empty source");require(fs::exists(empty/"makocode_minified.cpp")&&fs::file_size(empty/"makocode_minified.cpp")==0,id+": empty source output mismatch");
+    fs::path whitespace=work/"whitespace";fs::create_directories(whitespace);write_file(whitespace/"makocode.cpp","int\fvalue;\vint\tother;\n");auto ws=run_cli(whitespace,{"minify","makocode.cpp","--width","240","--height","80"},"whitespace");expect_success(ws,id+" control whitespace");require(read_file(whitespace/"makocode_minified.cpp")=="int value; int other;",id+": control whitespace normalization changed");
+    fs::path named=work/"named";fs::create_directories(named);write_file(named/"sample.part.cpp","int  named_value;\n");auto named_minify=run_cli(named,{"minify","sample.part.cpp","--width","240","--height","80","--output","result.cpp"},"named");expect_success(named_minify,id+" named source");require(read_file(named/"result.cpp")=="int named_value;"&&fs::exists(named/"result_0000.ppm"),id+": named source output or page prefix mismatch");
+    for(const auto& item:std::vector<std::pair<std::string,std::string>>{{"char_escape","'abc\\"},{"string_escape","\"abc\\"}}){fs::path dir=work/item.first;fs::create_directories(dir);write_file(dir/"makocode.cpp",item.second);auto run=run_cli(dir,{"minify","makocode.cpp","--width","240","--height","80"},item.first);expect_success(run,id+" trailing escape");compare_files(dir/"makocode.cpp",dir/"makocode_minified.cpp",id+" trailing escape");}
+    auto invalid=run_cli(work,{"minify","makocode.cpp","unexpected"},"invalid");expect_failure(invalid,id+" invalid arguments");require(invalid.out.find("minify: only one input filename is accepted")!=std::string::npos||invalid.err.find("minify: only one input filename is accepted")!=std::string::npos,id+": invalid-argument diagnostic changed");
+    auto missing_source=run_cli(work,{"minify","--width","240","--height","80"},"missing_source");expect_failure(missing_source,id+" missing source");require(missing_source.out.find("minify: an input filename is required")!=std::string::npos||missing_source.err.find("minify: an input filename is required")!=std::string::npos,id+": missing-source diagnostic changed");
+    auto missing=run_cli(work,{"minify","makocode.cpp"},"missing_dimensions");expect_failure(missing,id+" missing dimensions");require(missing.out.find("minify: both --width and --height are required")!=std::string::npos||missing.err.find("minify: both --width and --height are required")!=std::string::npos,id+": missing-dimensions diagnostic changed");
+    fs::path crlf=work/"crlf";fs::create_directories(crlf);std::string crlf_source;for(char c:source){if(c=='\n')crlf_source.push_back('\r');crlf_source.push_back(c);}write_file(crlf/"makocode.cpp",crlf_source);auto crlf_min=run_cli(crlf,{"minify","makocode.cpp","--width","240","--height","80"},"crlf");expect_success(crlf_min,id+" CRLF");std::string crlf_result=read_file(crlf/"makocode_minified.cpp");require(crlf_result.find('\r')==std::string::npos,id+": CRLF remains");
     auto crlf_compile=run_process({"g++","-std=c++17","-Wall","-Wextra","-pedantic",(crlf/"makocode_minified.cpp").string(),"-o",(work/"crlf_test").string()},work,{},work/"crlf_compile.out",work/"crlf_compile.err");expect_success(crlf_compile,id+" CRLF compile");
-    fs::path write_fail=work/"write_failure";fs::create_directories(write_fail/"makocode_minified.cpp");write_file(write_fail/"makocode.cpp",source);auto write_error=run_cli(write_fail,{"minify","--width","240","--height","80"},"write_error");expect_failure(write_error,id+" output write failure");require(write_error.out.find("minify: failed to write makocode_minified.cpp")!=std::string::npos||write_error.err.find("minify: failed to write makocode_minified.cpp")!=std::string::npos,id+": output-write diagnostic changed");
+    fs::path write_fail=work/"write_failure";fs::create_directories(write_fail/"makocode_minified.cpp");write_file(write_fail/"makocode.cpp",source);auto write_error=run_cli(write_fail,{"minify","makocode.cpp","--width","240","--height","80"},"write_error");expect_failure(write_error,id+" output write failure");require(write_error.out.find("minify: failed to write makocode_minified.cpp")!=std::string::npos||write_error.err.find("minify: failed to write makocode_minified.cpp")!=std::string::npos,id+": output-write diagnostic changed");
     auto allocation_check=[&](const fs::path& dir,unsigned long at,const std::string& expected){auto fail=run_process({test_executable.string(),"--minify-allocation-failure",std::to_string(at)},dir,{},dir/"alloc.out",dir/"alloc.err");expect_success(fail,id+" allocation failure mode");require(fail.out.find(expected)!=std::string::npos||fail.err.find(expected)!=std::string::npos,id+": allocation diagnostic changed at "+std::to_string(at));};
-    fs::path alloc=work/"alloc";fs::create_directories(alloc);write_file(alloc/"makocode.cpp","int value;\n");allocation_check(alloc,3,"minify: failed to compact whitespace");allocation_check(alloc,1,"minify: failed to read makocode.cpp");allocation_check(alloc,2,"minify: failed to strip comments");
-    fs::path literal_alloc=work/"literal_alloc";fs::create_directories(literal_alloc);write_file(literal_alloc/"makocode.cpp",std::string(64,'0')+"'x");allocation_check(literal_alloc,3,"minify: failed to strip comments");
-    fs::path ws_alloc=work/"ws_alloc";fs::create_directories(ws_alloc);write_file(ws_alloc/"makocode.cpp",std::string(64,'0')+"\n");allocation_check(ws_alloc,5,"minify: failed to compact whitespace");
-    fs::path no_source=work/"no_source";fs::create_directories(no_source);allocation_check(no_source,0,"minify: failed to read makocode.cpp");
+    fs::path alloc=work/"alloc";fs::create_directories(alloc);write_file(alloc/"makocode.cpp","int value;\n");allocation_check(alloc,5,"minify: failed to compact whitespace");allocation_check(alloc,3,"minify: failed to read input file");allocation_check(alloc,4,"minify: failed to strip comments");
+    fs::path literal_alloc=work/"literal_alloc";fs::create_directories(literal_alloc);write_file(literal_alloc/"makocode.cpp",std::string(64,'0')+"'x");allocation_check(literal_alloc,4,"minify: failed to strip comments");
+    fs::path ws_alloc=work/"ws_alloc";fs::create_directories(ws_alloc);write_file(ws_alloc/"makocode.cpp",std::string(64,'0')+"\n");allocation_check(ws_alloc,6,"minify: failed to compact whitespace");
+    fs::path no_source=work/"no_source";fs::create_directories(no_source);allocation_check(no_source,0,"minify: failed to read input file");
 }
 
 static void rs_erasures_case(){
@@ -3433,9 +3428,9 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--ppm-transform") == 0) return ppm_transform_cli_main(argc - 1, argv + 1);
     if (argc >= 2 && std::strcmp(argv[1], "--minify-allocation-failure") == 0) {
         minify_allocation_count=0;minify_allocation_failure_at=argc>2?std::strtoul(argv[2],nullptr,10):3ul;
-        char width_option[]="--width",width_value[]="240",height_option[]="--height",height_value[]="80";
-        char* args[]={width_option,width_value,height_option,height_value};
-        return command_minify(4,args)==1?0:1;
+        char source_path[]="makocode.cpp",width_option[]="--width",width_value[]="240",height_option[]="--height",height_value[]="80";
+        char* args[]={source_path,width_option,width_value,height_option,height_value};
+        return command_minify(5,args)==1?0:1;
     }
     repo_root = fs::canonical(fs::path(argv[0])).parent_path();
     std::vector<TestCase> cases = build_cases();
