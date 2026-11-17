@@ -1,6 +1,6 @@
 TODO
 
-- Split encoder, decoder, minify into their own cpp files? Plus a common?
+- Remove _WIN32 tag?
 - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
 - Clean up cli args (-h), README
 - Improve minification algorithm to reduce size, E2E test compiles it

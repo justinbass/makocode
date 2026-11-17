@@ -46,12 +46,12 @@ extern "C" void* makocode_test_malloc(unsigned long size);
 #include <unistd.h>
 
 #define main makocode_embedded_cli_main
-#include "makocode_common.cpp"
-#include "makocode_encode.cpp"
-#include "makocode_decode.cpp"
-#include "makocode_minify.cpp"
-#include "makocode_checkpoint.cpp"
-#include "makocode.cpp"
+#include "../src/makocode_common.cpp"
+#include "../src/makocode_encode.cpp"
+#include "../src/makocode_decode.cpp"
+#include "../src/makocode_minify.cpp"
+#include "../src/makocode_checkpoint.cpp"
+#include "../src/makocode.cpp"
 #undef main
 
 extern "C" void* makocode_test_malloc(unsigned long size) {

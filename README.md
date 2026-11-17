@@ -24,7 +24,7 @@ make test
 ./makocode encode --input=file.txt
 ./makocode encode --input=file.txt --palette "White Black"
 # Render the minified source at an explicit page size
-./makocode minify makocode.cpp --width 2398 --height 2957
+./makocode minify src/makocode.cpp --width 2398 --height 2957
 # Print, store, scan the output shown above
 ./makocode decode scan.ppm
 # To write one decoded file instead:
@@ -120,7 +120,8 @@ Multi-page overlays with an explicit numeric ECC ratio require at least `--ecc 0
 
 ## Tests
 
-`makocode_test.cpp` contains the test suite and drives the application through
+`tests/makocode_test.cpp` contains the test suite and drives the application
+through
 its CLI. Run all cases with:
 
 ```

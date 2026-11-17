@@ -33,7 +33,7 @@ FOOTER_GLYPH_WIDTH = 5
 FOOTER_GLYPH_HEIGHT = 8
 FOOTER_CHAR_SPACING = 1
 
-# The glyphs used by the calibration footer, copied from makocode.cpp's
+# The glyphs used by the calibration footer, copied from src/makocode.cpp's
 # default 5x8 footer font.
 FOOTER_GLYPHS = {
     " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000", "00000"),
