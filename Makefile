@@ -2,22 +2,27 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 LDFLAGS ?=
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+APPLE_SDK ?= $(shell xcrun --sdk macosx --show-sdk-path)
+CXXFLAGS += -isystem $(APPLE_SDK)/usr/include/c++/v1
+endif
+
 LCOV_REPORT ?= test_output/coverage/makocode.info
 LCOV_HTML_DIR ?= test_output/coverage
 LCOV_FLAGS ?= --ignore-errors inconsistent,unsupported,format
 LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=1
 GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category
 
-STATUS ?= ./test/make_step.sh
-TEST_VERBOSE ?= 0
+.PHONY: all clean test coverage
 
-TEST_CASES := $(shell bash ./test/run_test_case.sh --list)
-TEST_CASE_TARGETS := $(addprefix test-case-,$(TEST_CASES))
-export CANONICAL_TILE_HARNESS_BIN := $(CURDIR)/test_output/bin/canonical_tile_harness
-export PARTIAL_ECC_RECOVERY_HARNESS_BIN := $(CURDIR)/test_output/bin/partial_ecc_recovery_e2e
-export BLOB_ERASURE_HARNESS_BIN := $(CURDIR)/test_output/bin/blob_erasure_harness
-
-.PHONY: all clean test test-setup coverage $(TEST_CASE_TARGETS)
+define test_status
+	@if [ -t 1 ]; then \
+		printf '\033[1;34m[TEST]\033[0m %s\n' '$(1)'; \
+	else \
+		printf '[TEST] %s\n' '$(1)'; \
+	fi
+endef
 
 ifeq ($(COVERAGE),1)
 CXXFLAGS += --coverage -O0 -g
@@ -27,66 +32,35 @@ endif
 all: makocode
 
 makocode: makocode.cpp
-	@$(STATUS) build "compile makocode" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+	$(call test_status,compile makocode)
+	@$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
-test_output/bin/ppm_transform: test/ppm_transform.cpp
-	@mkdir -p "$(@D)"
-	@$(STATUS) build "compile ppm_transform" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
+makocode_test: makocode_test.cpp makocode.cpp
+	$(call test_status,compile makocode_test)
+	@$(CXX) $(CXXFLAGS) makocode_test.cpp -o $@ $(LDFLAGS)
 
-test_output/bin/canonical_tile_harness: test/test_canonical_tile_harness.cpp makocode
-	@mkdir -p "$(@D)"
-	@$(STATUS) build "compile canonical tile harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
-
-test_output/bin/partial_ecc_recovery_e2e: test/test_partial_ecc_recovery_harness.cpp makocode.cpp
-	@mkdir -p "$(@D)"
-	@$(STATUS) build "compile partial ECC recovery harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
-
-test_output/bin/blob_erasure_harness: test/test_blob_erasure_harness.cpp makocode.cpp
-	@mkdir -p "$(@D)"
-	@$(STATUS) build "compile blob erasure harness" $(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
-
-test: $(TEST_CASE_TARGETS)
-
-test-setup:
-	@$(STATUS) test "prepare test suite" bash ./test/run_test_suite.sh --prepare
-
-$(TEST_CASE_TARGETS): test-case-%: test-setup makocode test_output/bin/ppm_transform test_output/bin/canonical_tile_harness
-	@if [ "$(TEST_VERBOSE)" = 1 ]; then \
-		bash ./test/run_test_case.sh --run "$*"; \
-	else \
-		log="test_output/test_logs/$*.log"; \
-		pass=''; fail=''; reset=''; \
-		if [ -t 1 ] && [ -z "$${NO_COLOR:-}" ]; then \
-			pass=$$(printf '\033[32m'); fail=$$(printf '\033[31m'); reset=$$(printf '\033[0m'); \
-		fi; \
-		if bash ./test/run_test_case.sh --run "$*" >"$$log" 2>&1; then \
-			printf '%s[PASS]%s %s\n' "$$pass" "$$reset" "$*"; \
-		else \
-			status=$$?; \
-			printf '%s[FAIL]%s %s (exit %s; %s)\n' "$$fail" "$$reset" "$*" "$$status" "$$log" >&2; \
-			exit "$$status"; \
-		fi; \
-	fi
-
-test-case-0108_partial_ecc_recovery: test_output/bin/partial_ecc_recovery_e2e
-
-test-case-0110_decode_blob_erasures: test_output/bin/blob_erasure_harness
+test: makocode makocode_test
+	$(call test_status,run CLI test suite)
+	@./makocode_test --all
 
 coverage: clean
-	@$(STATUS) coverage "check lcov" sh -c 'command -v lcov >/dev/null 2>&1'
-	@$(STATUS) coverage "check genhtml" sh -c 'command -v genhtml >/dev/null 2>&1'
-	@$(STATUS) coverage "run tests (COVERAGE=1)" $(MAKE) COVERAGE=1 test
+	$(call test_status,check lcov)
+	@command -v lcov >/dev/null
+	$(call test_status,check genhtml)
+	@command -v genhtml >/dev/null
+	$(call test_status,run suite with coverage)
+	@$(MAKE) --no-print-directory COVERAGE=1 test
+	$(call test_status,prepare coverage output)
 	@mkdir -p "$(dir $(LCOV_REPORT))"
-	@$(STATUS) coverage "capture lcov" lcov --capture --no-external --directory . --output-file $(LCOV_REPORT) $(LCOV_FLAGS) $(LCOV_RC)
-	@$(STATUS) coverage "generate html" genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS) --branch-coverage
+	$(call test_status,capture coverage data)
+	@lcov --capture --no-external --directory . --output-file $(LCOV_REPORT) $(LCOV_FLAGS) $(LCOV_RC)
+	$(call test_status,generate coverage HTML)
+	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS) --branch-coverage
 
 clean:
-	@$(STATUS) --note clean "cleanup start"
-	@$(STATUS) clean "binary" rm -f makocode
-	@$(STATUS) clean "symbol bundle" rm -rf makocode.dSYM
-	@$(STATUS) clean "legacy ppm_transform helper" rm -f test/ppm_transform
-	@$(STATUS) clean "legacy ppm_transform symbol bundle" rm -rf test/ppm_transform.dSYM
-	@$(STATUS) clean "test artifacts" rm -rf test_output
-	@$(STATUS) clean "minified stub" rm -f makocode_minified.cpp
-	@$(STATUS) clean "coverage data" rm -f *.gcda *.gcno test/*.gcda test/*.gcno $(LCOV_REPORT)
-	@$(STATUS) --note clean "cleanup complete"
+	$(call test_status,remove application and test binaries)
+	@rm -f makocode makocode_test
+	$(call test_status,remove test artifacts)
+	@rm -rf makocode.dSYM makocode_test.dSYM test_output
+	$(call test_status,remove generated source and coverage files)
+	@rm -f makocode_minified.cpp *.gcda *.gcno $(LCOV_REPORT)

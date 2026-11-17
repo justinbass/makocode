@@ -14,7 +14,7 @@ complete license text.
 
 ## Dependencies
 
-Totally standalone for future-proofing, c++ and g++ required for compiling. CLI tests require bash.
+The application is a standalone C++17 program. Building and running the CLI tests requires a C++17 compiler and GNU Make. The test runner uses POSIX process APIs to invoke the CLI.
 
 ## Usage
 
@@ -120,32 +120,31 @@ Multi-page overlays with an explicit numeric ECC ratio require at least `--ecc 0
 
 ## Tests
 
-`make test` now drives the CLI end-to-end through the shell scripts in `test/`
-(round-trip, payload suite, overlay, CLI output-dir, and decode failure cases).
-Test artifacts are written to `test_output/` using the labels defined in each
-case registration (e.g., `0002_baseline_8k_ecc_050_*`,
-`0015_gray_100k_single_*`).
-Encoded PPM pages remain directly in `test_output/`. Standard round-trip tests
-pipe payloads into `encode` and compare `decode --decoded-stdout`; dedicated
-file and directory tests keep their filesystem fixtures and outputs. Each test
-run clears prior output before writing fresh artifacts. No visual-link directory
-is created.
-
-Test cases are registered in `test/test_cases.sh`. Run independent cases in
-parallel with GNU Make using `make -j test`. Each completed case prints one
-result line; its full output is saved in `test_output/test_logs/`. Use `make test TEST_VERBOSE=1`
-to stream full output instead.
-
-Each `make test` run prints its master seed and writes it to `test_output/test_seed.txt`.
-Repeat a randomized run with the same seed using:
+`makocode_test.cpp` contains the test suite and runs the application through its
+CLI. It builds as a separate executable and does not affect the source embedded
+by `makocode minify`. Run all cases with:
 
 ```
-MAKO_TEST_SEED=$(cat test_output/test_seed.txt) make -j test
+make -j4 test
 ```
 
-You can also choose a seed explicitly, for example `MAKO_TEST_SEED=12345 make -j test`.
-Random payload seeds are derived from the master seed and test label, so each case
-gets a stable payload when replayed.
+The runner uses the job count from `make -jN`; each case prints one result line.
+Work files and captured CLI output are kept in separate directories under
+`test_output/`. `make clean` removes them. List case IDs with
+`./makocode_test --list` or run one case with `./makocode_test --case CASE_ID`.
+In terminals, `[TEST]` is blue, `[PASS]` is green, and `[FAIL]` is red.
+
+Each run prints a master seed and writes it to
+`test_output/test_logs/test_seed.txt`. Repeat a randomized run with the same
+seed using:
+
+```
+MAKO_TEST_SEED=$(cat test_output/test_logs/test_seed.txt) make -j4 test
+```
+
+You can also choose a seed explicitly, for example
+`MAKO_TEST_SEED=12345 make -j4 test`. Random fixture seeds are derived from the
+master seed and case label.
 
 ### Coverage
 
@@ -156,9 +155,9 @@ HTML coverage report, install `lcov` (which also ships `genhtml`) and run:
 make coverage
 ```
 
-This rebuilds `makocode` with `--coverage -O0 -g`, executes every case in
-`test/run_test_suite.sh`, and writes `test_output/makocode.info` plus an HTML
-dashboard under `test_output/coverage/index.html`.
+This rebuilds both executables with `--coverage -O0 -g`, runs the same C++ test
+suite, and writes `test_output/coverage/makocode.info` plus an HTML dashboard
+under `test_output/coverage/index.html`.
 
 ### Calibration
 
