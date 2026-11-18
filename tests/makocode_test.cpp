@@ -3432,7 +3432,17 @@ int main(int argc, char** argv) {
         char* args[]={source_path,width_option,width_value,height_option,height_value};
         return command_minify(5,args)==1?0:1;
     }
-    repo_root = fs::canonical(fs::path(argv[0])).parent_path();
+    test_executable = fs::canonical(fs::path(argv[0]));
+    repo_root = test_executable.parent_path();
+    while (!repo_root.empty() && !fs::exists(repo_root / "src" / "makocode.cpp")) {
+        fs::path parent = repo_root.parent_path();
+        if (parent == repo_root) break;
+        repo_root = parent;
+    }
+    if (!fs::exists(repo_root / "src" / "makocode.cpp")) {
+        std::cerr << "Unable to locate repository root from " << test_executable << '\n';
+        return 2;
+    }
     std::vector<TestCase> cases = build_cases();
     if (argc == 2 && std::strcmp(argv[1], "--list") == 0) {
         for (const auto& test : cases) std::cout << test.id << '\n';
@@ -3449,8 +3459,7 @@ int main(int argc, char** argv) {
     const char* pass_label = stdout_color ? "\033[32m[PASS]\033[0m " : "[PASS] ";
     const char* fail_label = stderr_color ? "\033[31m[FAIL]\033[0m " : "[FAIL] ";
     output_root = repo_root / "test_output";
-    makocode_bin = repo_root / "makocode";
-    test_executable = fs::canonical(fs::path(argv[0]));
+    makocode_bin = test_executable.parent_path() / "makocode";
     fs::create_directories(output_root / "test_logs");
     master_seed = parse_master_seed();
     {

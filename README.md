@@ -36,18 +36,20 @@ independent of the host filesystem and process environment.
 
 ## Usage
 
+The application and test executables are written to `build/bin/`.
+
 ```
 make
 make test
-./makocode encode --input=file.txt
-./makocode encode --input=file.txt --palette "White Black"
+./build/bin/makocode encode --input=file.txt
+./build/bin/makocode encode --input=file.txt --palette "White Black"
 # Render the minified source at an explicit page size
-./makocode minify src/makocode.cpp --width 2398 --height 2957
+./build/bin/makocode minify src/makocode.cpp --width 2398 --height 2957
 # Print, store, scan the output shown above
-./makocode decode scan.ppm
+./build/bin/makocode decode scan.ppm
 # To write one decoded file instead:
-./makocode decode --decoded-file scan.ppm
-./makocode decode --decoded-stdout scan.ppm
+./build/bin/makocode decode --decoded-file scan.ppm
+./build/bin/makocode decode --decoded-stdout scan.ppm
 ```
 
 ### Incremental checkpoints
@@ -55,10 +57,10 @@ make test
 `checkpoint create` builds a single checkpoint bundle from the supplied file or directory inputs. Repeat `--base` for previously decoded trees whose chunks may be reused. The bundle contains a full snapshot manifest and only chunk bodies not found in the base data. `--chunk-size` sets the average content-defined chunk target (default `4M`; accepted range `256` bytes through `1G`). Chunk sizes are approximate page targets; normal `encode` compression and layout determine the actual page use.
 
 ```sh
-./makocode checkpoint create --input current --base previous --output current.mcp --chunk-size 4M
-./makocode encode --input current.mcp --output-dir pages --password 'secret' --random-data="$random"
-./makocode decode --output-dir decoded --password 'secret' pages/*.ppm
-./makocode checkpoint restore --input decoded/current.mcp --base previous --output restored
+./build/bin/makocode checkpoint create --input current --base previous --output current.mcp --chunk-size 4M
+./build/bin/makocode encode --input current.mcp --output-dir pages --password 'secret' --random-data="$random"
+./build/bin/makocode decode --output-dir decoded --password 'secret' pages/*.ppm
+./build/bin/makocode checkpoint restore --input decoded/current.mcp --base previous --output restored
 ```
 
 Checkpoint bundles are files, so the existing `encode`/`decode` options remain in control of page layout, encryption, ECC, hidden capacity, and filler. A bundle and its decoded bases are plaintext local files; encrypted page output protects the manifest and chunk references. Page count and dimensions remain observable. Checkpoint IDs use SHA-256 and the manifest is inside the encoded payload.
@@ -79,7 +81,7 @@ Linux and macOS:
 
 ```sh
 random=$(od -An -N28 -tx1 /dev/urandom | tr -d ' \n')
-./makocode encode --input=file.txt --password=... --random-data="$random"
+./build/bin/makocode encode --input=file.txt --password=... --random-data="$random"
 ```
 
 Windows PowerShell:
@@ -88,7 +90,7 @@ Windows PowerShell:
 $bytes = [byte[]]::new(28)
 [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
 $random = [Convert]::ToHexString($bytes)
-.\makocode.exe encode --input=file.txt --password=... --random-data=$random
+.\build\bin\makocode.exe encode --input=file.txt --password=... --random-data=$random
 ```
 
 Diceware can supply the randomness too; these words are entropy input, not the encryption password. Use 18 independently selected words (about 232 bits of entropy), hash their exact space-separated text, and take 56 hex digits (28 bytes). Linux:
@@ -96,7 +98,7 @@ Diceware can supply the randomness too; these words are entropy input, not the e
 ```sh
 words='word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18'
 random=$(printf '%s' "$words" | sha256sum | cut -c1-56)
-./makocode encode --input=file.txt --password=... --random-data="$random"
+./build/bin/makocode encode --input=file.txt --password=... --random-data="$random"
 ```
 
 On macOS replace `sha256sum` with `shasum -a 256`. In PowerShell, set `$words` to the 18 words, then run:
@@ -105,7 +107,7 @@ On macOS replace `sha256sum` with `shasum -a 256`. In PowerShell, set `$words` t
 $sha = [Security.Cryptography.SHA256]::Create()
 $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($words))
 $random = [Convert]::ToHexString($digest).Substring(0, 56)
-.\makocode.exe encode --input=file.txt --password=... --random-data=$random
+.\build\bin\makocode.exe encode --input=file.txt --password=... --random-data=$random
 ```
 
 Use a newly generated value for every encryption. Hashing formats the Diceware entropy into the required bytes; it does not add entropy.
@@ -149,7 +151,8 @@ make -j4 test
 The runner uses the job count from `make -jN`; each case prints one result line.
 Work files and captured CLI output are kept in separate directories under
 `test_output/`. `make clean` removes them. List case IDs with
-`./makocode_test --list` or run one case with `./makocode_test --case CASE_ID`.
+`./build/bin/makocode_test --list` or run one case with
+`./build/bin/makocode_test --case CASE_ID`.
 In terminals, `[TEST]` is blue, `[PASS]` is green, and `[FAIL]` is red.
 
 Each run prints a master seed and writes it to
@@ -166,16 +169,18 @@ master seed and case label.
 
 ### Coverage
 
-To run the same end-to-end suite with GCC/gcov instrumentation and produce an
-HTML coverage report, install `lcov` (which also ships `genhtml`) and run:
+To run the same end-to-end suite with gcov-compatible instrumentation and
+produce an HTML coverage report, install `lcov` (which also ships `genhtml`)
+and run:
 
 ```
 make coverage
 ```
 
 This rebuilds both executables with `--coverage -O0 -g`, runs the same C++ test
-suite, and writes `test_output/coverage/makocode.info` plus an HTML dashboard
-under `test_output/coverage/index.html`.
+suite, and captures coverage data from `build/bin/`. The LCOV report is written
+to `build/coverage/report/makocode.info`, and the HTML dashboard to
+`build/coverage/report/html/index.html`.
 
 ### Calibration
 

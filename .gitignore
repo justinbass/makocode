@@ -1,7 +1,5 @@
 *.bin
 *.dSYM/
-*.gcda
-*.gcno
 *.ppm
 !images/0001_makocode_2_colors.ppm
 !images/0002_makocode_4_colors.ppm
@@ -10,7 +8,12 @@
 *__pycache__*
 *swp
 .tmp/
+/makocode
+/makocode_test
+/makocode.dSYM/
+/makocode_test.dSYM/
+/*.gcda
+/*.gcno
+/build/
 /test_output/
-makocode
-makocode_test
 makocode_minified.cpp
