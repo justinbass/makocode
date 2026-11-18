@@ -1,7 +1,6 @@
 TODO
 
-- Clean up cli args (-h), README
-- Improve minification algorithm to reduce size, E2E test compiles it
+- Minification E2E test compiles its output
 - ECC approaching 100% should work, e.g. generate 100 pages and remove 99 of them.
 - Improve overlay to 254/255?
 - Steganography (high overlay, no metadata/fiducials). Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
@@ -18,6 +17,7 @@ TODO
   - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
   - Tests for physical row/column skip/expand (scan/print damage)
   - Increase all distortions until decoding breaks, make improvements
+- Clean up cli args (-h), README
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak/others as reference
 - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.
 - Penetration test, bug hunt

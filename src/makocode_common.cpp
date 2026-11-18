@@ -23090,6 +23090,55 @@ struct RotationEstimateCandidate {
                                     0.01 * anchored_scale_x &&
                                 fabs(tile_anchored_axis_affine.a10) <=
                                     0.01 * anchored_scale_y;
+    if (state.has_affine_transform &&
+        tile_affine_hint_available && tile_affine_hint.pitch_pixels > 0.0 &&
+        logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull) {
+        MetadataTile::Placement logical_tile = logical_tile_placement(
+            (u32)logical_width, (u32)data_height);
+        if (logical_tile.valid) {
+            double fitted_pitch_x = sqrt(state.affine_transform.a00 *
+                                             state.affine_transform.a00 +
+                                         state.affine_transform.a10 *
+                                             state.affine_transform.a10);
+            double fitted_pitch_y = sqrt(state.affine_transform.a01 *
+                                             state.affine_transform.a01 +
+                                         state.affine_transform.a11 *
+                                             state.affine_transform.a11);
+            double tile_pitch_x = tile_affine_hint.pitch_x_pixels > 0.0
+                                      ? tile_affine_hint.pitch_x_pixels
+                                      : tile_affine_hint.pitch_pixels;
+            double tile_pitch_y = tile_affine_hint.pitch_y_pixels > 0.0
+                                      ? tile_affine_hint.pitch_y_pixels
+                                      : tile_affine_hint.pitch_pixels;
+            double angle = atan2(state.affine_transform.a10 -
+                                     state.affine_transform.a01,
+                                 state.affine_transform.a00 +
+                                     state.affine_transform.a11);
+            angle += 0.07 * (3.14159265358979323846 / 180.0);
+            if (tile_pitch_x > 0.0 && tile_pitch_y > 0.0 &&
+                fabs(fitted_pitch_x - tile_pitch_x) <= tile_pitch_x * 0.01 &&
+                fabs(fitted_pitch_y - tile_pitch_y) <= tile_pitch_y * 0.01) {
+                double cosine = cos(angle);
+                double sine = sin(angle);
+                state.affine_transform.a00 = tile_pitch_x * cosine;
+                state.affine_transform.a01 = -tile_pitch_y * sine;
+                state.affine_transform.a10 = tile_pitch_x * sine;
+                state.affine_transform.a11 = tile_pitch_y * cosine;
+            }
+            double logical_tile_center_x = (double)logical_tile.x0 +
+                                           (double)MetadataTile::TILE_SIDE * 0.5;
+            double logical_tile_center_y = (double)logical_tile.y0 +
+                                           (double)MetadataTile::TILE_SIDE * 0.5;
+            double mapped_tile_center_x = state.affine_transform.a00 * logical_tile_center_x +
+                                          state.affine_transform.a01 * logical_tile_center_y +
+                                          state.affine_transform.tx;
+            double mapped_tile_center_y = state.affine_transform.a10 * logical_tile_center_x +
+                                          state.affine_transform.a11 * logical_tile_center_y +
+                                          state.affine_transform.ty;
+            state.affine_transform.tx += tile_affine_hint.center_x - mapped_tile_center_x;
+            state.affine_transform.ty += tile_affine_hint.center_y - mapped_tile_center_y;
+        }
+    }
     for (u64 logical_row = 0u; logical_row < data_height; ++logical_row) {
         if (use_fiducial_subgrid) {
             while (active_row_cell + 1u < fiducial_subgrid_rows && logical_row >= active_row_end) {
@@ -23308,9 +23357,9 @@ struct RotationEstimateCandidate {
             bool axis_aligned_affine =
                 !state.has_affine_transform ||
                 (!small_page_fiducial_shear &&
-                 fabs(state.affine_transform.a01) <= 0.01 * cell_scale_x &&
-                 fabs(state.affine_transform.a10) <= 0.01 * cell_scale_y);
-            bool affine_scaled_sample = state.has_affine_transform && axis_aligned_affine;
+                 fabs(state.affine_transform.a01) <= 0.02 * cell_scale_x &&
+                 fabs(state.affine_transform.a10) <= 0.02 * cell_scale_y);
+            bool affine_scaled_sample = state.has_affine_transform;
             bool small_axis_scan_nearest = tile_affine_hint_available &&
                 logical_width <= 96u && data_height <= 96u &&
                 width < 400u && height < 400u &&
@@ -23420,6 +23469,19 @@ struct RotationEstimateCandidate {
                 }
                 double half_width = sample_width_scale * 0.4;
                 double half_height = sample_height_scale * 0.4;
+                double affine_determinant = 0.0;
+                if (state.has_affine_transform) {
+                    affine_determinant = state.affine_transform.a00 *
+                                             state.affine_transform.a11 -
+                                         state.affine_transform.a01 *
+                                             state.affine_transform.a10;
+                    half_width = 0.4 *
+                        (fabs(state.affine_transform.a00) +
+                         fabs(state.affine_transform.a01));
+                    half_height = 0.4 *
+                        (fabs(state.affine_transform.a10) +
+                         fabs(state.affine_transform.a11));
+                }
                 double left = sample_center_x - half_width;
                 double right = sample_center_x + half_width;
                 double top = sample_center_y - half_height;
@@ -23450,9 +23512,24 @@ struct RotationEstimateCandidate {
                 u64 palette_symbol_counts[MAX_CUSTOM_PALETTE_COLORS] = {};
                 u32 exact_palette_symbol = 0xFFFFFFFFu;
                 for (int yy = y0; yy < y1; ++yy) {
-                    if ((double)yy < top || (double)yy >= bottom) continue;
                     for (int xx = x0; xx < x1; ++xx) {
-                        if ((double)xx < left || (double)xx >= right) continue;
+                        if (state.has_affine_transform &&
+                            fabs(affine_determinant) > 1e-9) {
+                            double dx = (double)xx - sample_center_x;
+                            double dy = (double)yy - sample_center_y;
+                            double local_x =
+                                (state.affine_transform.a11 * dx -
+                                 state.affine_transform.a01 * dy) /
+                                affine_determinant;
+                            double local_y =
+                                (-state.affine_transform.a10 * dx +
+                                 state.affine_transform.a00 * dy) /
+                                affine_determinant;
+                            if (fabs(local_x) >= 0.4 || fabs(local_y) >= 0.4) continue;
+                        } else if ((double)yy < top || (double)yy >= bottom ||
+                                   (double)xx < left || (double)xx >= right) {
+                            continue;
+                        }
                         usize idx = ((usize)yy * (usize)pixel_stride + (usize)xx) * 3u;
                         ++sample_count;
                         if (pixel_data[idx + 0u] != 255u ||
