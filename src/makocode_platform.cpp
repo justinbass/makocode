@@ -6,6 +6,7 @@
  */
 #include "makocode_platform.hpp"
 
+#if INCLUDES
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -17,7 +18,9 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#endif
 
+#if INCLUDES
 struct MakoPlatformDirectory {
     DIR* handle;
 };
@@ -162,3 +165,4 @@ extern "C" bool makocode_platform_local_timestamp(char* buffer, unsigned long ca
                                &local);
     return length > 0u && length < capacity;
 }
+#endif

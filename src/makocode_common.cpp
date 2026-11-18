@@ -909,7 +909,7 @@ bool append_affine_csv_row(makocode::ByteBuffer& csv,
 #define __7Z_TYPES_H
 
 
-#ifdef _WIN32
+#if defined(_WIN32) && INCLUDES
 #include <windows.h>
 #endif
 
@@ -933,7 +933,7 @@ bool append_affine_csv_row(makocode::ByteBuffer& csv,
 
 typedef int SRes;
 
-#ifdef _WIN32
+#if defined(_WIN32) && INCLUDES
 typedef DWORD WRes;
 #else
 typedef int WRes;
@@ -1196,7 +1196,7 @@ Public domain */
 void *MyAlloc(size_t size);
 void MyFree(void *address);
 
-#ifdef _WIN32
+#if defined(_WIN32) && INCLUDES
 
 void SetLargePageSize();
 
@@ -1497,7 +1497,7 @@ void MatchFinder_Init(CMatchFinder *p);
 Igor Pavlov
 Public domain */
 
-#ifdef _WIN32
+#if defined(_WIN32) && INCLUDES
 #include <windows.h>
 #endif
 

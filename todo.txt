@@ -27,11 +27,6 @@ TODO
 - Set version to 0 (document, makocode only stores the major version)
 - Hard reset git history to Initial Commit, save locally but don't publish it
 
-FUTURE
-
-- Freestanding flag
-  - Abstract all external dependencies (shell: head -c ... /dev/urandom, sort, ANY file writing including debug/encode/minify/etc), env vars, into an OS-relevant C++ module. No filesystem dependency, and no includes e.g. stdin/stdout data. Use preprocessor directive around all includes: #if INCLUDES \n #include ... \n #endif (dirent.h, sys/stat.h, ...). Mention in docs as part of futureproofing / self-contained solution.
-
 Prompts:
 - CC
   - I want you to orchestrate X luna xhigh subagents, Y at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly Z lines in there, basically one per block, but it's ok if we were a bit off too.

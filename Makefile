@@ -1,6 +1,14 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 LDFLAGS ?=
+INCLUDES ?= 1
+FREESTANDING ?= 0
+
+ifeq ($(FREESTANDING),1)
+CXXFLAGS += -ffreestanding -DINCLUDES=0
+else
+CXXFLAGS += -DINCLUDES=$(INCLUDES)
+endif
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -10,7 +18,8 @@ endif
 
 LCOV_REPORT ?= test_output/coverage/makocode.info
 LCOV_HTML_DIR ?= test_output/coverage
-MAKOCODE_SOURCES := src/makocode.cpp src/makocode_common.cpp src/makocode_encode.cpp src/makocode_decode.cpp src/makocode_minify.cpp src/makocode_checkpoint.cpp src/makocode_platform.cpp
+PLATFORM_SOURCE ?= src/makocode_platform.cpp
+MAKOCODE_SOURCES := src/makocode.cpp src/makocode_common.cpp src/makocode_encode.cpp src/makocode_decode.cpp src/makocode_minify.cpp src/makocode_checkpoint.cpp $(PLATFORM_SOURCE)
 # Clang's gcov output can assign synthesized functions to declaration lines or
 # line 0. Do not infer function ranges from those incomplete locations, and
 # fully ignore the resulting lcov metadata warnings (repeat categories per
@@ -19,7 +28,7 @@ LCOV_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,format,forma
 LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=0
 GENHTML_FLAGS ?= --ignore-errors inconsistent,inconsistent,unsupported,corrupt,category,category
 
-.PHONY: all clean test coverage
+.PHONY: all clean test coverage freestanding
 
 define test_status
 	@if [ -t 1 ]; then \
@@ -62,6 +71,15 @@ coverage: clean
 	$(call test_status,generate coverage HTML)
 	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) $(GENHTML_FLAGS) --branch-coverage
 
+# Compile every translation unit without the host platform implementation.
+# A target integration supplies the makocode_platform_* definitions at link time.
+freestanding:
+	@mkdir -p build/freestanding
+	@set -e; for source in $(MAKOCODE_SOURCES); do \
+		object=build/freestanding/$$(basename "$$source" .cpp).o; \
+		$(CXX) $(filter-out -DINCLUDES=%,$(CXXFLAGS)) -ffreestanding -DINCLUDES=0 -Isrc -c "$$source" -o "$$object"; \
+	done
+
 clean:
 	$(call test_status,remove application and test binaries)
 	@rm -f makocode makocode_test
@@ -69,3 +87,4 @@ clean:
 	@rm -rf makocode.dSYM makocode_test.dSYM test_output
 	$(call test_status,remove generated source and coverage files)
 	@rm -f makocode_minified.cpp *.gcda *.gcno src/*.gcda src/*.gcno tests/*.gcda tests/*.gcno $(LCOV_REPORT)
+	@rm -rf build/freestanding

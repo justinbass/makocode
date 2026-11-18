@@ -16,6 +16,24 @@ complete license text.
 
 The application is a standalone C++17 program. Building and running the CLI tests requires a C++17 compiler and GNU Make. The test runner uses POSIX process APIs to invoke the CLI.
 
+### Freestanding integration
+
+Runtime host services are routed through `makocode_platform_*` in
+`src/makocode_platform.cpp`. The POSIX implementation is enabled with
+`INCLUDES=1`; its OS headers and implementation are excluded with
+`INCLUDES=0`. `make freestanding` compiles each translation unit with
+`-ffreestanding` and `INCLUDES=0`, without linking a host OS adapter. A target
+integration supplies definitions for the platform ABI when it links the
+application; select its source with `PLATFORM_SOURCE=path/to/platform.cpp`.
+File access, directory traversal, terminal input/output,
+environment lookup, allocation, timestamps, and formatting stay behind this
+OS-relevant C++ module. The runtime does not invoke shell utilities.
+
+Keeping OS headers and services behind this boundary is part of making the
+implementation futureproof and self-contained: a port can provide the
+services supported by its environment while codec and archive logic remain
+independent of the host filesystem and process environment.
+
 ## Usage
 
 ```

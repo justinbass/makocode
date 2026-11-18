@@ -7,7 +7,9 @@
 #ifndef MAKOCODE_PLATFORM_HPP
 #define MAKOCODE_PLATFORM_HPP
 
-#include <stddef.h>
+#ifndef INCLUDES
+#define INCLUDES 1
+#endif
 
 enum {
     MAKOCODE_OPEN_READ = 1,
