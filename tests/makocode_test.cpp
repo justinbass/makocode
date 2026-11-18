@@ -996,6 +996,7 @@ static void cmd_overlay_mask(int argc, char** argv) {
     const char* background_color_text = nullptr;
     int width = 1000;
     int height = 1000;
+    int center_clear_radius = 0;
 
     for (int i = 2; i < argc; i++) {
         const char* arg = argv[i];
@@ -1008,6 +1009,7 @@ static void cmd_overlay_mask(int argc, char** argv) {
         else if (strcmp(arg, "--background-color") == 0) background_color_text = require_value("--background-color");
         else if (strcmp(arg, "--width") == 0) width = parse_i32(require_value("--width"), "width");
         else if (strcmp(arg, "--height") == 0) height = parse_i32(require_value("--height"), "height");
+        else if (strcmp(arg, "--center-clear-radius") == 0) center_clear_radius = parse_i32(require_value("--center-clear-radius"), "center clear radius");
         else die2("ppm_transform: unknown flag ", arg);
     }
 
@@ -1059,12 +1061,14 @@ static void cmd_overlay_mask(int argc, char** argv) {
     int cy = height / 2;
     int radius = (int)(width * 0.45);
     long long radius_sq = (long long)radius * (long long)radius;
+    long long center_clear_radius_sq = (long long)center_clear_radius * center_clear_radius;
 
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             int dx = x - cx;
             int dy = y - cy;
-            int inside = ((long long)dx * dx + (long long)dy * dy) <= radius_sq;
+            long long distance_sq = (long long)dx * dx + (long long)dy * dy;
+            int inside = distance_sq <= radius_sq && distance_sq > center_clear_radius_sq;
             int rgb[3] = {bg_color[0], bg_color[1], bg_color[2]};
             if (inside) {
                 if (circle_palette_count > 0) {
@@ -2563,9 +2567,10 @@ struct OverlayConfig{
     unsigned width=1000,height=1000;
     std::string fraction="0.1",ecc,palette,ignore_colors,footer,font_size;
     std::string circle="0 0 0",background="255 255 255",circle_colors,allowed_colors;
+    unsigned center_clear_radius=0;
     std::vector<std::string> encode_options;
     int expected_pages=0;
-    bool skip_grayscale=false,without_metadata=false,without_fiducials=false;
+    bool skip_grayscale=false,without_metadata=false,without_fiducials=false,encrypted=false;
 };
 
 static void overlay_case(const OverlayConfig& cfg){
@@ -2575,8 +2580,10 @@ static void overlay_case(const OverlayConfig& cfg){
     generate_bytes(work,payload,cfg.size,payload_seed,"payload");
     std::map<std::string,std::string> mask_env;
     if(!cfg.circle_colors.empty())mask_env["MAKO_OVERLAY_CIRCLE_COLORS"]=cfg.circle_colors;
-    auto made=run_transform(work,{"overlay-mask","--output",mask.string(),"--circle-color",cfg.circle,
-        "--background-color",cfg.background,"--width",std::to_string(cfg.width),"--height",std::to_string(cfg.height)},"mask",mask_env);
+    std::vector<std::string> mask_args={"overlay-mask","--output",mask.string(),"--circle-color",cfg.circle,
+        "--background-color",cfg.background,"--width",std::to_string(cfg.width),"--height",std::to_string(cfg.height)};
+    if(cfg.center_clear_radius){mask_args.push_back("--center-clear-radius");mask_args.push_back(std::to_string(cfg.center_clear_radius));}
+    auto made=run_transform(work,mask_args,"mask",mask_env);
     expect_success(made,cfg.id+" overlay mask");
     std::vector<std::string> encode={"encode","--input=payload.bin","--overlay-fraction="+cfg.fraction,
         "--overlay-ppm="+mask.string(),"--overlay-pages=all","--page-width="+std::to_string(cfg.width),
@@ -2588,11 +2595,17 @@ static void overlay_case(const OverlayConfig& cfg){
     if(!cfg.font_size.empty()){encode.push_back("--font-size");encode.push_back(cfg.font_size);}
     if(cfg.without_metadata)encode.push_back("--no-metadata");
     if(cfg.without_fiducials)encode.push_back("--no-fiducials");
+    if(cfg.encrypted){
+        encode.push_back("--password=steganography-suite-password");
+        encode.push_back("--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb");
+    }
     encode.insert(encode.end(),cfg.encode_options.begin(),cfg.encode_options.end());
     auto encoded=run_cli(work,encode,"encode",payload,{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("crypto/"+cfg.id))}});
     expect_success(encoded,cfg.id+" encode");
     std::string log=encoded.out+encoded.err;
     require(log.find("debug: overlay erasure budget per block=")!=std::string::npos,cfg.id+": overlay selector budget was not logged");
+    if(cfg.encrypted)require(log.find("debug: overlay erasure budget per block=254")!=std::string::npos,
+                             cfg.id+": expected 254 reserved erasures per block");
     auto unordered=ppm_paths(pages_dir,cfg.id);require(!unordered.empty(),cfg.id+": encode produced no PPM pages");if(cfg.expected_pages>0)require(static_cast<int>(unordered.size())==cfg.expected_pages,cfg.id+": page count mismatch");
     std::vector<std::pair<u64,std::string>> indexed;
     TileSummary baseline;
@@ -2614,11 +2627,20 @@ static void overlay_case(const OverlayConfig& cfg){
     require(fs::exists(csv),cfg.id+": missing encode fiducial report");
     std::vector<std::string> decode_extra={"--debug"};
     if(cfg.without_metadata){decode_extra.insert(decode_extra.end(),{"--no-metadata","--no-fiducials","--palette",cfg.palette});}
+    if(cfg.encrypted)decode_extra.push_back("--password=steganography-suite-password");
     std::vector<std::string> decode_args=decode_file_args(ordered,decoded,decode_extra);
     auto result=run_cli(work,decode_args,"decode");expect_success(result,cfg.id+" decode");
     require(fs::exists(decoded/"decode_fiducials.csv"),cfg.id+": missing decode fiducial report");
     check_fiducials(csv,decoded/"decode_fiducials.csv",cfg.id);
     compare_files(payload,decoded/"payload.bin",cfg.id);
+    if(cfg.encrypted){
+        fs::path wrong_password_output=work/"wrong_password";
+        fs::create_directories(wrong_password_output);
+        auto wrong_password=run_cli(work,decode_file_args(ordered,wrong_password_output,
+            {"--no-metadata","--no-fiducials","--palette",cfg.palette,
+             "--password=incorrect-steganography-password"}),"wrong_password");
+        expect_failure(wrong_password,cfg.id+" wrong password");
+    }
     if(cfg.without_fiducials){
         require(read_file(csv)=="page,row,column,x,y,logical_x,logical_y\n",cfg.id+": --no-fiducials still emitted markers");
         PpmImage image=read_ppm(ordered.front());size_t matching=0;
@@ -3391,8 +3413,13 @@ static std::vector<TestCase> build_cases() {
     oc=OverlayConfig{};oc.id="0063_overlay_fill";oc.fraction="0.992156862745098";oc.ecc="fill";overlay(oc);
     oc=OverlayConfig{};oc.id="0068_overlay_fill_mixed";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 0 0";oc.background="0 255 0";oc.ignore_colors="#FF0000";oc.skip_grayscale=true;overlay(oc);
     oc=OverlayConfig{};oc.id="0109_overlay_footer_geometry";oc.size=4096;oc.width=640;oc.height=400;oc.footer="Archive title";oc.font_size="5";overlay(oc);
-    const std::vector<std::pair<std::string,std::string>> no_metadata={{"0124_overlay_no_metadata_2","White Black"},{"0125_overlay_no_metadata_4","White Cyan Magenta Yellow"},{"0126_overlay_no_metadata_5","White Cyan Magenta Yellow Black"},{"0127_overlay_no_metadata_8","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"}};
-    for(const auto& item:no_metadata){oc=OverlayConfig{};oc.id=item.first;oc.size=24;oc.fraction="0.992156862745098";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encode_options={"--metadata-pages=all","--no-metadata","--fiducial-spacing=24","--no-fiducials"};overlay(oc);}
+    const std::vector<std::pair<std::string,std::string>> steganography_palettes={{"2","White Black"},{"4","White Cyan Magenta Yellow"},{"5","White Cyan Magenta Yellow Black"},{"8","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"}};
+    for(const auto& item:steganography_palettes){
+        oc=OverlayConfig{};oc.id="0124_overlay_palette_"+item.first;oc.size=24;oc.fraction="0.5";oc.palette=item.second;oc.circle="128 64 0";oc.ignore_colors="White";oc.center_clear_radius=32u;overlay(oc);
+    }
+    for(const auto& item:steganography_palettes){
+        oc=OverlayConfig{};oc.id="0128_steganography_password_"+item.first;oc.size=24;oc.fraction="0.9960784313";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encrypted=true;overlay(oc);
+    }
     return cases;
 }
 

@@ -24771,6 +24771,8 @@ bool frame_bits_to_payload(const u8* frame_data,
 bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                               const ImageMappingConfig& mapping_overrides,
                                               bool metadata_absent,
+                                              const char* password,
+                                              usize password_length,
                                               makocode::ByteBuffer& frame_bits_out,
                                               makocode::ByteBuffer& frame_erasures_out,
                                               u64& frame_bit_count_out,
@@ -25485,10 +25487,44 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                     if (!all_blocks_valid) continue;
                     decoded_data.size = (usize)(block_count * data_symbols);
                         if (decoded_data.size > (usize)USIZE_MAX_VALUE / 8u) continue;
+                        const u8* compressed_data = decoded_data.data;
+                        usize compressed_data_size = decoded_data.size;
+                        usize stream_bytes = 0u;
+                        makocode::ByteBuffer decrypted_data;
+                        if (password && password_length &&
+                            decoded_data.size >= MetadataTile::ENCRYPTION_HEADER_BYTES +
+                                                     MetadataTile::ENCRYPTION_TAG_BYTES &&
+                            read_le_u32(decoded_data.data) == MetadataTile::ENCRYPTION_HEADER_MAGIC) {
+                            u64 plaintext_bytes = read_le_u64(decoded_data.data + 12u);
+                            if (plaintext_bytes > (u64)USIZE_MAX_VALUE -
+                                                      MetadataTile::ENCRYPTION_HEADER_BYTES -
+                                                      MetadataTile::ENCRYPTION_TAG_BYTES) continue;
+                            stream_bytes = MetadataTile::ENCRYPTION_HEADER_BYTES +
+                                           (usize)plaintext_bytes +
+                                           MetadataTile::ENCRYPTION_TAG_BYTES;
+                            if (stream_bytes > decoded_data.size ||
+                                (stream_bytes - 1u) / data_symbols + 1u != block_count) continue;
+                            bool zero_padding = true;
+                            for (usize padding = stream_bytes; padding < decoded_data.size; ++padding) {
+                                if (decoded_data.data[padding] != 0u) {
+                                    zero_padding = false;
+                                    break;
+                                }
+                            }
+                            if (!zero_padding ||
+                                makocode::decrypt_payload_buffer(decoded_data.data,
+                                                                 stream_bytes,
+                                                                 password,
+                                                                 password_length,
+                                                                 decrypted_data) !=
+                                    makocode::DecryptStatus_Success) continue;
+                            compressed_data = decrypted_data.data;
+                            compressed_data_size = decrypted_data.size;
+                        }
                         makocode::ByteBuffer payload;
                         usize compressed_bytes = 0u;
-                        bool decompressed = lzma_decompress(decoded_data.data,
-                                                            decoded_data.size * 8u,
+                        bool decompressed = lzma_decompress(compressed_data,
+                                                            compressed_data_size * 8u,
                                                             payload,
                                                             MetadataTile::LZMA_SIZE_FROM_HEADER,
                                                             false,
@@ -25496,10 +25532,13 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                                             false);
                         if (!decompressed ||
                             compressed_bytes <= MetadataTile::LZMA_HEADER_BYTES ||
-                            compressed_bytes > decoded_data.size ||
-                            (compressed_bytes - 1u) / data_symbols + 1u != block_count) continue;
+                            compressed_bytes > compressed_data_size) continue;
+                        if (!stream_bytes) {
+                            stream_bytes = compressed_bytes;
+                            if ((compressed_bytes - 1u) / data_symbols + 1u != block_count) continue;
+                        }
                         bool zero_padding = true;
-                        for (usize padding = compressed_bytes; padding < decoded_data.size; ++padding) {
+                        for (usize padding = stream_bytes; padding < decoded_data.size; ++padding) {
                             if (decoded_data.data[padding] != 0u) {
                                 zero_padding = false;
                                 break;
@@ -25508,12 +25547,12 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                         if (!zero_padding) continue;
 
                         MetadataTile::Values recovered_values = probe;
-                        recovered_values.payload_bytes = compressed_bytes;
+                        recovered_values.payload_bytes = stream_bytes;
                         recovered_values.ecc_enabled = true;
                         recovered_values.ecc_block_data = (u16)data_symbols;
                         recovered_values.ecc_parity = (u16)parity;
                         recovered_values.ecc_block_count = block_count;
-                        recovered_values.ecc_original_bytes = compressed_bytes;
+                        recovered_values.ecc_original_bytes = stream_bytes;
                         recovered_values.overlay_erasure_budget = 0u;
                         if (!MetadataTile::derive_schema_payload_layout(recovered_values) ||
                             recovered_values.page_bits != stream_length * 8u) continue;
