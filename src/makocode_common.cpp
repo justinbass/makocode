@@ -909,10 +909,6 @@ bool append_affine_csv_row(makocode::ByteBuffer& csv,
 #define __7Z_TYPES_H
 
 
-#if defined(_WIN32) && INCLUDES
-#include <windows.h>
-#endif
-
 #define SZ_OK 0
 
 #define SZ_ERROR_DATA 1
@@ -932,12 +928,6 @@ bool append_affine_csv_row(makocode::ByteBuffer& csv,
 #define SZ_ERROR_NO_ARCHIVE 17
 
 typedef int SRes;
-
-#if defined(_WIN32) && INCLUDES
-typedef DWORD WRes;
-#else
-typedef int WRes;
-#endif
 
 #ifndef RINOK
 #define RINOK(x) { int __result__ = (x); if (__result__ != 0) return __result__; }
@@ -1195,24 +1185,6 @@ Public domain */
 
 void *MyAlloc(size_t size);
 void MyFree(void *address);
-
-#if defined(_WIN32) && INCLUDES
-
-void SetLargePageSize();
-
-void *MidAlloc(size_t size);
-void MidFree(void *address);
-void *BigAlloc(size_t size);
-void BigFree(void *address);
-
-#else
-
-#define MidAlloc(size) MyAlloc(size)
-#define MidFree(address) MyFree(address)
-#define BigAlloc(size) MyAlloc(size)
-#define BigFree(address) MyFree(address)
-
-#endif
 
 #endif
 // --- End Alloc.h ---
@@ -1497,11 +1469,6 @@ void MatchFinder_Init(CMatchFinder *p);
 Igor Pavlov
 Public domain */
 
-#if defined(_WIN32) && INCLUDES
-#include <windows.h>
-#endif
-
-
 void *MyAlloc(size_t size)
 {
   if (size == 0)
@@ -1514,71 +1481,6 @@ void MyFree(void *address)
   makocode_platform_free(address);
 }
 
-#ifdef _WIN32
-
-void *MidAlloc(size_t size)
-{
-  if (size == 0)
-    return 0;
-return VirtualAlloc(0, size, MEM_COMMIT, PAGE_READWRITE);
-}
-
-void MidFree(void *address)
-{
-if (address == 0)
-    return;
-  VirtualFree(address, 0, MEM_RELEASE);
-}
-
-#ifndef MEM_LARGE_PAGES
-#undef _7ZIP_LARGE_PAGES
-#endif
-
-#ifdef _7ZIP_LARGE_PAGES
-SIZE_T g_LargePageSize = 0;
-typedef SIZE_T (WINAPI *GetLargePageMinimumP)();
-#endif
-
-void SetLargePageSize()
-{
-  #ifdef _7ZIP_LARGE_PAGES
-  SIZE_T size = 0;
-  GetLargePageMinimumP largePageMinimum = (GetLargePageMinimumP)
-        GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GetLargePageMinimum");
-  if (largePageMinimum == 0)
-    return;
-  size = largePageMinimum();
-  if (size == 0 || (size & (size - 1)) != 0)
-    return;
-  g_LargePageSize = size;
-  #endif
-}
-
-
-void *BigAlloc(size_t size)
-{
-  if (size == 0)
-    return 0;
-#ifdef _7ZIP_LARGE_PAGES
-  if (g_LargePageSize != 0 && g_LargePageSize <= (1 << 30) && size >= (1 << 18))
-  {
-    void *res = VirtualAlloc(0, (size + g_LargePageSize - 1) & (~(g_LargePageSize - 1)),
-        MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
-    if (res != 0)
-      return res;
-  }
-  #endif
-  return VirtualAlloc(0, size, MEM_COMMIT, PAGE_READWRITE);
-}
-
-void BigFree(void *address)
-{
-if (address == 0)
-    return;
-  VirtualFree(address, 0, MEM_RELEASE);
-}
-
-#endif
 // --- End Alloc.c ---
 
 // --- LzFind.c ---
