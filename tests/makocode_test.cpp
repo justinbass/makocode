@@ -2353,9 +2353,9 @@ static void decoded_file_case(){
     auto text_files=matching_files(out,"makocode_decoded_",".txt");require(text_files.size()==1,id+": expected one timestamped decoded file");
     std::regex name_re("^makocode_decoded_[0-9]{14}\\.txt$");require(std::regex_match(text_files[0].filename().string(),name_re),id+": invalid decoded filename");
     std::string report=read_file(text_files[0]);
-    for(const std::string& required:{"MAKOCODE-DECODED","end-archive\nend","metadata encryption_version 1","metadata ecc_enabled 1","metadata tile_schema 0","metadata lzma_uncompressed_bytes ","directory input/empty","file input/blank 0","file input/sub/a\\x20b 18","hello\\x0Aback\\x5Cslash\\x00\\xFF"})
+    for(const std::string& required:{"MAKOCODE-DECODED","end-archive\nend","metadata ecc_enabled 1","metadata encryption_salt ","metadata encryption_nonce ","metadata encryption_tag ","metadata tile_schema 0","metadata lzma_uncompressed_bytes ","directory input/empty","file input/blank 0","file input/sub/a\\x20b 18","hello\\x0Aback\\x5Cslash\\x00\\xFF"})
         require(report.find(required)!=std::string::npos,id+": decoded report missing "+required);
-    for(const std::string& forbidden:{"metadata tile_magic ","metadata metadata_magic ","metadata metadata_bytes ","metadata metadata_crc8 ","metadata tile_header ","metadata tile_data ","metadata compression ","metadata lzma_properties "})
+    for(const std::string& forbidden:{"metadata tile_magic ","metadata metadata_magic ","metadata metadata_bytes ","metadata metadata_crc8 ","metadata tile_header ","metadata tile_data ","metadata compression ","metadata lzma_properties ","metadata encryption_magic ","metadata encryption_version ","metadata encryption_flags ","metadata encryption_kdf ","metadata encryption_iterations ","metadata encryption_plaintext_bytes "})
         require(report.find(forbidden)==std::string::npos,id+": decoded report exposed omitted metadata");
     for(const auto& field:std::vector<std::pair<std::string,size_t>>{{"encryption_salt",32},{"encryption_nonce",24},{"encryption_tag",32}}){
         std::string prefix="metadata "+field.first+" ";size_t pos=report.find(prefix);require(pos!=std::string::npos,id+": missing "+field.first);pos+=prefix.size();size_t end=report.find('\n',pos);std::string hex=report.substr(pos,end-pos);
@@ -2523,6 +2523,97 @@ static void hidden_volumes_case(){
     std::vector<std::string> missing_random={"encode","--input=visible.bin","--page-width=1000","--page-height=1000","--password="+visible_password,"--output-dir="+(work/"missing_random").string()};
     auto missing=run_cli(source,missing_random,"missing_random");expect_failure(missing,id+" missing random data");
     require((missing.err+missing.out).find("--password requires --random-data")!=std::string::npos,id+": missing random error changed");
+}
+
+static void stealth_container_lengths_case(){
+    const std::string id="0129_stealth_container_lengths";
+    const char* visible_password="visible length password";
+    const char* hidden_password="hidden length password";
+    const char* visible_text="visible archive bytes";
+    const char* hidden_text="hidden archive bytes";
+    const u8 random_data[makocode::ENCRYPTION_SALT_BYTES+
+                         makocode::ENCRYPTION_NONCE_BYTES]={
+        0x11u,0x22u,0x33u,0x44u,0x55u,0x66u,0x77u,0x88u,
+        0x99u,0xAAu,0xBBu,0xCCu,0xDDu,0xEEu,0xF0u,0x10u,
+        0x21u,0x32u,0x43u,0x54u,0x65u,0x76u,0x87u,0x98u,
+        0xA9u,0xBAu,0xCBu,0xDCu};
+    const u8* salt=random_data;
+    const u8* nonce_seed=random_data+makocode::ENCRYPTION_SALT_BYTES;
+    u8 visible_key[32],hidden_key[32];
+    require(makocode::stealth_derive_base_key(visible_password,strlen(visible_password),salt,visible_key),
+            id+": visible key derivation failed");
+    require(makocode::stealth_derive_base_key(hidden_password,strlen(hidden_password),salt,hidden_key),
+            id+": hidden key derivation failed");
+    makocode::ByteBuffer visible_compressed,hidden_compressed,visible_body,hidden_body;
+    require(makocode::lzma_compress(reinterpret_cast<const u8*>(visible_text),strlen(visible_text),visible_compressed,true),
+            id+": visible compression failed");
+    require(makocode::lzma_compress(reinterpret_cast<const u8*>(hidden_text),strlen(hidden_text),hidden_compressed,true),
+            id+": hidden compression failed");
+    require(makocode::stealth_encrypt_blob(visible_compressed.data,visible_compressed.size,visible_key,
+            nonce_seed,random_data,sizeof(random_data),"visible body",visible_body),
+            id+": visible body encryption failed");
+    require(makocode::stealth_encrypt_blob(hidden_compressed.data,hidden_compressed.size,hidden_key,
+            nonce_seed,random_data,sizeof(random_data),"hidden body",hidden_body),
+            id+": hidden body encryption failed");
+    const usize body_offset=MetadataTile::STEALTH_CONTAINER_HEADER_BYTES+visible_body.size;
+    const usize hidden_capacity=hidden_body.size+37u;
+    const usize container_length=body_offset+hidden_capacity+29u;
+    makocode::ByteBuffer container;
+    require(container.ensure(container_length),id+": carrier allocation failed");
+    container.size=container_length;
+    memset(container.data,0xA5u,container.size);
+    memcpy(container.data,random_data,sizeof(random_data));
+    u8 visible_descriptor_plain[MetadataTile::STEALTH_VISIBLE_DESCRIPTOR_PLAINTEXT_BYTES];
+    write_le_u64(visible_descriptor_plain,(u64)visible_body.size);
+    write_le_u64(visible_descriptor_plain+8u,(u64)container_length);
+    makocode::ByteBuffer visible_descriptor;
+    require(makocode::stealth_encrypt_blob(visible_descriptor_plain,sizeof(visible_descriptor_plain),visible_key,
+            nonce_seed,random_data,sizeof(random_data),"visible descriptor",visible_descriptor),
+            id+": visible descriptor encryption failed");
+    u8 hidden_descriptor_plain[MetadataTile::STEALTH_HIDDEN_DESCRIPTOR_PLAINTEXT_BYTES];
+    write_le_u64(hidden_descriptor_plain,(u64)body_offset);
+    write_le_u64(hidden_descriptor_plain+8u,(u64)hidden_body.size);
+    write_le_u64(hidden_descriptor_plain+16u,(u64)hidden_capacity);
+    write_le_u64(hidden_descriptor_plain+24u,(u64)container_length);
+    makocode::ByteBuffer hidden_descriptor;
+    require(makocode::stealth_encrypt_blob(hidden_descriptor_plain,sizeof(hidden_descriptor_plain),hidden_key,
+            nonce_seed,random_data,sizeof(random_data),"hidden descriptor",hidden_descriptor),
+            id+": hidden descriptor encryption failed");
+    require(visible_descriptor.size==MetadataTile::STEALTH_VISIBLE_DESCRIPTOR_BYTES&&
+            hidden_descriptor.size==MetadataTile::STEALTH_HIDDEN_DESCRIPTOR_BYTES,
+            id+": descriptor sizes changed");
+    memcpy(container.data+MetadataTile::STEALTH_CONTAINER_PREFIX_BYTES,
+           visible_descriptor.data,visible_descriptor.size);
+    memcpy(container.data+MetadataTile::STEALTH_CONTAINER_PREFIX_BYTES+
+               MetadataTile::STEALTH_VISIBLE_DESCRIPTOR_BYTES,
+           hidden_descriptor.data,hidden_descriptor.size);
+    memcpy(container.data+MetadataTile::STEALTH_CONTAINER_HEADER_BYTES,
+           visible_body.data,visible_body.size);
+    memcpy(container.data+body_offset,hidden_body.data,hidden_body.size);
+    require(read_le_u32(container.data)!=0x4D454E43u,
+            id+": old clear encryption marker remains");
+    require(memcmp(container.data+MetadataTile::STEALTH_CONTAINER_PREFIX_BYTES,
+                   visible_descriptor_plain,sizeof(visible_descriptor_plain))!=0,
+            id+": visible descriptor is not encrypted");
+
+    for(unsigned password_index=0u;password_index<2u;++password_index){
+        const char* password=password_index==0u?visible_password:hidden_password;
+        const char* expected=password_index==0u?visible_text:hidden_text;
+        const usize expected_body_end=password_index==0u
+            ? MetadataTile::STEALTH_CONTAINER_HEADER_BYTES+visible_body.size
+            : body_offset+hidden_body.size;
+        bool is_container=false;
+        usize recovered_container_length=0u,recovered_body_end=0u;
+        makocode::ByteBuffer archive;
+        require(makocode::decode_stealth_container(container.data,container.size,password,strlen(password),
+                archive,is_container,&recovered_container_length,&recovered_body_end),
+                id+": protected archive failed to open");
+        require(is_container&&recovered_container_length==container_length&&
+                recovered_body_end==expected_body_end,
+                id+": encrypted stream or body length was recovered incorrectly");
+        require(archive.size==strlen(expected)&&memcmp(archive.data,expected,archive.size)==0,
+                id+": decrypted archive changed");
+    }
 }
 
 struct TileSummary{
@@ -2803,6 +2894,11 @@ static void metadata_free_case(bool large){
         require(changed>4000,id+": metadata damage circle too small");write_file(damaged,"P6\n"+std::to_string(dims)+" "+std::to_string(dims)+"\n255\n"+image.pixels);
         auto decoded=run_cli(work,{"decode","--decoded-stdout",damaged.string()},"decode_"+std::to_string(i));expect_success(decoded,id+" decode");
         std::string expected=read_file(payload);std::vector<unsigned char> expected_bytes(expected.begin(),expected.end());check_decoded(decoded.out,expected_bytes,0.0,id);
+        if(!large&&i==0u){
+            auto password_decoded=run_cli(work,{"decode","--decoded-stdout","--password=ignored",damaged.string()},"password_ignored_decode");
+            expect_success(password_decoded,id+" plaintext password decode");
+            check_decoded(password_decoded.out,expected_bytes,0.0,id+" plaintext password");
+        }
     }
 }
 
@@ -3380,6 +3476,7 @@ static std::vector<TestCase> build_cases() {
     cases.push_back({"0122_decode_metadata_free_large","Large page recovers without center metadata",[](const fs::path&){metadata_free_case(true);}});
     cases.push_back({"0112_checkpoint_restore","Checkpoint deduplication, page round-trip, and partial recovery",[](const fs::path&){checkpoint_restore_case();}});
     cases.push_back({"0110_hidden_volumes_e2e","Hidden capacity, filler, ECC, overlay, and CLI validation matrix",[](const fs::path&){hidden_volumes_case();}});
+    cases.push_back({"0129_stealth_container_lengths","Encrypted descriptors recover exact visible and hidden stream lengths",[](const fs::path&){stealth_container_lengths_case();}});
     cases.push_back({"0089_decode_unit_scale_translation","Unit-scale padded scan translation",[](const fs::path&){unit_scale_scan_case("0089_decode_unit_scale_translation",false,false);}});
     cases.push_back({"0090_decode_unit_scale_edge_bleed","Unit-scale ink bleed keeps decoded geometry",[](const fs::path&){unit_scale_scan_case("0090_decode_unit_scale_edge_bleed",true,false);}});
     cases.push_back({"0091_decode_unit_scale_optical_blur","Unit-scale optical blur",[](const fs::path&){unit_scale_scan_case("0091_decode_unit_scale_optical_blur",false,true);}});

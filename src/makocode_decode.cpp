@@ -1411,20 +1411,22 @@ retry_decode:
             }
         }
         if (payload_metadata.encryption_present) {
-            const u8* header = payload_metadata.encryption_header;
-            const char* names[] = {"encryption_magic", "encryption_version", "encryption_flags", "encryption_kdf", "encryption_reserved", "encryption_iterations", "encryption_plaintext_bytes"};
-            u64 values[] = {read_le_u32(header), header[4], header[5], header[6], header[7], read_le_u32(header + 8u), read_le_u64(header + 12u)};
-            for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
-                u64_to_ascii(values[i], number, sizeof(number));
-                ok = decoded.append_ascii("metadata ") && decoded.append_ascii(names[i]) && decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
-            }
-            const char* byte_names[] = {"encryption_salt", "encryption_nonce", "encryption_tag"};
-            const u8* bytes[] = {header + 20u, header + 36u, payload_metadata.encryption_tag};
-            usize sizes[] = {16u, 12u, 16u};
+            const char* names[] = {"encryption_salt", "encryption_nonce", "encryption_tag"};
+            const u8* bytes[] = {payload_metadata.encryption_salt,
+                                 payload_metadata.encryption_nonce,
+                                 payload_metadata.encryption_tag};
+            const usize sizes[] = {makocode::ENCRYPTION_SALT_BYTES,
+                                   makocode::ENCRYPTION_NONCE_BYTES,
+                                   makocode::ENCRYPTION_TAG_BYTES};
             static const char digits[] = "0123456789ABCDEF";
-            for (usize i = 0; ok && i < 3u; ++i) {
-                ok = decoded.append_ascii("metadata ") && decoded.append_ascii(byte_names[i]) && decoded.append_char(' ');
-                for (usize j = 0; ok && j < sizes[i]; ++j) ok = decoded.append_char(digits[bytes[i][j] >> 4u]) && decoded.append_char(digits[bytes[i][j] & 15u]);
+            for (usize field = 0u; ok && field < 3u; ++field) {
+                ok = decoded.append_ascii("metadata ") &&
+                     decoded.append_ascii(names[field]) &&
+                     decoded.append_char(' ');
+                for (usize byte = 0u; ok && byte < sizes[field]; ++byte) {
+                    ok = decoded.append_char(digits[bytes[field][byte] >> 4u]) &&
+                         decoded.append_char(digits[bytes[field][byte] & 15u]);
+                }
                 ok = ok && decoded.append_char('\n');
             }
         }

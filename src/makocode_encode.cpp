@@ -1125,6 +1125,15 @@ int command_encode(int arg_count, char** args) {
         return 1;
     }
     usize ecc_payload_bytes = compressed_for_sizing.size;
+    if (have_password) {
+        usize container_overhead = MetadataTile::STEALTH_CONTAINER_HEADER_BYTES +
+                                   MetadataTile::ENCRYPTION_TAG_BYTES;
+        if (ecc_payload_bytes > USIZE_MAX_VALUE - container_overhead) {
+            console_line(2, "encode: encrypted payload size overflow");
+            return 1;
+        }
+        ecc_payload_bytes += container_overhead;
+    }
     if (!mapping.page_width_set || !mapping.page_height_set) {
         makocode::EccSummary initial_sizing_ecc;
         initial_sizing_ecc.original_bytes = (u64)ecc_payload_bytes;
@@ -1142,7 +1151,7 @@ int command_encode(int arg_count, char** args) {
         }
     }
     makocode::ByteBuffer stealth_container;
-    if (hidden_mode_enabled) {
+    if (have_password) {
         makocode::ByteBuffer visible_body;
         makocode::ByteBuffer hidden_compressed;
         makocode::ByteBuffer hidden_body;
@@ -1257,7 +1266,7 @@ int command_encode(int arg_count, char** args) {
                                    (u64)visible_body.size + hidden_capacity;
         }
         u64 carrier_size = carrier_minimum_size;
-        if (container_ok && !hidden_fill) {
+        if (container_ok && hidden_mode_enabled && !hidden_fill) {
             double capacity_redundancy = ecc_mode == ECC_EXPLICIT_RATIO
                                              ? ecc_redundancy
                                              : (ecc_mode == ECC_AUTO_MINIMUM ? 0.5 : 3.0);
@@ -1358,18 +1367,20 @@ int command_encode(int arg_count, char** args) {
         }
         if (container_ok) {
             memcpy(stealth_container.data, prefix, sizeof(prefix));
-            u8 visible_descriptor_plain[8];
+            u8 visible_descriptor_plain[MetadataTile::STEALTH_VISIBLE_DESCRIPTOR_PLAINTEXT_BYTES];
             write_le_u64(visible_descriptor_plain, (u64)visible_body.size);
+            write_le_u64(visible_descriptor_plain + 8u, carrier_size);
             container_ok = MetadataTile::stealth_encrypt_blob(visible_descriptor_plain,
                                                 sizeof(visible_descriptor_plain),
                                                 visible_key, nonce_seed, prefix, sizeof(prefix),
                                                 "visible descriptor", visible_descriptor);
             if (container_ok && hidden_input_count) {
-                u8 hidden_descriptor_plain[24];
+                u8 hidden_descriptor_plain[MetadataTile::STEALTH_HIDDEN_DESCRIPTOR_PLAINTEXT_BYTES];
                 write_le_u64(hidden_descriptor_plain,
                              (u64)MetadataTile::STEALTH_CONTAINER_HEADER_BYTES + (u64)visible_body.size);
                 write_le_u64(hidden_descriptor_plain + 8u, (u64)hidden_body.size);
                 write_le_u64(hidden_descriptor_plain + 16u, hidden_capacity);
+                write_le_u64(hidden_descriptor_plain + 24u, carrier_size);
                 container_ok = MetadataTile::stealth_encrypt_blob(hidden_descriptor_plain,
                                                     sizeof(hidden_descriptor_plain),
                                                     hidden_key, nonce_seed, prefix, sizeof(prefix),
@@ -1404,20 +1415,12 @@ int command_encode(int arg_count, char** args) {
         hidden_descriptor.release();
         compressed_for_sizing.release();
         if (!container_ok) {
-            console_line(2, "encode: failed to construct hidden-capable data section");
+            console_line(2, "encode: failed to construct protected data section");
             return 1;
         }
         ecc_payload_bytes = stealth_container.size;
     } else {
         compressed_for_sizing.release();
-    }
-    if (have_password && !hidden_mode_enabled) {
-        usize encryption_overhead = makocode::ENCRYPTION_HEADER_BYTES + makocode::ENCRYPTION_TAG_BYTES;
-        if (ecc_payload_bytes > USIZE_MAX_VALUE - encryption_overhead) {
-            console_line(2, "encode: encrypted payload size overflow");
-            return 1;
-        }
-        ecc_payload_bytes += encryption_overhead;
     }
     double structural_erasure_fraction = 0.0;
     double unknown_error_redundancy = ecc_redundancy;
@@ -1728,21 +1731,11 @@ int command_encode(int arg_count, char** args) {
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
     encoder.config.overlay_erasure_budget = overlay_erasure_budget;
-    if (have_password && !hidden_mode_enabled) {
-        if (!encoder.set_password((const char*)password_buffer.data, password_buffer.size)) {
-            console_line(2, "encode: failed to set encryption password");
-            return 1;
-        }
-        if (!encoder.set_random_data(random_data_buffer.data, random_data_buffer.size)) {
-            console_line(2, "encode: failed to set encryption random data");
-            return 1;
-        }
-    }
-    if (hidden_mode_enabled) {
+    if (have_password) {
         encoder.payload_is_preencoded = true;
     }
-    if (!encoder.set_payload(hidden_mode_enabled ? stealth_container.data : archive.buffer.data,
-                             hidden_mode_enabled ? stealth_container.size : archive.buffer.size)) {
+    if (!encoder.set_payload(have_password ? stealth_container.data : archive.buffer.data,
+                             have_password ? stealth_container.size : archive.buffer.size)) {
         console_line(2, "encode: failed to set payload");
         return 1;
     }

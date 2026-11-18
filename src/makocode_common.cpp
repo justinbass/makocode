@@ -5554,169 +5554,6 @@ static bool chacha20_poly1305_decrypt(const u8* key,
 
 ;
 
-bool encrypt_payload_buffer(const ByteBuffer& plaintext,
-                                   const char* password,
-                                   usize password_length,
-                                   const u8* random_data,
-                                   ByteBuffer& output) {
-    u8 salt[ENCRYPTION_SALT_BYTES];
-    u8 nonce[ENCRYPTION_NONCE_BYTES];
-    if (!random_data) return false;
-    for (usize i = 0u; i < ENCRYPTION_SALT_BYTES; ++i) salt[i] = random_data[i];
-    for (usize i = 0u; i < ENCRYPTION_NONCE_BYTES; ++i) nonce[i] = random_data[ENCRYPTION_SALT_BYTES + i];
-    u8 key[32];
-    if (!pbkdf2_hmac_sha256((const u8*)password,
-                            password_length,
-                            salt,
-                            ENCRYPTION_SALT_BYTES,
-                            ENCRYPTION_PBKDF2_ITERATIONS,
-                            key,
-                            32u)) {
-        for (u32 i = 0u; i < 32u; ++i) {
-            key[i] = 0u;
-        }
-        return false;
-    }
-    const u8* plain_ptr = plaintext.data;
-    usize plain_size = plaintext.size;
-    u8 header[ENCRYPTION_HEADER_BYTES];
-    for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
-        header[i] = 0u;
-    }
-    write_le_u32(header, ENCRYPTION_HEADER_MAGIC);
-    header[4] = ENCRYPTION_HEADER_VERSION;
-    header[5] = ENCRYPTION_FLAG_PASSWORD;
-    header[6] = ENCRYPTION_KDF_PBKDF2_SHA256;
-    header[7] = 0u;
-    write_le_u32(header + 8u, ENCRYPTION_PBKDF2_ITERATIONS);
-    write_le_u64(header + 12u, (u64)plain_size);
-    for (usize i = 0u; i < ENCRYPTION_SALT_BYTES; ++i) {
-        header[20u + i] = salt[i];
-    }
-    for (usize i = 0u; i < ENCRYPTION_NONCE_BYTES; ++i) {
-        header[36u + i] = nonce[i];
-    }
-    ByteBuffer ciphertext;
-    u8 tag[ENCRYPTION_TAG_BYTES];
-    if (!chacha20_poly1305_encrypt(key,
-                                   nonce,
-                                   plain_ptr,
-                                   plain_size,
-                                   header,
-                                   ENCRYPTION_HEADER_BYTES,
-                                   ciphertext,
-                                   tag)) {
-        for (u32 i = 0u; i < 32u; ++i) {
-            key[i] = 0u;
-        }
-        ciphertext.release();
-        return false;
-    }
-    usize total_size = ENCRYPTION_HEADER_BYTES + ciphertext.size + ENCRYPTION_TAG_BYTES;
-    output.release();
-    if (!output.ensure(total_size)) {
-        for (u32 i = 0u; i < 32u; ++i) {
-            key[i] = 0u;
-        }
-        ciphertext.release();
-        return false;
-    }
-    output.size = total_size;
-    u8* dest = output.data;
-    for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
-        dest[i] = header[i];
-    }
-    if (ciphertext.size > 0u) {
-        for (usize i = 0u; i < ciphertext.size; ++i) {
-            dest[ENCRYPTION_HEADER_BYTES + i] = ciphertext.data[i];
-        }
-    }
-    for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
-        dest[ENCRYPTION_HEADER_BYTES + ciphertext.size + i] = tag[i];
-    }
-    ciphertext.release();
-    for (u32 i = 0u; i < 32u; ++i) {
-        key[i] = 0u;
-    }
-    return true;
-}
-
-DecryptStatus decrypt_payload_buffer(const u8* data,
-                                            usize data_length,
-                                            const char* password,
-                                            usize password_length,
-                                            ByteBuffer& plaintext) {
-    plaintext.release();
-    if (!data || data_length < ENCRYPTION_HEADER_BYTES + ENCRYPTION_TAG_BYTES) {
-        return DecryptStatus_NotEncrypted;
-    }
-    u32 magic = read_le_u32(data);
-    if (magic != ENCRYPTION_HEADER_MAGIC) {
-        return DecryptStatus_NotEncrypted;
-    }
-    u8 version = data[4];
-    u8 flags = data[5];
-    u8 kdf = data[6];
-    if (version != ENCRYPTION_HEADER_VERSION || !(flags & ENCRYPTION_FLAG_PASSWORD) || kdf != ENCRYPTION_KDF_PBKDF2_SHA256) {
-        return DecryptStatus_FormatError;
-    }
-    u32 iterations = read_le_u32(data + 8u);
-    u64 plain_bytes = read_le_u64(data + 12u);
-    const u8* salt = data + 20u;
-    const u8* nonce = data + 36u;
-    usize cipher_bytes = data_length - ENCRYPTION_HEADER_BYTES - ENCRYPTION_TAG_BYTES;
-    if ((u64)cipher_bytes != plain_bytes) {
-        return DecryptStatus_FormatError;
-    }
-    const u8* cipher = data + ENCRYPTION_HEADER_BYTES;
-    const u8* tag = cipher + cipher_bytes;
-    u8 key[32];
-    if (!pbkdf2_hmac_sha256((const u8*)password,
-                            password_length,
-                            salt,
-                            ENCRYPTION_SALT_BYTES,
-                            iterations,
-                            key,
-                            32u)) {
-        for (u32 i = 0u; i < 32u; ++i) {
-            key[i] = 0u;
-        }
-        return DecryptStatus_FormatError;
-    }
-    bool auth_failed = false;
-    if (!chacha20_poly1305_decrypt(key,
-                                   nonce,
-                                   cipher,
-                                   cipher_bytes,
-                                   data,
-                                   ENCRYPTION_HEADER_BYTES,
-                                   plaintext,
-                                   tag,
-                                   &auth_failed)) {
-        for (u32 i = 0u; i < 32u; ++i) {
-            key[i] = 0u;
-        }
-        plaintext.release();
-        if (auth_failed) {
-            return DecryptStatus_AuthFailed;
-        }
-        return DecryptStatus_FormatError;
-    }
-    for (u32 i = 0u; i < 32u; ++i) {
-        key[i] = 0u;
-    }
-    return DecryptStatus_Success;
-}
-
-
-;
-
-;
-
-;
-
-;
-
 static bool stealth_derive_key_nonce(const u8 base_key[32],
                                      const u8 nonce_seed[12],
                                      const char* domain,
@@ -6073,8 +5910,13 @@ bool decode_stealth_container(const u8* data,
                                     const char* password,
                                     usize password_length,
                                     ByteBuffer& archive_out,
-                                    bool& is_container) {
+                                    bool& is_container,
+                                    usize* container_bytes_out,
+                                    usize* authenticated_body_end_out,
+                                    bool decompress_archive) {
     is_container = false;
+    if (container_bytes_out) *container_bytes_out = 0u;
+    if (authenticated_body_end_out) *authenticated_body_end_out = 0u;
     archive_out.release();
     if (!data || data_length < STEALTH_CONTAINER_HEADER_BYTES || !password || !password_length) return false;
     const u8* salt = data;
@@ -6091,19 +5933,30 @@ bool decode_stealth_container(const u8* data,
                                               base_key, nonce_seed, aad,
                                               STEALTH_CONTAINER_PREFIX_BYTES,
                                               "visible descriptor", descriptor);
-    if (descriptor_ok && descriptor.size == 8u) {
+    if (descriptor_ok && descriptor.size == STEALTH_VISIBLE_DESCRIPTOR_PLAINTEXT_BYTES) {
         is_container = true;
         u64 body_length = read_le_u64(descriptor.data);
-        if (body_length >= ENCRYPTION_TAG_BYTES &&
+        u64 container_length = read_le_u64(descriptor.data + 8u);
+        if (container_length >= (u64)STEALTH_CONTAINER_HEADER_BYTES &&
+            container_length <= (u64)data_length &&
+            body_length >= ENCRYPTION_TAG_BYTES &&
+            body_length <= container_length - (u64)STEALTH_CONTAINER_HEADER_BYTES &&
             body_length <= (u64)(data_length - STEALTH_CONTAINER_HEADER_BYTES) &&
             body_length <= (u64)USIZE_MAX_VALUE &&
             stealth_decrypt_blob(data + STEALTH_CONTAINER_HEADER_BYTES,
                                  (usize)body_length, base_key, nonce_seed,
                                  aad, STEALTH_CONTAINER_PREFIX_BYTES,
                                  "visible body", compressed) &&
-            lzma_decompress(compressed.data, compressed.size * 8u,
-                            archive_out, LZMA_SIZE_FROM_HEADER, false)) {
+            (!decompress_archive ||
+             lzma_decompress(compressed.data, compressed.size * 8u,
+                             archive_out, LZMA_SIZE_FROM_HEADER, false))) {
             opened = true;
+            if (container_bytes_out) {
+                *container_bytes_out = (usize)container_length;
+            }
+            if (authenticated_body_end_out) {
+                *authenticated_body_end_out = STEALTH_CONTAINER_HEADER_BYTES + (usize)body_length;
+            }
         }
     }
     descriptor.release();
@@ -6116,25 +5969,36 @@ bool decode_stealth_container(const u8* data,
     if (stealth_decrypt_blob(data + STEALTH_CONTAINER_PREFIX_BYTES + STEALTH_VISIBLE_DESCRIPTOR_BYTES,
                              STEALTH_HIDDEN_DESCRIPTOR_BYTES,
                              base_key, nonce_seed, aad, STEALTH_CONTAINER_PREFIX_BYTES,
-                             "hidden descriptor", descriptor) && descriptor.size == 24u) {
+                             "hidden descriptor", descriptor) &&
+        descriptor.size == STEALTH_HIDDEN_DESCRIPTOR_PLAINTEXT_BYTES) {
         is_container = true;
         u64 body_offset = read_le_u64(descriptor.data);
         u64 body_length = read_le_u64(descriptor.data + 8u);
         u64 hidden_capacity = read_le_u64(descriptor.data + 16u);
+        u64 container_length = read_le_u64(descriptor.data + 24u);
         if (body_offset >= STEALTH_CONTAINER_HEADER_BYTES &&
             body_offset <= (u64)data_length &&
             body_length >= ENCRYPTION_TAG_BYTES &&
             body_length <= (u64)data_length - body_offset &&
             body_length <= hidden_capacity &&
             hidden_capacity <= (u64)data_length - body_offset &&
+            container_length >= body_offset + hidden_capacity &&
+            container_length <= (u64)data_length &&
             body_length <= (u64)USIZE_MAX_VALUE &&
             stealth_decrypt_blob(data + (usize)body_offset, (usize)body_length,
                                  base_key, nonce_seed, aad,
                                  STEALTH_CONTAINER_PREFIX_BYTES,
                                  "hidden body", compressed) &&
-            lzma_decompress(compressed.data, compressed.size * 8u,
-                            archive_out, LZMA_SIZE_FROM_HEADER, false)) {
+            (!decompress_archive ||
+             lzma_decompress(compressed.data, compressed.size * 8u,
+                             archive_out, LZMA_SIZE_FROM_HEADER, false))) {
             opened = true;
+            if (container_bytes_out) {
+                *container_bytes_out = (usize)container_length;
+            }
+            if (authenticated_body_end_out) {
+                *authenticated_body_end_out = (usize)(body_offset + body_length);
+            }
         }
     }
     for (usize i = 0u; i < sizeof(base_key); ++i) base_key[i] = 0u;
@@ -10074,6 +9938,18 @@ namespace MetadataTile {
             return true;
         };
 
+        if (!compact_image_search && data_height_pixels == height_pixels &&
+            fabs((double)width_pixels / (double)height_pixels - 1.0) <= 0.02) {
+            AffineParams native_page_affine = {};
+            native_page_affine.center_x = ((double)width_pixels - 1.0) * 0.5;
+            native_page_affine.center_y = ((double)height_pixels - 1.0) * 0.5;
+            native_page_affine.pitch_pixels = 1.0;
+            native_page_affine.pitch_x_pixels = 1.0;
+            native_page_affine.pitch_y_pixels = 1.0;
+            native_page_affine.angle_rad = 0.0;
+            if (try_fast_affine(native_page_affine)) return true;
+        }
+
         if (!compact_image_search && sample_scaled_cells &&
             fabs((double)width_pixels / (double)data_height_pixels - 1.0) <= 0.10 &&
             pitch_guess >= 1.5 && pitch_guess <= 6.0) {
@@ -10153,18 +10029,6 @@ namespace MetadataTile {
                     }
                 }
             }
-        }
-
-        if (!compact_image_search && data_height_pixels == height_pixels &&
-            fabs((double)width_pixels / (double)height_pixels - 1.0) <= 0.02) {
-            AffineParams native_page_affine = {};
-            native_page_affine.center_x = ((double)width_pixels - 1.0) * 0.5;
-            native_page_affine.center_y = ((double)height_pixels - 1.0) * 0.5;
-            native_page_affine.pitch_pixels = 1.0;
-            native_page_affine.pitch_x_pixels = 1.0;
-            native_page_affine.pitch_y_pixels = 1.0;
-            native_page_affine.angle_rad = 0.0;
-            if (try_fast_affine(native_page_affine)) return true;
         }
 
         if (compact_image_search && width_pixels < 160u && height_pixels < 160u) {
@@ -25486,45 +25350,24 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                     }
                     if (!all_blocks_valid) continue;
                     decoded_data.size = (usize)(block_count * data_symbols);
-                        if (decoded_data.size > (usize)USIZE_MAX_VALUE / 8u) continue;
-                        const u8* compressed_data = decoded_data.data;
-                        usize compressed_data_size = decoded_data.size;
-                        usize stream_bytes = 0u;
-                        makocode::ByteBuffer decrypted_data;
-                        if (password && password_length &&
-                            decoded_data.size >= MetadataTile::ENCRYPTION_HEADER_BYTES +
-                                                     MetadataTile::ENCRYPTION_TAG_BYTES &&
-                            read_le_u32(decoded_data.data) == MetadataTile::ENCRYPTION_HEADER_MAGIC) {
-                            u64 plaintext_bytes = read_le_u64(decoded_data.data + 12u);
-                            if (plaintext_bytes > (u64)USIZE_MAX_VALUE -
-                                                      MetadataTile::ENCRYPTION_HEADER_BYTES -
-                                                      MetadataTile::ENCRYPTION_TAG_BYTES) continue;
-                            stream_bytes = MetadataTile::ENCRYPTION_HEADER_BYTES +
-                                           (usize)plaintext_bytes +
-                                           MetadataTile::ENCRYPTION_TAG_BYTES;
-                            if (stream_bytes > decoded_data.size ||
-                                (stream_bytes - 1u) / data_symbols + 1u != block_count) continue;
-                            bool zero_padding = true;
-                            for (usize padding = stream_bytes; padding < decoded_data.size; ++padding) {
-                                if (decoded_data.data[padding] != 0u) {
-                                    zero_padding = false;
-                                    break;
-                                }
-                            }
-                            if (!zero_padding ||
-                                makocode::decrypt_payload_buffer(decoded_data.data,
-                                                                 stream_bytes,
-                                                                 password,
-                                                                 password_length,
-                                                                 decrypted_data) !=
-                                    makocode::DecryptStatus_Success) continue;
-                            compressed_data = decrypted_data.data;
-                            compressed_data_size = decrypted_data.size;
-                        }
+                    if (decoded_data.size > (usize)USIZE_MAX_VALUE / 8u) continue;
+                    usize stream_bytes = 0u;
+                    bool authenticated_container = false;
+                    if (password && password_length) {
+                        makocode::ByteBuffer protected_archive;
+                        bool is_container = false;
+                        bool opened = makocode::decode_stealth_container(
+                            decoded_data.data, decoded_data.size, password,
+                            password_length, protected_archive, is_container,
+                            &stream_bytes, 0, false);
+                        if (is_container && !opened) continue;
+                        authenticated_container = is_container && opened;
+                    }
+                    if (!authenticated_container) {
                         makocode::ByteBuffer payload;
                         usize compressed_bytes = 0u;
-                        bool decompressed = lzma_decompress(compressed_data,
-                                                            compressed_data_size * 8u,
+                        bool decompressed = lzma_decompress(decoded_data.data,
+                                                            decoded_data.size * 8u,
                                                             payload,
                                                             MetadataTile::LZMA_SIZE_FROM_HEADER,
                                                             false,
@@ -25532,11 +25375,12 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                                             false);
                         if (!decompressed ||
                             compressed_bytes <= MetadataTile::LZMA_HEADER_BYTES ||
-                            compressed_bytes > compressed_data_size) continue;
-                        if (!stream_bytes) {
-                            stream_bytes = compressed_bytes;
-                            if ((compressed_bytes - 1u) / data_symbols + 1u != block_count) continue;
-                        }
+                            compressed_bytes > decoded_data.size ||
+                            (compressed_bytes - 1u) / data_symbols + 1u != block_count) continue;
+                        stream_bytes = compressed_bytes;
+                    }
+                    if (stream_bytes > decoded_data.size ||
+                        (stream_bytes - 1u) / data_symbols + 1u != block_count) continue;
                         bool zero_padding = true;
                         for (usize padding = stream_bytes; padding < decoded_data.size; ++padding) {
                             if (decoded_data.data[padding] != 0u) {

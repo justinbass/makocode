@@ -75,7 +75,7 @@ Decode restores the original file tree by default. `--decoded-file` writes a tim
 
 ### Encryption randomness
 
-Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes), split into a 16-byte salt and 12-byte nonce. Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system.
+Password-protected encoding uses an authenticated container with encrypted length descriptors. Its fixed cryptographic settings are built into the program and are not written as a clear header. The container carries a 16-byte salt and 12-byte nonce seed. Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes). Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system.
 
 Linux and macOS:
 
@@ -114,11 +114,11 @@ Use a newly generated value for every encryption. Hashing formats the Diceware e
 
 ### Hidden-capacity volumes and random page fill
 
-`--hidden 0` is the default ordinary format and leaves the existing payload layout unchanged. `--hidden R` reserves hidden capacity equal to `R` times the visible encrypted body length: `0.5` reserves about one third of the combined data region, and `2` reserves about two thirds. The hidden capacity is a limit; unused bytes at its end contain pseudorandom filler. Hidden mode requires the visible `--password` and `--random-data`, so its visible-body length descriptor is encrypted.
+`--hidden 0` is the default and reserves no hidden capacity. `--hidden R` reserves hidden capacity equal to `R` times the visible encrypted body length: `0.5` reserves about one third of the combined data region, and `2` reserves about two thirds. The hidden capacity is a limit; unused bytes at its end contain pseudorandom filler. Hidden mode requires the visible `--password` and `--random-data`, so its visible-body length descriptor is encrypted.
 
 To store a hidden archive, provide both `--hidden-input PATH` and `--hidden-password TEXT`, in addition to the visible `--password` and `--random-data`. The two passwords must differ. Decode the visible or hidden archive by supplying its corresponding password. If no hidden input is supplied, the hidden-capacity region contains random filler only. `--hidden fill` uses the remaining data capacity of one page; `--fill-pages N` extends page fill to `N` physical pages when used with `--hidden fill` or `--ecc fill`. Combining `--hidden fill` with `--ecc fill` is rejected because both would claim the same capacity.
 
-Hidden descriptors and archive bodies are authenticated and encrypted in the data section. The container begins with only the supplied salt and nonce; no clear format marker identifies hidden mode. Decoding recognizes a container only when a supplied password authenticates one of its descriptors. Page count and page dimensions remain observable. ECC covers the encoded data section; random physical page fill after the protected stream is outside the RS codewords and is ignored during extraction. Page filling requires fresh `--random-data`, which can be supplied without `--password` when it is used only to seed filler.
+Visible and hidden descriptors and archive bodies are authenticated and encrypted in the data section. Password-protected data begins with only the supplied salt and nonce seed; it has no clear format marker or length. Decoding recognizes a protected container only when a supplied password authenticates a descriptor. Page count and page dimensions remain observable. ECC covers the encoded data section; random physical page fill after the protected stream is outside the RS codewords and is ignored during extraction. Page filling requires fresh `--random-data`, which can be supplied without `--password` when it is used only to seed filler.
 
 The decoded file uses ASCII lines, begins with `MAKOCODE-DECODED`, and ends with `end`. Each `page N` section contains `metadata NAME VALUE` lines and ends with `end-page`. The `payload` section uses the same metadata form and ends with `end-payload`. Byte arrays in metadata are uppercase hexadecimal; numeric fields are decimal. Fields are present only when recovered. Page sections report the recovered metadata fields without the raw tile header or tile bytes.
 

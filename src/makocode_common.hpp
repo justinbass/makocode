@@ -286,22 +286,6 @@ struct FloodQueue {
 } // namespace makocode
 
 namespace makocode {
-static const u32 ENCRYPTION_HEADER_MAGIC = 0x4D454E43u;
-} // namespace makocode
-
-namespace makocode {
-static const u8  ENCRYPTION_HEADER_VERSION = 1u;
-} // namespace makocode
-
-namespace makocode {
-static const u8  ENCRYPTION_FLAG_PASSWORD = 0x01u;
-} // namespace makocode
-
-namespace makocode {
-static const u8  ENCRYPTION_KDF_PBKDF2_SHA256 = 1u;
-} // namespace makocode
-
-namespace makocode {
 static const usize ENCRYPTION_SALT_BYTES = (usize)16;
 } // namespace makocode
 
@@ -311,10 +295,6 @@ static const usize ENCRYPTION_NONCE_BYTES = (usize)12;
 
 namespace makocode {
 static const usize ENCRYPTION_TAG_BYTES = (usize)16;
-} // namespace makocode
-
-namespace makocode {
-static const usize ENCRYPTION_HEADER_BYTES = (usize)48;
 } // namespace makocode
 
 namespace makocode {
@@ -401,25 +381,26 @@ struct Poly1305State {
 } // namespace makocode
 
 namespace makocode {
-enum DecryptStatus {
-    DecryptStatus_NotEncrypted = 0,
-    DecryptStatus_Success = 1,
-    DecryptStatus_AuthFailed = 2,
-    DecryptStatus_FormatError = 3
-};
-} // namespace makocode
-
-namespace makocode {
 static const usize STEALTH_CONTAINER_PREFIX_BYTES =
     ENCRYPTION_SALT_BYTES + ENCRYPTION_NONCE_BYTES;
 } // namespace makocode
 
 namespace makocode {
-static const usize STEALTH_VISIBLE_DESCRIPTOR_BYTES = 24u;
+static const usize STEALTH_VISIBLE_DESCRIPTOR_PLAINTEXT_BYTES = 16u;
 } // namespace makocode
 
 namespace makocode {
-static const usize STEALTH_HIDDEN_DESCRIPTOR_BYTES = 40u;
+static const usize STEALTH_VISIBLE_DESCRIPTOR_BYTES =
+    STEALTH_VISIBLE_DESCRIPTOR_PLAINTEXT_BYTES + ENCRYPTION_TAG_BYTES;
+} // namespace makocode
+
+namespace makocode {
+static const usize STEALTH_HIDDEN_DESCRIPTOR_PLAINTEXT_BYTES = 32u;
+} // namespace makocode
+
+namespace makocode {
+static const usize STEALTH_HIDDEN_DESCRIPTOR_BYTES =
+    STEALTH_HIDDEN_DESCRIPTOR_PLAINTEXT_BYTES + ENCRYPTION_TAG_BYTES;
 } // namespace makocode
 
 namespace makocode {
@@ -706,14 +687,6 @@ bool encode_payload_with_ecc(const ByteBuffer& compressed,
 } // namespace makocode
 
 namespace makocode {
-bool encrypt_payload_buffer(const ByteBuffer& plaintext,
-                                   const char* password,
-                                   usize password_length,
-                                   const u8* random_data,
-                                   ByteBuffer& output);
-} // namespace makocode
-
-namespace makocode {
 bool lzma_compress(const u8* input,
                           usize length,
                           ByteBuffer& output,
@@ -729,10 +702,7 @@ struct EncoderContext {
     EncoderConfig config;
     ByteBuffer payload_bytes;
     BitWriter bit_writer;
-    ByteBuffer encryption_password;
-    ByteBuffer encryption_random_data;
     bool configured;
-    bool encryption_enabled;
     bool payload_is_preencoded;
 
     EccSummary ecc_summary;
@@ -741,10 +711,7 @@ struct EncoderContext {
         : config(),
           payload_bytes(),
           bit_writer(),
-          encryption_password(),
-          encryption_random_data(),
           configured(false),
-          encryption_enabled(false),
           payload_is_preencoded(false),
           ecc_summary() {}
 
@@ -755,10 +722,7 @@ struct EncoderContext {
     void reset() {
         payload_bytes.release();
         bit_writer.reset();
-        encryption_password.release();
-        encryption_random_data.release();
         configured = false;
-        encryption_enabled = false;
         payload_is_preencoded = false;
         ecc_summary = EccSummary();
     }
@@ -772,32 +736,6 @@ struct EncoderContext {
             payload_bytes.data[i] = data[i];
         }
         payload_bytes.size = size;
-        return true;
-    }
-
-    bool set_password(const char* password, usize length) {
-        encryption_password.release();
-        encryption_enabled = false;
-        if (!password || length == 0u) {
-            return true;
-        }
-        if (!encryption_password.ensure(length)) {
-            return false;
-        }
-        for (usize i = 0u; i < length; ++i) {
-            encryption_password.data[i] = (u8)password[i];
-        }
-        encryption_password.size = length;
-        encryption_enabled = true;
-        return true;
-    }
-
-    bool set_random_data(const u8* data, usize length) {
-        encryption_random_data.release();
-        if (!data || length != ENCRYPTION_SALT_BYTES + ENCRYPTION_NONCE_BYTES ||
-            !encryption_random_data.ensure(length)) return false;
-        for (usize i = 0u; i < length; ++i) encryption_random_data.data[i] = data[i];
-        encryption_random_data.size = length;
         return true;
     }
 
@@ -817,13 +755,6 @@ struct EncoderContext {
             }
         }
         const ByteBuffer* payload_source = payload_is_preencoded ? &payload_bytes : &compressed;
-        ByteBuffer encrypted;
-        if (!payload_is_preencoded && encryption_enabled && encryption_password.size > 0u) {
-            if (!encrypt_payload_buffer(compressed, (const char*)encryption_password.data, encryption_password.size, encryption_random_data.data, encrypted)) {
-                return false;
-            }
-            payload_source = &encrypted;
-        }
         double redundancy = (config.ecc_redundancy > 0.0) ? config.ecc_redundancy : 0.0;
         if (redundancy > 0.0) {
             if (payload_source->size > 0u) {
@@ -994,23 +925,16 @@ struct EncodedPayloadMetadata {
     bool ecc_present;
     EccHeader ecc;
     bool encryption_present;
-    u8 encryption_header[ENCRYPTION_HEADER_BYTES];
+    u8 encryption_salt[ENCRYPTION_SALT_BYTES];
+    u8 encryption_nonce[ENCRYPTION_NONCE_BYTES];
     u8 encryption_tag[ENCRYPTION_TAG_BYTES];
     bool lzma_present;
     u8 lzma_header[LZMA_HEADER_BYTES];
 
     EncodedPayloadMetadata()
-        : ecc_present(false), ecc(), encryption_present(false),
-          encryption_header(), encryption_tag(), lzma_present(false), lzma_header() {}
+        : ecc_present(false), ecc(), encryption_present(false), encryption_salt(),
+          encryption_nonce(), encryption_tag(), lzma_present(false), lzma_header() {}
 };
-} // namespace makocode
-
-namespace makocode {
-DecryptStatus decrypt_payload_buffer(const u8* data,
-                                            usize data_length,
-                                            const char* password,
-                                            usize password_length,
-                                            ByteBuffer& plaintext);
 } // namespace makocode
 
 namespace makocode {
@@ -1027,7 +951,10 @@ bool decode_stealth_container(const u8* data,
                                     const char* password,
                                     usize password_length,
                                     ByteBuffer& archive_out,
-                                    bool& is_container);
+                                    bool& is_container,
+                                    usize* container_bytes_out = 0,
+                                    usize* authenticated_body_end_out = 0,
+                                    bool decompress_archive = true);
 } // namespace makocode
 
 namespace makocode {
@@ -1256,12 +1183,15 @@ struct DecoderContext {
             partial_payload = ecc_stats.unrecoverable_blocks > 0u;
             ByteBuffer stealth_archive;
             bool stealth_container = false;
+            usize authenticated_body_end = 0u;
             bool stealth_opened = decode_stealth_container(compressed.data,
                                                            compressed.size,
                                                            password,
                                                            password_length,
                                                            stealth_archive,
-                                                           stealth_container);
+                                                           stealth_container,
+                                                           0,
+                                                           &authenticated_body_end);
             if (stealth_container) {
                 password_attempted = true;
                 if (!stealth_opened) {
@@ -1278,30 +1208,22 @@ struct DecoderContext {
                 has_payload = true;
                 encoded_metadata.ecc_present = true;
                 encoded_metadata.ecc = header.encoded_header;
+                encoded_metadata.encryption_present = true;
+                memcpy(encoded_metadata.encryption_salt,
+                       compressed.data,
+                       ENCRYPTION_SALT_BYTES);
+                memcpy(encoded_metadata.encryption_nonce,
+                       compressed.data + ENCRYPTION_SALT_BYTES,
+                       ENCRYPTION_NONCE_BYTES);
+                memcpy(encoded_metadata.encryption_tag,
+                       compressed.data + authenticated_body_end - ENCRYPTION_TAG_BYTES,
+                       ENCRYPTION_TAG_BYTES);
+                encoded_metadata.lzma_present = true;
                 return true;
             }
-            const u8* compressed_data = compressed.data;
-            usize compressed_size = compressed.size;
-            const u8* working_data = compressed_data;
-            usize working_size = compressed_size;
-            ByteBuffer decrypted;
-            if (have_password) {
-                password_attempted = true;
-                DecryptStatus status = decrypt_payload_buffer(compressed_data,
-                                                              compressed_size,
-                                                              password,
-                                                              password_length,
-                                                              decrypted);
-                if (status == DecryptStatus_NotEncrypted) {
-                    password_not_encrypted = true;
-                } else if (status == DecryptStatus_Success) {
-                    working_data = decrypted.data;
-                    working_size = decrypted.size;
-                } else {
-                    password_failed = true;
-                    return false;
-                }
-            }
+            if (have_password) password_attempted = true;
+            const u8* working_data = compressed.data;
+            usize working_size = compressed.size;
             u64 bit_total = (u64)working_size * 8u;
             if (bit_total > (u64)USIZE_MAX_VALUE) {
                 ecc_failed = true;
@@ -1320,15 +1242,7 @@ struct DecoderContext {
             }
             encoded_metadata.ecc_present = true;
             encoded_metadata.ecc = header.encoded_header;
-            if (working_data == decrypted.data && decrypted.data) {
-                encoded_metadata.encryption_present = true;
-                for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
-                    encoded_metadata.encryption_header[i] = compressed_data[i];
-                }
-                for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
-                    encoded_metadata.encryption_tag[i] = compressed_data[compressed_size - ENCRYPTION_TAG_BYTES + i];
-                }
-            }
+            if (have_password) password_not_encrypted = true;
             if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
                 encoded_metadata.lzma_present = true;
                 for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
@@ -1353,12 +1267,15 @@ struct DecoderContext {
         }
         ByteBuffer stealth_archive;
         bool stealth_container = false;
+        usize authenticated_body_end = 0u;
         bool stealth_opened = decode_stealth_container(data,
                                                        byte_count,
                                                        password,
                                                        password_length,
                                                        stealth_archive,
-                                                       stealth_container);
+                                                       stealth_container,
+                                                       0,
+                                                       &authenticated_body_end);
         if (stealth_container) {
             password_attempted = true;
             if (!stealth_opened) {
@@ -1373,30 +1290,24 @@ struct DecoderContext {
             stealth_archive.size = 0u;
             stealth_archive.capacity = 0u;
             has_payload = true;
+            encoded_metadata.encryption_present = true;
+            memcpy(encoded_metadata.encryption_salt,
+                   data,
+                   ENCRYPTION_SALT_BYTES);
+            memcpy(encoded_metadata.encryption_nonce,
+                   data + ENCRYPTION_SALT_BYTES,
+                   ENCRYPTION_NONCE_BYTES);
+            memcpy(encoded_metadata.encryption_tag,
+                   data + authenticated_body_end - ENCRYPTION_TAG_BYTES,
+                   ENCRYPTION_TAG_BYTES);
+            encoded_metadata.lzma_present = true;
             return true;
         }
+        if (have_password) password_attempted = true;
         const u8* compressed_data = data;
         usize compressed_size = byte_count;
         const u8* decode_data = compressed_data;
         usize decode_bits = compressed_size * 8u;
-        ByteBuffer decrypted;
-        if (have_password) {
-            password_attempted = true;
-            DecryptStatus status = decrypt_payload_buffer(compressed_data,
-                                                          compressed_size,
-                                                          password,
-                                                          password_length,
-                                                          decrypted);
-            if (status == DecryptStatus_NotEncrypted) {
-                password_not_encrypted = true;
-            } else if (status == DecryptStatus_Success) {
-                decode_data = decrypted.data;
-                decode_bits = decrypted.size * 8u;
-            } else {
-                password_failed = true;
-                return false;
-            }
-        }
         if (!lzma_decompress(decode_data,
                              decode_bits,
                              payload,
@@ -1404,15 +1315,7 @@ struct DecoderContext {
                              lzma_properties_embedded)) {
             return false;
         }
-        if (decode_data == decrypted.data && decrypted.data) {
-            encoded_metadata.encryption_present = true;
-            for (usize i = 0u; i < ENCRYPTION_HEADER_BYTES; ++i) {
-                encoded_metadata.encryption_header[i] = compressed_data[i];
-            }
-            for (usize i = 0u; i < ENCRYPTION_TAG_BYTES; ++i) {
-                encoded_metadata.encryption_tag[i] = compressed_data[compressed_size - ENCRYPTION_TAG_BYTES + i];
-            }
-        }
+        if (have_password) password_not_encrypted = true;
         if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
             encoded_metadata.lzma_present = true;
             for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
