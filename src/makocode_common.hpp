@@ -569,63 +569,15 @@ static const usize RS_POLY_CAPACITY = 256u;
 } // namespace makocode
 
 namespace makocode {
-static const u16 ECC_HEADER_MAGIC = 0x4543u;
-} // namespace makocode
-
-namespace makocode {
-static const u8  ECC_HEADER_VERSION = 1u;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_BITS = 208u;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_BYTES = ECC_HEADER_BITS / 8u;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_COPY_COUNT = 3u;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_COPY_DATA_BYTES = ECC_HEADER_BYTES;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_COPY_PARITY_BYTES = 6u;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_COPY_TOTAL_BYTES = ECC_HEADER_COPY_DATA_BYTES + ECC_HEADER_COPY_PARITY_BYTES;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_COPY_TOTAL_BITS = ECC_HEADER_COPY_TOTAL_BYTES * 8u;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_TOTAL_BITS = ECC_HEADER_COPY_TOTAL_BITS * ECC_HEADER_COPY_COUNT;
-} // namespace makocode
-
-namespace makocode {
-static const usize ECC_HEADER_TOTAL_BYTES = ECC_HEADER_COPY_TOTAL_BYTES * ECC_HEADER_COPY_COUNT;
-} // namespace makocode
-
-namespace makocode {
-static const u16 ECC_HEADER_COPY_DATA_SYMBOLS = (u16)ECC_HEADER_COPY_DATA_BYTES;
-} // namespace makocode
-
-namespace makocode {
-static const u16 ECC_HEADER_COPY_PARITY_SYMBOLS = (u16)ECC_HEADER_COPY_PARITY_BYTES;
-} // namespace makocode
-
-namespace makocode {
 struct EncoderConfig {
     u32 metadata_key_count;
     u32 fiducial_density;
     double ecc_redundancy;
     u16 overlay_erasure_budget;
+    u16 unknown_error_budget;
+    u32 palette_size;
+    const char* password;
+    usize password_length;
     u32 max_parallelism;
 
     EncoderConfig()
@@ -633,6 +585,10 @@ struct EncoderConfig {
           fiducial_density(0u),
           ecc_redundancy(0.0),
           overlay_erasure_budget(0u),
+          unknown_error_budget(0u),
+          palette_size(0u),
+          password(0),
+          password_length(0u),
           max_parallelism(1u) {}
 };
 } // namespace makocode
@@ -646,6 +602,9 @@ struct EccSummary {
     u64 original_bytes;
     u64 block_count;
     u16 overlay_erasure_budget;
+    u16 unknown_error_budget;
+    bool palette_symbol_stream;
+    u64 overlay_selector_seed;
     u32 metadata_ecc_minimum_parity_bytes;
 
     EccSummary()
@@ -656,6 +615,9 @@ struct EccSummary {
           original_bytes(0u),
           block_count(0u),
           overlay_erasure_budget(0u),
+          unknown_error_budget(0u),
+          palette_symbol_stream(false),
+          overlay_selector_seed(0u),
           metadata_ecc_minimum_parity_bytes(2u) {}
 };
 } // namespace makocode
@@ -667,7 +629,10 @@ struct EccDecodeStats {
     u64 total_blocks;
     u64 blocks_with_errors;
     u64 unrecoverable_blocks;
-    u64 header_copy_repairs;
+    u32 failed_block_errors;
+    u32 failed_block_erasures;
+    u32 failed_block_stage;
+    u64 failed_block_index;
 
     EccDecodeStats()
         : corrected_symbols(0u),
@@ -675,15 +640,110 @@ struct EccDecodeStats {
           total_blocks(0u),
           blocks_with_errors(0u),
           unrecoverable_blocks(0u),
-          header_copy_repairs(0u) {}
+          failed_block_errors(0u),
+          failed_block_erasures(0u),
+          failed_block_stage(0u),
+          failed_block_index(0u) {}
 };
 } // namespace makocode
 
 namespace makocode {
-bool encode_payload_with_ecc(const ByteBuffer& compressed,
-                                    double redundancy,
-                                    BitWriter& writer,
-                                    EccSummary& summary);
+struct PaletteSymbolProfile {
+    u32 palette_size;
+    u32 field_prime;
+    u32 block_length;
+    u32 symbol_bits;
+
+    PaletteSymbolProfile()
+        : palette_size(0u), field_prime(0u), block_length(0u), symbol_bits(0u) {}
+};
+
+struct PaletteSymbolHeaderRecovery {
+    bool available;
+    bool password_protected;
+    u64 byte_count;
+    u64 block_count;
+    u16 data_symbols_per_block;
+    u16 parity_symbols;
+    u16 overlay_erasure_budget;
+    u16 unknown_error_budget;
+
+    PaletteSymbolHeaderRecovery()
+        : available(false), password_protected(false), byte_count(0u), block_count(0u),
+          data_symbols_per_block(0u), parity_symbols(0u),
+          overlay_erasure_budget(0u), unknown_error_budget(0u) {}
+};
+
+static const u64 PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED = 0x4D616B6F76300001ull;
+static const u32 PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS = 48u;
+static const u32 PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS = 32u;
+
+bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile);
+bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
+                                          double redundancy,
+                                          u32& parity_symbols);
+bool palette_symbol_to_dots(const PaletteSymbolProfile& profile,
+                            u32 value,
+                            u8 dots[8]);
+bool palette_dots_to_symbol(const PaletteSymbolProfile& profile,
+                            const u8 dots[8],
+                            u32& value);
+bool palette_bytes_to_symbols(const PaletteSymbolProfile& profile,
+                              const u8* bytes,
+                              usize byte_count,
+                              ByteBuffer& symbols);
+bool palette_symbols_to_bytes(const PaletteSymbolProfile& profile,
+                              const ByteBuffer& symbols,
+                              usize byte_count,
+                              ByteBuffer& bytes);
+u64 palette_symbol_count_for_bytes(const PaletteSymbolProfile& profile,
+                                   usize byte_count);
+bool palette_rs_encode(const PaletteSymbolProfile& profile,
+                       const ByteBuffer& data_symbols,
+                       u32 block_length,
+                       u32 data_symbols_per_block,
+                       ByteBuffer& code_symbols);
+bool palette_rs_decode(const PaletteSymbolProfile& profile,
+                       const ByteBuffer& code_symbols,
+                       u32 block_length,
+                       u32 data_symbols_per_block,
+                       const ByteBuffer& erased_symbols,
+                       ByteBuffer& data_symbols,
+                       EccDecodeStats* stats = 0);
+bool palette_symbol_password_mask(const PaletteSymbolProfile& profile,
+                                  ByteBuffer& symbols,
+                                  const char* password,
+                                  usize password_length,
+                                  bool unmask,
+                                  u64 first_symbol_index = 0u);
+bool palette_symbol_password_selector_seed(const char* password,
+                                           usize password_length,
+                                           u64& seed);
+bool palette_symbol_selector_mask(u64 seed,
+                                 u64 block_index,
+                                 u32 block_length,
+                                 u32 selected_count,
+                                 u8* mask_out);
+bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
+                                  const u8* bytes,
+                                  usize byte_count,
+                                  double redundancy,
+                                  u16 overlay_erasure_budget,
+                                  u16 unknown_error_budget,
+                                  const char* password,
+                                  usize password_length,
+                                  ByteBuffer& encoded_symbols,
+                                  EccSummary& summary);
+bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
+                                  const ByteBuffer& encoded_symbols,
+                                  const ByteBuffer& erased_symbols,
+                                  const char* password,
+                                  usize password_length,
+                                  ByteBuffer& bytes,
+                                  EccDecodeStats* stats,
+                                  bool* password_protected = 0,
+                                  const PaletteSymbolHeaderRecovery* header_recovery = 0,
+                                  bool allow_partial = false);
 } // namespace makocode
 
 namespace makocode {
@@ -691,10 +751,6 @@ bool lzma_compress(const u8* input,
                           usize length,
                           ByteBuffer& output,
                           bool include_uncompressed_size = true);
-} // namespace makocode
-
-namespace makocode {
-bool shuffle_encoded_stream(u8* data, usize byte_count, bool ecc_enabled);
 } // namespace makocode
 
 namespace makocode {
@@ -747,6 +803,7 @@ struct EncoderContext {
     bool build() {
         bit_writer.reset();
         ecc_summary = EccSummary();
+        if (config.palette_size < 2u) return false;
         ecc_summary.overlay_erasure_budget = config.overlay_erasure_budget;
         ByteBuffer compressed;
         if (!payload_is_preencoded) {
@@ -756,32 +813,28 @@ struct EncoderContext {
         }
         const ByteBuffer* payload_source = payload_is_preencoded ? &payload_bytes : &compressed;
         double redundancy = (config.ecc_redundancy > 0.0) ? config.ecc_redundancy : 0.0;
-        if (redundancy > 0.0) {
-            if (payload_source->size > 0u) {
-                if (!encode_payload_with_ecc(*payload_source, redundancy, bit_writer, ecc_summary)) {
-                    return false;
-                }
-            }
-        } else {
-            for (usize i = 0u; i < payload_source->size; ++i) {
-                u8 byte = payload_source->data ? payload_source->data[i] : 0u;
-                if (!bit_writer.write_bits((u64)byte, 8u)) {
-                    return false;
-                }
-            }
-            ecc_summary.original_bytes = payload_source->size;
-            ecc_summary.redundancy = 0.0;
-            ecc_summary.block_count = 0u;
-            ecc_summary.block_data_symbols = 0u;
-            ecc_summary.parity_symbols = 0u;
-            ecc_summary.enabled = false;
+        PaletteSymbolProfile profile;
+        ByteBuffer symbols;
+        if (!palette_symbol_profile(config.palette_size, profile) ||
+            !palette_symbol_encode_stream(profile,
+                                          payload_source->data,
+                                          payload_source->size,
+                                          redundancy,
+                                          config.overlay_erasure_budget,
+                                          config.unknown_error_budget,
+                                          config.password,
+                                          config.password_length,
+                                          symbols,
+                                          ecc_summary)) {
+            return false;
+        }
+        for (usize symbol_index = 0u; symbol_index < symbols.size / 4u; ++symbol_index) {
+            const u8* value = symbols.data + symbol_index * 4u;
+            u32 symbol = (u32)value[0] | ((u32)value[1] << 8u) |
+                         ((u32)value[2] << 16u) | ((u32)value[3] << 24u);
+            if (!bit_writer.write_bits((u64)symbol, 32u)) return false;
         }
         bit_writer.align_to_byte();
-        usize total_bytes = bit_writer.byte_size();
-        if (total_bytes > 0u) {
-            u8* stream = bit_writer.buffer.data;
-            shuffle_encoded_stream(stream, total_bytes, ecc_summary.enabled);
-        }
         configured = true;
         return true;
     }
@@ -801,93 +854,6 @@ void write_le_u16(u8* ptr, u16 value);
 void write_le_u64(u8* ptr, u64 value);
 
 namespace makocode {
-struct EccHeader {
-    u16 magic;
-    u8 version;
-    u8 flags;
-    u16 block_data;
-    u16 parity;
-    u16 reserved;
-    u64 block_count;
-    u64 original_bytes;
-
-    EccHeader()
-        : magic(ECC_HEADER_MAGIC),
-          version(ECC_HEADER_VERSION),
-          flags(0x01u),
-          block_data(0u),
-          parity(0u),
-          reserved(0u),
-          block_count(0u),
-          original_bytes(0u) {}
-
-    bool serialize(u8* dest) const {
-        dest[0] = (u8)(magic & 0xFFu);
-        dest[1] = (u8)((magic >> 8u) & 0xFFu);
-        dest[2] = version;
-        dest[3] = flags;
-        write_le_u16(dest + 4u, block_data);
-        write_le_u16(dest + 6u, parity);
-        write_le_u16(dest + 8u, reserved);
-        write_le_u64(dest + 10u, block_count);
-        write_le_u64(dest + 18u, original_bytes);
-        return true;
-    }
-
-    bool write(BitWriter& writer) const {
-        if (!writer.write_bits((u64)magic, 16u)) {
-            return false;
-        }
-        writer.write_bits((u64)version, 8u);
-        if (!writer.write_bits((u64)flags, 8u)) {
-            return false;
-        }
-        writer.write_bits((u64)block_data, 16u);
-        if (!writer.write_bits((u64)parity, 16u)) {
-            return false;
-        }
-        writer.write_bits((u64)reserved, 16u);
-        writer.write_bits(block_count, 64u);
-        writer.write_bits(original_bytes, 64u);
-        return true;
-    }
-
-    static bool parse(const u8* bytes, EccHeader& header) {
-        header.magic = read_le_u16(bytes);
-        header.version = bytes[2];
-        header.flags = bytes[3];
-        header.block_data = read_le_u16(bytes + 4u);
-        header.parity = read_le_u16(bytes + 6u);
-        header.reserved = read_le_u16(bytes + 8u);
-        header.block_count = read_le_u64(bytes + 10u);
-        header.original_bytes = read_le_u64(bytes + 18u);
-        if (header.magic != ECC_HEADER_MAGIC) {
-            return false;
-        }
-        if (header.version != ECC_HEADER_VERSION) {
-            return false;
-        }
-        if (!(header.flags & 0x01u)) {
-            return false;
-        }
-        if (header.block_data == 0u || header.parity == 0u) {
-            return false;
-        }
-        if ((u32)header.block_data + header.parity > RS_FIELD_SIZE) {
-            return false;
-        }
-        if (header.block_count == 0u) {
-            return false;
-        }
-        if (header.original_bytes > (u64)USIZE_MAX_VALUE) {
-            return false;
-        }
-        return true;
-    }
-};
-} // namespace makocode
-
-namespace makocode {
 struct ReedSolomonTables {
     bool initialized;
     u8 exp_table[512];
@@ -897,33 +863,7 @@ struct ReedSolomonTables {
 } // namespace makocode
 
 namespace makocode {
-struct EccHeaderInfo {
-    bool detected;
-    bool valid;
-    bool enabled;
-    u16 block_data;
-    u16 parity;
-    u64 block_count;
-    u64 original_bytes;
-    u32 header_copies_repaired;
-    EccHeader encoded_header;
-
-    EccHeaderInfo()
-        : detected(false),
-          valid(false),
-          enabled(false),
-          block_data(0u),
-          parity(0u),
-          block_count(0u),
-          original_bytes(0u),
-          header_copies_repaired(0u) {}
-};
-} // namespace makocode
-
-namespace makocode {
 struct EncodedPayloadMetadata {
-    bool ecc_present;
-    EccHeader ecc;
     bool encryption_present;
     u8 encryption_salt[ENCRYPTION_SALT_BYTES];
     u8 encryption_nonce[ENCRYPTION_NONCE_BYTES];
@@ -932,17 +872,9 @@ struct EncodedPayloadMetadata {
     u8 lzma_header[LZMA_HEADER_BYTES];
 
     EncodedPayloadMetadata()
-        : ecc_present(false), ecc(), encryption_present(false), encryption_salt(),
-          encryption_nonce(), encryption_tag(), lzma_present(false), lzma_header() {}
+        : encryption_present(false), encryption_salt(), encryption_nonce(),
+          encryption_tag(), lzma_present(false), lzma_header() {}
 };
-} // namespace makocode
-
-namespace makocode {
-bool decode_ecc_payload(const u8* bytes,
-                               const EccHeaderInfo& header,
-                               ByteBuffer& output,
-                               EccDecodeStats* stats,
-                               const u8* erased_symbols = 0);
 } // namespace makocode
 
 namespace makocode {
@@ -958,10 +890,6 @@ bool decode_stealth_container(const u8* data,
 } // namespace makocode
 
 namespace makocode {
-bool fisher_yates_unshuffle(u8* data, usize count);
-} // namespace makocode
-
-namespace makocode {
 bool lzma_decompress(const u8* input,
                             usize bit_count,
                             ByteBuffer& output,
@@ -969,29 +897,6 @@ bool lzma_decompress(const u8* input,
                             bool properties_embedded = true,
                             usize* consumed_bytes_out = 0,
                             bool allow_partial = false);
-} // namespace makocode
-
-namespace makocode {
-bool overlay_selector_mask(u64 selector_seed,
-                                          u64 block_index,
-                                          u16 block_total,
-                                          u8 selected_count,
-                                          u8* mask_out,
-                                          u8* rank_out = 0);
-} // namespace makocode
-
-namespace makocode {
-bool parse_ecc_header(const u8* bytes,
-                             usize byte_count,
-                             EccHeaderInfo& header);
-} // namespace makocode
-
-namespace makocode {
-bool unshuffle_encoded_stream(u8* data, usize byte_count);
-} // namespace makocode
-
-namespace makocode {
-usize ecc_header_span_for_bytes(usize byte_count);
 } // namespace makocode
 
 namespace makocode {
@@ -1030,309 +935,6 @@ struct DecoderContext {
         password_not_encrypted = false;
         ecc_stats = EccDecodeStats();
         encoded_metadata = EncodedPayloadMetadata();
-    }
-
-    bool parse(u8* data,
-               usize size_in_bits,
-               const char* password,
-               usize password_length,
-               const u8* erased_symbols = 0,
-               usize erasure_byte_count = 0u,
-               u64 overlay_selector_seed = 0u,
-               const u8* overlay_selector_counts = 0,
-               usize overlay_selector_count = 0u,
-               u16 overlay_unknown_parity_budget = 0u,
-               u16 overlay_erasure_budget = 0u,
-               bool headerless_layout = false,
-               bool synthetic_ecc_header = false,
-               u64 external_lzma_uncompressed_size = LZMA_SIZE_FROM_HEADER,
-               bool lzma_properties_embedded = true) {
-        payload.release();
-        has_payload = false;
-        ecc_failed = false;
-        partial_payload = false;
-        password_attempted = false;
-        password_failed = false;
-        password_not_encrypted = false;
-        ecc_stats = EccDecodeStats();
-        encoded_metadata = EncodedPayloadMetadata();
-        if (size_in_bits == 0u) {
-            return true;
-        }
-        if (!data) {
-        return false;
-    }
-    usize byte_count = (size_in_bits + 7u) >> 3u;
-    ByteBuffer erased_work;
-    if (erased_symbols || overlay_selector_counts) {
-        if ((erased_symbols && erasure_byte_count < byte_count) ||
-            !erased_work.ensure(byte_count)) {
-            return false;
-        }
-        for (usize i = 0u; i < byte_count; ++i) {
-            erased_work.data[i] = (erased_symbols && erased_symbols[i]) ? 1u : 0u;
-        }
-        erased_work.size = byte_count;
-    }
-    if (byte_count > 0u) {
-        bool unshuffled = false;
-        if (headerless_layout) {
-            if (synthetic_ecc_header) {
-                usize header_span = ecc_header_span_for_bytes(byte_count);
-                unshuffled = byte_count >= header_span &&
-                             fisher_yates_unshuffle(data + header_span,
-                                                    byte_count - header_span);
-            } else {
-                unshuffled = fisher_yates_unshuffle(data, byte_count);
-            }
-        } else {
-            unshuffled = unshuffle_encoded_stream(data, byte_count);
-        }
-        if (!unshuffled) return false;
-    }
-    
-    EccHeaderInfo header;
-    bool header_ok = parse_ecc_header(data, byte_count, header);
-        bool have_password = (password && password_length > 0u);
-        if (header_ok && header.valid && header.enabled) {
-            ecc_stats.header_copy_repairs = header.header_copies_repaired;
-            usize header_span = ecc_header_span_for_bytes(byte_count);
-            if (erased_work.data && byte_count > header_span &&
-                !fisher_yates_unshuffle(erased_work.data + header_span,
-                                        byte_count - header_span)) {
-                return false;
-            }
-            u16 block_total = (u16)(header.block_data + header.parity);
-            u64 expected_bytes = (u64)block_total * header.block_count;
-            u64 available_bytes = (u64)byte_count;
-            if (available_bytes < (u64)header_span + expected_bytes) {
-                ecc_failed = true;
-                return false;
-            }
-            if (overlay_unknown_parity_budget > header.parity ||
-                overlay_erasure_budget > header.parity ||
-                (u32)overlay_unknown_parity_budget +
-                        (u32)overlay_erasure_budget > header.parity ||
-                (overlay_erasure_budget > 0u && !overlay_selector_counts)) {
-                ecc_failed = true;
-                return false;
-            }
-            if (overlay_selector_counts) {
-                if (overlay_selector_count != header.block_count ||
-                    header.block_count > (u64)USIZE_MAX_VALUE) {
-                    ecc_failed = true;
-                    return false;
-                }
-                u16 block_total = (u16)(header.block_data + header.parity);
-                u8 selector_mask[RS_POLY_CAPACITY];
-                for (u32 block_index = 0u; block_index < header.block_count; ++block_index) {
-                    u64 block_offset = (u64)header_span +
-                                       (u64)block_index * (u64)block_total;
-                    u8 selector_count = overlay_selector_counts[block_index];
-                    if (selector_count != overlay_erasure_budget ||
-                        !overlay_selector_mask(overlay_selector_seed,
-                                                       block_index,
-                                                       block_total,
-                                                       selector_count,
-                                                       selector_mask)) {
-                        ecc_failed = true;
-                        return false;
-                    }
-                    for (u16 symbol = 0u; symbol < block_total; ++symbol) {
-                        if (selector_mask[symbol]) {
-                            u64 erased_index = block_offset + symbol;
-                            if (erased_index >= erased_work.size) {
-                                ecc_failed = true;
-                                return false;
-                            }
-                            erased_work.data[(usize)erased_index] = 1u;
-                        }
-                    }
-                }
-            } else if (overlay_unknown_parity_budget > 0u) {
-                for (u32 block_index = 0u; block_index < header.block_count; ++block_index) {
-                    u64 block_offset = (u64)header_span +
-                                       (u64)block_index * (u64)block_total;
-                    u32 structural_erasures_in_block = 0u;
-                    if (erased_work.data) {
-                        for (u16 symbol = 0u; symbol < block_total; ++symbol) {
-                            u64 erased_index = block_offset + symbol;
-                            if (erased_work.data[(usize)erased_index]) {
-                                ++structural_erasures_in_block;
-                            }
-                        }
-                    }
-                    if ((u64)structural_erasures_in_block +
-                            (u64)overlay_unknown_parity_budget > header.parity) {
-                        ecc_failed = true;
-                        return false;
-                    }
-                }
-            }
-            const u8* encoded = data + header_span;
-            ByteBuffer compressed;
-            const u8* encoded_erasures = erased_work.data ? erased_work.data + header_span : 0;
-            if (!decode_ecc_payload(encoded,
-                                    header,
-                                    compressed,
-                                    &ecc_stats,
-                                    encoded_erasures)) {
-                ecc_failed = true;
-                return false;
-            }
-            partial_payload = ecc_stats.unrecoverable_blocks > 0u;
-            ByteBuffer stealth_archive;
-            bool stealth_container = false;
-            usize authenticated_body_end = 0u;
-            bool stealth_opened = decode_stealth_container(compressed.data,
-                                                           compressed.size,
-                                                           password,
-                                                           password_length,
-                                                           stealth_archive,
-                                                           stealth_container,
-                                                           0,
-                                                           &authenticated_body_end);
-            if (stealth_container) {
-                password_attempted = true;
-                if (!stealth_opened) {
-                    password_failed = true;
-                    return false;
-                }
-                payload.release();
-                payload.data = stealth_archive.data;
-                payload.size = stealth_archive.size;
-                payload.capacity = stealth_archive.capacity;
-                stealth_archive.data = 0;
-                stealth_archive.size = 0u;
-                stealth_archive.capacity = 0u;
-                has_payload = true;
-                encoded_metadata.ecc_present = true;
-                encoded_metadata.ecc = header.encoded_header;
-                encoded_metadata.encryption_present = true;
-                memcpy(encoded_metadata.encryption_salt,
-                       compressed.data,
-                       ENCRYPTION_SALT_BYTES);
-                memcpy(encoded_metadata.encryption_nonce,
-                       compressed.data + ENCRYPTION_SALT_BYTES,
-                       ENCRYPTION_NONCE_BYTES);
-                memcpy(encoded_metadata.encryption_tag,
-                       compressed.data + authenticated_body_end - ENCRYPTION_TAG_BYTES,
-                       ENCRYPTION_TAG_BYTES);
-                encoded_metadata.lzma_present = true;
-                return true;
-            }
-            if (have_password) password_attempted = true;
-            const u8* working_data = compressed.data;
-            usize working_size = compressed.size;
-            u64 bit_total = (u64)working_size * 8u;
-            if (bit_total > (u64)USIZE_MAX_VALUE) {
-                ecc_failed = true;
-                return false;
-            }
-            
-            if (!lzma_decompress(working_data,
-                                 (usize)bit_total,
-                                 payload,
-                                 external_lzma_uncompressed_size,
-                                 lzma_properties_embedded,
-                                 (usize*)0,
-                                 ecc_stats.unrecoverable_blocks > 0u)) {
-                ecc_failed = true;
-                return false;
-            }
-            encoded_metadata.ecc_present = true;
-            encoded_metadata.ecc = header.encoded_header;
-            if (have_password) password_not_encrypted = true;
-            if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
-                encoded_metadata.lzma_present = true;
-                for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
-                    encoded_metadata.lzma_header[i] = lzma_properties_embedded
-                                                          ? working_data[i]
-                                                          : LZMA_FIXED_PROPERTIES[i];
-                }
-                write_le_u64(encoded_metadata.lzma_header + LZMA_PROPS_SIZE,
-                             external_lzma_uncompressed_size);
-            } else if (working_size >= LZMA_HEADER_BYTES) {
-                encoded_metadata.lzma_present = true;
-                for (usize i = 0u; i < LZMA_HEADER_BYTES; ++i) {
-                    encoded_metadata.lzma_header[i] = working_data[i];
-                }
-            }
-            has_payload = true;
-            return true;
-        }
-        if (header.detected && !header.valid) {
-            ecc_failed = true;
-            return false;
-        }
-        ByteBuffer stealth_archive;
-        bool stealth_container = false;
-        usize authenticated_body_end = 0u;
-        bool stealth_opened = decode_stealth_container(data,
-                                                       byte_count,
-                                                       password,
-                                                       password_length,
-                                                       stealth_archive,
-                                                       stealth_container,
-                                                       0,
-                                                       &authenticated_body_end);
-        if (stealth_container) {
-            password_attempted = true;
-            if (!stealth_opened) {
-                password_failed = true;
-                return false;
-            }
-            payload.release();
-            payload.data = stealth_archive.data;
-            payload.size = stealth_archive.size;
-            payload.capacity = stealth_archive.capacity;
-            stealth_archive.data = 0;
-            stealth_archive.size = 0u;
-            stealth_archive.capacity = 0u;
-            has_payload = true;
-            encoded_metadata.encryption_present = true;
-            memcpy(encoded_metadata.encryption_salt,
-                   data,
-                   ENCRYPTION_SALT_BYTES);
-            memcpy(encoded_metadata.encryption_nonce,
-                   data + ENCRYPTION_SALT_BYTES,
-                   ENCRYPTION_NONCE_BYTES);
-            memcpy(encoded_metadata.encryption_tag,
-                   data + authenticated_body_end - ENCRYPTION_TAG_BYTES,
-                   ENCRYPTION_TAG_BYTES);
-            encoded_metadata.lzma_present = true;
-            return true;
-        }
-        if (have_password) password_attempted = true;
-        const u8* compressed_data = data;
-        usize compressed_size = byte_count;
-        const u8* decode_data = compressed_data;
-        usize decode_bits = compressed_size * 8u;
-        if (!lzma_decompress(decode_data,
-                             decode_bits,
-                             payload,
-                             external_lzma_uncompressed_size,
-                             lzma_properties_embedded)) {
-            return false;
-        }
-        if (have_password) password_not_encrypted = true;
-        if (external_lzma_uncompressed_size != LZMA_SIZE_FROM_HEADER) {
-            encoded_metadata.lzma_present = true;
-            for (usize i = 0u; i < (usize)LZMA_PROPS_SIZE; ++i) {
-                encoded_metadata.lzma_header[i] = lzma_properties_embedded
-                                                      ? decode_data[i]
-                                                      : LZMA_FIXED_PROPERTIES[i];
-            }
-            write_le_u64(encoded_metadata.lzma_header + LZMA_PROPS_SIZE,
-                         external_lzma_uncompressed_size);
-        } else if (decode_bits / 8u >= LZMA_HEADER_BYTES) {
-            encoded_metadata.lzma_present = true;
-            for (usize i = 0u; i < LZMA_HEADER_BYTES; ++i) {
-                encoded_metadata.lzma_header[i] = decode_data[i];
-            }
-        }
-        has_payload = true;
-        return true;
     }
 
     bool ecc_correction_failed() const {
@@ -1383,6 +985,7 @@ struct ImageMappingConfig {
     u32 custom_palette_count;
     u32 custom_palette_base;
     bool custom_palette_valid;
+    u64 symbol_placement_seed;
     bool recover_palette;
     const char* recover_limit_text;
     usize recover_limit_length;
@@ -1398,6 +1001,7 @@ struct ImageMappingConfig {
           custom_palette_count(0u),
           custom_palette_base(0u),
           custom_palette_valid(false),
+          symbol_placement_seed(makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),
           recover_palette(false),
           recover_limit_text("4"),
           recover_limit_length(1u) {
@@ -1575,10 +1179,6 @@ struct Values {
         u32 footer_rows;
         u32 fiducial_spacing_pixels;
         bool ecc_enabled;
-        u16 ecc_header_magic;
-        u8 ecc_header_version;
-        u8 ecc_header_flags;
-        u16 ecc_header_reserved;
         u16 ecc_block_data;
         u16 ecc_parity;
         u64 ecc_block_count;
@@ -1623,10 +1223,6 @@ struct Values {
               footer_rows(0u),
               fiducial_spacing_pixels(24u),
               ecc_enabled(false),
-              ecc_header_magic(ECC_HEADER_MAGIC),
-              ecc_header_version(ECC_HEADER_VERSION),
-              ecc_header_flags(0x01u),
-              ecc_header_reserved(0u),
               ecc_block_data(0u),
               ecc_parity(0u),
               ecc_block_count(0u),
@@ -2064,18 +1660,6 @@ bool ascii_to_fraction(const char* text,
                               u64& numerator,
                               u64& denominator);
 
-namespace makocode {
-bool build_ecc_header_bytes(u8* dest,
-                                   u16 block_data,
-                                   u16 parity,
-                                   u64 block_count,
-                                   u64 original_bytes,
-                                   u16 magic = ECC_HEADER_MAGIC,
-                                   u8 version = ECC_HEADER_VERSION,
-                                   u8 flags = 0x01u,
-                                   u16 reserved = 0u);
-} // namespace makocode
-
 bool ppm_write_metadata_header(const PpmParserState& state,
                                       makocode::ByteBuffer& output);
 
@@ -2129,7 +1713,8 @@ bool build_payload_rank_map(u32 width_pixels,
                                        usize reserved_mask_size,
                                        ByteBuffer& rank_map,
                                        u64& payload_pixel_count,
-                                       bool include_metadata_overwrites = false);
+                                       bool include_metadata_overwrites = false,
+                                       u64 symbol_placement_seed = 0u);
 } // namespace MetadataTile
 
 bool arguments_request_help(int arg_count, char** args);
@@ -2144,14 +1729,6 @@ namespace MetadataTile {
 using namespace makocode;
 u32 palette_tag_x0(u32 palette_count);
 } // namespace MetadataTile
-
-namespace makocode {
-bool compute_ecc_layout(usize data_bytes,
-                               double requested_redundancy,
-                               u16& block_data,
-                               u16& parity_symbols,
-                               u64& block_count);
-} // namespace makocode
 
 bool path_contains_substring(const char* path, const char* needle);
 
@@ -2293,6 +1870,7 @@ bool find_best_ecc_fill(usize payload_bytes,
                                bool fit_height,
                                double structural_erasure_fraction,
                                double overlay_fraction,
+                               u16 required_unknown_errors,
                                double& best_ratio,
                                double& best_requested_ratio,
                                u16& best_block_data,
@@ -2317,8 +1895,6 @@ bool build_frame_bits(const makocode::EncoderContext& encoder,
 bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                               const ImageMappingConfig& mapping_overrides,
                                               bool metadata_absent,
-                                              const char* password,
-                                              usize password_length,
                                               makocode::ByteBuffer& frame_bits_out,
                                               makocode::ByteBuffer& frame_erasures_out,
                                               u64& frame_bit_count_out,
@@ -2415,13 +1991,7 @@ bool ppm_write_dimensions(u64 width,
                                  u64 height,
                                  makocode::ByteBuffer& output);
 
-bool derive_ecc_redundancy_with_overwrite(usize payload_bytes,
-                                          double requested_redundancy,
-                                          double structural_fraction,
-                                          double& effective_redundancy,
-                                          u16& unknown_parity_budget,
-                                          u16& overlay_erasure_budget,
-                                          double overlay_fraction);
+
 
 bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         double requested_redundancy,
@@ -2434,7 +2004,8 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         double structural_erasure_fraction,
                                         double overlay_fraction,
                                         EccFillCandidate& candidate,
-                                        u32 metadata_ecc_minimum_parity_bytes = 2u);
+                                        u32 metadata_ecc_minimum_parity_bytes = 2u,
+                                        u16 required_unknown_errors = 0u);
 
 bool write_all_fd(int fd, const u8* data, usize length);
 

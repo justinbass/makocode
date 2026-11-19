@@ -77,6 +77,8 @@ Decode restores the original file tree by default. `--decoded-file` writes a tim
 
 Password-protected encoding uses an authenticated container with encrypted length descriptors. Its fixed cryptographic settings are built into the program and are not written as a clear header. The container carries a 16-byte salt and 12-byte nonce seed. Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes). Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system.
 
+In version 0, one-password streams derive a key with PBKDF2-HMAC-SHA256 (60,000 iterations and a fixed public salt), then use domain-separated HMAC-SHA256 inputs to seed a ChaCha20 stream that masks the eight-dot field symbols after Reed–Solomon encoding. This masks the fixed bootstrap and payload symbols; the selector seed is derived from the password and a fixed public domain, and is not stored in page metadata. Hidden-volume mode uses separate visible and hidden passwords, so it uses the public selector and relies on the authenticated encrypted container rather than applying one shared symbol mask. In both modes, decoding authenticates encrypted content before decompressing it.
+
 Linux and macOS:
 
 ```sh
@@ -126,17 +128,27 @@ The `archive` section gives `entries COUNT`, followed by `directory PATH` and `f
 
 ### Error correction and overlays
 
-`encode --ecc RATIO` sets the requested Reed–Solomon parity/data ratio on the compressed, then optionally encrypted, payload. Numeric ratios accept decimal values from `0` through `254`; `--ecc 0` disables payload ECC. If `--ecc` is omitted, the encoder selects the minimum ratio that covers metadata, fiducial, and configured overlay erasures. If the selected ratio cannot cover those erasures, encoding fails and reports a sufficient ratio and the overlay fraction the current ECC can support. Positive ratios map to integer parity symbols per block. GF(256) blocks contain at most 255 total symbols, so the physical maximum is 254 parity symbols for one data symbol. `--ecc fill` searches the feasible block layouts for the best final-page use.
+Version 0 stores a field symbol as exactly eight palette dots, most-significant dot first. For a palette of `q` colors, the field prime is the largest prime below `q^8`; dot patterns representing values at least that prime are invalid. The Reed–Solomon block length is `N = min(765, p - 1)`, using nonzero evaluation points. Profiles include:
+
+| Palette colors `q` | Largest prime `p < q^8` | Block length `N` |
+| ---: | ---: | ---: |
+| 2 | 251 | 250 |
+| 3 | 6,553 | 765 |
+| 4 | 65,521 | 765 |
+| 5 | 390,581 | 765 |
+| 6 | 1,679,609 | 765 |
+| 7 | 5,764,799 | 765 |
+| 8 | 16,777,213 | 765 |
+| 16 | 4,294,967,291 | 765 |
+
+Compressed bytes, or the authenticated encrypted container, are packed as 96-byte big-endian integers into fixed-width base-`p` symbols. A fixed 48-symbol bootstrap code (`K=32`, `P=16`) protects the source length and payload code layout. Reed–Solomon blocks have `K` data symbols and `P=N-K` parity symbols. `--ecc RATIO` sets the requested parity/data ratio; `--ecc fill` searches layouts for page use. Version remains 0 and old byte-oriented payload encodings are not supported.
 
 `encode --metadata-pages LIST` writes the center metadata tile only on selected pages. `LIST` accepts `all` (the default), page numbers, ranges, `middle`, and `last`; for example, `--metadata-pages=middle` writes the tile on page 2 of a three-page encoding. Pages without a tile still carry payload in the same raster positions. Multi-page decode therefore needs at least one supplied page with readable metadata.
 
-`encode --overlay-fraction F --overlay-ppm overlay.ppm --overlay-pages LIST` reserves an overlay erasure budget and applies the supplied PPM to the selected generated pages. Repeat the `--overlay-ppm`/`--overlay-pages` pair for multiple images; `LIST` accepts `all` (the default), page numbers, ranges, `middle`, or `last`, and pages may be assigned only once. At least one overlay image and `--overlay-fraction` must be supplied together, and each PPM's dimensions must match the encoded pages. `F` ranges from `0.0` through `254/255` and is a share of each Reed–Solomon codeword. For a block with `K` data and `P` parity symbols, the encoder reserves `O = ceil((K + P) × F)` erasures; the selector uses the same `O` positions in every block. The theoretical maximum is `254/255`: one data symbol and 254 parity symbols in a 255-symbol block. Structural erasures also consume parity, so some page layouts can support a slightly lower fraction. Schema 0 stores per-block parity `P` and overlay erasures `O` as compact `u16` values, plus payload size and block data size `K`. The decoder derives the block count from the payload size and `K`; `O` must not exceed `P`, and each block has at most 255 symbols. Overlay positions are selected deterministically per block. If the requested overlay budget exceeds available parity, encoding fails and reports a sufficient `--ecc` ratio and/or the maximum supported `--overlay-fraction`.
+`encode --overlay-fraction F --overlay-ppm overlay.ppm --overlay-pages LIST` selects and replaces whole eight-dot payload symbols. It never selects any of the 48 bootstrap symbols. The per-block overlay erasure count is `O=floor(F*N)`. The correction limit is `S + 2E + O <= P`, where `S` is any other known erasures and `E` is the number of unknown symbol errors. An unreadable or misclassified dot makes an unknown symbol error unless the decoder can confidently identify its symbol as an erasure. At `F=254/255`, the profile uses nearly all parity for overlays and has little or no remaining scan-error margin. `--overlay-ignore-colors` leaves matching selected pixels unchanged; the selected symbols still consume their reserved erasure budget. The selector order is deterministic per block and keyed by the stream password when one password governs the stream; hidden-volume mode uses the public selector because its two volumes use different passwords.
 
-Decode marks the full reserved selector as erased, including symbols left unchanged because `--overlay-ignore-colors` skipped their overlay pixels. That option does not reduce the ECC erasure budget.
+For marker-free single-page use, encode with `--no-metadata --no-fiducials`. Decode with the same `--no-metadata --no-fiducials`, the exact `--palette`, and matching `--page-width`/`--page-height`. The decoder reads the PPM as a one-pixel-per-dot grid from its top-left origin. Crops, rotation, rescaling, and origin shifts are unsupported; without registration marks, an image transformed back to the declared dimensions cannot always be distinguished from the original grid.
 
-If erasure decoding fails, decode retries without erasure hints. The retry can use the same parity to correct overlay changes and other errors together as unknown errors, up to half the block's parity-symbol count. For example, 100 parity symbols can correct 40 overlay errors and 10 other errors.
-
-Multi-page overlays with an explicit numeric ECC ratio require at least `--ecc 0.5`; larger overlay fractions may require more parity. Lower ratios are rejected before page output because they can exceed the correction budget across filled pages.
 
 ## Tests
 
@@ -219,10 +231,10 @@ lp -d HL-L3220CDW -o ppi=600 -o natural-scaling=100 -o sides=one-sided calibrati
 
 To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick (`brew install imagemagick` on macOS, `sudo apt install imagemagick` on Debian/Ubuntu) and run `convert scan.png -depth 8 -compress none scan.ppm`.
 
-### Custom Palettes (Base-N Mode)
+### Custom Palettes (Field-Symbol Mode)
 
 - Pass `--palette "Color ..."` to `encode`/`decode` with 2–16 unique ordered entries using the built-in names (`White`, `Cyan`, `Magenta`, `Yellow`, `Black`) or `#RRGGBB` values. Examples: `--palette "White Black"` (2 colors), `--palette "White Cyan Magenta"` (base‑3), `--palette "White Cyan Magenta Yellow Black"` (base‑5). Quote the list so the CLI keeps the whitespace intact.
-- The encoder automatically maps each page’s bitstream into base‑N digits (where `N` equals the palette length), pads out every non-reserved pixel, and chooses footer foreground/background colors by measuring palette contrast—no need for fixed White/Black endpoints.
+- Every palette, including non-powers of two, uses eight-dot base-`q` symbols from the version-zero field profile above. The encoder fills complete symbol groups and chooses footer foreground/background colors from palette contrast.
 - Palette metadata is embedded per page (via `MAKOCODE_PALETTE`, `MAKOCODE_PALETTE_BASE`, and `MAKOCODE_PAGE_SYMBOLS`), so `decode` normally discovers the palette automatically, but you can still force it with `--palette ...` if desired.
 - Use `decode --recover-palette` when the embedded palette row is damaged. Recovery first tries the common ordered palettes for 2, 4, 5, and 8 colors, using colors sampled from the whole page to account for scan shifts. It then tries image-derived palette clusters and their orderings before exhaustive RGB candidates. `--recover-limit N` limits ordered palette candidates (default `4`); increase it to continue beyond the common palettes. If you already know the palette, pass the encoder-style ordered list with `--palette` to try it first.
 

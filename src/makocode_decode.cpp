@@ -24,6 +24,7 @@ int command_decode(int arg_count, char** args) {
     u64 encoded_frame_bits = 0u;
     makocode::ByteBuffer password_buffer;
     bool have_password = false;
+    bool retried_public_symbol_placement = false;
     makocode::ByteBuffer output_dir_buffer;
     const char* output_dir = ".";
     bool have_output_dir = false;
@@ -204,10 +205,35 @@ int command_decode(int arg_count, char** args) {
         console_line(2, "decode: --no-metadata currently requires one page");
         return 1;
     }
+    if (no_metadata && !no_fiducials) {
+        console_line(2, "decode: --no-metadata requires --no-fiducials");
+        return 1;
+    }
+    if (no_metadata && !mapping.palette_set) {
+        console_line(2, "decode: --no-metadata requires the encoded --palette");
+        return 1;
+    }
+    if (no_metadata &&
+        (!mapping.page_width_set || !mapping.page_height_set)) {
+        console_line(2, "decode: --no-metadata requires --page-width and --page-height");
+        return 1;
+    }
+    const char* raw_fallback_setting =
+        makocode_platform_getenv("MAKOCODE_DECODE_RAW_FALLBACK");
+    bool allow_metadata_free_recovery = no_metadata ||
+        (raw_fallback_setting && raw_fallback_setting[0] &&
+         raw_fallback_setting[0] != '0');
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "decode")) {
             return 1;
         }
+    }
+    if (have_password &&
+        !makocode::palette_symbol_password_selector_seed(
+            (const char*)password_buffer.data, password_buffer.size,
+            mapping.symbol_placement_seed)) {
+        console_line(2, "decode: failed to derive password-keyed symbol placement");
+        return 1;
     }
     ImageMappingConfig mapping_overrides = mapping;
     makocode::ByteBuffer bitstream;
@@ -217,8 +243,6 @@ int command_decode(int arg_count, char** args) {
     u16 overlay_unknown_parity_budget = 0u;
     u16 overlay_erasure_budget = 0u;
     u64 bit_count = 0u;
-    makocode::ByteBuffer frame_bits_for_length_recovery;
-    u64 frame_bit_count_for_length_recovery = 0u;
     PpmParserState aggregate_state;
     MetadataTile::Values single_retry_tile;
     bool single_retry_tile_available = false;
@@ -264,8 +288,6 @@ retry_decode:
     }
     encoded_page_count = 0u;
     encoded_frame_bits = 0u;
-    frame_bits_for_length_recovery.release();
-    frame_bit_count_for_length_recovery = 0u;
     erased_payload_symbols.release();
     overlay_selector_counts.release();
     overlay_selector_seed = 0u;
@@ -332,7 +354,9 @@ retry_decode:
                                                       (const u8*)0,
                                                       0u,
                                                       0u,
-                                                      small_scan_geometry_variant);
+                                                      small_scan_geometry_variant,
+                                                      true,
+                                                      true);
 
         if (!frame_extracted) {
             if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
@@ -342,18 +366,39 @@ retry_decode:
                 retried_subgrid = true;
                 goto retry_decode;
             }
+            if (!allow_metadata_free_recovery) {
+                console_line(2, "decode: metadata tile missing; aborting");
+                return 1;
+            }
             MetadataTile::Values recovered_values;
-            if (!recover_metadata_free_single_page(ppm_stream,
-                                                   mapping_overrides,
-                                                   no_metadata,
-                                                   have_password ? (const char*)password_buffer.data : (const char*)0,
-                                                   have_password ? password_buffer.size : 0u,
-                                                   frame_bits,
-                                                   frame_erasure_bits,
-                                                   frame_bit_count,
-                                                   single_page_capacity_bits,
-                                                   single_state,
-                                                   recovered_values)) {
+            bool recovered = recover_metadata_free_single_page(
+                ppm_stream,
+                mapping_overrides,
+                no_metadata,
+                frame_bits,
+                frame_erasure_bits,
+                frame_bit_count,
+                single_page_capacity_bits,
+                single_state,
+                recovered_values);
+            if (!recovered && have_password &&
+                mapping_overrides.symbol_placement_seed !=
+                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED) {
+                ImageMappingConfig public_placement_mapping = mapping_overrides;
+                public_placement_mapping.symbol_placement_seed =
+                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                recovered = recover_metadata_free_single_page(
+                    ppm_stream,
+                    public_placement_mapping,
+                    no_metadata,
+                    frame_bits,
+                    frame_erasure_bits,
+                    frame_bit_count,
+                    single_page_capacity_bits,
+                    single_state,
+                    recovered_values);
+            }
+            if (!recovered) {
                 console_line(2, "decode: invalid ppm input");
                 return 1;
             }
@@ -408,13 +453,23 @@ retry_decode:
                 return 1;
             }
             makocode::BitWriter assembled_bits;
-            makocode::BitWriter assembled_erasures;
+            makocode::ByteBuffer assembled_symbol_erasures;
             auto append_missing_bits = [&](u64 bits) -> bool {
+                u64 symbol_count_u64 = bits / 32u;
+                if ((bits & 31u) != 0u || symbol_count_u64 > (u64)USIZE_MAX_VALUE ||
+                    assembled_symbol_erasures.size >
+                        USIZE_MAX_VALUE - (usize)symbol_count_u64 ||
+                    !assembled_symbol_erasures.ensure(
+                        assembled_symbol_erasures.size + (usize)symbol_count_u64)) return false;
+                usize first_symbol = assembled_symbol_erasures.size;
+                assembled_symbol_erasures.size += (usize)symbol_count_u64;
+                if (symbol_count_u64) {
+                    memset(assembled_symbol_erasures.data + first_symbol, 1u,
+                           (usize)symbol_count_u64);
+                }
                 while (bits > 0u) {
                     u32 chunk = bits >= 64u ? 64u : (u32)bits;
-                    u64 ones = chunk == 64u ? U64_MAX_VALUE : (((u64)1u << chunk) - 1u);
-                    if (!assembled_bits.write_bits(0u, chunk) ||
-                        !assembled_erasures.write_bits(ones, chunk)) return false;
+                    if (!assembled_bits.write_bits(0u, chunk)) return false;
                     bits -= chunk;
                 }
                 return true;
@@ -441,21 +496,32 @@ retry_decode:
                     return 1;
                 }
                 if (frame_erasure_bits.data && frame_erasure_bits.size) {
-                    if (!append_bits_from_buffer(assembled_erasures,
-                                                 frame_erasure_bits.data,
-                                                 observed_bits)) {
+                    if ((observed_bits & 31u) != 0u ||
+                        observed_bits / 32u > frame_erasure_bits.size ||
+                        assembled_symbol_erasures.size > USIZE_MAX_VALUE -
+                            (usize)(observed_bits / 32u) ||
+                        !assembled_symbol_erasures.append_bytes(
+                            frame_erasure_bits.data,
+                            (usize)(observed_bits / 32u))) {
                         console_line(2, "decode: failed to assemble stdin page erasures");
                         return 1;
                     }
                 } else {
-                    u64 clean_bits = observed_bits;
-                    while (clean_bits > 0u) {
-                        u32 chunk = clean_bits >= 64u ? 64u : (u32)clean_bits;
-                        if (!assembled_erasures.write_bits(0u, chunk)) {
-                            console_line(2, "decode: failed to assemble stdin page erasures");
-                            return 1;
-                        }
-                        clean_bits -= chunk;
+                    if ((observed_bits & 31u) != 0u ||
+                        observed_bits / 32u > (u64)USIZE_MAX_VALUE ||
+                        assembled_symbol_erasures.size > USIZE_MAX_VALUE -
+                            (usize)(observed_bits / 32u) ||
+                        !assembled_symbol_erasures.ensure(
+                            assembled_symbol_erasures.size + (usize)(observed_bits / 32u))) {
+                        console_line(2, "decode: failed to assemble stdin page erasures");
+                        return 1;
+                    }
+                    usize first_symbol = assembled_symbol_erasures.size;
+                    usize observed_symbols = (usize)(observed_bits / 32u);
+                    assembled_symbol_erasures.size += observed_symbols;
+                    if (observed_symbols) {
+                        memset(assembled_symbol_erasures.data + first_symbol, 0,
+                               observed_symbols);
                     }
                 }
                 if (observed_bits < segment_bits &&
@@ -465,32 +531,28 @@ retry_decode:
                 }
             }
             usize assembled_bytes = assembled_bits.byte_size();
-            usize assembled_erasure_bytes = assembled_erasures.byte_size();
             frame_bits.release();
             frame_erasure_bits.release();
             if ((assembled_bytes && !frame_bits.ensure(assembled_bytes)) ||
-                (assembled_erasure_bytes && !frame_erasure_bits.ensure(assembled_erasure_bytes))) {
+                (assembled_symbol_erasures.size &&
+                 !frame_erasure_bits.ensure(assembled_symbol_erasures.size))) {
                 console_line(2, "decode: failed to allocate assembled stdin pages");
                 return 1;
             }
             if (assembled_bytes) memcpy(frame_bits.data, assembled_bits.data(), assembled_bytes);
-            if (assembled_erasure_bytes) {
+            if (assembled_symbol_erasures.size) {
                 memcpy(frame_erasure_bits.data,
-                       assembled_erasures.data(),
-                       assembled_erasure_bytes);
+                       assembled_symbol_erasures.data,
+                       assembled_symbol_erasures.size);
             }
             frame_bits.size = assembled_bytes;
-            frame_erasure_bits.size = assembled_erasure_bytes;
+            frame_erasure_bits.size = assembled_symbol_erasures.size;
             frame_bit_count = assembled_bits.bit_size();
         }
         if (single_color_rotation) {
             for (usize i = 0u; i < frame_bits.size; ++i) {
                 u8 rotate = (u8)((i % 3u) + 1u);
                 frame_bits.data[i] = rotate_right_u8(frame_bits.data[i], rotate);
-            }
-            for (usize i = 0u; i < frame_erasure_bits.size; ++i) {
-                u8 rotate = (u8)((i % 3u) + 1u);
-                frame_erasure_bits.data[i] = rotate_right_u8(frame_erasure_bits.data[i], rotate);
             }
         }
         bool payload_extracted = frame_bits_to_payload(frame_bits.data,
@@ -525,20 +587,15 @@ retry_decode:
             console_line(2, "decode: failed to extract payload bits");
             return 1;
         }
-        if (single_state.has_ecc_flag && !single_state.ecc_flag_value) {
-            byte_buffer_move(frame_bits_for_length_recovery, frame_bits);
-            frame_bit_count_for_length_recovery = frame_bit_count;
-        }
         aggregate_state = single_state;
         have_metadata = true;
 
     } else {
         makocode::BitWriter frame_aggregator;
-        makocode::BitWriter erasure_aggregator;
+        makocode::ByteBuffer symbol_erasure_aggregator;
         frame_aggregator.reset();
-        erasure_aggregator.reset();
         makocode::ByteBuffer indexed_frame_bits;
-        makocode::ByteBuffer indexed_erasure_bits;
+        makocode::ByteBuffer indexed_symbol_erasures;
         bool aggregate_initialized = false;
         bool page_assembly_mode_initialized = false;
         bool indexed_page_assembly = false;
@@ -654,22 +711,43 @@ retry_decode:
                 }
                 if (file_count == 1u) {
                     MetadataTile::Values recovered_values;
-                    if (recover_metadata_free_single_page(ppm_stream,
-                                                           mapping_overrides,
-                                                           no_metadata,
-                                                           have_password ? (const char*)password_buffer.data : (const char*)0,
-                                                           have_password ? password_buffer.size : 0u,
-                                                           page_bits,
-                                                           page_erasure_bits,
-                                                           page_bit_count,
-                                                           page_capacity_bits,
-                                                           page_state,
-                                                           recovered_values)) {
+                    bool recovered = allow_metadata_free_recovery &&
+                        recover_metadata_free_single_page(ppm_stream,
+                                                          mapping_overrides,
+                                                          no_metadata,
+                                                          page_bits,
+                                                          page_erasure_bits,
+                                                          page_bit_count,
+                                                          page_capacity_bits,
+                                                          page_state,
+                                                          recovered_values);
+                    if (!recovered && allow_metadata_free_recovery && have_password &&
+                        mapping_overrides.symbol_placement_seed !=
+                            makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED) {
+                        ImageMappingConfig public_placement_mapping = mapping_overrides;
+                        public_placement_mapping.symbol_placement_seed =
+                            makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                        recovered = recover_metadata_free_single_page(
+                            ppm_stream,
+                            public_placement_mapping,
+                            no_metadata,
+                            page_bits,
+                            page_erasure_bits,
+                            page_bit_count,
+                            page_capacity_bits,
+                            page_state,
+                            recovered_values);
+                    }
+                    if (recovered) {
                         frame_extracted = true;
                         page_color_rotation = false;
                     }
                 }
                 if (!frame_extracted) {
+                    if (!allow_metadata_free_recovery) {
+                        console_line(2, "decode: metadata tile missing; aborting");
+                        return 1;
+                    }
                     console_write(2, "decode: invalid ppm in ");
                     console_line(2, input_files[file_index]);
                     return 1;
@@ -692,42 +770,53 @@ retry_decode:
                 indexed_page_assembly = true;
                 {
                     indexed_frame_bit_total = page_state.page_bits_value;
+                    if ((indexed_frame_bit_total & 31u) != 0u) {
+                        console_line(2, "decode: field-symbol frame length is not aligned");
+                        return 1;
+                    }
                     u64 frame_bytes_u64 = (indexed_frame_bit_total >> 3u) +
                                           ((indexed_frame_bit_total & 7u) ? 1u : 0u);
+                    u64 frame_symbols_u64 = indexed_frame_bit_total / 32u;
                     if (frame_bytes_u64 > (u64)USIZE_MAX_VALUE ||
+                        frame_symbols_u64 > (u64)USIZE_MAX_VALUE ||
                         (frame_bytes_u64 &&
-                         (!indexed_frame_bits.ensure((usize)frame_bytes_u64) ||
-                          !indexed_erasure_bits.ensure((usize)frame_bytes_u64)))) {
+                         !indexed_frame_bits.ensure((usize)frame_bytes_u64)) ||
+                        (frame_symbols_u64 &&
+                         !indexed_symbol_erasures.ensure((usize)frame_symbols_u64))) {
                         console_line(2, "decode: failed to allocate metadata-indexed pages");
                         return 1;
                     }
                     indexed_frame_bits.size = (usize)frame_bytes_u64;
-                    indexed_erasure_bits.size = (usize)frame_bytes_u64;
+                    indexed_symbol_erasures.size = (usize)frame_symbols_u64;
                     if (frame_bytes_u64) {
                         memset(indexed_frame_bits.data, 0, (usize)frame_bytes_u64);
-                        memset(indexed_erasure_bits.data, 0xFF, (usize)frame_bytes_u64);
+                    }
+                    if (frame_symbols_u64) {
+                        memset(indexed_symbol_erasures.data, 1, (usize)frame_symbols_u64);
                     }
                     u64 prior_bits = frame_aggregator.bit_size();
                     if (prior_bits > indexed_frame_bit_total ||
-                        prior_bits > erasure_aggregator.bit_size()) {
+                        (prior_bits & 31u) != 0u ||
+                        prior_bits / 32u > symbol_erasure_aggregator.size) {
                         console_line(2, "decode: preceding metadata-free pages exceed indexed payload length");
                         return 1;
                     }
                     makocode::BitReader prior_frame_reader;
-                    makocode::BitReader prior_erasure_reader;
                     prior_frame_reader.reset(frame_aggregator.data(), prior_bits);
-                    prior_erasure_reader.reset(erasure_aggregator.data(), prior_bits);
                     for (u64 bit_index = 0u; bit_index < prior_bits; ++bit_index) {
                         u8 bit = prior_frame_reader.read_bit();
-                        u8 erased = prior_erasure_reader.read_bit();
-                        if (prior_frame_reader.failed || prior_erasure_reader.failed) {
+                        if (prior_frame_reader.failed) {
                             console_line(2, "decode: failed to migrate preceding metadata-free pages");
                             return 1;
                         }
                         usize destination_byte = (usize)(bit_index >> 3u);
                         u8 destination_mask = (u8)(1u << (bit_index & 7u));
                         if (bit) indexed_frame_bits.data[destination_byte] |= destination_mask;
-                        if (!erased) indexed_erasure_bits.data[destination_byte] &= (u8)~destination_mask;
+                    }
+                    if (prior_bits) {
+                        memcpy(indexed_symbol_erasures.data,
+                               symbol_erasure_aggregator.data,
+                               (usize)(prior_bits / 32u));
                     }
                 }
             }
@@ -899,6 +988,10 @@ retry_decode:
                 } else if (effective_bits > indexed_frame_bit_total - page_offset) {
                     effective_bits = indexed_frame_bit_total - page_offset;
                 }
+                if ((effective_bits & 31u) != 0u || (page_offset & 31u) != 0u) {
+                    console_line(2, "decode: page field-symbol erasure map is not aligned");
+                    return 1;
+                }
                 for (u64 bit_index = 0u; bit_index < effective_bits; ++bit_index) {
                     u64 destination_bit = page_offset + bit_index;
                     usize destination_byte = (usize)(destination_bit >> 3u);
@@ -909,30 +1002,55 @@ retry_decode:
                                      (page_bits.data[source_byte] & source_mask) != 0u;
                     if (bit_value) indexed_frame_bits.data[destination_byte] |= destination_mask;
                     else indexed_frame_bits.data[destination_byte] &= (u8)~destination_mask;
-                    bool erased_value = page_erasure_bits.data &&
-                                        source_byte < page_erasure_bits.size &&
-                                        (page_erasure_bits.data[source_byte] & source_mask) != 0u;
-                    if (erased_value) indexed_erasure_bits.data[destination_byte] |= destination_mask;
-                    else indexed_erasure_bits.data[destination_byte] &= (u8)~destination_mask;
+                }
+                u64 destination_symbol = page_offset / 32u;
+                u64 page_symbol_count = effective_bits / 32u;
+                if (destination_symbol > indexed_symbol_erasures.size ||
+                    page_symbol_count > indexed_symbol_erasures.size - destination_symbol ||
+                    (page_erasure_bits.data &&
+                     page_symbol_count > page_erasure_bits.size)) {
+                    console_line(2, "decode: page field-symbol erasure map is truncated");
+                    return 1;
+                }
+                for (u64 symbol = 0u; symbol < page_symbol_count; ++symbol) {
+                    indexed_symbol_erasures.data[(usize)(destination_symbol + symbol)] =
+                        page_erasure_bits.data
+                            ? (page_erasure_bits.data[(usize)symbol] ? 1u : 0u)
+                            : 0u;
                 }
             } else {
                 if (!append_bits_from_buffer(frame_aggregator, page_bits.data, effective_bits)) {
                     console_line(2, "decode: failed to assemble bitstream");
                     return 1;
                 }
+                if ((effective_bits & 31u) != 0u ||
+                    effective_bits / 32u > (u64)USIZE_MAX_VALUE) {
+                    console_line(2, "decode: field-symbol erasure map is not aligned");
+                    return 1;
+                }
+                usize page_symbol_count = (usize)(effective_bits / 32u);
                 if (page_erasure_bits.data && page_erasure_bits.size) {
-                    if (!append_bits_from_buffer(erasure_aggregator,
-                                                 page_erasure_bits.data,
-                                                 effective_bits)) {
-                        console_line(2, "decode: failed to assemble erasure map");
+                    if (page_symbol_count > page_erasure_bits.size ||
+                        symbol_erasure_aggregator.size >
+                            USIZE_MAX_VALUE - page_symbol_count ||
+                        !symbol_erasure_aggregator.append_bytes(
+                            page_erasure_bits.data, page_symbol_count)) {
+                        console_line(2, "decode: failed to assemble field-symbol erasures");
                         return 1;
                     }
                 } else {
-                    for (u64 bit_index = 0u; bit_index < effective_bits; ++bit_index) {
-                        if (!erasure_aggregator.write_bit(0u)) {
-                            console_line(2, "decode: failed to assemble erasure map");
-                            return 1;
-                        }
+                    if (symbol_erasure_aggregator.size >
+                            USIZE_MAX_VALUE - page_symbol_count ||
+                        !symbol_erasure_aggregator.ensure(
+                            symbol_erasure_aggregator.size + page_symbol_count)) {
+                        console_line(2, "decode: failed to assemble field-symbol erasures");
+                        return 1;
+                    }
+                    usize first_symbol = symbol_erasure_aggregator.size;
+                    symbol_erasure_aggregator.size += page_symbol_count;
+                    if (page_symbol_count) {
+                        memset(symbol_erasure_aggregator.data + first_symbol, 0,
+                               page_symbol_count);
                     }
                 }
             }
@@ -959,21 +1077,12 @@ retry_decode:
                                      : &frame_aggregator.buffer.data[i];
                 *frame_byte = rotate_right_u8(*frame_byte, rotate);
             }
-            usize erasure_bytes = indexed_page_assembly
-                                      ? indexed_erasure_bits.size
-                                      : erasure_aggregator.byte_size();
-            for (usize i = 0u; i < erasure_bytes; ++i) {
-                u8 rotate = (u8)((i % 3u) + 1u);
-                u8* erasure_byte = indexed_page_assembly
-                                       ? &indexed_erasure_bits.data[i]
-                                       : &erasure_aggregator.buffer.data[i];
-                *erasure_byte = rotate_right_u8(*erasure_byte, rotate);
-            }
         }
         const u8* frame_data = indexed_page_assembly
                                    ? indexed_frame_bits.data : frame_aggregator.data();
         const u8* erasure_data = indexed_page_assembly
-                                     ? indexed_erasure_bits.data : erasure_aggregator.data();
+                                     ? indexed_symbol_erasures.data
+                                     : symbol_erasure_aggregator.data;
         bool payload_extracted = frame_bits_to_payload(frame_data,
                                                        frame_bit_total,
                                                        aggregate_state,
@@ -995,14 +1104,6 @@ retry_decode:
             console_line(2, "decode: failed to extract payload bits");
             return 1;
         }
-        if (aggregate_state.has_ecc_flag && !aggregate_state.ecc_flag_value) {
-            if (indexed_page_assembly) {
-                byte_buffer_move(frame_bits_for_length_recovery, indexed_frame_bits);
-            } else {
-                byte_buffer_move(frame_bits_for_length_recovery, frame_aggregator.buffer);
-            }
-            frame_bit_count_for_length_recovery = frame_bit_total;
-        }
         have_metadata = true;
 
     }
@@ -1020,299 +1121,282 @@ retry_decode:
     }
     bool metadata_v2_layout = aggregate_state.has_encoded_tile &&
                               metadata_schema_is_current(aggregate_state.encoded_tile.schema_version);
-    bool ecc_header_repaired = false;
-    makocode::EccHeaderInfo bitstream_header;
-    bool bitstream_header_present = false;
-    bool bitstream_header_valid = false;
-    if (!metadata_v2_layout && bitstream.data &&
-        bitstream.size >= makocode::ECC_HEADER_TOTAL_BYTES) {
-        bitstream_header_present = makocode::parse_ecc_header(bitstream.data, bitstream.size, bitstream_header);
-        bitstream_header_valid = bitstream_header_present && bitstream_header.valid && bitstream_header.enabled;
-    }
-    bool ecc_metadata_available = have_metadata &&
-                                  aggregate_state.has_ecc_flag &&
-                                  aggregate_state.ecc_flag_value;
-    bool ecc_metadata_complete = ecc_metadata_available &&
-                                 aggregate_state.has_ecc_block_data &&
-                                 aggregate_state.has_ecc_parity &&
-                                 aggregate_state.has_ecc_block_count &&
-                                 aggregate_state.has_ecc_original_bytes;
-
-    if (metadata_v2_layout && ecc_metadata_complete) {
-        u64 block_total = aggregate_state.ecc_block_data_value +
-                          aggregate_state.ecc_parity_value;
-        if (!block_total || aggregate_state.ecc_block_count_value > U64_MAX_VALUE / block_total) {
-            console_line(2, "decode: invalid metadata ECC block layout");
-            return 1;
-        }
-        u64 protected_bytes_u64 = block_total * aggregate_state.ecc_block_count_value;
-        if (protected_bytes_u64 > (u64)USIZE_MAX_VALUE ||
-            protected_bytes_u64 > U64_MAX_VALUE / 8u ||
-            protected_bytes_u64 > bitstream.size ||
-            protected_bytes_u64 * 8u > bit_count) {
-            console_line(2, "decode: metadata ECC payload length exceeds extracted data");
-            return 1;
-        }
-        bitstream.size = (usize)protected_bytes_u64;
-        bit_count = protected_bytes_u64 * 8u;
-        if (erased_payload_symbols.data) {
-            if (protected_bytes_u64 > erased_payload_symbols.size) {
-                console_line(2, "decode: metadata ECC erasure map is truncated");
-                return 1;
-            }
-            erased_payload_symbols.size = (usize)protected_bytes_u64;
-        }
-    }
-    
-    if (!metadata_v2_layout && !bitstream_header_valid) {
-        if (ecc_metadata_complete &&
-            bitstream.data &&
-            bitstream.size >= makocode::ECC_HEADER_TOTAL_BYTES &&
-            bit_count >= (u64)makocode::ECC_HEADER_TOTAL_BITS) {
-            u64 block_data_value = aggregate_state.ecc_block_data_value;
-            u64 parity_value = aggregate_state.ecc_parity_value;
-            if (block_data_value <= 0xFFFFu && parity_value <= 0xFFFFu) {
-                u8 header_bytes[makocode::ECC_HEADER_TOTAL_BYTES];
-                if (makocode::build_ecc_header_bytes(header_bytes,
-                                                     (u16)block_data_value,
-                                                     (u16)parity_value,
-                                                     aggregate_state.ecc_block_count_value,
-                                                     aggregate_state.ecc_original_bytes_value,
-                                                     aggregate_state.has_encoded_tile
-                                                         ? aggregate_state.encoded_tile.ecc_header_magic
-                                                         : makocode::ECC_HEADER_MAGIC,
-                                                     aggregate_state.has_encoded_tile
-                                                         ? aggregate_state.encoded_tile.ecc_header_version
-                                                         : makocode::ECC_HEADER_VERSION,
-                                                     aggregate_state.has_encoded_tile
-                                                         ? aggregate_state.encoded_tile.ecc_header_flags
-                                                         : 0x01u,
-                                                     aggregate_state.has_encoded_tile
-                                                         ? aggregate_state.encoded_tile.ecc_header_reserved
-                                                         : 0u)) {
-                    bool differs = false;
-                    for (usize i = 0u; i < makocode::ECC_HEADER_TOTAL_BYTES; ++i) {
-                        if (bitstream.data[i] != header_bytes[i]) {
-                            differs = true;
-                            break;
-                        }
-                    }
-                    if (differs) {
-                        for (usize i = 0u; i < makocode::ECC_HEADER_TOTAL_BYTES; ++i) {
-                            bitstream.data[i] = header_bytes[i];
-                        }
-                        ecc_header_repaired = true;
-                    }
-                }
-            }
-        } else if (ecc_metadata_available) {
-            
-            console_line(2, "decode: warning: ECC metadata incomplete; header reconstruction skipped");
-        }
-    }
-    if (ecc_header_repaired) {
-        console_line(2, "decode: repaired ECC header from metadata");
-    }
-    makocode::ByteBuffer synthetic_header_stream;
-    makocode::ByteBuffer synthetic_header_erasures;
-    const u8* decoder_stream_data = bitstream.data;
-    u64 decoder_stream_bits = bit_count;
-    const u8* decoder_erasure_data = erased_payload_symbols.data;
-    usize decoder_erasure_bytes = erased_payload_symbols.size;
-    bool synthetic_ecc_header = false;
-    if (metadata_v2_layout && ecc_metadata_complete) {
-        if (!bitstream.data || (bit_count & 7u) != 0u ||
-            bit_count > U64_MAX_VALUE - (u64)makocode::ECC_HEADER_TOTAL_BITS ||
-            bitstream.size > USIZE_MAX_VALUE - makocode::ECC_HEADER_TOTAL_BYTES ||
-            aggregate_state.ecc_block_data_value > 0xFFFFu ||
-            aggregate_state.ecc_parity_value > 0xFFFFu ||
-            !synthetic_header_stream.ensure(bitstream.size + makocode::ECC_HEADER_TOTAL_BYTES)) {
-            console_line(2, "decode: invalid metadata ECC header");
-            return 1;
-        }
-        u8 header_bytes[makocode::ECC_HEADER_TOTAL_BYTES];
-        if (!makocode::build_ecc_header_bytes(header_bytes,
-                                              (u16)aggregate_state.ecc_block_data_value,
-                                              (u16)aggregate_state.ecc_parity_value,
-                                              aggregate_state.ecc_block_count_value,
-                                              aggregate_state.ecc_original_bytes_value,
-                                              aggregate_state.encoded_tile.ecc_header_magic,
-                                              aggregate_state.encoded_tile.ecc_header_version,
-                                              aggregate_state.encoded_tile.ecc_header_flags,
-                                              aggregate_state.encoded_tile.ecc_header_reserved)) {
-            console_line(2, "decode: invalid metadata ECC header");
-            return 1;
-        }
-        synthetic_header_stream.size = makocode::ECC_HEADER_TOTAL_BYTES + bitstream.size;
-        for (usize i = 0u; i < makocode::ECC_HEADER_TOTAL_BYTES; ++i) {
-            synthetic_header_stream.data[i] = header_bytes[i];
-        }
-        for (usize i = 0u; i < bitstream.size; ++i) {
-            synthetic_header_stream.data[makocode::ECC_HEADER_TOTAL_BYTES + i] = bitstream.data[i];
-        }
-        decoder_stream_data = synthetic_header_stream.data;
-        decoder_stream_bits = bit_count + (u64)makocode::ECC_HEADER_TOTAL_BITS;
-        synthetic_ecc_header = true;
-        if (erased_payload_symbols.data) {
-            if (erased_payload_symbols.size < bitstream.size ||
-                !synthetic_header_erasures.ensure(synthetic_header_stream.size)) {
-                console_line(2, "decode: invalid payload erasure map");
-                return 1;
-            }
-            synthetic_header_erasures.size = synthetic_header_stream.size;
-            for (usize i = 0u; i < makocode::ECC_HEADER_TOTAL_BYTES; ++i) {
-                synthetic_header_erasures.data[i] = 0u;
-            }
-            for (usize i = 0u; i < bitstream.size; ++i) {
-                synthetic_header_erasures.data[makocode::ECC_HEADER_TOTAL_BYTES + i] =
-                    erased_payload_symbols.data[i];
-            }
-            decoder_erasure_data = synthetic_header_erasures.data;
-            decoder_erasure_bytes = synthetic_header_erasures.size;
-        }
+    u32 palette_symbol_palette_size = mapping_has_custom_palette(mapping)
+                                          ? mapping.custom_palette_count
+                                          : (1u << bits_per_sample(mapping.color_channels));
+    makocode::PaletteSymbolProfile palette_symbol_profile;
+    bool palette_symbol_metadata_layout =
+        metadata_v2_layout &&
+        makocode::palette_symbol_profile(palette_symbol_palette_size,
+                                         palette_symbol_profile) &&
+        aggregate_state.encoded_tile.ecc_block_data > 0u &&
+        (u32)aggregate_state.encoded_tile.ecc_block_data +
+                aggregate_state.encoded_tile.ecc_parity ==
+            palette_symbol_profile.block_length &&
+        (bit_count & 31u) == 0u;
+    bool palette_symbol_stream_input = palette_symbol_metadata_layout ||
+        (!metadata_v2_layout && !aggregate_state.has_encoded_tile &&
+         mapping_has_custom_palette(mapping) && (bit_count & 31u) == 0u);
+    if (!palette_symbol_stream_input) {
+        console_line(2, "decode: unsupported payload format; expected version-zero field symbols");
+        return 1;
     }
     makocode::DecoderContext decoder;
     const char* password_ptr = have_password ? (const char*)password_buffer.data : (const char*)0;
     usize password_length = have_password ? password_buffer.size : 0u;
-    if (!decoder.parse((u8*)decoder_stream_data,
-                       decoder_stream_bits,
-                       password_ptr,
-                       password_length,
-                       decoder_erasure_data,
-                       decoder_erasure_bytes,
-                       overlay_selector_seed,
-                       overlay_selector_counts.data,
-                       overlay_selector_counts.size,
-                       overlay_unknown_parity_budget,
-                       overlay_erasure_budget,
-                       metadata_v2_layout,
-                       synthetic_ecc_header,
-                       makocode::LZMA_SIZE_FROM_HEADER,
-                       false)) {
+    bool decoder_parse_succeeded = false;
+    if (palette_symbol_stream_input) {
+        makocode::ByteBuffer compressed_or_container;
+        makocode::EccDecodeStats symbol_stats;
+        bool password_protected = false;
+        makocode::PaletteSymbolHeaderRecovery header_recovery;
+        if (metadata_v2_layout && aggregate_state.encoded_tile.ecc_original_bytes > 0u &&
+            aggregate_state.encoded_tile.ecc_block_count > 0u) {
+            header_recovery.available = true;
+            header_recovery.password_protected = false;
+            header_recovery.byte_count = aggregate_state.encoded_tile.ecc_original_bytes;
+            header_recovery.block_count = aggregate_state.encoded_tile.ecc_block_count;
+            header_recovery.data_symbols_per_block =
+                aggregate_state.encoded_tile.ecc_block_data;
+            header_recovery.parity_symbols = aggregate_state.encoded_tile.ecc_parity;
+            header_recovery.overlay_erasure_budget =
+                aggregate_state.encoded_tile.overlay_erasure_budget;
+            header_recovery.unknown_error_budget =
+                aggregate_state.encoded_tile.unknown_parity_budget;
+        }
+        decoder_parse_succeeded =
+            makocode::palette_symbol_profile(palette_symbol_palette_size,
+                                             palette_symbol_profile) &&
+            makocode::palette_symbol_decode_stream(palette_symbol_profile,
+                                                   bitstream,
+                                                   erased_payload_symbols,
+                                                   have_password ? (const char*)0 : password_ptr,
+                                                   have_password ? 0u : password_length,
+                                                   compressed_or_container,
+                                                   &symbol_stats,
+                                                   &password_protected,
+                                                   &header_recovery,
+                                                   !have_password);
+        if (!decoder_parse_succeeded && have_password && header_recovery.available) {
+            header_recovery.password_protected = false;
+            decoder_parse_succeeded =
+                makocode::palette_symbol_decode_stream(palette_symbol_profile,
+                                                       bitstream,
+                                                       erased_payload_symbols,
+                                                       password_ptr,
+                                                       password_length,
+                                                       compressed_or_container,
+                                                       &symbol_stats,
+                                                       &password_protected,
+                                                       &header_recovery);
+        }
+        if (!decoder_parse_succeeded && have_password && header_recovery.available) {
+            header_recovery.password_protected = true;
+            decoder_parse_succeeded =
+                makocode::palette_symbol_decode_stream(palette_symbol_profile,
+                                                       bitstream,
+                                                       erased_payload_symbols,
+                                                       password_ptr,
+                                                       password_length,
+                                                       compressed_or_container,
+                                                       &symbol_stats,
+                                                       &password_protected,
+                                                       &header_recovery);
+        }
+        if (!decoder_parse_succeeded && have_password &&
+            !header_recovery.available) {
+            decoder_parse_succeeded =
+                makocode::palette_symbol_decode_stream(palette_symbol_profile,
+                                                       bitstream,
+                                                       erased_payload_symbols,
+                                                       password_ptr,
+                                                       password_length,
+                                                       compressed_or_container,
+                                                       &symbol_stats,
+                                                       &password_protected);
+        }
+        bool field_symbols_decoded = decoder_parse_succeeded;
+        if (decoder_parse_succeeded) {
+            if (password_protected || have_password) {
+                makocode::ByteBuffer archive;
+                bool is_container = false;
+                usize authenticated_body_end = 0u;
+                bool container_opened = makocode::decode_stealth_container(
+                    compressed_or_container.data,
+                    compressed_or_container.size,
+                    password_ptr,
+                    password_length,
+                    archive,
+                    is_container,
+                    0,
+                    &authenticated_body_end);
+                if (container_opened && is_container) {
+                    decoder.payload = archive;
+                    archive.data = 0;
+                    archive.size = 0u;
+                    archive.capacity = 0u;
+                    decoder.has_payload = true;
+                    decoder.password_attempted = true;
+                    decoder_parse_succeeded = true;
+                    decoder.encoded_metadata.encryption_present = true;
+                    memcpy(decoder.encoded_metadata.encryption_salt,
+                           compressed_or_container.data,
+                           makocode::ENCRYPTION_SALT_BYTES);
+                    memcpy(decoder.encoded_metadata.encryption_nonce,
+                           compressed_or_container.data + makocode::ENCRYPTION_SALT_BYTES,
+                           makocode::ENCRYPTION_NONCE_BYTES);
+                    if (authenticated_body_end >= makocode::ENCRYPTION_TAG_BYTES) {
+                        memcpy(decoder.encoded_metadata.encryption_tag,
+                               compressed_or_container.data + authenticated_body_end -
+                                   makocode::ENCRYPTION_TAG_BYTES,
+                               makocode::ENCRYPTION_TAG_BYTES);
+                    }
+                    decoder.encoded_metadata.lzma_present = true;
+                } else if (have_password && header_recovery.available &&
+                           (password_protected || is_container)) {
+                    header_recovery.password_protected = false;
+                    makocode::ByteBuffer unmasked_bytes;
+                    makocode::EccDecodeStats unmasked_stats;
+                    bool unmasked_protected = false;
+                    bool unmasked_decoded = makocode::palette_symbol_decode_stream(
+                        palette_symbol_profile, bitstream, erased_payload_symbols,
+                        (const char*)0, 0u, unmasked_bytes, &unmasked_stats,
+                        &unmasked_protected, &header_recovery);
+                    if (unmasked_decoded && !unmasked_protected &&
+                        makocode::lzma_decompress(unmasked_bytes.data,
+                                                  unmasked_bytes.size * 8u,
+                                                  decoder.payload,
+                                                  makocode::LZMA_SIZE_FROM_HEADER,
+                                                  false)) {
+                        decoder.has_payload = true;
+                        decoder.password_attempted = true;
+                        decoder.password_not_encrypted = true;
+                        decoder_parse_succeeded = true;
+                        symbol_stats = unmasked_stats;
+                    } else {
+                        decoder_parse_succeeded = false;
+                        decoder.password_attempted = true;
+                        decoder.password_failed = true;
+                    }
+                } else if (password_protected || is_container) {
+                    decoder_parse_succeeded = false;
+                    decoder.password_attempted = true;
+                    decoder.password_failed = true;
+                } else {
+                    decoder_parse_succeeded = makocode::lzma_decompress(
+                        compressed_or_container.data,
+                        compressed_or_container.size * 8u,
+                        decoder.payload,
+                        makocode::LZMA_SIZE_FROM_HEADER,
+                        false);
+                    if (decoder_parse_succeeded) {
+                        decoder.has_payload = true;
+                        decoder.password_attempted = have_password;
+                        decoder.password_not_encrypted = have_password;
+                    }
+                }
+            } else {
+                decoder_parse_succeeded = makocode::lzma_decompress(
+                    compressed_or_container.data,
+                    compressed_or_container.size * 8u,
+                    decoder.payload,
+                    makocode::LZMA_SIZE_FROM_HEADER,
+                    false,
+                    0,
+                    !have_password && symbol_stats.unrecoverable_blocks > 0u);
+                if (decoder_parse_succeeded) {
+                    decoder.has_payload = true;
+                    decoder.password_attempted = have_password;
+                    decoder.password_not_encrypted = have_password;
+                    decoder.partial_payload =
+                        !have_password && symbol_stats.unrecoverable_blocks > 0u;
+                }
+            }
+        }
+        decoder.ecc_stats = symbol_stats;
+        decoder.ecc_failed = !decoder_parse_succeeded;
+        if (!decoder_parse_succeeded) {
+            if (debug_requested) {
+                char corrected[32];
+                char failed[32];
+                char failed_errors[32];
+                char failed_erasures[32];
+                char failed_stage[32];
+                char failed_index[32];
+                char decoded_blocks[32];
+                u64_to_ascii(symbol_stats.corrected_symbols, corrected, sizeof(corrected));
+                u64_to_ascii(symbol_stats.unrecoverable_blocks, failed, sizeof(failed));
+                u64_to_ascii(symbol_stats.failed_block_errors, failed_errors, sizeof(failed_errors));
+                u64_to_ascii(symbol_stats.failed_block_erasures, failed_erasures, sizeof(failed_erasures));
+                u64_to_ascii(symbol_stats.failed_block_stage, failed_stage, sizeof(failed_stage));
+                u64_to_ascii(symbol_stats.failed_block_index, failed_index, sizeof(failed_index));
+                u64_to_ascii(symbol_stats.total_blocks, decoded_blocks, sizeof(decoded_blocks));
+                console_write(2, "decode: field-symbol ECC corrected=");
+                console_write(2, corrected);
+                console_write(2, " unrecoverable_blocks=");
+                console_write(2, failed);
+                console_write(2, " failed_block_errors=");
+                console_write(2, failed_errors);
+                console_write(2, " failed_block_erasures=");
+                console_write(2, failed_erasures);
+                console_write(2, " stage=");
+                console_write(2, failed_stage);
+                console_write(2, " failed_block_index=");
+                console_write(2, failed_index);
+                console_write(2, " completed_blocks=");
+                console_line(2, decoded_blocks);
+            }
+            if (have_password && !field_symbols_decoded) {
+                decoder.password_attempted = true;
+                decoder.password_failed = true;
+            }
+            console_line(2, "decode: field-symbol ECC, password, or decompression failure");
+        }
+    }
+    if (!decoder_parse_succeeded) {
+        if (have_password && !retried_public_symbol_placement) {
+            retried_public_symbol_placement = true;
+            mapping.symbol_placement_seed =
+                makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+            mapping_overrides.symbol_placement_seed =
+                makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+            goto retry_decode;
+        }
         if (decoder.password_auth_failed()) {
             console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
             return 1;
         }
-        bool frame_length_recovered = false;
-        if (!decoder.ecc_correction_failed() &&
-            !have_password &&
-            !metadata_v2_layout &&
-            aggregate_state.has_ecc_flag &&
-            !aggregate_state.ecc_flag_value &&
-            frame_bits_for_length_recovery.data &&
-            frame_bit_count_for_length_recovery > 64u) {
-            makocode::BitReader length_reader;
-            length_reader.reset(frame_bits_for_length_recovery.data,
-                                frame_bit_count_for_length_recovery);
-            u64 observed_bits = length_reader.read_bits(64u);
-            u64 available_bits = frame_bit_count_for_length_recovery - 64u;
-            makocode::ByteBuffer recovered_stream;
-            u64 recovered_bits = 0u;
-            u32 valid_candidates = 0u;
-            for (u32 header_bit = 0u; header_bit < 64u; ++header_bit) {
-                u64 candidate_bits = observed_bits ^ (1ull << header_bit);
-                if (candidate_bits == 0u ||
-                    (candidate_bits & 7u) != 0u ||
-                    candidate_bits > available_bits) {
-                    continue;
-                }
-                u8& candidate_header_byte =
-                    frame_bits_for_length_recovery.data[header_bit >> 3u];
-                candidate_header_byte ^= (u8)(1u << (header_bit & 7u));
-                makocode::ByteBuffer candidate_stream;
-                u64 candidate_stream_bits = 0u;
-                bool candidate_extracted = frame_bits_to_payload(
-                    frame_bits_for_length_recovery.data,
-                    frame_bit_count_for_length_recovery,
-                    aggregate_state,
-                    candidate_stream,
-                    candidate_stream_bits);
-                candidate_header_byte ^= (u8)(1u << (header_bit & 7u));
-                if (!candidate_extracted || candidate_stream_bits != candidate_bits) {
-                    continue;
-                }
-                makocode::ByteBuffer candidate_input;
-                if (!candidate_input.ensure(candidate_stream.size)) {
-                    continue;
-                }
-                candidate_input.size = candidate_stream.size;
-                for (usize i = 0u; i < candidate_stream.size; ++i) {
-                    candidate_input.data[i] = candidate_stream.data[i];
-                }
-                makocode::DecoderContext candidate_decoder;
-                if (!candidate_decoder.parse(candidate_input.data,
-                                             candidate_stream_bits,
-                                             (const char*)0,
-                                             0u)) {
-                    continue;
-                }
-                const makocode::ByteBuffer& archive = candidate_decoder.payload;
-                bool archive_valid = archive_is_well_formed(archive);
-                if (archive_valid) {
-                    ++valid_candidates;
-                    if (valid_candidates == 1u) {
-                        byte_buffer_move(recovered_stream, candidate_stream);
-                        recovered_bits = candidate_stream_bits;
-                    }
-                }
-            }
-            if (valid_candidates == 1u) {
-                byte_buffer_move(bitstream, recovered_stream);
-                bit_count = recovered_bits;
-                frame_length_recovered = decoder.parse(bitstream.data,
-                                                       bit_count,
-                                                       password_ptr,
-                                                       password_length);
-                if (frame_length_recovered) {
-                    console_line(2, "decode: recovered frame length from a one-bit header correction");
-                }
-            }
-        }
-        if (!frame_length_recovered) {
-            if (!decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
+        if (!force_disable_subgrid && !retried_subgrid) {
                 console_line(2, "decode: parse failure; retrying without fiducial subgrid");
                 force_disable_subgrid = true;
                 retried_subgrid = true;
                 goto retry_decode;
-            }
-            if (decoder.ecc_correction_failed() && !force_disable_subgrid && !retried_subgrid) {
-                console_line(2, "decode: ECC could not repair the payload; retrying without fiducial subgrid");
-                if (file_count == 1u && aggregate_state.has_encoded_tile &&
-                    aggregate_state.encoded_tile.page_width_pixels > 96u &&
-                    aggregate_state.encoded_tile.page_height_pixels > 96u) {
-                    single_retry_tile = aggregate_state.encoded_tile;
-                    single_retry_tile_available = true;
-                }
-                force_disable_subgrid = true;
-                retried_subgrid = true;
-                goto retry_decode;
-            }
-            if (decoder.ecc_correction_failed() && !force_tile_center_sampling &&
-                aggregate_state.has_encoded_tile &&
-                aggregate_state.encoded_tile.page_width_pixels <= 96u &&
-                aggregate_state.encoded_tile.page_height_pixels <= 96u) {
-                force_tile_center_sampling = true;
-                force_disable_subgrid = true;
-                retried_subgrid = true;
-                goto retry_decode;
-            }
-            if (decoder.ecc_correction_failed() && force_tile_center_sampling &&
-                aggregate_state.has_encoded_tile &&
-                aggregate_state.encoded_tile.palette_count == 2u &&
-                aggregate_state.encoded_tile.page_width_pixels <= 96u &&
-                aggregate_state.encoded_tile.page_height_pixels <= 96u &&
-                small_scan_geometry_variant < 10u) {
-                ++small_scan_geometry_variant;
-                console_line(2, "decode: ECC could not repair payload; retrying adjacent small-scan geometry");
-                goto retry_decode;
-            }
-            if (decoder.ecc_correction_failed()) {
-                console_line(2, "decode: ECC could not repair the payload");
-            } else {
-                console_line(2, "decode: parse failure");
-            }
-            return 1;
         }
+        if (decoder.ecc_correction_failed() && !force_tile_center_sampling &&
+            aggregate_state.has_encoded_tile &&
+            aggregate_state.encoded_tile.page_width_pixels <= 96u &&
+            aggregate_state.encoded_tile.page_height_pixels <= 96u) {
+            force_tile_center_sampling = true;
+            force_disable_subgrid = true;
+            retried_subgrid = true;
+            goto retry_decode;
+        }
+        if (decoder.ecc_correction_failed() && force_tile_center_sampling &&
+            aggregate_state.has_encoded_tile &&
+            aggregate_state.encoded_tile.palette_count == 2u &&
+            aggregate_state.encoded_tile.page_width_pixels <= 96u &&
+            aggregate_state.encoded_tile.page_height_pixels <= 96u &&
+            small_scan_geometry_variant < 10u) {
+            ++small_scan_geometry_variant;
+            console_line(2, "decode: ECC could not repair payload; retrying adjacent small-scan geometry");
+            goto retry_decode;
+        }
+        if (decoder.ecc_correction_failed()) {
+            console_line(2, "decode: ECC could not repair the payload");
+        } else {
+            console_line(2, "decode: parse failure");
+        }
+        return 1;
     }
     if (decoder.has_payload &&
         !decoder.partial_payload &&
@@ -1327,7 +1411,6 @@ retry_decode:
         console_line(2, "decode: recovered archive is invalid; retrying adjacent small-scan geometry");
         goto retry_decode;
     }
-    frame_bits_for_length_recovery.release();
     if (decoder.partial_payload) {
         console_line(2, "decode: warning: ECC could not repair all payload blocks; recovered partial data");
     }
@@ -1401,15 +1484,6 @@ retry_decode:
             ok = ok && decoded.append_ascii("metadata frame_bits ") && decoded.append_ascii(number) && decoded.append_char('\n');
         }
         const makocode::EncodedPayloadMetadata& payload_metadata = decoder.encoded_metadata;
-        if (payload_metadata.ecc_present) {
-            const makocode::EccHeader& ecc = payload_metadata.ecc;
-            const char* names[] = {"ecc_magic", "ecc_version", "ecc_flags", "ecc_reserved", "ecc_block_data", "ecc_parity", "ecc_block_count", "ecc_original_bytes"};
-            u64 values[] = {ecc.magic, ecc.version, ecc.flags, ecc.reserved, ecc.block_data, ecc.parity, ecc.block_count, ecc.original_bytes};
-            for (usize i = 0; ok && i < sizeof(values) / sizeof(values[0]); ++i) {
-                u64_to_ascii(values[i], number, sizeof(number));
-                ok = decoded.append_ascii("metadata ") && decoded.append_ascii(names[i]) && decoded.append_char(' ') && decoded.append_ascii(number) && decoded.append_char('\n');
-            }
-        }
         if (payload_metadata.encryption_present) {
             const char* names[] = {"encryption_salt", "encryption_nonce", "encryption_tag"};
             const u8* bytes[] = {payload_metadata.encryption_salt,
