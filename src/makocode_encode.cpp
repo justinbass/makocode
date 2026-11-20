@@ -2797,7 +2797,38 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         payload_pixel_count < 8u || payload_pixel_count > (u64)USIZE_MAX_VALUE / 8u) {
         return false;
     }
-    u64 page_symbol_capacity = payload_pixel_count / 8u;
+    if (tile.page_width_pixels == 0u || tile.page_height_pixels == 0u ||
+        tile.page_width_pixels > 0xFFFFFFFFull ||
+        tile.page_height_pixels > 0xFFFFFFFFull ||
+        tile.footer_rows >= tile.page_height_pixels) return false;
+    u32 page_width = (u32)tile.page_width_pixels;
+    u32 page_height = (u32)tile.page_height_pixels;
+    u32 page_data_height = page_height - (u32)tile.footer_rows;
+    u64 fiducial_reserved_pixels = 0u;
+    makocode::ByteBuffer fiducial_mask;
+    if (!compute_fiducial_marker_mask(page_width,
+                                     page_height,
+                                     page_data_height,
+                                     fiducial_reserved_pixels,
+                                     &fiducial_mask,
+                                     true,
+                                     tile.fiducial_columns,
+                                     tile.fiducial_rows,
+                                     tile.fiducial_spacing_pixels)) return false;
+    u64 page_data_pixels = (u64)page_width * page_data_height;
+    MetadataTile::Placement page_placement =
+        MetadataTile::compute_center_tile_placement(page_width, page_data_height);
+    u64 metadata_tile_pixels = page_placement.valid
+        ? (u64)(page_width < MetadataTile::TILE_SIDE
+                    ? page_width : MetadataTile::TILE_SIDE) *
+              (page_data_height < MetadataTile::TILE_SIDE
+                   ? page_data_height : MetadataTile::TILE_SIDE)
+        : 0u;
+    if (!page_placement.valid || fiducial_reserved_pixels > page_data_pixels ||
+        metadata_tile_pixels > page_data_pixels - fiducial_reserved_pixels) return false;
+    u64 page_capacity_pixels = page_data_pixels - fiducial_reserved_pixels -
+                               metadata_tile_pixels;
+    u64 page_symbol_capacity = page_capacity_pixels / 8u;
     if (!page_symbol_capacity ||
         tile.page_index - 1u > U64_MAX_VALUE / page_symbol_capacity) return false;
     u64 page_symbol_offset = (tile.page_index - 1u) * page_symbol_capacity;

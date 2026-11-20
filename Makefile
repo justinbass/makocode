@@ -44,7 +44,7 @@ define test_status
 endef
 
 ifeq ($(COVERAGE),1)
-CXXFLAGS += --coverage -O0 -g
+CXXFLAGS += --coverage -O2 -g
 LDFLAGS += --coverage
 COMPILE_DIR := $(abspath $(COVERAGE_DATA_DIR))
 else

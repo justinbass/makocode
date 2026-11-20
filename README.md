@@ -189,7 +189,7 @@ and run:
 make coverage
 ```
 
-This rebuilds both executables with `--coverage -O0 -g`, runs the same C++ test
+This rebuilds both executables with `--coverage -O2 -g`, runs the same C++ test
 suite, and captures coverage data from `build/bin/`. The LCOV report is written
 to `build/coverage/report/makocode.info`, and the HTML dashboard to
 `build/coverage/report/html/index.html`.
@@ -240,16 +240,18 @@ To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick 
 
 ### Standard Palette Order and Metadata Marker
 
-The standard ordered palettes and the endpoint colors used by the metadata marker are:
+The standard ordered palettes and the dark/light colors used by the metadata marker are:
 
 | Palette size | Ordered palette | Marker 0 → 1 |
 | --- | --- | --- |
-| 2 colors | White, Black | White → Black |
-| 4 colors | White, Cyan, Magenta, Yellow | White → Yellow |
-| 5 colors | White, Cyan, Magenta, Yellow, Black | White → Black |
-| 8 colors | White, Red (`#FF0000`), Green (`#00FF00`), Blue (`#0000FF`), Cyan, Magenta, Yellow, Black | White → Black |
+| 2 colors | White, Black | Black → White |
+| 4 colors | White, Cyan, Magenta, Yellow | Magenta → White |
+| 5 colors | White, Cyan, Magenta, Yellow, Black | Black → White |
+| 8 colors | White, Red (`#FF0000`), Green (`#00FF00`), Blue (`#0000FF`), Cyan, Magenta, Yellow, Black | Black → White |
 
-The metadata tile has a 4×8 marker (32 pixels) immediately below its palette row. It stores one bit per pixel, using the first palette entry for 0 and the last entry for 1. This marker is binary on every palette size; page payload symbols use the full ordered palette according to the page's encoding mode.
+The metadata tile has a 4×8 marker (32 pixels) immediately below its palette row. It stores one bit per pixel, using the darkest palette color for 0 and the lightest palette color for 1, independent of palette order. This marker is binary on every palette size; page payload symbols use the full ordered palette according to the page's encoding mode.
+
+Inactive cells in the 48×48 metadata footprint are filled with deterministic palette noise, with a two-pixel light margin around active metadata. These cells stay outside payload ranks so scans keep the same payload layout.
 
 The marker encodes the ASCII low nibbles for `MA KO CO DE`, with spaces used only for visual grouping. Read the eight letters in order, most-significant bit first within each nibble, across each row from left to right. The nibbles are `D 1 B F 3 F 4 5`, giving these four rows:
 

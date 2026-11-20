@@ -2907,9 +2907,26 @@ static void small_scan_case(){
 
 static void current_metadata_case(){
     const std::string id="0087_decode_current_metadata";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages=work/"pages",decoded=work/"decoded";fs::create_directories(pages);write_file(payload,"x");
-    auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"page");require(ppms.size()==1,id+": expected page");
+    auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--page-width=80","--page-height=80","--palette","White Black"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"page");require(ppms.size()==1,id+": expected page");
     MetadataTile::Values tile=extract_tile_values(ppms.front());PpmImage image=read_ppm(ppms.front());
     const unsigned tile_x=(image.width-48)/2,tile_y=(image.height-48)/2;unsigned cell=tile.metadata_length_prefix_bits+128;
+    unsigned ring_dark=0,ring_light=0;unsigned palette_x=MetadataTile::palette_tag_x0(tile.palette_count);u64 metadata_cells=tile.metadata_length_prefix_bits+tile.metadata_symbol_count;
+    for(unsigned y=0;y<48;++y)for(unsigned x=0;x<48;++x){
+        bool active=(y==tile.metadata_tag_y0&&x>=palette_x&&x<palette_x+tile.palette_count+1u)||
+                    (y>tile.metadata_tag_y0&&y<tile.metadata_tag_y0+MetadataTile::TILE_TAG_ROWS&&x>=MetadataTile::tag_marker_x0()&&x<MetadataTile::tag_marker_x0()+MetadataTile::TILE_MARKER_WIDTH)||
+                    (y==tile.metadata_tag_y0+MetadataTile::TILE_LENGTH_ROW&&x>=(48u-tile.metadata_outer_length_bits)/2u&&x<(48u-tile.metadata_outer_length_bits)/2u+tile.metadata_outer_length_bits);
+        if(!active&&tile.metadata_square_side&&x>=tile.metadata_square_x0&&x<tile.metadata_square_x0+tile.metadata_square_side&&y>=tile.metadata_square_y0&&y<tile.metadata_square_y0+tile.metadata_square_side){u64 square_cell=static_cast<u64>(y-tile.metadata_square_y0)*tile.metadata_square_side+(x-tile.metadata_square_x0);active=square_cell<metadata_cells;}
+        if(active)continue;size_t at=(static_cast<size_t>(tile_y+y)*image.width+tile_x+x)*3u;double luminance=MetadataTile::rgb_luminance_u8(static_cast<unsigned char>(image.pixels[at]),static_cast<unsigned char>(image.pixels[at+1]),static_cast<unsigned char>(image.pixels[at+2]));if(luminance<128.0)++ring_dark;else ++ring_light;
+    }
+    require(ring_dark>10u&&ring_light>100u,id+": inactive metadata ring is not filled with palette noise");
+    for(u32 bit=0u;bit<32u;++bit){
+        unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7u);
+        unsigned y=tile_y+tile.metadata_tag_y0+1u+bit/8u;
+        size_t at=(static_cast<size_t>(y)*image.width+x)*3u;
+        bool actual_dark=static_cast<unsigned char>(image.pixels[at])<128u;
+        bool marker_bit=((MetadataTile::ASCII_LOW_NIBBLE_MARKER>>(31u-bit))&1u)!=0u;
+        require(actual_dark==!marker_bit,id+": MAKO/CODE nibble marker polarity is reversed");
+    }
     unsigned x=tile_x+tile.metadata_square_x0+cell%tile.metadata_square_side,y=tile_y+tile.metadata_square_y0+cell/tile.metadata_square_side;
     size_t index=(static_cast<size_t>(y)*image.width+x)*3;require(index+2<image.pixels.size(),id+": target module outside page");
     unsigned char original=static_cast<unsigned char>(image.pixels[index]);require(original==0||original==255,id+": target module not black/white");
@@ -3028,9 +3045,9 @@ static void erased_metadata_scan_case(const std::string& id,int kind){
     fs::path work=make_work_dir(id),payload=work/"payload.bin",encoded=work/"encoded";fs::create_directories(encoded);std::string bytes=kind==0?"partially damaged marker scan payload":kind==1?"erased marker orientation scan payload":"erased metadata length row scan payload";write_file(payload,bytes);
     auto enc=run_cli(work,encode_file_args(payload,encoded,"source",{"--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto pages=ppm_paths(encoded,"source");require(pages.size()==1,id+": expected one encoded page");MetadataTile::Values tile=extract_tile_values(pages[0]);
     PpmImage source=read_ppm(pages[0]);unsigned tile_x=(source.width-48)/2,tile_y=(source.height-48)/2;
-    if(kind==0){require(tile.palette_count>=2u,id+": marker palette missing");std::vector<unsigned> one_bits;for(unsigned bit=0;bit<32;++bit)if(MetadataTile::makocode_tag_bit(bit))one_bits.push_back(bit);
-        require(one_bits.size()==20u,id+": marker code weight changed");for(size_t i=0;i<16;++i){unsigned bit=one_bits[i],x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;source.pixels[at]=static_cast<char>(tile.palette[0].r);source.pixels[at+1]=static_cast<char>(tile.palette[0].g);source.pixels[at+2]=static_cast<char>(tile.palette[0].b);}
-        unsigned matches=0;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;bool observed=static_cast<unsigned char>(source.pixels[at])==tile.palette[tile.palette_count-1].r&&static_cast<unsigned char>(source.pixels[at+1])==tile.palette[tile.palette_count-1].g&&static_cast<unsigned char>(source.pixels[at+2])==tile.palette[tile.palette_count-1].b,expected=MetadataTile::makocode_tag_bit(bit);matches+=observed==expected;}require(matches==16,id+": partial marker fixture does not leave half the bits matched");
+    if(kind==0){require(tile.palette_count>=2u,id+": marker palette missing");u32 dark_index=0u;double darkest=MetadataTile::rgb_luminance_u8(tile.palette[0].r,tile.palette[0].g,tile.palette[0].b);for(u32 color=1u;color<tile.palette_count;++color){double luminance=MetadataTile::rgb_luminance_u8(tile.palette[color].r,tile.palette[color].g,tile.palette[color].b);if(luminance<darkest){darkest=luminance;dark_index=color;}}std::vector<unsigned> light_bits;for(unsigned bit=0;bit<32;++bit)if(!MetadataTile::makocode_tag_dark_bit(bit))light_bits.push_back(bit);
+        require(light_bits.size()==20u,id+": marker code weight changed");for(size_t i=0;i<16;++i){unsigned bit=light_bits[i],x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;source.pixels[at]=static_cast<char>(tile.palette[dark_index].r);source.pixels[at+1]=static_cast<char>(tile.palette[dark_index].g);source.pixels[at+2]=static_cast<char>(tile.palette[dark_index].b);}
+        unsigned matches=0;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;bool observed=static_cast<unsigned char>(source.pixels[at])==tile.palette[dark_index].r&&static_cast<unsigned char>(source.pixels[at+1])==tile.palette[dark_index].g&&static_cast<unsigned char>(source.pixels[at+2])==tile.palette[dark_index].b,expected=MetadataTile::makocode_tag_dark_bit(bit);matches+=observed==expected;}require(matches==16,id+": partial marker fixture does not leave half the bits matched");
     }else if(kind==1){for(unsigned row=0;row<4;++row)for(unsigned col=0;col<8;++col){size_t at=(static_cast<size_t>(tile_y+tile.metadata_tag_y0+1+row)*source.width+tile_x+20+col)*3;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}}
     else{u64 metadata_cells=tile.metadata_length_prefix_bits+tile.metadata_symbol_count;unsigned value_bits=0;for(u64 n=metadata_cells;n;n>>=1)++value_bits;unsigned length_bits=1;for(unsigned remaining=value_bits-1;remaining>1;remaining>>=1)++length_bits;unsigned outer=2+length_bits+value_bits;unsigned x0=tile_x+(48-outer)/2,y=tile_y+tile.metadata_tag_y0+5;
         unsigned changed=0;for(unsigned col=0;col<outer;++col){size_t at=(static_cast<size_t>(y)*source.width+x0+col)*3;if(static_cast<unsigned char>(source.pixels[at])!=255)++changed;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}require(changed>0,id+": length row fixture changed no cells");}
@@ -3105,6 +3122,12 @@ static void rs_erasures_case(){
 }
 
 static void metadata_tile_format_case(){
+    MetadataTile::Values rank_values;rank_values.metadata_square_side=21u;rank_values.metadata_square_x0=13u;rank_values.metadata_square_y0=20u;rank_values.metadata_tag_y0=8u;rank_values.metadata_length_prefix_bits=1u;rank_values.metadata_symbol_count=1u;
+    MetadataTile::Placement rank_placement=MetadataTile::compute_center_tile_placement(80u,80u);makocode::ByteBuffer rank_mask;require(rank_mask.ensure(80u*80u),"metadata rank mask allocation failed");rank_mask.size=80u*80u;memset(rank_mask.data,0,rank_mask.size);u32 marker_x=rank_placement.x0+MetadataTile::tag_marker_x0(),marker_y=rank_placement.y0+rank_values.metadata_tag_y0+1u;rank_mask.data[(usize)marker_y*80u+marker_x]=1u;u32 metadata_x=rank_placement.x0+rank_values.metadata_square_x0,metadata_y=rank_placement.y0+rank_values.metadata_square_y0;rank_mask.data[(usize)metadata_y*80u+metadata_x]=1u;rank_mask.data[(usize)metadata_y*80u+metadata_x+1u]=1u;
+    makocode::ByteBuffer rank_map;u64 rank_pixels=0u;
+    require(MetadataTile::build_payload_rank_map(80u,80u,rank_placement,rank_values,rank_mask.data,rank_mask.size,rank_map,rank_pixels,true,0u),"metadata ring rank map failed");
+    const u64* ranks=(const u64*)rank_map.data;usize ring_pixel=(usize)rank_placement.y0*80u+rank_placement.x0;
+    require(rank_pixels>0u&&ranks[ring_pixel]==U64_MAX_VALUE,"metadata ring noise entered the payload rank map");require(ranks[(usize)marker_y*80u+marker_x]==U64_MAX_VALUE&&ranks[(usize)metadata_y*80u+metadata_x]==U64_MAX_VALUE&&ranks[(usize)metadata_y*80u+metadata_x+1u]==U64_MAX_VALUE,"active metadata cells were not reserved from payload");
     const u64 expected[]={0,1,65535,65536,0x123456789ABull,U64_MAX_VALUE};for(u64 value:expected){MetadataTile::BitWriter writer;require(MetadataTile::write_compact_u64(writer,value),"compact u64 write failed");MetadataTile::BitReader reader;reader.reset(writer.data(),writer.bit_size());u64 actual=0;require(MetadataTile::read_compact_u64(reader,actual)&&actual==value&&!reader.failed&&reader.cursor==writer.bit_size(),"compact u64 roundtrip failed");}
     const u32 vals[]={0,1,2,127,128,253,254,65535};for(u32 p:vals)for(u32 e:vals){MetadataTile::BitWriter writer;require(MetadataTile::write_compact_u16(writer,p,true)&&MetadataTile::write_compact_u16(writer,e,true),"compact u16 write failed");MetadataTile::BitReader reader;reader.reset(writer.data(),writer.bit_size());u32 actual=0;require(MetadataTile::read_compact_u16(reader,actual,true)&&actual==p&&MetadataTile::read_compact_u16(reader,actual,true)&&actual==e&&!reader.failed&&reader.cursor==writer.bit_size(),"compact u16 roundtrip failed");if(p==0&&e==0)require(writer.bit_size()==6,"zero compact-u16 framing changed");}
     makocode::ByteBuffer data;require(data.ensure(1000),"metadata RS allocation failed");data.size=1000;for(usize i=0;i<data.size;++i)data.data[i]=static_cast<u8>(i*73u+19u);makocode::ByteBuffer word;require(MetadataTile::rs_encode_with_parity(data,232,word)&&word.size==11208,"metadata RS encode failed");
@@ -3451,6 +3474,23 @@ static void run_roundtrip(const RoundTrip& test) {
         makocode::ByteBuffer tile_bits;
         require(MetadataTile::build_tile_bits(tile, tile_bits),
                 test.id + ": could not rebuild metadata tile");
+        u32 marker_light_index = 0u;
+        u32 marker_dark_index = 0u;
+        double marker_light_luminance = MetadataTile::rgb_luminance_u8(
+            tile.palette[0u].r, tile.palette[0u].g, tile.palette[0u].b);
+        double marker_dark_luminance = marker_light_luminance;
+        for (u32 color = 1u; color < tile.palette_count; ++color) {
+            double luminance = MetadataTile::rgb_luminance_u8(
+                tile.palette[color].r, tile.palette[color].g, tile.palette[color].b);
+            if (luminance > marker_light_luminance) {
+                marker_light_luminance = luminance;
+                marker_light_index = color;
+            }
+            if (luminance < marker_dark_luminance) {
+                marker_dark_luminance = luminance;
+                marker_dark_index = color;
+            }
+        }
         for (u32 row = 0u; row < 4u; ++row) {
             for (u32 col = 0u; col < 8u; ++col) {
                 u32 bit = row * 8u + col;
@@ -3458,10 +3498,11 @@ static void run_roundtrip(const RoundTrip& test) {
                 usize cell = (usize)(tile.metadata_tag_y0 + 1u + row) *
                                  MetadataTile::TILE_SIDE +
                              MetadataTile::tag_marker_x0() + col;
-                u8 expected_palette_index = one ? (u8)(tile.palette_count - 1u) : 0u;
+                u8 expected_palette_index = one ? (u8)marker_light_index
+                                                 : (u8)marker_dark_index;
                 require(tile_bits.data[cell] == expected_palette_index,
                         test.id + ": marker pixel " + std::to_string(bit) +
-                            " does not match its binary endpoint index");
+                            " does not use its light/dark palette color");
             }
         }
     }
