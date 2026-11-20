@@ -1191,6 +1191,7 @@ struct Values {
         u16 unknown_parity_budget;
         u16 overlay_erasure_budget;
         bool palette_background_first;
+        bool palette_is_custom;
         u32 palette_count;
         PaletteColor palette[MAX_CUSTOM_PALETTE_COLORS];
 
@@ -1235,9 +1236,52 @@ struct Values {
               unknown_parity_budget(0u),
               overlay_erasure_budget(0u),
               palette_background_first(false),
+              palette_is_custom(false),
               palette_count(0u),
               palette() {}
     };
+struct PayloadRankMapCache {
+    bool configured;
+    u32 width_pixels;
+    u32 data_height_pixels;
+    bool placement_valid;
+    u32 placement_x0;
+    u32 placement_y0;
+    u32 placement_offset_x;
+    u32 placement_offset_y;
+    u32 metadata_length_prefix_bits;
+    u32 metadata_symbol_count;
+    u32 metadata_square_side;
+    u32 metadata_square_x0;
+    u32 metadata_square_y0;
+    bool include_metadata_overwrites;
+    u64 payload_pixel_count;
+    ByteBuffer reserved_mask;
+    ByteBuffer base_rank_map;
+    ByteBuffer page_rank_map;
+    ByteBuffer rank_to_pixel;
+
+    PayloadRankMapCache()
+        : configured(false),
+          width_pixels(0u),
+          data_height_pixels(0u),
+          placement_valid(false),
+          placement_x0(0u),
+          placement_y0(0u),
+          placement_offset_x(0u),
+          placement_offset_y(0u),
+          metadata_length_prefix_bits(0u),
+          metadata_symbol_count(0u),
+          metadata_square_side(0u),
+          metadata_square_x0(0u),
+          metadata_square_y0(0u),
+          include_metadata_overwrites(false),
+          payload_pixel_count(0u),
+          reserved_mask(),
+          base_rank_map(),
+          page_rank_map(),
+          rank_to_pixel() {}
+};
 } // namespace MetadataTile
 
 namespace MetadataTile {
@@ -1714,7 +1758,13 @@ bool build_payload_rank_map(u32 width_pixels,
                                        ByteBuffer& rank_map,
                                        u64& payload_pixel_count,
                                        bool include_metadata_overwrites = false,
-                                       u64 symbol_placement_seed = 0u);
+                                       u64 symbol_placement_seed = 0u,
+                                       PayloadRankMapCache* cache = 0);
+bool permute_payload_rank_map(u64 pixel_count,
+                              const Values& values,
+                              u64 symbol_placement_seed,
+                              ByteBuffer& rank_map,
+                              u64 payload_pixel_count);
 } // namespace MetadataTile
 
 bool arguments_request_help(int arg_count, char** args);
@@ -1773,7 +1823,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u16 unknown_parity_budget = 0u,
                                u16 overlay_erasure_budget = 0u,
                                bool include_metadata_tile = true,
-                               MetadataTile::Values* metadata_values_out = 0);
+                               MetadataTile::Values* metadata_values_out = 0,
+                               MetadataTile::PayloadRankMapCache* rank_map_cache = 0);
 
 namespace MetadataTile {
 using namespace makocode;

@@ -2910,27 +2910,57 @@ static void current_metadata_case(){
     auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--page-width=80","--page-height=80","--palette","White Black"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"page");require(ppms.size()==1,id+": expected page");
     MetadataTile::Values tile=extract_tile_values(ppms.front());PpmImage image=read_ppm(ppms.front());
     const unsigned tile_x=(image.width-48)/2,tile_y=(image.height-48)/2;unsigned cell=tile.metadata_length_prefix_bits+128;
-    unsigned ring_dark=0,ring_light=0;unsigned palette_x=MetadataTile::palette_tag_x0(tile.palette_count);u64 metadata_cells=tile.metadata_length_prefix_bits+tile.metadata_symbol_count;
+    makocode::ByteBuffer tile_bits,active_mask;
+    require(MetadataTile::build_tile_bits(tile,tile_bits,&active_mask),id+": could not rebuild active metadata mask");
+    require(cell>=tile.metadata_length_prefix_bits&&
+                cell<tile.metadata_length_prefix_bits+tile.metadata_symbol_count,
+            id+": damage target is outside the metadata codeword");
+    unsigned damaged_local_x=tile.metadata_square_x0+cell%tile.metadata_square_side;
+    unsigned damaged_local_y=tile.metadata_square_y0+cell/tile.metadata_square_side;
+    require(active_mask.data[(size_t)damaged_local_y*48u+damaged_local_x]!=0u,
+            id+": damage target is not an active metadata symbol");
+    unsigned ring_dark=0,ring_light=0,two_cell_dark=0;
     for(unsigned y=0;y<48;++y)for(unsigned x=0;x<48;++x){
-        bool active=(y==tile.metadata_tag_y0&&x>=palette_x&&x<palette_x+tile.palette_count+1u)||
-                    (y>tile.metadata_tag_y0&&y<tile.metadata_tag_y0+MetadataTile::TILE_TAG_ROWS&&x>=MetadataTile::tag_marker_x0()&&x<MetadataTile::tag_marker_x0()+MetadataTile::TILE_MARKER_WIDTH)||
-                    (y==tile.metadata_tag_y0+MetadataTile::TILE_LENGTH_ROW&&x>=(48u-tile.metadata_outer_length_bits)/2u&&x<(48u-tile.metadata_outer_length_bits)/2u+tile.metadata_outer_length_bits);
-        if(!active&&tile.metadata_square_side&&x>=tile.metadata_square_x0&&x<tile.metadata_square_x0+tile.metadata_square_side&&y>=tile.metadata_square_y0&&y<tile.metadata_square_y0+tile.metadata_square_side){u64 square_cell=static_cast<u64>(y-tile.metadata_square_y0)*tile.metadata_square_side+(x-tile.metadata_square_x0);active=square_cell<metadata_cells;}
-        if(active)continue;size_t at=(static_cast<size_t>(tile_y+y)*image.width+tile_x+x)*3u;double luminance=MetadataTile::rgb_luminance_u8(static_cast<unsigned char>(image.pixels[at]),static_cast<unsigned char>(image.pixels[at+1]),static_cast<unsigned char>(image.pixels[at+2]));if(luminance<128.0)++ring_dark;else ++ring_light;
+        if(active_mask.data[static_cast<size_t>(y)*48u+x])continue;
+        bool one_cell_border=false,two_cell_border=false;
+        for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx){
+            int nx=(int)x+dx,ny=(int)y+dy;
+            if(nx<0||ny<0||nx>=48||ny>=48||!active_mask.data[(size_t)ny*48u+(size_t)nx])continue;
+            int distance=std::max(std::abs(dx),std::abs(dy));
+            if(distance==1)one_cell_border=true;
+            else if(distance==2)two_cell_border=true;
+        }
+        size_t at=(static_cast<size_t>(tile_y+y)*image.width+tile_x+x)*3u;
+        double luminance=MetadataTile::rgb_luminance_u8(static_cast<unsigned char>(image.pixels[at]),static_cast<unsigned char>(image.pixels[at+1]),static_cast<unsigned char>(image.pixels[at+2]));
+        if(one_cell_border)require(luminance>=254.0,id+": metadata one-cell border is not light at "+std::to_string(x)+","+std::to_string(y));
+        else if(two_cell_border&&luminance<128.0)++two_cell_dark;
+        if(luminance<128.0)++ring_dark;else ++ring_light;
     }
-    require(ring_dark>10u&&ring_light>100u,id+": inactive metadata ring is not filled with palette noise");
+    require(ring_dark>10u&&ring_light>100u&&two_cell_dark>0u,id+": inactive metadata ring is not filled with palette noise outside its one-cell border");
     for(u32 bit=0u;bit<32u;++bit){
         unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7u);
         unsigned y=tile_y+tile.metadata_tag_y0+1u+bit/8u;
         size_t at=(static_cast<size_t>(y)*image.width+x)*3u;
-        bool actual_dark=static_cast<unsigned char>(image.pixels[at])<128u;
-        bool marker_bit=((MetadataTile::ASCII_LOW_NIBBLE_MARKER>>(31u-bit))&1u)!=0u;
-        require(actual_dark==!marker_bit,id+": MAKO/CODE nibble marker polarity is reversed");
+        static const char expected_marker_bits[]="11010001101111110011111101000101";
+        bool marker_bit=expected_marker_bits[bit]=='1';
+        unsigned char expected=marker_bit?0u:255u;
+        require(static_cast<unsigned char>(image.pixels[at])==expected&&
+                    static_cast<unsigned char>(image.pixels[at+1u])==expected&&
+                    static_cast<unsigned char>(image.pixels[at+2u])==expected,
+                id+": MAKO/CODE marker does not use the required fixed color");
+    }
+    PpmImage damaged_image=image;
+    for(size_t pixel=0;pixel<damaged_image.pixels.size();pixel+=3u){
+        if(static_cast<unsigned char>(damaged_image.pixels[pixel])==0u&&
+           static_cast<unsigned char>(damaged_image.pixels[pixel+1u])==0u&&
+           static_cast<unsigned char>(damaged_image.pixels[pixel+2u])==0u){
+            damaged_image.pixels[pixel]=damaged_image.pixels[pixel+1u]=damaged_image.pixels[pixel+2u]=static_cast<char>(100);
+        }
     }
     unsigned x=tile_x+tile.metadata_square_x0+cell%tile.metadata_square_side,y=tile_y+tile.metadata_square_y0+cell/tile.metadata_square_side;
-    size_t index=(static_cast<size_t>(y)*image.width+x)*3;require(index+2<image.pixels.size(),id+": target module outside page");
-    unsigned char original=static_cast<unsigned char>(image.pixels[index]);require(original==0||original==255,id+": target module not black/white");
-    for(int c=0;c<3;++c)image.pixels[index+c]=static_cast<char>(255-original);fs::path damaged=work/"damaged.ppm";write_file(damaged,"P6\n80 80\n255\n"+image.pixels);
+    size_t index=(static_cast<size_t>(y)*damaged_image.width+x)*3;require(index+2<damaged_image.pixels.size(),id+": target module outside page");
+    unsigned char original=static_cast<unsigned char>(damaged_image.pixels[index]);require(original==100||original==255,id+": target module not a scanned palette color");
+    unsigned char flipped=original==100?255:100;for(int c=0;c<3;++c)damaged_image.pixels[index+c]=static_cast<char>(flipped);fs::path damaged=work/"damaged.ppm";write_file(damaged,"P6\n80 80\n255\n"+damaged_image.pixels);
     auto result=run_cli(work,decode_file_args({damaged.string()},decoded),"decode");expect_success(result,id+" damaged metadata decode");compare_files(payload,decoded/"payload.bin",id);
     PpmImage no_tile=read_ppm(ppms.front());for(unsigned yy=tile_y;yy<tile_y+48;++yy)for(unsigned xx=tile_x;xx<tile_x+48;++xx){size_t at=(static_cast<size_t>(yy)*no_tile.width+xx)*3;no_tile.pixels[at]=no_tile.pixels[at+1]=no_tile.pixels[at+2]=127;}
     fs::path absent=work/"no_bootstrap.ppm";write_file(absent,"P6\n80 80\n255\n"+no_tile.pixels);auto failed=run_cli(work,decode_file_args({absent.string()},work/"no_bootstrap_out"),"no_bootstrap");expect_failure(failed,id+" absent metadata");
@@ -3045,9 +3075,14 @@ static void erased_metadata_scan_case(const std::string& id,int kind){
     fs::path work=make_work_dir(id),payload=work/"payload.bin",encoded=work/"encoded";fs::create_directories(encoded);std::string bytes=kind==0?"partially damaged marker scan payload":kind==1?"erased marker orientation scan payload":"erased metadata length row scan payload";write_file(payload,bytes);
     auto enc=run_cli(work,encode_file_args(payload,encoded,"source",{"--page-width=80","--page-height=80"}),"encode");expect_success(enc,id+" encode");auto pages=ppm_paths(encoded,"source");require(pages.size()==1,id+": expected one encoded page");MetadataTile::Values tile=extract_tile_values(pages[0]);
     PpmImage source=read_ppm(pages[0]);unsigned tile_x=(source.width-48)/2,tile_y=(source.height-48)/2;
-    if(kind==0){require(tile.palette_count>=2u,id+": marker palette missing");u32 dark_index=0u;double darkest=MetadataTile::rgb_luminance_u8(tile.palette[0].r,tile.palette[0].g,tile.palette[0].b);for(u32 color=1u;color<tile.palette_count;++color){double luminance=MetadataTile::rgb_luminance_u8(tile.palette[color].r,tile.palette[color].g,tile.palette[color].b);if(luminance<darkest){darkest=luminance;dark_index=color;}}std::vector<unsigned> light_bits;for(unsigned bit=0;bit<32;++bit)if(!MetadataTile::makocode_tag_dark_bit(bit))light_bits.push_back(bit);
-        require(light_bits.size()==20u,id+": marker code weight changed");for(size_t i=0;i<16;++i){unsigned bit=light_bits[i],x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;source.pixels[at]=static_cast<char>(tile.palette[dark_index].r);source.pixels[at+1]=static_cast<char>(tile.palette[dark_index].g);source.pixels[at+2]=static_cast<char>(tile.palette[dark_index].b);}
-        unsigned matches=0;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;bool observed=static_cast<unsigned char>(source.pixels[at])==tile.palette[dark_index].r&&static_cast<unsigned char>(source.pixels[at+1])==tile.palette[dark_index].g&&static_cast<unsigned char>(source.pixels[at+2])==tile.palette[dark_index].b,expected=MetadataTile::makocode_tag_dark_bit(bit);matches+=observed==expected;}require(matches==16,id+": partial marker fixture does not leave half the bits matched");
+    if(kind==0){
+        require(tile.palette_count>=2u,id+": marker palette missing");
+        std::vector<unsigned> one_bits;
+        static const char expected_marker_bits[]="11010001101111110011111101000101";
+        for(unsigned bit=0;bit<32;++bit)if(expected_marker_bits[bit]=='1')one_bits.push_back(bit);
+        require(one_bits.size()==20u,id+": marker code weight changed");
+        for(size_t i=0;i<16u;++i){unsigned bit=one_bits[i],x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}
+        unsigned matches=0;for(unsigned bit=0;bit<32;++bit){unsigned x=tile_x+MetadataTile::tag_marker_x0()+(bit&7),y=tile_y+tile.metadata_tag_y0+1+bit/8;size_t at=(static_cast<size_t>(y)*source.width+x)*3;unsigned char pixel=static_cast<unsigned char>(source.pixels[at]);bool observed=pixel==0u&&static_cast<unsigned char>(source.pixels[at+1])==0u&&static_cast<unsigned char>(source.pixels[at+2])==0u,expected=expected_marker_bits[bit]=='1';matches+=observed==expected;}require(matches==16u,id+": partial marker fixture does not leave half the bits matched");
     }else if(kind==1){for(unsigned row=0;row<4;++row)for(unsigned col=0;col<8;++col){size_t at=(static_cast<size_t>(tile_y+tile.metadata_tag_y0+1+row)*source.width+tile_x+20+col)*3;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}}
     else{u64 metadata_cells=tile.metadata_length_prefix_bits+tile.metadata_symbol_count;unsigned value_bits=0;for(u64 n=metadata_cells;n;n>>=1)++value_bits;unsigned length_bits=1;for(unsigned remaining=value_bits-1;remaining>1;remaining>>=1)++length_bits;unsigned outer=2+length_bits+value_bits;unsigned x0=tile_x+(48-outer)/2,y=tile_y+tile.metadata_tag_y0+5;
         unsigned changed=0;for(unsigned col=0;col<outer;++col){size_t at=(static_cast<size_t>(y)*source.width+x0+col)*3;if(static_cast<unsigned char>(source.pixels[at])!=255)++changed;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}require(changed>0,id+": length row fixture changed no cells");}
@@ -3128,6 +3163,11 @@ static void metadata_tile_format_case(){
     require(MetadataTile::build_payload_rank_map(80u,80u,rank_placement,rank_values,rank_mask.data,rank_mask.size,rank_map,rank_pixels,true,0u),"metadata ring rank map failed");
     const u64* ranks=(const u64*)rank_map.data;usize ring_pixel=(usize)rank_placement.y0*80u+rank_placement.x0;
     require(rank_pixels>0u&&ranks[ring_pixel]==U64_MAX_VALUE,"metadata ring noise entered the payload rank map");require(ranks[(usize)marker_y*80u+marker_x]==U64_MAX_VALUE&&ranks[(usize)metadata_y*80u+metadata_x]==U64_MAX_VALUE&&ranks[(usize)metadata_y*80u+metadata_x+1u]==U64_MAX_VALUE,"active metadata cells were not reserved from payload");
+    MetadataTile::PayloadRankMapCache rank_cache;makocode::ByteBuffer cached_rank_map,reference_rank_map;u64 cached_pixels=0u,reference_pixels=0u;rank_values.palette_count=4u;
+    for(u64 page_index=1u;page_index<=2u;++page_index){rank_values.page_index=page_index;require(MetadataTile::build_payload_rank_map(80u,80u,rank_placement,rank_values,rank_mask.data,rank_mask.size,reference_rank_map,reference_pixels,true,0x123456789ABCDEF0ull),"uncached page rank map failed");require(MetadataTile::build_payload_rank_map(80u,80u,rank_placement,rank_values,rank_mask.data,rank_mask.size,cached_rank_map,cached_pixels,true,0x123456789ABCDEF0ull,&rank_cache),"cached page rank map failed");require(cached_pixels==reference_pixels&&cached_rank_map.size==reference_rank_map.size&&memcmp(cached_rank_map.data,reference_rank_map.data,reference_rank_map.size)==0,"cached page rank map differs from uncached output");}
+    MetadataTile::Placement shifted_placement=rank_placement;shifted_placement.x0+=1u;require(MetadataTile::build_payload_rank_map(80u,80u,shifted_placement,rank_values,rank_mask.data,rank_mask.size,reference_rank_map,reference_pixels,true,0x123456789ABCDEF0ull),"shifted uncached page rank map failed");require(MetadataTile::build_payload_rank_map(80u,80u,shifted_placement,rank_values,rank_mask.data,rank_mask.size,cached_rank_map,cached_pixels,true,0x123456789ABCDEF0ull,&rank_cache),"shifted cached page rank map failed");require(cached_pixels==reference_pixels&&cached_rank_map.size==reference_rank_map.size&&memcmp(cached_rank_map.data,reference_rank_map.data,reference_rank_map.size)==0,"placement change reused an incompatible rank map");
+    MetadataTile::PayloadRankMapCache fresh_rank_cache;require(!MetadataTile::build_payload_rank_map(80u,80u,shifted_placement,rank_values,rank_mask.data,rank_mask.size,fresh_rank_cache.base_rank_map,cached_pixels,true,0x123456789ABCDEF0ull,&fresh_rank_cache),"fresh base-map alias was accepted");require(!MetadataTile::build_payload_rank_map(80u,80u,shifted_placement,rank_values,rank_mask.data,rank_mask.size,fresh_rank_cache.reserved_mask,cached_pixels,true,0x123456789ABCDEF0ull,&fresh_rank_cache),"fresh reservation-mask alias was accepted");
+    MetadataTile::Placement invalid_placement=shifted_placement;invalid_placement.valid=false;require(!MetadataTile::build_payload_rank_map(80u,80u,invalid_placement,rank_values,rank_mask.data,rank_mask.size,cached_rank_map,cached_pixels,true,0x123456789ABCDEF0ull,&rank_cache)&&cached_pixels==0u,"invalid placement was accepted on a cache hit");require(!MetadataTile::build_payload_rank_map(80u,80u,shifted_placement,rank_values,rank_mask.data,rank_mask.size,rank_cache.base_rank_map,cached_pixels,true,0x123456789ABCDEF0ull,&rank_cache),"rank map output aliased and corrupted its cache");
     const u64 expected[]={0,1,65535,65536,0x123456789ABull,U64_MAX_VALUE};for(u64 value:expected){MetadataTile::BitWriter writer;require(MetadataTile::write_compact_u64(writer,value),"compact u64 write failed");MetadataTile::BitReader reader;reader.reset(writer.data(),writer.bit_size());u64 actual=0;require(MetadataTile::read_compact_u64(reader,actual)&&actual==value&&!reader.failed&&reader.cursor==writer.bit_size(),"compact u64 roundtrip failed");}
     const u32 vals[]={0,1,2,127,128,253,254,65535};for(u32 p:vals)for(u32 e:vals){MetadataTile::BitWriter writer;require(MetadataTile::write_compact_u16(writer,p,true)&&MetadataTile::write_compact_u16(writer,e,true),"compact u16 write failed");MetadataTile::BitReader reader;reader.reset(writer.data(),writer.bit_size());u32 actual=0;require(MetadataTile::read_compact_u16(reader,actual,true)&&actual==p&&MetadataTile::read_compact_u16(reader,actual,true)&&actual==e&&!reader.failed&&reader.cursor==writer.bit_size(),"compact u16 roundtrip failed");if(p==0&&e==0)require(writer.bit_size()==6,"zero compact-u16 framing changed");}
     makocode::ByteBuffer data;require(data.ensure(1000),"metadata RS allocation failed");data.size=1000;for(usize i=0;i<data.size;++i)data.data[i]=static_cast<u8>(i*73u+19u);makocode::ByteBuffer word;require(MetadataTile::rs_encode_with_parity(data,232,word)&&word.size==11208,"metadata RS encode failed");
@@ -3440,6 +3480,8 @@ struct RoundTrip {
     std::vector<std::string> transform_args;
     bool require_multiple_pages = false;
     bool tiny_dimensions_check = false;
+    bool marker_free_compact = false;
+    bool default_ecc_check = false;
     bool white_checker = false;
 };
 
@@ -3462,60 +3504,74 @@ static void run_roundtrip(const RoundTrip& test) {
     auto pages = ppm_paths(work, prefix);
     require(!pages.empty(), test.id + ": encode produced no PPM pages");
     if (test.require_multiple_pages) require(pages.size() > 1, test.id + ": expected multiple pages");
-    if (test.id == "0001_makocode_2_colors" ||
-        test.id == "0002_makocode_4_colors" ||
+    if (test.id == "0002_makocode_4_colors" ||
         test.id == "0003_makocode_5_colors" ||
-        test.id == "0004_makocode_8_colors") {
-        static const char* expected_marker_rows[] = {
-            "11010001", "10111111", "00111111", "01000101"};
+        test.id == "0004_makocode_8_colors" ||
+        test.id == "0130_default_ecc_2_colors") {
         require(pages.size() == 1u, test.id + ": marker fixture expected one page");
         MetadataTile::Values tile = extract_tile_values(pages.front());
         require(tile.palette_count >= 2u, test.id + ": marker palette missing endpoints");
+        PaletteColor expected_zero = {255u, 255u, 255u};
+        PaletteColor expected_one = {0u, 0u, 0u};
+        if (test.id == "0002_makocode_4_colors") {
+            expected_one = {255u, 255u, 0u};
+        }
+        u32 marker_zero_index = tile.palette_count;
+        u32 marker_one_index = tile.palette_count;
+        for (u32 color = 0u; color < tile.palette_count; ++color) {
+            const PaletteColor& actual = tile.palette[color];
+            if (actual.r == expected_zero.r && actual.g == expected_zero.g &&
+                actual.b == expected_zero.b) marker_zero_index = color;
+            if (actual.r == expected_one.r && actual.g == expected_one.g &&
+                actual.b == expected_one.b) marker_one_index = color;
+        }
+        require(marker_zero_index < tile.palette_count &&
+                    marker_one_index < tile.palette_count,
+                test.id + ": marker palette does not contain its required fixed colors");
         makocode::ByteBuffer tile_bits;
         require(MetadataTile::build_tile_bits(tile, tile_bits),
                 test.id + ": could not rebuild metadata tile");
-        u32 marker_light_index = 0u;
-        u32 marker_dark_index = 0u;
-        double marker_light_luminance = MetadataTile::rgb_luminance_u8(
-            tile.palette[0u].r, tile.palette[0u].g, tile.palette[0u].b);
-        double marker_dark_luminance = marker_light_luminance;
-        for (u32 color = 1u; color < tile.palette_count; ++color) {
-            double luminance = MetadataTile::rgb_luminance_u8(
-                tile.palette[color].r, tile.palette[color].g, tile.palette[color].b);
-            if (luminance > marker_light_luminance) {
-                marker_light_luminance = luminance;
-                marker_light_index = color;
-            }
-            if (luminance < marker_dark_luminance) {
-                marker_dark_luminance = luminance;
-                marker_dark_index = color;
-            }
-        }
-        for (u32 row = 0u; row < 4u; ++row) {
-            for (u32 col = 0u; col < 8u; ++col) {
-                u32 bit = row * 8u + col;
-                bool one = expected_marker_rows[row][col] == '1';
-                usize cell = (usize)(tile.metadata_tag_y0 + 1u + row) *
-                                 MetadataTile::TILE_SIDE +
-                             MetadataTile::tag_marker_x0() + col;
-                u8 expected_palette_index = one ? (u8)marker_light_index
-                                                 : (u8)marker_dark_index;
-                require(tile_bits.data[cell] == expected_palette_index,
-                        test.id + ": marker pixel " + std::to_string(bit) +
-                            " does not use its light/dark palette color");
-            }
+        PpmImage image = read_ppm(pages.front());
+        static const char expected_marker_bits[] = "11010001101111110011111101000101";
+        unsigned tile_x = (image.width - MetadataTile::TILE_SIDE) / 2u;
+        unsigned tile_y = (image.height - MetadataTile::TILE_SIDE) / 2u;
+        for (u32 bit = 0u; bit < 32u; ++bit) {
+            bool one = expected_marker_bits[bit] == '1';
+            u32 x = MetadataTile::tag_marker_x0() + (bit & 7u);
+            u32 y = tile.metadata_tag_y0 + 1u + bit / 8u;
+            usize cell = (usize)y * MetadataTile::TILE_SIDE + x;
+            u8 expected_palette_index =
+                (u8)(one ? marker_one_index : marker_zero_index);
+            require(tile_bits.data[cell] == expected_palette_index,
+                    test.id + ": marker bit " + std::to_string(bit) +
+                        " is not stored at its required fixed color");
+            usize pixel = ((usize)(tile_y + y) * image.width + tile_x + x) * 3u;
+            const PaletteColor& expected = one ? expected_one : expected_zero;
+            require((u8)image.pixels[pixel] == expected.r &&
+                        (u8)image.pixels[pixel + 1u] == expected.g &&
+                        (u8)image.pixels[pixel + 2u] == expected.b,
+                    test.id + ": printed marker bit " + std::to_string(bit) +
+                        " does not match its required fixed color");
         }
     }
     if (test.tiny_dimensions_check) {
-        std::string header = read_file(pages.front());
-        std::istringstream input(header);
-        std::string magic; unsigned width = 0, height = 0, maximum = 0;
-        input >> magic >> width >> height >> maximum;
-        require(magic == "P6" && maximum == 255 && width < 96 && height < 96,
-                test.id + ": expected a compact version-zero bootstrap page");
+        PpmImage image = read_ppm(pages.front());
+        require(image.width >= 16u && image.width <= 25u &&
+                    image.height >= 16u && image.height <= 25u,
+                test.id + ": expected a roughly 20 by 20 pixel bootstrap page");
+    }
+    if (test.default_ecc_check) {
+        MetadataTile::Values tile = extract_tile_values(pages.front());
+        require(tile.ecc_parity >= 170u && tile.unknown_parity_budget >= 85u,
+                test.id + ": default auto-ECC no longer reserves 85 unknown symbol errors");
     }
     std::vector<std::string> decode_base{"decode", "--decoded-stdout"};
     decode_base.insert(decode_base.end(), test.decode_args.begin(), test.decode_args.end());
+    if (test.marker_free_compact) {
+        PpmImage image = read_ppm(pages.front());
+        decode_base.push_back("--page-width=" + std::to_string(image.width));
+        decode_base.push_back("--page-height=" + std::to_string(image.height));
+    }
     if (pages.size() == 1) {
         ProcessResult result = run_cli(work, decode_base, "decode", pages.front(), env);
         expect_success(result, test.id + " decode");
@@ -3558,6 +3614,45 @@ static void palette_symbol_codec_case(){
         u32 expected_block_limit = profile.field_prime - 1u;
         if (expected_block_limit > 765u) expected_block_limit = 765u;
         require(profile.block_length==expected_block_limit,id+": RS block limit mismatch");
+        if (palette_sizes[profile_index] == 2u) {
+            u32 parity = 0u;
+            require(makocode::palette_symbol_parity_for_redundancy(profile, 0.02, parity) &&
+                        parity == 8u,
+                    id + ": q2 parity did not round up to a full print-error correction group");
+            const u32 short_length = 59u;
+            const u32 short_data_count = 53u;
+            makocode::ByteBuffer short_data, short_code, short_damaged,
+                short_erasures, short_recovered;
+            require(short_data.ensure(short_data_count * 4u) &&
+                        short_erasures.ensure(short_length),
+                    id + ": q2 shortened-boundary buffers allocation failed");
+            short_data.size = short_data_count * 4u;
+            for (u32 i = 0u; i < short_data_count; ++i) {
+                write_le_u32(short_data.data + i * 4u,
+                             (i * 3571u + 19u) % profile.field_prime);
+            }
+            require(makocode::palette_rs_encode(profile, short_data, short_length,
+                                                 short_data_count, short_code) &&
+                        short_damaged.ensure(short_code.size),
+                    id + ": q2 shortened-boundary encoding failed");
+            short_damaged.size = short_code.size;
+            memcpy(short_damaged.data, short_code.data, short_code.size);
+            short_erasures.size = short_length;
+            memset(short_erasures.data, 0, short_length);
+            for (u32 i = 0u; i < 3u; ++i) {
+                u32 position = 3u + i * 11u;
+                write_le_u32(short_damaged.data + position * 4u,
+                             (read_le_u32(short_damaged.data + position * 4u) +
+                              37u + i) % profile.field_prime);
+            }
+            require(makocode::palette_rs_decode(profile, short_damaged, short_length,
+                                                 short_data_count, short_erasures,
+                                                 short_recovered) &&
+                        short_recovered.size == short_data.size &&
+                        memcmp(short_recovered.data, short_data.data,
+                               short_data.size) == 0,
+                    id + ": shortened q2 RS failed at the three-error parity boundary");
+        }
         const u32 values[]={0u,1u,profile.field_prime/2u,profile.field_prime-1u};
         for(u32 value:values){
             u8 dots[8]={};u32 decoded=0u;
@@ -3844,34 +3939,118 @@ static void palette_symbol_codec_case(){
                                                      stream_decoded,0),
             id+": wrong password was accepted");
 
+    makocode::ByteBuffer short_stream,short_decoded;
+    makocode::EccSummary short_summary;
+    require(makocode::palette_symbol_encode_stream(password_profile,stream_source.data(),stream_source.size(),
+                                                   0.1,0u,0u,0,0u,short_stream,short_summary),
+            id+": shortened stream encoding failed");
+    require(short_summary.block_count==1u&&
+            (u32)short_summary.block_data_symbols+short_summary.parity_symbols<
+                password_profile.block_length,
+            id+": small no-overlay stream did not shorten its RS block");
+    require(makocode::palette_symbol_decode_stream(password_profile,short_stream,makocode::ByteBuffer(),
+                                                    0,0u,short_decoded,0),
+            id+": shortened stream decoding failed");
+    require(short_decoded.size==stream_source.size()&&
+            memcmp(short_decoded.data,stream_source.data(),stream_source.size())==0,
+            id+": shortened stream round trip mismatch");
+    makocode::ByteBuffer damaged_short,short_erasures,short_recovered;
+    usize short_symbol_count=short_stream.size/4u;
+    require(damaged_short.ensure(short_stream.size)&&short_erasures.ensure(short_symbol_count),
+            id+": shortened ECC buffers allocation failed");
+    damaged_short.size=short_stream.size;
+    memcpy(damaged_short.data,short_stream.data,short_stream.size);
+    short_erasures.size=short_symbol_count;
+    memset(short_erasures.data,0,short_symbol_count);
+    for(u32 i=0u;i<10u;++i){
+        usize index=makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS+7u+i*3u;
+        u32 value=read_le_u32(damaged_short.data+index*4u);
+        write_le_u32(damaged_short.data+index*4u,
+                     (value+31u+i)%password_profile.field_prime);
+    }
+    for(u32 i=0u;i<5u;++i){
+        usize index=makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS+41u+i*5u;
+        u32 value=read_le_u32(damaged_short.data+index*4u);
+        write_le_u32(damaged_short.data+index*4u,
+                     (value+97u+i)%password_profile.field_prime);
+        short_erasures.data[index]=1u;
+    }
+    require(2u*10u+5u<=short_summary.parity_symbols&&
+            makocode::palette_symbol_decode_stream(password_profile,damaged_short,
+                short_erasures,0,0u,short_recovered,0),
+            id+": shortened ECC failed within the mixed correction bound");
+    require(short_recovered.size==stream_source.size()&&
+            memcmp(short_recovered.data,stream_source.data(),stream_source.size())==0,
+            id+": shortened ECC recovered the wrong payload");
+    makocode::ByteBuffer over_budget_short;
+    require(over_budget_short.ensure(short_stream.size),
+            id+": shortened over-budget buffer allocation failed");
+    over_budget_short.size=short_stream.size;
+    memcpy(over_budget_short.data,short_stream.data,short_stream.size);
+    u32 over_budget_errors=(u32)short_summary.parity_symbols/2u+1u;
+    for(u32 i=0u;i<over_budget_errors;++i){
+        usize index=makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS+i;
+        u32 value=read_le_u32(over_budget_short.data+index*4u);
+        write_le_u32(over_budget_short.data+index*4u,
+                     (value+151u+i)%password_profile.field_prime);
+    }
+    require(2u*over_budget_errors>short_summary.parity_symbols&&
+            !makocode::palette_symbol_decode_stream(password_profile,over_budget_short,
+                makocode::ByteBuffer(),0,0u,short_recovered,0),
+            id+": shortened ECC accepted errors beyond its correction bound");
+
     makocode::ByteBuffer padded_stream,source_symbols,padded_data,padded_code,malformed_stream;
     makocode::EccSummary padded_summary;
-    require(makocode::palette_symbol_encode_stream(password_profile,stream_source.data(),stream_source.size(),
+    std::vector<u8> padded_source(2000u);
+    for(usize i=0u;i<padded_source.size();++i)padded_source[i]=(u8)((i*53u+7u)&255u);
+    require(makocode::palette_symbol_encode_stream(password_profile,padded_source.data(),padded_source.size(),
                                                    0.1,0u,0u,0,0u,padded_stream,padded_summary),
             id+": unprotected stream encoding failed");
-    require(makocode::palette_bytes_to_symbols(password_profile,stream_source.data(),
-                                               stream_source.size(),source_symbols),
+    require(makocode::palette_bytes_to_symbols(password_profile,padded_source.data(),
+                                               padded_source.size(),source_symbols),
             id+": padding source conversion failed");
     makocode::ByteBuffer payload_code,payload_erasures;
+    const u32 padded_block_length=(u32)padded_summary.block_data_symbols+
+                                  padded_summary.parity_symbols;
     usize payload_symbol_count=padded_stream.size/4u-makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;
     require(payload_code.ensure(payload_symbol_count*4u),id+": padding code allocation failed");
     payload_code.size=payload_symbol_count*4u;
-    memcpy(payload_code.data,padded_stream.data+makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS*4u,payload_code.size);
+    for(u64 block=0u;block<padded_summary.block_count;++block){
+        for(u32 position=0u;position<padded_block_length;++position){
+            usize interleaved=(usize)((u64)position*padded_summary.block_count+block);
+            usize block_order=(usize)(block*padded_block_length+position);
+            memcpy(payload_code.data+block_order*4u,
+                   padded_stream.data+(makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS+
+                                       interleaved)*4u,4u);
+        }
+    }
     require(makocode::palette_rs_decode(password_profile,payload_code,
-                                        password_profile.block_length,
+                                        padded_block_length,
                                         padded_summary.block_data_symbols,payload_erasures,
                                         padded_data),id+": padding data decode failed");
     require(source_symbols.size/4u<padded_data.size/4u,
             id+": fixture has no final-block padding");
     write_le_u32(padded_data.data+source_symbols.size,1u);
     require(makocode::palette_rs_encode(password_profile,padded_data,
-                                        password_profile.block_length,
+                                        padded_block_length,
                                         padded_summary.block_data_symbols,padded_code),
             id+": malformed padding code generation failed");
+    makocode::ByteBuffer interleaved_padded_code;
+    require(interleaved_padded_code.ensure(padded_code.size),id+": interleaved padding code allocation failed");
+    interleaved_padded_code.size=padded_code.size;
+    for(u64 block=0u;block<padded_summary.block_count;++block){
+        for(u32 position=0u;position<padded_block_length;++position){
+            usize block_order=(usize)(block*padded_block_length+position);
+            usize interleaved=(usize)((u64)position*padded_summary.block_count+block);
+            memcpy(interleaved_padded_code.data+interleaved*4u,
+                   padded_code.data+block_order*4u,4u);
+        }
+    }
     require(malformed_stream.ensure(padded_stream.size),id+": malformed stream allocation failed");
     malformed_stream.size=padded_stream.size;
     memcpy(malformed_stream.data,padded_stream.data,padded_stream.size);
-    memcpy(malformed_stream.data+makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS*4u,padded_code.data,padded_code.size);
+    memcpy(malformed_stream.data+makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS*4u,
+           interleaved_padded_code.data,interleaved_padded_code.size);
     require(!makocode::palette_symbol_decode_stream(password_profile,malformed_stream,
                                                     payload_erasures,0,0u,stream_decoded,0),
             id+": nonzero final-block padding was accepted");
@@ -3913,11 +4092,12 @@ static std::vector<TestCase> build_cases() {
         cases.push_back({id, description, [test](const fs::path&) { run_roundtrip(test); }});
     };
     RoundTrip r;
-    r.size=1; r.literal="0"; r.tiny_dimensions_check=true; rt("0000_tiny_0", "1 byte payload literal '0' encoded from stdin", r); r={};
+    r.size=1; r.literal="0"; r.encode_args={"--ecc=0.001","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black"}; r.tiny_dimensions_check=true; r.marker_free_compact=true; rt("0000_tiny_0", "1 byte payload literal '0' encoded from stdin", r); r={};
     const char* makocode_ids[]={"0001_makocode_2_colors","0002_makocode_4_colors","0003_makocode_5_colors","0004_makocode_8_colors"};
     const char* makocode_palettes[]={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"};
     const char* makocode_descriptions[]={"makocode encoded with 2 colors","makocode encoded with 4 colors","makocode encoded with 5 colors","makocode encoded with 8 colors"};
-    for(size_t i=0;i<4;++i){r.size=8;r.literal="makocode";r.encode_args={"--palette",makocode_palettes[i]};r.decode_args={"--palette",makocode_palettes[i]};rt(makocode_ids[i],makocode_descriptions[i],r);r={};}
+    for(size_t i=0;i<4;++i){r.size=8;r.literal="makocode";r.encode_args={"--palette",makocode_palettes[i]};r.decode_args={"--palette",makocode_palettes[i]};if(i==0){r.encode_args.insert(r.encode_args.end(),{"--ecc=0.001","--no-metadata","--no-fiducials"});r.decode_args.insert(r.decode_args.end(),{"--no-metadata","--no-fiducials"});r.tiny_dimensions_check=true;r.marker_free_compact=true;}if(i==1)r.transform_args={"--scale-x","2","--scale-y","2"};rt(makocode_ids[i],makocode_descriptions[i],r);r={};}
+    r.size=8; r.literal="makocode"; r.default_ecc_check=true; rt("0130_default_ecc_2_colors", "Default q2 ECC and metadata marker", r); r={};
     r.size=8192; rt("0005_baseline_8k_auto", "8 KiB payload with automatically selected ECC", r); r={};
     r.size=8192; rt("0006_baseline_8k_auto_seeded", "8 KiB payload with automatically selected ECC", r); r={};
     r.size=131072; r.encode_args={"--page-width=700", "--page-height=700"}; r.require_multiple_pages=true; rt("0007_baseline_multi_page_auto", "128 KiB multi-page payload", r); r={};

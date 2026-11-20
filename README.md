@@ -240,18 +240,18 @@ To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick 
 
 ### Standard Palette Order and Metadata Marker
 
-The standard ordered palettes and the dark/light colors used by the metadata marker are:
+The standard marker colors are fixed RGB values. For the listed palettes, bit 0 is White; bit 1 is Black for 2/5/8 colors and Yellow for 4 colors:
 
 | Palette size | Ordered palette | Marker 0 → 1 |
 | --- | --- | --- |
-| 2 colors | White, Black | Black → White |
-| 4 colors | White, Cyan, Magenta, Yellow | Magenta → White |
-| 5 colors | White, Cyan, Magenta, Yellow, Black | Black → White |
-| 8 colors | White, Red (`#FF0000`), Green (`#00FF00`), Blue (`#0000FF`), Cyan, Magenta, Yellow, Black | Black → White |
+| 2 colors | White, Black | White → Black |
+| 4 colors | White, Cyan, Magenta, Yellow | White → Yellow |
+| 5 colors | White, Cyan, Magenta, Yellow, Black | White → Black |
+| 8 colors | White, Red (`#FF0000`), Green (`#00FF00`), Blue (`#0000FF`), Cyan, Magenta, Yellow, Black | White → Black |
 
-The metadata tile has a 4×8 marker (32 pixels) immediately below its palette row. It stores one bit per pixel, using the darkest palette color for 0 and the lightest palette color for 1, independent of palette order. This marker is binary on every palette size; page payload symbols use the full ordered palette according to the page's encoding mode.
+The metadata tile has a 4×8 marker (32 pixels) immediately below its palette row. It stores the `D1 BF 3F 45` bits directly: zero selects White and one selects the listed marker color. The decoder finds those colors in the stored palette row, so the marker remains Black even when the default q2 payload palette is ordered Black/White. For other palette sizes without these standard colors, the marker uses the first and last palette entries. Page payload symbols use the full ordered palette according to the page's encoding mode.
 
-Inactive cells in the 48×48 metadata footprint are filled with deterministic palette noise, with a two-pixel light margin around active metadata. These cells stay outside payload ranks so scans keep the same payload layout.
+Inactive cells throughout the 48×48 metadata footprint are filled with deterministic palette noise, except for a one-cell light border around active metadata. Inactive noise stays outside payload ranks and does not change capacity or ordering.
 
 The marker encodes the ASCII low nibbles for `MA KO CO DE`, with spaces used only for visual grouping. Read the eight letters in order, most-significant bit first within each nibble, across each row from left to right. The nibbles are `D 1 B F 3 F 4 5`, giving these four rows:
 
@@ -266,12 +266,12 @@ The complete marker bit pattern is `D1 BF 3F 45`. It represents the ASCII low ni
 
 ## Sample Barcodes
 
-The payload `makocode` encoded by regression fixtures 0001–0004. Each PNG is a preview linked to the copied PPM output:
+The payload `makocode` encoded by regression fixtures 0001–0004. Fixture 0001 is the compact, marker-free q2 sample; fixture 0130 separately covers default q2 ECC and its metadata marker. Fixtures 0002–0004 show the metadata marker using the maximum palette color. Each PNG is a preview linked to the copied PPM output:
 
 <table>
   <tr><th>2 colors</th><th>4 colors</th><th>5 colors</th><th>8 colors</th></tr>
   <tr>
-    <td><a href="images/0001_makocode_2_colors.ppm"><img alt="0001: makocode encoded with 2 colors, white and black" src="images/0001_makocode_2_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
+    <td><a href="images/0001_makocode_2_colors.ppm"><img alt="0001: compact marker-free makocode encoding with 2 colors" src="images/0001_makocode_2_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
     <td><a href="images/0002_makocode_4_colors.ppm"><img alt="0002: makocode encoded with 4 colors" src="images/0002_makocode_4_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
     <td><a href="images/0003_makocode_5_colors.ppm"><img alt="0003: makocode encoded with 5 colors" src="images/0003_makocode_5_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>
     <td><a href="images/0004_makocode_8_colors.ppm"><img alt="0004: makocode encoded with 8 colors" src="images/0004_makocode_8_colors.png" width="192" style="image-rendering: pixelated; image-rendering: crisp-edges;"></a></td>

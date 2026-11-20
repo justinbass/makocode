@@ -1131,7 +1131,7 @@ retry_decode:
                                          palette_symbol_profile) &&
         aggregate_state.encoded_tile.ecc_block_data > 0u &&
         (u32)aggregate_state.encoded_tile.ecc_block_data +
-                aggregate_state.encoded_tile.ecc_parity ==
+                aggregate_state.encoded_tile.ecc_parity <=
             palette_symbol_profile.block_length &&
         (bit_count & 31u) == 0u;
     bool palette_symbol_stream_input = palette_symbol_metadata_layout ||
