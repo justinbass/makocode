@@ -534,8 +534,9 @@ int command_encode(int arg_count, char** args) {
             u64 ratio_denominator = 1u;
             if (!ascii_to_fraction(ecc_value, ecc_length,
                                    ratio_numerator, ratio_denominator) ||
-                (long double)ratio_numerator / (long double)ratio_denominator > 764.0L) {
-                console_line(2, "encode: --ecc ratio must be between 0 and 764");
+                (long double)ratio_numerator / (long double)ratio_denominator >
+                    (long double)(makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH - 1u)) {
+                console_line(2, "encode: --ecc ratio must be between 0 and 1023");
                 return 1;
             }
             ecc_redundancy = (double)ratio_numerator / (double)ratio_denominator;
@@ -3036,7 +3037,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
             cached_selector_masks = true;
         }
     }
-    u8 selector_mask[765];
+    u8 selector_mask[makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     u64 page_interleaved_start = page_symbol_offset > bootstrap_symbol_count
         ? page_symbol_offset - bootstrap_symbol_count
         : 0u;

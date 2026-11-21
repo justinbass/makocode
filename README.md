@@ -128,18 +128,20 @@ The `archive` section gives `entries COUNT`, followed by `directory PATH` and `f
 
 ### Error correction and overlays
 
-Version 0 stores a field symbol as exactly eight palette dots, most-significant dot first. For a palette of `q` colors, the field prime is the largest prime below `q^8`; dot patterns representing values at least that prime are invalid. The Reed–Solomon block length is `N = min(765, p - 1)`, using nonzero evaluation points. Profiles include:
+Version 0 stores one field symbol as exactly eight palette dots, most-significant dot first. A `q`-color symbol has `q^8` possible patterns; the codec uses the largest prime `p` below `q^8` as its field size and rejects the remaining patterns. Reed–Solomon corrects whole field symbols, not partial dot or bit errors. Its block length is `N = min(1024, p - 1)`, using distinct nonzero evaluation points. `N` need not be prime. Profiles include:
 
 | Palette colors `q` | Largest prime `p < q^8` | Block length `N` |
 | ---: | ---: | ---: |
 | 2 | 251 | 250 |
-| 3 | 6,553 | 765 |
-| 4 | 65,521 | 765 |
-| 5 | 390,581 | 765 |
-| 6 | 1,679,609 | 765 |
-| 7 | 5,764,799 | 765 |
-| 8 | 16,777,213 | 765 |
-| 16 | 4,294,967,291 | 765 |
+| 3 | 6,553 | 1,024 |
+| 4 | 65,521 | 1,024 |
+| 5 | 390,581 | 1,024 |
+| 6 | 1,679,609 | 1,024 |
+| 7 | 5,764,799 | 1,024 |
+| 8 | 16,777,213 | 1,024 |
+| 16 | 4,294,967,291 | 1,024 |
+
+The 1,024-symbol cap is a computational bound, not a target: two-color mode is limited to 250 by `p−1`, and short no-overlay streams use shortened blocks. The block is `n=K+P`; the cap does not force a small payload to fill a maximum block. With no padding to the cap, finer percentage steps for a small payload require more parity symbols and paper area. For `K` data and `P` parity symbols, correction obeys `S + 2E <= P`; one parity symbol buys one erasure, while an unknown symbol error costs two. Percentage granularity is set by the actual block length, not by the `p` symbol values. At a fixed parity rate, longer blocks give finer percentage steps and more absolute correction, but use more memory and computation. The current encoder interpolation performs `K(K−1)/2` field updates per block; decoding uses `O(NP + P²)` syndrome/error-location work and `O(K² + NK)` reconstruction, with `O(N+K)` scratch. These are implementation costs, not RS limits. Blocks may span pages. The cap bounds those costs; raising it does not improve a short payload unless its actual block is made longer.
 
 Compressed bytes, or the authenticated encrypted container, are packed as 96-byte big-endian integers into fixed-width base-`p` symbols. Reed–Solomon blocks have `K` data symbols and `P=N-K` parity symbols. Metadata on every page already carries the source length and block layout, so these streams omit the otherwise redundant 48-symbol bootstrap. Marker-free streams and streams with metadata on only selected pages retain the fixed bootstrap code (`K=32`, `P=16`) so decoding can recover framing before reading a metadata tile. `--ecc RATIO` sets the requested parity/data ratio; `--ecc fill` searches layouts for page use. Version remains 0 and old byte-oriented payload encodings are not supported.
 

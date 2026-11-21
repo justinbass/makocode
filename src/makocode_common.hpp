@@ -660,6 +660,8 @@ struct PaletteSymbolProfile {
         : palette_size(0u), field_prime(0u), block_length(0u), symbol_bits(0u) {}
 };
 
+static const u32 PALETTE_SYMBOL_MAX_BLOCK_LENGTH = 1024u;
+
 class PaletteSymbolPasswordContext {
 public:
     PaletteSymbolPasswordContext();

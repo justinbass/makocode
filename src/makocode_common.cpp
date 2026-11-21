@@ -119,9 +119,9 @@ bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile) {
     profile.palette_size = palette_size;
     profile.field_prime = candidate;
     u32 evaluation_point_limit = candidate - 1u;
-    profile.block_length = evaluation_point_limit < 765u
+    profile.block_length = evaluation_point_limit < PALETTE_SYMBOL_MAX_BLOCK_LENGTH
                                ? evaluation_point_limit
-                               : 765u;
+                               : PALETTE_SYMBOL_MAX_BLOCK_LENGTH;
     profile.symbol_bits = bits;
     return true;
 }
@@ -300,8 +300,8 @@ static bool palette_symbol_build_inverse_table(u32 maximum_value,
                                                u32 prime,
                                                u32* inverse_values) {
     if (!maximum_value || maximum_value >= prime || !inverse_values ||
-        maximum_value > 765u) return false;
-    u32 prefix_products[766];
+        maximum_value >= PALETTE_SYMBOL_MAX_BLOCK_LENGTH) return false;
+    u32 prefix_products[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     u32 product = 1u;
     for (u32 value = 1u; value <= maximum_value; ++value) {
         product = (u32)(((u64)product * value) % prime);
@@ -342,7 +342,8 @@ static bool palette_symbol_interpolate_coefficients(const u32* x,
             u32 inverse = shared_inverse;
             if (!consecutive_points) {
                 u32 denominator = palette_symbol_subtract(x[current], x[current - order], prime);
-                inverse = denominator <= 765u ? inverse_differences[denominator] : 0u;
+                inverse = denominator < PALETTE_SYMBOL_MAX_BLOCK_LENGTH
+                              ? inverse_differences[denominator] : 0u;
             }
             if (!inverse) return false;
             u32 difference = palette_symbol_subtract(coefficients[current],
@@ -384,10 +385,10 @@ static bool palette_symbol_find_error_locator(const u32* syndromes,
                                               u32 prime,
                                               u32* locator,
                                               u32& error_count) {
-    if (!syndromes || !locator || syndrome_count > 765u) return false;
-    u32 previous[766] = {};
-    u32 temporary[766] = {};
-    memset(locator, 0, sizeof(u32) * 766u);
+    if (!syndromes || !locator || syndrome_count > PALETTE_SYMBOL_MAX_BLOCK_LENGTH) return false;
+    u32 previous[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u] = {};
+    u32 temporary[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u] = {};
+    memset(locator, 0, sizeof(u32) * (PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u));
     locator[0] = 1u;
     previous[0] = 1u;
     u32 degree = 0u;
@@ -404,11 +405,14 @@ static bool palette_symbol_find_error_locator(const u32* syndromes,
             ++shift;
             continue;
         }
-        memcpy(temporary, locator, sizeof(u32) * 766u);
+        memcpy(temporary, locator,
+               sizeof(u32) * (PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u));
         u32 inverse = palette_symbol_inverse(prior_discrepancy, prime);
         if (!inverse) return false;
         u32 scale = (u32)(((u64)discrepancy * inverse) % prime);
-        for (u32 coefficient = 0u; coefficient + shift < 766u; ++coefficient) {
+        for (u32 coefficient = 0u;
+             coefficient + shift <= PALETTE_SYMBOL_MAX_BLOCK_LENGTH;
+             ++coefficient) {
             if (previous[coefficient]) {
                 u32 product = (u32)(((u64)scale * previous[coefficient]) % prime);
                 locator[coefficient + shift] = palette_symbol_subtract(
@@ -443,10 +447,10 @@ bool palette_rs_encode(const PaletteSymbolProfile& profile,
     if (block_count > (u64)USIZE_MAX_VALUE / block_length / 4u ||
         !code_symbols.ensure((usize)block_count * block_length * 4u)) return false;
     code_symbols.size = (usize)block_count * block_length * 4u;
-    u32 x[765];
-    u32 y[765];
-    u32 coefficients[765];
-    u32 inverse_differences[766];
+    u32 x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    u32 y[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    u32 coefficients[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    u32 inverse_differences[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u];
     if (!palette_symbol_build_inverse_table(block_length - 1u,
                                             profile.field_prime,
                                             inverse_differences)) return false;
@@ -493,15 +497,15 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
     data_symbols.size = block_count * data_symbols_per_block * 4u;
     const u32 prime = profile.field_prime;
     const u32 parity = block_length - data_symbols_per_block;
-    u32 x[765];
-    u32 weights[765];
-    u32 inverse_differences[766];
+    u32 x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    u32 weights[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    u32 inverse_differences[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u];
     if (!palette_symbol_build_inverse_table(block_length - 1u, prime,
                                             inverse_differences)) return false;
     for (u32 i = 0u; i < block_length; ++i) x[i] = i + 1u;
-    u32 factorials[766];
-    u32 prefix_products[766];
-    u32 inverse_x[765];
+    u32 factorials[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u];
+    u32 prefix_products[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    u32 inverse_x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     factorials[0] = 1u;
     for (u32 i = 1u; i < block_length; ++i) {
         factorials[i] = (u32)(((u64)factorials[i - 1u] * i) % prime);
@@ -529,14 +533,14 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
     }
     bool inverse_x_ready = false;
     for (usize block = 0u; block < block_count; ++block) {
-        u32 received[765];
-        u8 erased[765] = {};
-        u32 syndromes[765] = {};
-        u32 modified_syndromes[765] = {};
-        u32 locator[766] = {};
-        u32 good_x[765];
-        u32 good_y[765];
-        u32 coefficients[765];
+        u32 received[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+        u8 erased[PALETTE_SYMBOL_MAX_BLOCK_LENGTH] = {};
+        u32 syndromes[PALETTE_SYMBOL_MAX_BLOCK_LENGTH] = {};
+        u32 modified_syndromes[PALETTE_SYMBOL_MAX_BLOCK_LENGTH] = {};
+        u32 locator[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u] = {};
+        u32 good_x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+        u32 good_y[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+        u32 coefficients[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
         u32 erased_count = 0u;
         usize code_start = block * block_length;
         for (u32 i = 0u; i < block_length; ++i) {
@@ -697,7 +701,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
                 if (!erased[dropped] ||
                     read_le_u32(code_symbols.data +
                                 (code_start + dropped) * 4u) >= prime) continue;
-                u32 trial_modified[765];
+                u32 trial_modified[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
                 memcpy(trial_modified, syndromes, parity * sizeof(u32));
                 u32 trial_count = parity;
                 for (u32 position = 0u; position < block_length; ++position) {
@@ -710,7 +714,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
                     }
                     if (trial_count) --trial_count;
                 }
-                u32 trial_locator[766] = {};
+                u32 trial_locator[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u] = {};
                 u32 trial_errors = 0u;
                 if (!palette_symbol_find_error_locator(trial_modified,
                                                        trial_count,
@@ -738,7 +742,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             }
             return false;
         }
-        u8 errors[765] = {};
+        u8 errors[PALETTE_SYMBOL_MAX_BLOCK_LENGTH] = {};
         u32 roots = 0u;
         if (!inverse_x_ready) {
             for (u32 i = 0u; i < block_length; ++i) {
@@ -6810,9 +6814,9 @@ bool palette_symbol_selector_mask(u64 seed,
                                   u32 block_length,
                                   u32 selected_count,
                                   u8* mask_out) {
-    if (!mask_out || !block_length || block_length > 765u ||
+    if (!mask_out || !block_length || block_length > PALETTE_SYMBOL_MAX_BLOCK_LENGTH ||
         selected_count > block_length) return false;
-    u16 pool[765];
+    u16 pool[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     memset(mask_out, 0, block_length);
     for (u32 i = 0u; i < block_length; ++i) pool[i] = (u16)i;
     if (!selected_count) return true;
@@ -7094,7 +7098,8 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
     encoded_symbols.release();
     summary = EccSummary();
     if (!bytes || !byte_count || profile.field_prime < 2u ||
-        !profile.block_length || profile.block_length > 765u || redundancy < 0.0) return false;
+        !profile.block_length ||
+        profile.block_length > PALETTE_SYMBOL_MAX_BLOCK_LENGTH || redundancy < 0.0) return false;
     u32 block_length = profile.block_length;
     u32 parity = 0u;
     if (!palette_symbol_parity_for_redundancy(profile, redundancy, parity)) return false;
@@ -7377,7 +7382,7 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
         if (is_masked &&
             (!active_password_context ||
              !active_password_context->selector_seed(selector_seed))) return false;
-        u8 selector_mask[765];
+        u8 selector_mask[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
         for (u64 block = 0u; block < block_count; ++block) {
             if (!palette_symbol_selector_mask(selector_seed, block,
                                               block_length, overlay_budget,
@@ -29752,10 +29757,10 @@ void write_encode_help() {
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
-    console_line(1, "  --ecc RATIO|fill     Parity/data ratio (0-764); fill maximizes page use.");
+    console_line(1, "  --ecc RATIO|fill     Parity/data ratio (0-1023); fill maximizes page use.");
     console_line(1, "                       Omit to use the minimum ECC for scan and overlay budgets.");
     console_line(1, "                       Insufficient ECC is rejected with a sufficient ratio and supported overlay fraction.");
-    console_line(1, "                       0 disables payload parity; blocks use the palette field profile (max 765 symbols).");
+    console_line(1, "                       0 disables payload parity; blocks use the palette field profile (max 1024 symbols).");
     console_line(1, "  --overlay-fraction F Whole-symbol overlay share (0.0-254/255; rounded down per block).");
     console_line(1, "  --overlay-ppm PATH   PPM image to apply to pages selected by the next --overlay-pages.");
     console_line(1, "  --overlay-pages LIST Pages/ranges for the preceding image (all, 1,3-5,middle,last).");
@@ -30301,7 +30306,9 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         u16 required_unknown_errors) {
     (void)structural_erasure_fraction;
     if (payload_bytes == 0u || requested_redundancy <= 0.0 ||
-        requested_redundancy > 764.0 || overlay_fraction < 0.0 ||
+        requested_redundancy >
+            (double)(makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH - 1u) ||
+        overlay_fraction < 0.0 ||
         overlay_fraction >= 1.0) return false;
     u32 palette_size = mapping_has_custom_palette(mapping)
                            ? mapping.custom_palette_count
@@ -30446,8 +30453,8 @@ bool find_best_ecc_fill(usize payload_bytes,
                            : (1u << bits_per_sample(mapping.color_channels));
     makocode::PaletteSymbolProfile fill_profile;
     if (!makocode::palette_symbol_profile(palette_size, fill_profile)) return false;
-    EccFillCandidate parity_candidates[766] = {};
-    u8 parity_candidate_state[766] = {};
+    EccFillCandidate parity_candidates[makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH] = {};
+    u8 parity_candidate_state[makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH] = {};
     auto evaluate_cached_candidate = [&](double redundancy,
                                          EccFillCandidate& out_candidate) -> bool {
         u32 parity = 0u;

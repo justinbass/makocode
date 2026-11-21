@@ -2348,14 +2348,14 @@ static void cli_help_case() {
     std::vector<HelpCheck> help={{{},"Usage:","makocode encode [options]"},{{"--help"},"Usage:","makocode encode [options]"},{{"-h"},"Usage:","makocode encode [options]"},{{"unknown-command"},"Usage:","makocode encode [options]"},{{"encode","--help"},"Usage: makocode encode","--input PATH"},{{"decode","--help"},"Usage: makocode decode","stdin"},{{"checkpoint","--help"},"makocode checkpoint","checkpoint restore"},{{"overlay","--help"},"Usage:","makocode encode [options]"},{{"minify","--help"},"Usage: makocode minify","Strips comments/whitespace"}};
     for(size_t i=0;i<help.size();++i){auto result=run_cli(work,help[i].args,"help_"+std::to_string(i));require(result.status==0,id+": help command failed");std::string all=result.out+result.err;require(all.find(help[i].first)!=std::string::npos&&all.find(help[i].second)!=std::string::npos,id+": missing expected help text");}
     for(const auto& pair:std::vector<std::pair<std::vector<std::string>,std::string>>{
-        {{"encode","--ecc=764.01"},"--ecc ratio must be between 0 and 764"},
+        {{"encode","--ecc=1023.01"},"--ecc ratio must be between 0 and 1023"},
         {{"encode","--overlay-fraction=1.01"},"--overlay-fraction must be between 0.0 and 254/255"},
         {{"encode","--overlay-fraction=0.5"},"--overlay-fraction and overlay images must be used together"},
         {{"encode","--overlay-ppm=missing.ppm"},"each --overlay-ppm requires a following --overlay-pages"}}){
         auto result=run_cli(work,pair.first,"reject");expect_failure(result,id+" rejection");require(result.err.find(pair.second)!=std::string::npos||result.out.find(pair.second)!=std::string::npos,id+": rejection text mismatch");
     }
     auto encode_help=run_cli(work,{"encode","--help"},"encode_help");expect_success(encode_help,id+" encode help");
-    require(encode_help.out.find("Omit to use the minimum ECC")!=std::string::npos&&encode_help.out.find("0 disables payload parity")!=std::string::npos&&encode_help.out.find("max 765 symbols")!=std::string::npos,id+": encode help contract changed");
+    require(encode_help.out.find("Omit to use the minimum ECC")!=std::string::npos&&encode_help.out.find("0 disables payload parity")!=std::string::npos&&encode_help.out.find("max 1024 symbols")!=std::string::npos,id+": encode help contract changed");
 }
 
 static void decode_ecc_retry_case() {
@@ -2808,7 +2808,7 @@ static void overlay_case(const OverlayConfig& cfg){
             cfg.palette=="White Cyan Magenta Yellow"?4u:
             cfg.palette=="White Cyan Magenta Yellow Black"?5u:
             cfg.palette=="White #FF0000 #00FF00 #0000FF Cyan Black"?6u:8u;
-        const unsigned block_length=palette_size==2u?250u:765u;
+        const unsigned block_length=palette_size==2u?250u:1024u;
         const unsigned expected_budget=static_cast<unsigned>(std::floor(
             static_cast<double>(block_length)*(254.0/255.0)));
         require(log.find("debug: overlay erasure budget per block="+
@@ -3173,7 +3173,7 @@ static void short_length_header_case(){
 static void palette_q2_center_speck_case(){
     const std::string id="0132_palette_q2_center_specks";const unsigned width=180u,height=180u;const double scale=2.5;fs::path work=make_work_dir(id),payload=work/"payload.bin",encoded=work/"encoded",overlay=work/"overlay.ppm",scan=work/"specked_scan.ppm",decoded=work/"decoded";fs::create_directories(encoded);generate_bytes(work,payload,128u,613947u,"payload");write_file(overlay,"P6\n180 180\n255\n"+std::string((usize)width*height*3u,'\0'));
     auto enc=run_cli(work,encode_file_args(payload,encoded,"page",{"--page-width="+std::to_string(width),"--page-height="+std::to_string(height),"--ecc=0.02","--overlay-fraction=0.012","--overlay-ppm="+overlay.string(),"--overlay-pages=all","--palette","Black White"}),"encode");expect_success(enc,id+" encode");auto pages=ppm_paths(encoded,"page");require(pages.size()==1u,id+": expected one page");PpmImage original=read_ppm(pages.front());require(original.width==width&&original.height==height,id+": encoded grid changed");
-    makocode::PaletteSymbolProfile q2_profile;require(makocode::palette_symbol_profile(2u,q2_profile)&&q2_profile.field_prime==251u&&q2_profile.block_length==250u,id+": q2 did not use the specified GF(251) profile");MetadataTile::Values rank_values=extract_tile_values(pages.front());u32 block_length=(u32)rank_values.ecc_block_data+rank_values.ecc_parity;u64 bootstrap_symbols=makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;u64 expected_headed_bits=(rank_values.ecc_block_count*(u64)block_length+bootstrap_symbols)*32u;require(rank_values.ecc_parity==8u&&block_length==250u&&rank_values.unknown_parity_budget==2u&&rank_values.overlay_erasure_budget==3u&&rank_values.overlay_selector_present&&rank_values.ecc_block_count>0u&&rank_values.page_bits==expected_headed_bits,id+": fixture does not encode headed q2 blocks with P=8, O=3, E=2");u8 selector_mask[765]={};require(makocode::palette_symbol_selector_mask(rank_values.overlay_selector_seed,0u,block_length,rank_values.overlay_erasure_budget,selector_mask),id+": selector mask failed");MetadataTile::Placement placement=MetadataTile::compute_center_tile_placement(width,height);makocode::ByteBuffer tile_bits,tile_active_mask;u8 guard_mask[MetadataTile::TILE_SIDE*MetadataTile::TILE_SIDE]={};require(MetadataTile::build_tile_bits(rank_values,tile_bits,&tile_active_mask)&&tile_active_mask.size==sizeof(guard_mask)&&MetadataTile::build_active_guard_mask(tile_active_mask.data,tile_active_mask.size,guard_mask,sizeof(guard_mask)),id+": metadata reservation mask failed");
+    makocode::PaletteSymbolProfile q2_profile;require(makocode::palette_symbol_profile(2u,q2_profile)&&q2_profile.field_prime==251u&&q2_profile.block_length==250u,id+": q2 did not use the specified GF(251) profile");MetadataTile::Values rank_values=extract_tile_values(pages.front());u32 block_length=(u32)rank_values.ecc_block_data+rank_values.ecc_parity;u64 bootstrap_symbols=makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;u64 expected_headed_bits=(rank_values.ecc_block_count*(u64)block_length+bootstrap_symbols)*32u;require(rank_values.ecc_parity==8u&&block_length==250u&&rank_values.unknown_parity_budget==2u&&rank_values.overlay_erasure_budget==3u&&rank_values.overlay_selector_present&&rank_values.ecc_block_count>0u&&rank_values.page_bits==expected_headed_bits,id+": fixture does not encode headed q2 blocks with P=8, O=3, E=2");u8 selector_mask[makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH]={};require(makocode::palette_symbol_selector_mask(rank_values.overlay_selector_seed,0u,block_length,rank_values.overlay_erasure_budget,selector_mask),id+": selector mask failed");MetadataTile::Placement placement=MetadataTile::compute_center_tile_placement(width,height);makocode::ByteBuffer tile_bits,tile_active_mask;u8 guard_mask[MetadataTile::TILE_SIDE*MetadataTile::TILE_SIDE]={};require(MetadataTile::build_tile_bits(rank_values,tile_bits,&tile_active_mask)&&tile_active_mask.size==sizeof(guard_mask)&&MetadataTile::build_active_guard_mask(tile_active_mask.data,tile_active_mask.size,guard_mask,sizeof(guard_mask)),id+": metadata reservation mask failed");
     makocode::ByteBuffer reserved,rank_map;u64 payload_pixels=0u,reserved_pixels=0u;usize pixel_count=(usize)width*height;u32 fiducial_columns=0u,fiducial_rows=0u;compute_centered_fiducial_dimensions(width,height,24u,fiducial_columns,fiducial_rows);require(compute_fiducial_marker_mask(width,height,height,reserved_pixels,&reserved,true,fiducial_columns,fiducial_rows,24u),id+": fiducial reservation mask failed");for(unsigned y=0u;y<MetadataTile::TILE_SIDE;++y)for(unsigned x=0u;x<MetadataTile::TILE_SIDE;++x){if(!guard_mask[(usize)y*MetadataTile::TILE_SIDE+x])continue;u32 px=placement.x0+x-placement.offset_x,py=placement.y0+y-placement.offset_y;reserved.data[(usize)py*width+px]=1u;}require(MetadataTile::build_payload_rank_map(width,height,placement,rank_values,reserved.data,reserved.size,rank_map,payload_pixels,false,makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),id+": payload rank map failed");
     std::vector<usize> selected_pixels;std::vector<u32> selected_positions;const u64* ranks=(const u64*)rank_map.data;for(usize pixel=0u;pixel<pixel_count&&selected_pixels.size()<5u;++pixel){u64 rank=ranks[pixel];if(rank==U64_MAX_VALUE||(rank&7u)!=0u)continue;u64 symbol=rank/8u;if(symbol<bootstrap_symbols)continue;u64 interleaved_offset=symbol-bootstrap_symbols;if(interleaved_offset%rank_values.ecc_block_count!=0u)continue;u64 position=interleaved_offset/rank_values.ecc_block_count;if(position>=block_length||selector_mask[position])continue;usize at=pixel*3u;if((u8)original.pixels[at]==255u&&(u8)original.pixels[at+1u]==255u&&(u8)original.pixels[at+2u]==255u){selected_pixels.push_back(pixel);selected_positions.push_back((u32)position);}}require(selected_pixels.size()==5u&&std::set<u32>(selected_positions.begin(),selected_positions.end()).size()==5u,id+": did not find five non-selector white dots in distinct symbols of one deinterleaved RS block");
     PpmImage image;image.width=450u;image.height=450u;image.pixels.resize((usize)image.width*image.height*3u);for(unsigned y=0u;y<image.height;++y)for(unsigned x=0u;x<image.width;++x){unsigned source_x=(unsigned)((u64)x*2u/5u),source_y=(unsigned)((u64)y*2u/5u);usize source_at=((usize)source_y*width+source_x)*3u,dest_at=((usize)y*image.width+x)*3u;memcpy(image.pixels.data()+dest_at,original.pixels.data()+source_at,3u);}
@@ -3862,7 +3862,9 @@ static void palette_symbol_codec_case(){
         require(makocode::palette_symbol_profile(palette_sizes[profile_index],profile),id+": profile unavailable");
         require(profile.field_prime==expected_primes[profile_index],id+": prime profile mismatch");
         u32 expected_block_limit = profile.field_prime - 1u;
-        if (expected_block_limit > 765u) expected_block_limit = 765u;
+        if (expected_block_limit > makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH) {
+            expected_block_limit = makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH;
+        }
         require(profile.block_length==expected_block_limit,id+": RS block limit mismatch");
         if (palette_sizes[profile_index] == 2u) {
             u32 parity = 0u;
@@ -4320,7 +4322,7 @@ static void palette_symbol_codec_case(){
 
     makocode::ByteBuffer padded_stream,source_symbols,padded_data,padded_code,malformed_stream;
     makocode::EccSummary padded_summary;
-    std::vector<u8> padded_source(2000u);
+    std::vector<u8> padded_source(3000u);
     for(usize i=0u;i<padded_source.size();++i)padded_source[i]=(u8)((i*53u+7u)&255u);
     require(makocode::palette_symbol_encode_stream(password_profile,padded_source.data(),padded_source.size(),
                                                    0.1,0u,0u,0,0u,padded_stream,padded_summary),
@@ -4418,6 +4420,40 @@ static void palette_symbol_codec_case(){
                 id + ": high-error RS recovery failed within its correction bound");
         require(recovered.size == data.size && memcmp(recovered.data, data.data, data.size) == 0,
                 id + ": high-error RS correction mismatch");
+    }
+    {
+        makocode::PaletteSymbolProfile profile;
+        require(makocode::palette_symbol_profile(4u, profile) &&
+                    profile.block_length == 1024u,
+                id + ": four-color profile did not use the 1,024-symbol cap");
+        u32 maximum_parity = 0u;
+        require(makocode::palette_symbol_parity_for_redundancy(
+                    profile, 1023.0, maximum_parity) && maximum_parity == 1023u,
+                id + ": maximum 1,023:1 parity/data ratio was rejected");
+        const u32 block_length = 1024u;
+        const u32 data_count = block_length - 2u;
+        makocode::ByteBuffer data, code, damaged, erasures, recovered;
+        require(data.ensure((usize)data_count * 4u) && erasures.ensure(block_length),
+                id + ": 1,024-symbol test buffers allocation failed");
+        data.size = (usize)data_count * 4u;
+        for (u32 i = 0u; i < data_count; ++i) {
+            write_le_u32(data.data + (usize)i * 4u,
+                         (i * 7919u + 31u) % profile.field_prime);
+        }
+        require(makocode::palette_rs_encode(profile, data, block_length, data_count, code) &&
+                    damaged.ensure(code.size),
+                id + ": 1,024-symbol RS encoding failed");
+        damaged.size = code.size;
+        memcpy(damaged.data, code.data, code.size);
+        memset(erasures.data, 0, block_length);
+        erasures.size = block_length;
+        write_le_u32(damaged.data + 511u * 4u,
+                     (read_le_u32(damaged.data + 511u * 4u) + 1u) % profile.field_prime);
+        require(makocode::palette_rs_decode(profile, damaged, block_length, data_count,
+                                             erasures, recovered) &&
+                    recovered.size == data.size &&
+                    memcmp(recovered.data, data.data, data.size) == 0,
+                id + ": 1,024-symbol RS correction failed");
     }
 }
 
