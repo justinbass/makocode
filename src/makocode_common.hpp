@@ -576,6 +576,7 @@ struct EncoderConfig {
     u16 overlay_erasure_budget;
     u16 unknown_error_budget;
     u32 palette_size;
+    bool omit_palette_symbol_bootstrap;
     const char* password;
     usize password_length;
     u32 max_parallelism;
@@ -587,6 +588,7 @@ struct EncoderConfig {
           overlay_erasure_budget(0u),
           unknown_error_budget(0u),
           palette_size(0u),
+          omit_palette_symbol_bootstrap(false),
           password(0),
           password_length(0u),
           max_parallelism(1u) {}
@@ -658,6 +660,26 @@ struct PaletteSymbolProfile {
         : palette_size(0u), field_prime(0u), block_length(0u), symbol_bits(0u) {}
 };
 
+class PaletteSymbolPasswordContext {
+public:
+    PaletteSymbolPasswordContext();
+    ~PaletteSymbolPasswordContext();
+    PaletteSymbolPasswordContext(const PaletteSymbolPasswordContext&) = delete;
+    PaletteSymbolPasswordContext& operator=(const PaletteSymbolPasswordContext&) = delete;
+
+    bool derive(const char* password, usize password_length);
+    bool selector_seed(u64& seed) const;
+    bool mask(const PaletteSymbolProfile& profile,
+              ByteBuffer& symbols,
+              bool unmask,
+              u64 first_symbol_index = 0u) const;
+    bool available() const;
+
+private:
+    u8 key_[32];
+    bool available_;
+};
+
 struct PaletteSymbolHeaderRecovery {
     bool available;
     bool password_protected;
@@ -674,7 +696,7 @@ struct PaletteSymbolHeaderRecovery {
           overlay_erasure_budget(0u), unknown_error_budget(0u) {}
 };
 
-static const u64 PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED = 0x4D616B6F76300001ull;
+static const u64 PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED = 0x4D616B6F76300005ull;
 static const u32 PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS = 48u;
 static const u32 PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS = 32u;
 
@@ -733,7 +755,8 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   const char* password,
                                   usize password_length,
                                   ByteBuffer& encoded_symbols,
-                                  EccSummary& summary);
+                                  EccSummary& summary,
+                                  bool omit_bootstrap = false);
 bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                                   const ByteBuffer& encoded_symbols,
                                   const ByteBuffer& erased_symbols,
@@ -743,7 +766,9 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                                   EccDecodeStats* stats,
                                   bool* password_protected = 0,
                                   const PaletteSymbolHeaderRecovery* header_recovery = 0,
-                                  bool allow_partial = false);
+                                  bool allow_partial = false,
+                                  bool bootstrap_omitted = false,
+                                  const PaletteSymbolPasswordContext* password_context = 0);
 } // namespace makocode
 
 namespace makocode {
@@ -825,7 +850,8 @@ struct EncoderContext {
                                           config.password,
                                           config.password_length,
                                           symbols,
-                                          ecc_summary)) {
+                                          ecc_summary,
+                                          config.omit_palette_symbol_bootstrap)) {
             return false;
         }
         for (usize symbol_index = 0u; symbol_index < symbols.size / 4u; ++symbol_index) {
@@ -1088,7 +1114,7 @@ struct AffineTransform {
 
 namespace MetadataTile {
 using namespace makocode;
-static const PaletteColor* g_decode_palette_override = 0;
+static thread_local const PaletteColor* g_decode_palette_override = 0;
 } // namespace MetadataTile
 
 namespace MetadataTile {
@@ -1749,6 +1775,10 @@ bool read_entire_stdin(makocode::ByteBuffer& buffer);
 
 namespace MetadataTile {
 using namespace makocode;
+bool build_active_guard_mask(const u8* active_mask,
+                             usize active_mask_size,
+                             u8* guard_mask,
+                             usize guard_mask_size);
 bool build_payload_rank_map(u32 width_pixels,
                                        u32 data_height_pixels,
                                        const Placement& placement,
@@ -1906,7 +1936,8 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    bool detect_uniform_blots = true,
                                    bool known_tile_is_present = true,
                                    bool metadata_center_probe_only = false,
-                                   bool metadata_summary_only = false);
+                                   bool metadata_summary_only = false,
+                                   u64 page_capacity_override = 0u);
 
 bool palette_colors_equal(const PaletteColor& a, const PaletteColor& b);
 

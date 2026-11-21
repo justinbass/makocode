@@ -23,6 +23,9 @@ endif
 
 PLATFORM_SOURCE ?= src/makocode_platform.cpp
 MAKOCODE_SOURCES := src/makocode.cpp src/makocode_common.cpp src/makocode_encode.cpp src/makocode_decode.cpp src/makocode_minify.cpp src/makocode_checkpoint.cpp $(PLATFORM_SOURCE)
+MAKOCODE_HEADERS := $(wildcard src/*.hpp)
+CLI_OBJECT_DIR := $(BIN_DIR)/obj
+MAKOCODE_OBJECTS := $(patsubst %.cpp,$(CLI_OBJECT_DIR)/%.o,$(MAKOCODE_SOURCES))
 MAKOCODE_BIN := $(BIN_DIR)/makocode
 MAKOCODE_TEST_BIN := $(BIN_DIR)/makocode_test
 # Clang's gcov output can assign synthesized functions to declaration lines or
@@ -55,14 +58,19 @@ all: $(MAKOCODE_BIN)
 
 makocode: $(MAKOCODE_BIN)
 
-$(MAKOCODE_BIN): $(MAKOCODE_SOURCES)
+$(CLI_OBJECT_DIR)/%.o: %.cpp $(MAKOCODE_HEADERS)
+	$(call test_status,compile $<)
+	@mkdir -p "$(dir $@)" "$(COMPILE_DIR)"
+	@cd "$(COMPILE_DIR)" && $(CXX) $(CXXFLAGS) -I"$(CURDIR)/src" -c "$(abspath $<)" -o "$(abspath $@)"
+
+$(MAKOCODE_BIN): $(MAKOCODE_OBJECTS)
 	$(call test_status,compile makocode)
 	@mkdir -p "$(BIN_DIR)" "$(COMPILE_DIR)"
-	@cd "$(COMPILE_DIR)" && $(CXX) $(CXXFLAGS) $(abspath $(MAKOCODE_SOURCES)) -o "$(abspath $@)" $(LDFLAGS)
+	@cd "$(COMPILE_DIR)" && $(CXX) $(CXXFLAGS) $(abspath $(MAKOCODE_OBJECTS)) -o "$(abspath $@)" $(LDFLAGS)
 
 makocode_test: $(MAKOCODE_TEST_BIN)
 
-$(MAKOCODE_TEST_BIN): tests/makocode_test.cpp $(MAKOCODE_SOURCES)
+$(MAKOCODE_TEST_BIN): tests/makocode_test.cpp $(MAKOCODE_SOURCES) $(MAKOCODE_HEADERS)
 	$(call test_status,compile makocode_test)
 	@mkdir -p "$(BIN_DIR)" "$(COMPILE_DIR)"
 	@cd "$(COMPILE_DIR)" && $(CXX) $(CXXFLAGS) -DMAKOCODE_TEST_BUILD $(abspath tests/makocode_test.cpp src/makocode_platform.cpp) -o "$(abspath $@)" $(LDFLAGS)

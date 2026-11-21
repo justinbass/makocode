@@ -686,9 +686,49 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             if (modified_count) --modified_count;
         }
         u32 error_count = 0u;
-        if (!palette_symbol_find_error_locator(modified_syndromes, modified_count,
-                                              prime, locator, error_count) ||
-            2u * error_count + erased_count > parity) {
+        bool locator_found = palette_symbol_find_error_locator(
+            modified_syndromes, modified_count, prime, locator, error_count);
+        if (locator_found && 2u * error_count + erased_count == parity + 1u) {
+            // A low-confidence symbol can still carry the correct value. If the
+            // nominal erasure/error budget misses by one, try those observed
+            // values as known symbols, but only accept a candidate that passes
+            // the complete RS root and codeword verification below.
+            for (u32 dropped = 0u; dropped < block_length; ++dropped) {
+                if (!erased[dropped] ||
+                    read_le_u32(code_symbols.data +
+                                (code_start + dropped) * 4u) >= prime) continue;
+                u32 trial_modified[765];
+                memcpy(trial_modified, syndromes, parity * sizeof(u32));
+                u32 trial_count = parity;
+                for (u32 position = 0u; position < block_length; ++position) {
+                    if (!erased[position] || position == dropped) continue;
+                    for (u32 order = 0u; order + 1u < trial_count; ++order) {
+                        trial_modified[order] = palette_symbol_subtract(
+                            trial_modified[order + 1u],
+                            (u32)(((u64)x[position] * trial_modified[order]) % prime),
+                            prime);
+                    }
+                    if (trial_count) --trial_count;
+                }
+                u32 trial_locator[766] = {};
+                u32 trial_errors = 0u;
+                if (!palette_symbol_find_error_locator(trial_modified,
+                                                       trial_count,
+                                                       prime,
+                                                       trial_locator,
+                                                       trial_errors) ||
+                    2u * trial_errors + erased_count - 1u > parity) continue;
+                memcpy(modified_syndromes, trial_modified,
+                       trial_count * sizeof(u32));
+                memcpy(locator, trial_locator, sizeof(locator));
+                modified_count = trial_count;
+                error_count = trial_errors;
+                erased[dropped] = 0u;
+                --erased_count;
+                break;
+            }
+        }
+        if (!locator_found || 2u * error_count + erased_count > parity) {
             if (stats) {
                 ++stats->unrecoverable_blocks;
                 stats->failed_block_errors = error_count;
@@ -5732,18 +5772,13 @@ static inline u32 rotr32(u32 value, u32 amount) {
 ;
 
 static void sha256_process_block(Sha256State& state, const u8* block) {
-    u32 w[64];
+    u32 w[16];
     for (u32 i = 0u; i < 16u; ++i) {
         u32 b0 = (u32)block[i * 4u + 0u];
         u32 b1 = (u32)block[i * 4u + 1u];
         u32 b2 = (u32)block[i * 4u + 2u];
         u32 b3 = (u32)block[i * 4u + 3u];
         w[i] = (b0 << 24u) | (b1 << 16u) | (b2 << 8u) | b3;
-    }
-    for (u32 i = 16u; i < 64u; ++i) {
-        u32 s0 = rotr32(w[i - 15u], 7u) ^ rotr32(w[i - 15u], 18u) ^ (w[i - 15u] >> 3u);
-        u32 s1 = rotr32(w[i - 2u], 17u) ^ rotr32(w[i - 2u], 19u) ^ (w[i - 2u] >> 10u);
-        w[i] = w[i - 16u] + s0 + w[i - 7u] + s1;
     }
     u32 a = state.h[0];
     u32 b = state.h[1];
@@ -5754,9 +5789,21 @@ static void sha256_process_block(Sha256State& state, const u8* block) {
     u32 g = state.h[6];
     u32 h = state.h[7];
     for (u32 i = 0u; i < 64u; ++i) {
+        u32 wi;
+        if (i < 16u) {
+            wi = w[i];
+        } else {
+            u32 slot = i & 15u;
+            u32 s0_input = w[(i + 1u) & 15u];
+            u32 s1_input = w[(i + 14u) & 15u];
+            u32 s0 = rotr32(s0_input, 7u) ^ rotr32(s0_input, 18u) ^ (s0_input >> 3u);
+            u32 s1 = rotr32(s1_input, 17u) ^ rotr32(s1_input, 19u) ^ (s1_input >> 10u);
+            wi = w[slot] + s0 + w[(i + 9u) & 15u] + s1;
+            w[slot] = wi;
+        }
         u32 s1 = rotr32(e, 6u) ^ rotr32(e, 11u) ^ rotr32(e, 25u);
         u32 ch = (e & f) ^ ((~e) & g);
-        u32 temp1 = h + s1 + ch + SHA256_K[i] + w[i];
+        u32 temp1 = h + s1 + ch + SHA256_K[i] + wi;
         u32 s0 = rotr32(a, 2u) ^ rotr32(a, 13u) ^ rotr32(a, 22u);
         u32 maj = (a & b) ^ (a & c) ^ (b & c);
         u32 temp2 = s0 + maj;
@@ -6703,22 +6750,59 @@ static bool palette_symbol_derive_password_key(const char* password,
            stealth_derive_base_key(password, password_length, public_salt, key);
 }
 
+static bool palette_symbol_password_selector_seed_from_key(const u8 key[32],
+                                                           u64& seed) {
+    seed = 0u;
+    if (!key) return false;
+    u8 digest[32];
+    static const u8 domain[] = "MakoCode v0 overlay selector";
+    if (!hmac_sha256(key, 32u, domain, sizeof(domain) - 1u, digest)) {
+        memset(digest, 0, sizeof(digest));
+        return false;
+    }
+    seed = read_le_u64(digest);
+    memset(digest, 0, sizeof(digest));
+    return true;
+}
+
+PaletteSymbolPasswordContext::PaletteSymbolPasswordContext()
+    : key_{}, available_(false) {}
+
+PaletteSymbolPasswordContext::~PaletteSymbolPasswordContext() {
+    memset(key_, 0, sizeof(key_));
+    available_ = false;
+}
+
+bool PaletteSymbolPasswordContext::derive(const char* password,
+                                          usize password_length) {
+    memset(key_, 0, sizeof(key_));
+    available_ = false;
+    if (!palette_symbol_derive_password_key(password, password_length, key_)) {
+        memset(key_, 0, sizeof(key_));
+        return false;
+    }
+    available_ = true;
+    return true;
+}
+
+bool PaletteSymbolPasswordContext::selector_seed(u64& seed) const {
+    if (!available_) {
+        seed = 0u;
+        return false;
+    }
+    return palette_symbol_password_selector_seed_from_key(key_, seed);
+}
+
+bool PaletteSymbolPasswordContext::available() const {
+    return available_;
+}
+
 bool palette_symbol_password_selector_seed(const char* password,
                                            usize password_length,
                                            u64& seed) {
     seed = 0u;
-    u8 key[32];
-    u8 digest[32];
-    static const u8 domain[] = "MakoCode v0 overlay selector";
-    if (!palette_symbol_derive_password_key(password, password_length, key) ||
-        !hmac_sha256(key, sizeof(key), domain, sizeof(domain) - 1u, digest)) {
-        memset(key, 0, sizeof(key));
-        return false;
-    }
-    seed = read_le_u64(digest);
-    memset(key, 0, sizeof(key));
-    memset(digest, 0, sizeof(digest));
-    return true;
+    PaletteSymbolPasswordContext context;
+    return context.derive(password, password_length) && context.selector_seed(seed);
 }
 
 bool palette_symbol_selector_mask(u64 seed,
@@ -6802,25 +6886,21 @@ bool palette_symbol_selector_mask(u64 seed,
     return true;
 }
 
-bool palette_symbol_password_mask(const PaletteSymbolProfile& profile,
-                                  ByteBuffer& symbols,
-                                  const char* password,
-                                  usize password_length,
-                                  bool unmask,
-                                  u64 first_symbol_index) {
-    if (symbols.size % 4u || profile.field_prime < 2u) return false;
-    u8 base_key[32];
+static bool palette_symbol_password_mask_from_key(const PaletteSymbolProfile& profile,
+                                                  ByteBuffer& symbols,
+                                                  const u8 base_key[32],
+                                                  bool unmask,
+                                                  u64 first_symbol_index) {
+    if (!base_key || symbols.size % 4u || profile.field_prime < 2u) return false;
     u8 stream_key[32];
     u8 nonce_digest[32];
     u8 nonce[12] = {};
     static const u8 key_domain[] = "MakoCode v0 symbol mask key";
     static const u8 stream_domain[] = "MakoCode v0 symbol mask stream";
-    if (!palette_symbol_derive_password_key(password, password_length, base_key) ||
-        !hmac_sha256(base_key, sizeof(base_key), key_domain, sizeof(key_domain) - 1u,
+    if (!hmac_sha256(base_key, 32u, key_domain, sizeof(key_domain) - 1u,
                      stream_key) ||
         !hmac_sha256(stream_key, sizeof(stream_key), stream_domain,
                      sizeof(stream_domain) - 1u, nonce_digest)) {
-        memset(base_key, 0, sizeof(base_key));
         memset(stream_key, 0, sizeof(stream_key));
         memset(nonce_digest, 0, sizeof(nonce_digest));
         return false;
@@ -6831,7 +6911,6 @@ bool palette_symbol_password_mask(const PaletteSymbolProfile& profile,
     u8 random_block[64] = {};
     usize symbol_count = symbols.size / 4u;
     if (symbol_count && block_counter > 0xFFFFFFFFull) {
-        memset(base_key, 0, sizeof(base_key));
         memset(stream_key, 0, sizeof(stream_key));
         memset(nonce_digest, 0, sizeof(nonce_digest));
         memset(nonce, 0, sizeof(nonce));
@@ -6865,7 +6944,88 @@ bool palette_symbol_password_mask(const PaletteSymbolProfile& profile,
         }
         write_le_u32(symbols.data + index * 4u, value);
     }
-    memset(base_key, 0, sizeof(base_key));
+    memset(stream_key, 0, sizeof(stream_key));
+    memset(nonce_digest, 0, sizeof(nonce_digest));
+    memset(nonce, 0, sizeof(nonce));
+    memset(random_block, 0, sizeof(random_block));
+    return valid;
+}
+
+bool PaletteSymbolPasswordContext::mask(const PaletteSymbolProfile& profile,
+                                        ByteBuffer& symbols,
+                                        bool unmask,
+                                        u64 first_symbol_index) const {
+    return available_ &&
+           palette_symbol_password_mask_from_key(profile, symbols, key_,
+                                                 unmask, first_symbol_index);
+}
+
+bool palette_symbol_password_mask(const PaletteSymbolProfile& profile,
+                                  ByteBuffer& symbols,
+                                  const char* password,
+                                  usize password_length,
+                                  bool unmask,
+                                  u64 first_symbol_index) {
+    PaletteSymbolPasswordContext context;
+    return context.derive(password, password_length) &&
+           context.mask(profile, symbols, unmask, first_symbol_index);
+}
+
+static bool palette_symbol_public_whiten(const PaletteSymbolProfile& profile,
+                                         ByteBuffer& symbols,
+                                         bool unwhiten,
+                                         u64 first_symbol_index = 0u) {
+    if (symbols.size % 4u || profile.field_prime < 2u) return false;
+    u8 seed[12];
+    write_le_u64(seed, PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED);
+    write_le_u32(seed + 8u, profile.field_prime);
+    u8 stream_key[32];
+    u8 nonce_digest[32];
+    u8 nonce[12] = {};
+    static const u8 key_domain[] = "MakoCode v0 public symbol whitening key";
+    static const u8 stream_domain[] = "MakoCode v0 public symbol whitening stream";
+    if (!hmac_sha256(seed, sizeof(seed), key_domain, sizeof(key_domain) - 1u,
+                     stream_key) ||
+        !hmac_sha256(stream_key, sizeof(stream_key), stream_domain,
+                     sizeof(stream_domain) - 1u, nonce_digest)) {
+        memset(seed, 0, sizeof(seed));
+        memset(stream_key, 0, sizeof(stream_key));
+        memset(nonce_digest, 0, sizeof(nonce_digest));
+        return false;
+    }
+    memcpy(nonce, nonce_digest, sizeof(nonce));
+    u64 block_counter = first_symbol_index / 16u;
+    usize random_offset = (usize)(first_symbol_index % 16u) * 4u;
+    usize symbol_count = symbols.size / 4u;
+    u8 random_block[64] = {};
+    if (symbol_count && block_counter > 0xFFFFFFFFull) return false;
+    if (symbol_count) chacha20_block(stream_key, nonce, (u32)block_counter++, random_block);
+    bool valid = true;
+    for (usize index = 0u; index < symbol_count; ++index) {
+        if (random_offset + 4u > sizeof(random_block)) {
+            if (block_counter > 0xFFFFFFFFull) {
+                valid = false;
+                break;
+            }
+            chacha20_block(stream_key, nonce, (u32)block_counter++, random_block);
+            random_offset = 0u;
+        }
+        u32 mask = read_le_u32(random_block + random_offset) % profile.field_prime;
+        random_offset += 4u;
+        u32 value = read_le_u32(symbols.data + index * 4u);
+        if (value >= profile.field_prime) {
+            valid = false;
+            break;
+        }
+        if (unwhiten) {
+            value = value >= mask ? value - mask
+                                  : (u32)((u64)value + profile.field_prime - mask);
+        } else {
+            value = (u32)(((u64)value + mask) % profile.field_prime);
+        }
+        write_le_u32(symbols.data + index * 4u, value);
+    }
+    memset(seed, 0, sizeof(seed));
     memset(stream_key, 0, sizeof(stream_key));
     memset(nonce_digest, 0, sizeof(nonce_digest));
     memset(nonce, 0, sizeof(nonce));
@@ -6929,7 +7089,8 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   const char* password,
                                   usize password_length,
                                   ByteBuffer& encoded_symbols,
-                                  EccSummary& summary) {
+                                  EccSummary& summary,
+                                  bool omit_bootstrap) {
     encoded_symbols.release();
     summary = EccSummary();
     if (!bytes || !byte_count || profile.field_prime < 2u ||
@@ -6995,10 +7156,24 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                            PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
                            PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS, header_code) ||
         !palette_symbol_append_range(encoded_symbols, header_code) ||
-        !palette_symbol_append_range(encoded_symbols, interleaved_payload_code)) return false;
-    if (password && password_length &&
-        !palette_symbol_password_mask(profile, encoded_symbols, password,
-                                      password_length, false)) return false;
+        !palette_symbol_append_range(encoded_symbols, interleaved_payload_code) ||
+        !palette_symbol_public_whiten(profile, encoded_symbols, false)) return false;
+    PaletteSymbolPasswordContext password_key;
+    if (password && password_length) {
+        if (!password_key.derive(password, password_length) ||
+            !password_key.mask(profile, encoded_symbols, false, 0u) ||
+            !password_key.selector_seed(summary.overlay_selector_seed)) return false;
+    }
+    if (omit_bootstrap) {
+        usize bootstrap_bytes = (usize)PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS * 4u;
+        if (encoded_symbols.size < bootstrap_bytes) return false;
+        encoded_symbols.size -= bootstrap_bytes;
+        if (encoded_symbols.size) {
+            memmove(encoded_symbols.data,
+                    encoded_symbols.data + bootstrap_bytes,
+                    encoded_symbols.size);
+        }
+    }
     summary.enabled = parity > 0u;
     summary.block_data_symbols = (u16)data_per_block;
     summary.parity_symbols = (u16)parity;
@@ -7010,9 +7185,6 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
     summary.overlay_erasure_budget = overlay_erasure_budget;
     summary.unknown_error_budget = unknown_error_budget;
     summary.palette_symbol_stream = true;
-    if (password && password_length &&
-        !palette_symbol_password_selector_seed(password, password_length,
-                                               summary.overlay_selector_seed)) return false;
     return true;
 }
 
@@ -7025,18 +7197,26 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                                   EccDecodeStats* stats,
                                   bool* password_protected,
                                   const PaletteSymbolHeaderRecovery* header_recovery,
-                                  bool allow_partial) {
+                                  bool allow_partial,
+                                  bool bootstrap_omitted,
+                                  const PaletteSymbolPasswordContext* password_context) {
     bytes.release();
     if (stats) *stats = EccDecodeStats();
     if (password_protected) *password_protected = false;
     if (encoded_symbols.size % 4u ||
-        encoded_symbols.size / 4u < PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS ||
+        (!bootstrap_omitted &&
+         encoded_symbols.size / 4u < PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) ||
+        (bootstrap_omitted && (!header_recovery || !header_recovery->available)) ||
         (erased_symbols.size && erased_symbols.size < encoded_symbols.size / 4u)) return false;
-    ByteBuffer header_code;
-    if (!palette_symbol_copy_range(encoded_symbols, 0u,
-                                   PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS, header_code)) return false;
+    PaletteSymbolPasswordContext derived_password_context;
+    const PaletteSymbolPasswordContext* active_password_context = password_context;
+    if ((!active_password_context || !active_password_context->available()) &&
+        password && password_length) {
+        if (!derived_password_context.derive(password, password_length)) return false;
+        active_password_context = &derived_password_context;
+    }
     ByteBuffer header_erasures;
-    if (erased_symbols.size) {
+    if (!bootstrap_omitted && erased_symbols.size) {
         if (!header_erasures.ensure(PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS)) return false;
         header_erasures.size = PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;
         memcpy(header_erasures.data, erased_symbols.data,
@@ -7044,54 +7224,92 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     }
     ByteBuffer header_data;
     EccDecodeStats header_stats;
-    bool header_decoded = palette_rs_decode(profile, header_code,
-                                            PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
-                                            PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS,
-                                            header_erasures, header_data, &header_stats);
+    ByteBuffer raw_header_code;
+    ByteBuffer header_code;
+    bool header_decoded = false;
     bool is_masked = false;
-    if (header_decoded) {
-        if (read_le_u32(header_data.data) != 76u) header_decoded = false;
-    }
-    if (!header_decoded && password && password_length) {
-        if (!palette_symbol_password_mask(profile, header_code, password,
-                                          password_length, true)) return false;
-        header_decoded = palette_rs_decode(profile, header_code,
-                                            PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
-                                            PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS,
-                                            header_erasures, header_data, &header_stats);
-        if (header_decoded && read_le_u32(header_data.data) == 76u) {
-            is_masked = true;
-        } else {
-            header_decoded = false;
-        }
-    }
-    if (!header_decoded && header_recovery && header_recovery->available &&
-        erased_symbols.size >= PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) {
+    if (bootstrap_omitted) {
         bool recover_masked = header_recovery->password_protected;
-        if (!recover_masked || (password && password_length)) {
-            u32 recovered_values[PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS] = {};
-            recovered_values[0] = 76u;
-            recovered_values[1] = 0u;
-            recovered_values[2] = recover_masked ? 1u : 0u;
-            if (palette_symbol_store_base_p(header_recovery->byte_count,
-                                            profile.field_prime,
-                                            recovered_values + 3u, 9u) &&
-                palette_symbol_store_base_p(header_recovery->block_count,
-                                            profile.field_prime,
-                                            recovered_values + 16u, 9u)) {
-                recovered_values[12] = header_recovery->data_symbols_per_block;
-                recovered_values[13] = header_recovery->parity_symbols;
-                recovered_values[14] = header_recovery->overlay_erasure_budget;
-                recovered_values[15] = header_recovery->unknown_error_budget;
-                header_data.release();
-                if (!header_data.ensure(PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS * 4u)) return false;
-                header_data.size = PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS * 4u;
-                for (u32 i = 0u; i < PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS; ++i) {
-                    write_le_u32(header_data.data + (usize)i * 4u, recovered_values[i]);
+        u32 recovered_values[PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS] = {};
+        recovered_values[0] = 76u;
+        recovered_values[2] = recover_masked ? 1u : 0u;
+        if ((!recover_masked || (password && password_length)) &&
+            palette_symbol_store_base_p(header_recovery->byte_count,
+                                         profile.field_prime,
+                                         recovered_values + 3u, 9u) &&
+            palette_symbol_store_base_p(header_recovery->block_count,
+                                         profile.field_prime,
+                                         recovered_values + 16u, 9u)) {
+            recovered_values[12] = header_recovery->data_symbols_per_block;
+            recovered_values[13] = header_recovery->parity_symbols;
+            recovered_values[14] = header_recovery->overlay_erasure_budget;
+            recovered_values[15] = header_recovery->unknown_error_budget;
+            if (!header_data.ensure(PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS * 4u)) return false;
+            header_data.size = PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS * 4u;
+            for (u32 i = 0u; i < PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS; ++i) {
+                write_le_u32(header_data.data + (usize)i * 4u, recovered_values[i]);
+            }
+            header_decoded = true;
+            is_masked = recover_masked;
+        }
+    } else {
+        if (!palette_symbol_copy_range(encoded_symbols, 0u,
+                                       PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
+                                       raw_header_code)) return false;
+        if (active_password_context && active_password_context->available() &&
+            palette_symbol_copy_range(raw_header_code, 0u,
+                                      PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS, header_code) &&
+            active_password_context->mask(profile, header_code, true, 0u) &&
+            palette_symbol_public_whiten(profile, header_code, true)) {
+            header_decoded = palette_rs_decode(profile, header_code,
+                                                PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
+                                                PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS,
+                                                header_erasures, header_data, &header_stats);
+            if (header_decoded && read_le_u32(header_data.data) == 76u) {
+                is_masked = true;
+            } else {
+                header_decoded = false;
+            }
+        }
+        if (!header_decoded &&
+            palette_symbol_copy_range(raw_header_code, 0u,
+                                      PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS, header_code) &&
+            palette_symbol_public_whiten(profile, header_code, true)) {
+            header_decoded = palette_rs_decode(profile, header_code,
+                                                PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
+                                                PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS,
+                                                header_erasures, header_data, &header_stats);
+            if (header_decoded && read_le_u32(header_data.data) != 76u) {
+                header_decoded = false;
+            }
+        }
+        if (!header_decoded && header_recovery && header_recovery->available &&
+            erased_symbols.size >= PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) {
+            bool recover_masked = header_recovery->password_protected;
+            if (!recover_masked || (password && password_length)) {
+                u32 recovered_values[PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS] = {};
+                recovered_values[0] = 76u;
+                recovered_values[1] = 0u;
+                recovered_values[2] = recover_masked ? 1u : 0u;
+                if (palette_symbol_store_base_p(header_recovery->byte_count,
+                                                profile.field_prime,
+                                                recovered_values + 3u, 9u) &&
+                    palette_symbol_store_base_p(header_recovery->block_count,
+                                                profile.field_prime,
+                                                recovered_values + 16u, 9u)) {
+                    recovered_values[12] = header_recovery->data_symbols_per_block;
+                    recovered_values[13] = header_recovery->parity_symbols;
+                    recovered_values[14] = header_recovery->overlay_erasure_budget;
+                    recovered_values[15] = header_recovery->unknown_error_budget;
+                    if (!header_data.ensure(PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS * 4u)) return false;
+                    header_data.size = PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS * 4u;
+                    for (u32 i = 0u; i < PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS; ++i) {
+                        write_le_u32(header_data.data + (usize)i * 4u, recovered_values[i]);
+                    }
+                    header_decoded = true;
+                    is_masked = recover_masked;
+                    header_stats = EccDecodeStats();
                 }
-                header_decoded = true;
-                is_masked = recover_masked;
-                header_stats = EccDecodeStats();
             }
         }
     }
@@ -7138,11 +7356,12 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
         stored_block_count != block_count ||
         block_count > U64_MAX_VALUE / block_length) return false;
     u64 payload_symbol_count_u64 = block_count * block_length;
-    if (payload_symbol_count_u64 > U64_MAX_VALUE - PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS ||
-        payload_symbol_count_u64 + PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS > encoded_symbols.size / 4u ||
+    u64 payload_first_symbol = bootstrap_omitted ? 0u : PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;
+    if (payload_symbol_count_u64 > U64_MAX_VALUE - payload_first_symbol ||
+        payload_symbol_count_u64 + payload_first_symbol > encoded_symbols.size / 4u ||
         payload_symbol_count_u64 > (u64)USIZE_MAX_VALUE) return false;
     ByteBuffer payload_code;
-    if (!palette_symbol_copy_range(encoded_symbols, PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
+    if (!palette_symbol_copy_range(encoded_symbols, (usize)payload_first_symbol,
                                    (usize)payload_symbol_count_u64, payload_code)) return false;
     ByteBuffer payload_erasures;
     if (erased_symbols.size || overlay_budget > 0u) {
@@ -7151,13 +7370,13 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
         memset(payload_erasures.data, 0, payload_erasures.size);
         if (erased_symbols.size) {
             memcpy(payload_erasures.data,
-                   erased_symbols.data + PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS,
+                   erased_symbols.data + (usize)payload_first_symbol,
                    payload_erasures.size);
         }
         u64 selector_seed = 0u;
         if (is_masked &&
-            !palette_symbol_password_selector_seed(password, password_length,
-                                                   selector_seed)) return false;
+            (!active_password_context ||
+             !active_password_context->selector_seed(selector_seed))) return false;
         u8 selector_mask[765];
         for (u64 block = 0u; block < block_count; ++block) {
             if (!palette_symbol_selector_mask(selector_seed, block,
@@ -7171,8 +7390,10 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
         }
     }
     if (is_masked &&
-        !palette_symbol_password_mask(profile, payload_code, password,
-                                      password_length, true,
+        (!active_password_context ||
+         !active_password_context->mask(profile, payload_code, true,
+                                        PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS))) return false;
+    if (!palette_symbol_public_whiten(profile, payload_code, true,
                                       PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS)) return false;
     ByteBuffer block_order_payload;
     if (!block_order_payload.ensure((usize)payload_symbol_count_u64 * 4u)) return false;
@@ -7460,33 +7681,36 @@ bool compute_fiducial_marker_mask(u32 width_pixels,
 ;
 
 namespace makocode {
-static ReedSolomonTables g_rs_tables;
+static const ReedSolomonTables& rs_tables() {
+    static ReedSolomonTables tables = {};
+    static const bool initialized = [&]() {
+        u16 value = 1u;
+        for (u16 i = 0u; i < RS_FIELD_SIZE; ++i) {
+            u8 element = (u8)(value & 0xFFu);
+            tables.exp_table[i] = element;
+            tables.log_table[element] = (u8)i;
+            value <<= 1u;
+            if (value & 0x100u) value ^= (u16)RS_FIELD_PRIMITIVE;
+        }
+        for (u16 i = RS_FIELD_SIZE; i < 512u; ++i) {
+            tables.exp_table[i] = tables.exp_table[i - RS_FIELD_SIZE];
+        }
+        tables.log_table[0] = 0u;
+        for (u16 a = 1u; a < 256u; ++a) {
+            for (u16 b = 1u; b < 256u; ++b) {
+                u16 sum = (u16)tables.log_table[a] + (u16)tables.log_table[b];
+                tables.product[a][b] = tables.exp_table[sum];
+            }
+        }
+        tables.initialized = true;
+        return true;
+    }();
+    (void)initialized;
+    return tables;
+}
 
 static void rs_ensure_tables() {
-    if (g_rs_tables.initialized) {
-        return;
-    }
-    u16 value = 1u;
-    for (u16 i = 0u; i < RS_FIELD_SIZE; ++i) {
-        u8 element = (u8)(value & 0xFFu);
-        g_rs_tables.exp_table[i] = element;
-        g_rs_tables.log_table[element] = (u8)i;
-        value <<= 1u;
-        if (value & 0x100u) {
-            value ^= (u16)RS_FIELD_PRIMITIVE;
-        }
-    }
-    for (u16 i = RS_FIELD_SIZE; i < 512u; ++i) {
-        g_rs_tables.exp_table[i] = g_rs_tables.exp_table[i - RS_FIELD_SIZE];
-    }
-    g_rs_tables.log_table[0] = 0u;
-    for (u16 a = 1u; a < 256u; ++a) {
-        for (u16 b = 1u; b < 256u; ++b) {
-            u16 sum = (u16)g_rs_tables.log_table[a] + (u16)g_rs_tables.log_table[b];
-            g_rs_tables.product[a][b] = g_rs_tables.exp_table[sum];
-        }
-    }
-    g_rs_tables.initialized = true;
+    (void)rs_tables();
 }
 
 static inline u8 gf_mul(u8 a, u8 b) {
@@ -7494,7 +7718,7 @@ static inline u8 gf_mul(u8 a, u8 b) {
         return 0u;
     }
     rs_ensure_tables();
-    return g_rs_tables.product[a][b];
+    return rs_tables().product[a][b];
 }
 
 static inline u8 gf_div(u8 a, u8 b) {
@@ -7502,10 +7726,11 @@ static inline u8 gf_div(u8 a, u8 b) {
         return 0u;
     }
     rs_ensure_tables();
-    u16 log_a = g_rs_tables.log_table[a];
-    u16 log_b = g_rs_tables.log_table[b];
+    const ReedSolomonTables& tables = rs_tables();
+    u16 log_a = tables.log_table[a];
+    u16 log_b = tables.log_table[b];
     u16 diff = (u16)((log_a + RS_FIELD_SIZE - log_b) % RS_FIELD_SIZE);
-    return g_rs_tables.exp_table[diff];
+    return tables.exp_table[diff];
 }
 
 
@@ -7513,7 +7738,7 @@ static inline u8 gf_div(u8 a, u8 b) {
 static inline u8 gf_pow_alpha(u32 power) {
     rs_ensure_tables();
     power %= RS_FIELD_SIZE;
-    return g_rs_tables.exp_table[power];
+    return rs_tables().exp_table[power];
 }
 
 static u16 poly_trim(u8* poly, u16 length) {
@@ -7617,7 +7842,7 @@ static bool rs_compute_syndromes(const u8* codeword,
     for (u16 i = 0u; i < parity_symbols; ++i) {
         u8 evaluation = 0u;
         u8 root = gf_pow_alpha(i + 1u);
-        const u8* products = g_rs_tables.product[root];
+        const u8* products = rs_tables().product[root];
         for (u16 j = 0u; j < codeword_length; ++j) {
             evaluation = products[evaluation] ^ codeword[j];
         }
@@ -7813,9 +8038,9 @@ static bool rs_decode_block(u8* block,
         erasure_seen[erasure_positions[i]] = 1u;
     }
     if (data_symbols == 1u && erasure_count > 0u) {
-        static u16 cached_parity_symbols = 0u;
-        static u16 cached_generator_size = 0u;
-        static u8 cached_generator[RS_POLY_CAPACITY];
+        static thread_local u16 cached_parity_symbols = 0u;
+        static thread_local u16 cached_generator_size = 0u;
+        static thread_local u8 cached_generator[RS_POLY_CAPACITY];
         if (cached_parity_symbols != parity_symbols) {
             if (!rs_build_generator(parity_symbols,
                                     cached_generator,
@@ -8042,7 +8267,7 @@ namespace MetadataTile {
 
     
 ;
-    static u32 g_decode_palette_override_count = 0u;
+    static thread_local u32 g_decode_palette_override_count = 0u;
 
     // Scratch sampling window. The encoded metadata footprint is derived from
     // its content; this size is only used by the existing scan samplers.
@@ -8475,15 +8700,19 @@ namespace MetadataTile {
             values.ecc_block_data != expected_block_length - values.ecc_parity) return false;
         values.ecc_block_count = (source_symbols + values.ecc_block_data - 1u) /
                                  values.ecc_block_data;
-        if (!values.ecc_block_count || values.ecc_block_count >
-            (U64_MAX_VALUE / block_length) - 1u) return false;
-        u64 encoded_symbols = makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS +
-                              values.ecc_block_count * block_length;
-        if (encoded_symbols > U64_MAX_VALUE / 32u) return false;
-        u64 encoded_page_bits = encoded_symbols * 32u;
+        if (!values.ecc_block_count ||
+            values.ecc_block_count > U64_MAX_VALUE / block_length) return false;
+        u64 payload_symbols = values.ecc_block_count * block_length;
+        if (payload_symbols > U64_MAX_VALUE / 32u -
+                                  makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) return false;
+        u64 headerless_page_bits = payload_symbols * 32u;
+        u64 headed_page_bits =
+            (payload_symbols + makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) * 32u;
         if (requested_page_bits &&
-            (requested_page_bits < encoded_page_bits || (requested_page_bits & 31u))) return false;
-        values.page_bits = requested_page_bits ? requested_page_bits : encoded_page_bits;
+            ((requested_page_bits & 31u) ||
+             (requested_page_bits != headerless_page_bits &&
+              requested_page_bits < headed_page_bits))) return false;
+        values.page_bits = requested_page_bits ? requested_page_bits : headed_page_bits;
         values.page_count = 0u;
         values.overwrite_layout = true;
         return values.page_bits > 0u;
@@ -8535,7 +8764,8 @@ namespace MetadataTile {
         if (!write_compact_u64(writer, (u64)values.fiducial_spacing_pixels) ||
             !write_compact_u64(writer, (u64)values.fiducial_columns) ||
             !write_compact_u64(writer, (u64)values.fiducial_rows) ||
-            !writer.write_bit(values.palette_is_custom ? 1u : 0u)) return false;
+            !writer.write_bit(values.palette_is_custom ? 1u : 0u) ||
+            !writer.write_bit(values.metadata_ecc_minimum_parity_bytes >= 8u ? 1u : 0u)) return false;
 
         if (!writer.align_to_byte()) return false;
         usize bytes = writer.byte_size();
@@ -8654,14 +8884,22 @@ namespace MetadataTile {
         out_values.unknown_parity_budget = (u16)encoded_unknown_budget;
         out_values.ecc_block_data = (u16)encoded_block_data;
         if (!read_compact_u64(reader, value) ||
-            value < FIDUCIAL_MARKER_SIZE_PIXELS || value > 0xFFFFFFFFu) return false;
+            (value != 0u && value < FIDUCIAL_MARKER_SIZE_PIXELS) ||
+            value > 0xFFFFFFFFu) return false;
         out_values.fiducial_spacing_pixels = (u32)value;
         if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
         out_values.fiducial_columns = (u32)value;
         if (!read_compact_u64(reader, value) || value > 0xFFFFu) return false;
         out_values.fiducial_rows = (u32)value;
         out_values.palette_is_custom = reader.read_bit() != 0u;
+        out_values.metadata_ecc_minimum_parity_bytes = reader.read_bit() ? 8u : 2u;
         if (reader.failed) return false;
+        out_values.metadata_ecc_redundancy = out_values.ecc_block_data
+            ? (double)out_values.ecc_parity / (double)out_values.ecc_block_data
+            : 0.0;
+        if (out_values.metadata_ecc_redundancy > 0.25) {
+            out_values.metadata_ecc_redundancy = 0.25;
+        }
         if (!derive_schema_payload_layout(out_values)) return false;
         if (reader.failed || !metadata_values_sane(out_values)) return false;
         return build_palette_text_from_colors(out_values.palette,
@@ -8696,18 +8934,18 @@ namespace MetadataTile {
             !read_compact_u16(reader, metadata_payload_size) || metadata_payload_size == 0u ||
             !reader.align_to_byte()) return false;
         if (reader.cursor >= reader.bit_count || ((reader.bit_count - reader.cursor) & 7u)) return false;
-        ByteBuffer metadata_payload;
-        usize consumed_bytes = 0u;
-        if (!lzma_decompress(codeword.data + (reader.cursor >> 3u),
-                             reader.bit_count - reader.cursor,
-                             metadata_payload,
-                             (u64)metadata_payload_size,
-                             false,
-                             &consumed_bytes)) return false;
+        if ((reader.cursor & 7u) != 0u) return false;
         usize metadata_header_bytes = (usize)reader.cursor >> 3u;
         usize available_bytes = (usize)reader.bit_count >> 3u;
-        if (consumed_bytes > available_bytes - metadata_header_bytes) return false;
-        u64 actual_metadata_bits = (u64)(metadata_header_bytes + consumed_bytes) * 8u;
+        if (metadata_header_bytes > available_bytes ||
+            metadata_payload_size > available_bytes - metadata_header_bytes) return false;
+        ByteBuffer metadata_payload;
+        if (!metadata_payload.ensure(metadata_payload_size)) return false;
+        metadata_payload.size = metadata_payload_size;
+        memcpy(metadata_payload.data, codeword.data + metadata_header_bytes,
+               metadata_payload_size);
+        u64 actual_metadata_bits =
+            (u64)(metadata_header_bytes + metadata_payload_size) * 8u;
         if (actual_metadata_bits == 0u || actual_metadata_bits > metadata_bit_count ||
             actual_metadata_bits > 0xFFFFFFFFu) return false;
         if (!decode_metadata_payload_bytes(metadata_payload.data,
@@ -8745,6 +8983,38 @@ namespace MetadataTile {
         return placement;
     }
 
+    bool build_active_guard_mask(const u8* active_mask,
+                                 usize active_mask_size,
+                                 u8* guard_mask,
+                                 usize guard_mask_size) {
+        const usize cell_count = (usize)TILE_SIDE * TILE_SIDE;
+        if (!active_mask || !guard_mask || active_mask == guard_mask ||
+            active_mask_size != cell_count || guard_mask_size != cell_count) return false;
+        memset(guard_mask, 0, cell_count);
+        for (u32 y = 0u; y < TILE_SIDE; ++y) {
+            for (u32 x = 0u; x < TILE_SIDE; ++x) {
+                usize cell = (usize)y * TILE_SIDE + x;
+                if (!active_mask[cell]) continue;
+                guard_mask[cell] = 1u;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int neighbor_x = (int)x + dx;
+                        int neighbor_y = (int)y + dy;
+                        if (neighbor_x < 0 || neighbor_x >= (int)TILE_SIDE ||
+                            neighbor_y < 0 || neighbor_y >= (int)TILE_SIDE ||
+                            (dx == 0 && dy == 0)) continue;
+                        usize neighbor = (usize)neighbor_y * TILE_SIDE +
+                                         (usize)neighbor_x;
+                        if (!active_mask[neighbor] && !guard_mask[neighbor]) {
+                            guard_mask[neighbor] = 2u;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     bool build_payload_rank_map(u32 width_pixels,
                                        u32 data_height_pixels,
                                        const Placement& placement,
@@ -8779,8 +9049,6 @@ namespace MetadataTile {
               square_page_y + (i64)square_side > (i64)data_height_pixels))) {
             return false;
         }
-        i64 tile_page_x = (i64)placement.x0 - (i64)placement.offset_x;
-        i64 tile_page_y = (i64)placement.y0 - (i64)placement.offset_y;
         if (cache && (&rank_map == &cache->reserved_mask ||
                       &rank_map == &cache->base_rank_map)) return false;
         if (cache && rank_map.data) {
@@ -8838,6 +9106,8 @@ namespace MetadataTile {
             if (include_metadata_overwrites) {
                 u64 x = index % width_pixels;
                 u64 y = index / width_pixels;
+                i64 tile_page_x = (i64)placement.x0 - (i64)placement.offset_x;
+                i64 tile_page_y = (i64)placement.y0 - (i64)placement.offset_y;
                 if ((i64)x >= tile_page_x &&
                     (i64)x < tile_page_x + TILE_SIDE &&
                     (i64)y >= tile_page_y &&
@@ -8846,74 +9116,8 @@ namespace MetadataTile {
             ranks[index] = next_rank++;
             return next_rank != U64_MAX_VALUE;
         };
-        if (marker_free_grid) {
-            for (u64 index = 0u; index < pixel_count; ++index) {
-                if (!append_pixel(index)) return false;
-            }
-        } else {
-            usize first_square_cell = include_metadata_overwrites ? 0u : metadata_cells;
-            for (usize cell = first_square_cell; cell < square_cells; ++cell) {
-                u32 x = (u32)(square_page_x + (i64)(cell % square_side));
-                u32 y = (u32)(square_page_y + (i64)(cell / square_side));
-                if (!append_pixel((u64)y * width_pixels + x)) return false;
-            }
-            u32 square_x0 = (u32)square_page_x;
-            u32 square_y0 = (u32)square_page_y;
-            i64 square_left = (i64)square_x0;
-            i64 square_top = (i64)square_y0;
-            i64 square_right = square_left + (i64)square_side - 1;
-            i64 square_bottom = square_top + (i64)square_side - 1;
-            u64 max_radius = square_x0;
-            u64 right_radius = (u64)width_pixels - 1u - (u64)square_right;
-            u64 bottom_radius = (u64)data_height_pixels - 1u - (u64)square_bottom;
-            if (right_radius > max_radius) max_radius = right_radius;
-            if (square_y0 > max_radius) max_radius = square_y0;
-            if (bottom_radius > max_radius) max_radius = bottom_radius;
-            for (u64 radius = 1u; radius <= max_radius; ++radius) {
-            i64 left = square_left - (i64)radius;
-            i64 right = square_right + (i64)radius;
-            i64 top = square_top - (i64)radius;
-            i64 bottom = square_bottom + (i64)radius;
-            i64 center_left = left + (right - left) / 2;
-            for (i64 offset = 0; center_left + offset <= right || center_left - 1 - offset >= left;
-                 ++offset) {
-                i64 right_x = center_left + offset;
-                if (right_x <= right && right_x >= 0 && right_x < (i64)width_pixels &&
-                    bottom >= 0 && bottom < (i64)data_height_pixels &&
-                    !append_pixel((u64)bottom * width_pixels + (u64)right_x)) return false;
-                i64 left_x = center_left - 1 - offset;
-                if (left_x >= left && left_x >= 0 && left_x < (i64)width_pixels &&
-                    bottom >= 0 && bottom < (i64)data_height_pixels &&
-                    !append_pixel((u64)bottom * width_pixels + (u64)left_x)) return false;
-            }
-            for (i64 y = bottom - 1; y > top; --y) {
-                if (y >= 0 && y < (i64)data_height_pixels) {
-                    if (right >= 0 && right < (i64)width_pixels &&
-                        !append_pixel((u64)y * width_pixels + (u64)right)) return false;
-                    if (left >= 0 && left < (i64)width_pixels &&
-                        !append_pixel((u64)y * width_pixels + (u64)left)) return false;
-                }
-            }
-            i64 top_center_left = left + (right - left) / 2;
-            for (i64 offset = 0; top_center_left + offset <= right ||
-                                 top_center_left - 1 - offset >= left; ++offset) {
-                i64 right_x = top_center_left + offset;
-                if (right_x <= right && right_x >= 0 && right_x < (i64)width_pixels &&
-                    top >= 0 && top < (i64)data_height_pixels &&
-                    !append_pixel((u64)top * width_pixels + (u64)right_x)) return false;
-                i64 left_x = top_center_left - 1 - offset;
-                if (left_x >= left && left_x >= 0 && left_x < (i64)width_pixels &&
-                    top >= 0 && top < (i64)data_height_pixels &&
-                    !append_pixel((u64)top * width_pixels + (u64)left_x)) return false;
-            }
-            }
-            for (u32 y = 0u; y < data_height_pixels; ++y) {
-                for (u32 x = 0u; x < width_pixels; ++x) {
-                    if (x >= square_x0 && x < square_x0 + square_side &&
-                        y >= square_y0 && y < square_y0 + square_side) continue;
-                    if (!append_pixel((u64)y * width_pixels + x)) return false;
-                }
-            }
+        for (u64 index = 0u; index < pixel_count; ++index) {
+            if (!append_pixel(index)) return false;
         }
         payload_pixel_count = next_rank;
         if (cache && (!reserved_mask_size || reserved_mask) &&
@@ -8955,7 +9159,10 @@ namespace MetadataTile {
         if (pixel_count > (u64)USIZE_MAX_VALUE / sizeof(u64) ||
             rank_map.size != (usize)pixel_count * sizeof(u64)) return false;
         u64* ranks = (u64*)rank_map.data;
-        if (symbol_placement_seed && payload_pixel_count >= 16u) {
+        if (payload_pixel_count >= 16u) {
+            if (!symbol_placement_seed) {
+                symbol_placement_seed = PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+            }
             u64 group_count = payload_pixel_count / 8u;
             if (group_count > (u64)USIZE_MAX_VALUE / sizeof(u64)) return false;
             ByteBuffer permutation;
@@ -9010,6 +9217,51 @@ namespace MetadataTile {
         return true;
     }
 
+    static bool metadata_palette_symbols_whiten(const PaletteColor* palette,
+                                                u32 palette_count,
+                                                u8* symbols,
+                                                usize symbol_count,
+                                                bool unwhiten) {
+        if (!palette || !symbols || !palette_count ||
+            palette_count > MAX_CUSTOM_PALETTE_COLORS) return false;
+        u8 context[8u] = {};
+        write_le_u32(context, palette_count);
+        write_le_u32(context + 4u, (u32)symbol_count);
+        u8 key[32] = {};
+        static const u8 domain[] = "MakoCode v0 metadata palette-symbol whitening";
+        if (!hmac_sha256(context, sizeof(context), domain,
+                         sizeof(domain) - 1u, key)) return false;
+        u8 nonce[12] = {};
+        u8 random_block[64] = {};
+        u64 counter = 0u;
+        usize random_offset = sizeof(random_block);
+        bool valid = true;
+        for (usize index = 0u; index < symbol_count; ++index) {
+            if (random_offset >= sizeof(random_block)) {
+                if (counter > 0xFFFFFFFFull) {
+                    valid = false;
+                    break;
+                }
+                chacha20_block(key, nonce, (u32)counter++, random_block);
+                random_offset = 0u;
+            }
+            u32 value = symbols[index];
+            if (value >= palette_count) {
+                valid = false;
+                break;
+            }
+            u32 mask = (u32)random_block[random_offset++] % palette_count;
+            symbols[index] = (u8)(unwhiten
+                ? (value >= mask ? value - mask : value + palette_count - mask)
+                : (value + mask) % palette_count);
+        }
+        memset(context, 0, sizeof(context));
+        memset(key, 0, sizeof(key));
+        memset(nonce, 0, sizeof(nonce));
+        memset(random_block, 0, sizeof(random_block));
+        return valid;
+    }
+
     static bool build_tile_bits(Values& values,
                                 ByteBuffer& out_bits /* size TILE_SIDE*TILE_SIDE, 0/1 */,
                                 ByteBuffer* out_active_mask = 0) {
@@ -9027,19 +9279,11 @@ namespace MetadataTile {
         ByteBuffer metadata_payload;
         if (!encode_metadata_payload_bytes(values, metadata_payload)) return false;
         if (metadata_payload.size == 0u || metadata_payload.size > 0xFFFFu) return false;
-        ByteBuffer compressed_metadata;
-        if (!lzma_compress(metadata_payload.data,
-                           metadata_payload.size,
-                           compressed_metadata,
-                           false)) return false;
-
         u32 parity_bytes = 0u;
         if (values.metadata_bit_count > 0u) {
             parity_bytes = values.metadata_ecc_bytes;
         } else if (values.metadata_ecc_redundancy > 0.0) {
-            // Preserve the prior ECC estimate, which included LZMA's
-            // eight-byte uncompressed-size header.
-            usize ecc_basis_bytes = compressed_metadata.size + 8u;
+            usize ecc_basis_bytes = metadata_payload.size;
             double parity_estimate = ceil((double)ecc_basis_bytes *
                                           values.metadata_ecc_redundancy);
             if (parity_estimate > 254.0) parity_estimate = 254.0;
@@ -9060,8 +9304,8 @@ namespace MetadataTile {
             !write_compact_u16(metadata_writer, parity_bytes) ||
             !write_compact_u16(metadata_writer, (u32)metadata_payload.size) ||
             !metadata_writer.align_to_byte()) return false;
-        for (usize i = 0u; i < compressed_metadata.size; ++i) {
-            if (!metadata_writer.write_bits((u64)compressed_metadata.data[i], 8u)) return false;
+        for (usize i = 0u; i < metadata_payload.size; ++i) {
+            if (!metadata_writer.write_bits((u64)metadata_payload.data[i], 8u)) return false;
         }
         if (!metadata_writer.align_to_byte()) return false;
         u32 metadata_bit_count = (u32)metadata_writer.bit_size();
@@ -9128,6 +9372,23 @@ namespace MetadataTile {
         usize metadata_length_bits = metadata_length_writer.bit_size();
         usize total_metadata_cells = metadata_length_bits + metadata_symbol_count;
         if (total_metadata_cells == 0u || total_metadata_cells > 0xFFFFu) return false;
+        ByteBuffer metadata_square_symbols;
+        if (!metadata_square_symbols.ensure(total_metadata_cells)) return false;
+        metadata_square_symbols.size = total_metadata_cells;
+        for (usize bit_cursor = 0u; bit_cursor < metadata_length_bits; ++bit_cursor) {
+            metadata_square_symbols.data[bit_cursor] =
+                (u8)((metadata_length_writer.data()[bit_cursor >> 3u] >>
+                      (bit_cursor & 7u)) & 1u);
+        }
+        if (metadata_symbol_count) {
+            memcpy(metadata_square_symbols.data + metadata_length_bits,
+                   metadata_symbols.data, metadata_symbol_count);
+        }
+        if (!metadata_palette_symbols_whiten(values.palette,
+                                             values.palette_count,
+                                             metadata_square_symbols.data,
+                                             metadata_square_symbols.size,
+                                             false)) return false;
         u32 square_side = 1u;
         while ((usize)square_side * (usize)square_side < total_metadata_cells) ++square_side;
         BitWriter outer_length_writer;
@@ -9175,20 +9436,11 @@ namespace MetadataTile {
                 (u8)((outer_length_writer.data()[bit_cursor >> 3u] >> (bit_cursor & 7u)) & 1u);
             if (out_active_mask) out_active_mask->data[cell] = 1u;
         }
-        for (usize bit_cursor = 0u; bit_cursor < metadata_length_bits; ++bit_cursor) {
-            u32 local_x = square_x0 + (u32)(bit_cursor % square_side);
-            u32 local_y = square_y0 + (u32)(bit_cursor / square_side);
-            usize cell = (usize)local_y * (usize)TILE_SIDE + (usize)local_x;
-            out_bits.data[cell] =
-                (u8)((metadata_length_writer.data()[bit_cursor >> 3u] >> (bit_cursor & 7u)) & 1u);
-            if (out_active_mask) out_active_mask->data[cell] = 1u;
-        }
-        for (usize symbol_cursor = 0u; symbol_cursor < metadata_symbol_count; ++symbol_cursor) {
-            usize square_cell = metadata_length_bits + symbol_cursor;
+        for (usize square_cell = 0u; square_cell < total_metadata_cells; ++square_cell) {
             u32 local_x = square_x0 + (u32)(square_cell % square_side);
             u32 local_y = square_y0 + (u32)(square_cell / square_side);
             usize cell = (usize)local_y * (usize)TILE_SIDE + (usize)local_x;
-            out_bits.data[cell] = metadata_symbols.data[symbol_cursor];
+            out_bits.data[cell] = metadata_square_symbols.data[square_cell];
             if (out_active_mask) out_active_mask->data[cell] = 1u;
         }
         values.encoded_tag = ((u64)values.palette_count << 32u) |
@@ -9297,6 +9549,7 @@ namespace MetadataTile {
                         if (symbol == 1u) length_data[x >> 3u] |= (u8)(1u << (x & 7u));
                     }
                     bool outer_length_read = false;
+                    bool outer_length_forced = false;
                     u32 total_metadata_cells = 0u;
                     usize outer_length_prefix_bits = 0u;
                     if (forced_total_metadata_cells > 0u) {
@@ -9307,6 +9560,7 @@ namespace MetadataTile {
                                 total_metadata_cells = forced_total_metadata_cells;
                                 outer_length_prefix_bits = inferred_outer_length.bit_size();
                                 outer_length_read = true;
+                                outer_length_forced = true;
                             }
                         }
                     } else {
@@ -9325,6 +9579,21 @@ namespace MetadataTile {
                                 candidate_cells > 0xFFFFu) continue;
                             usize candidate_prefix_bits = (usize)candidate_reader.cursor;
                             if (start != (TILE_SIDE - candidate_prefix_bits) / 2u) continue;
+                            BitWriter canonical_candidate;
+                            if (!write_compact_u16(canonical_candidate, candidate_cells) ||
+                                canonical_candidate.bit_size() != candidate_prefix_bits) continue;
+                            bool canonical_candidate_matches = true;
+                            for (usize bit = 0u; bit < candidate_prefix_bits; ++bit) {
+                                u8 observed = (u8)((candidate_data[bit >> 3u] >>
+                                                   (bit & 7u)) & 1u);
+                                u8 expected = (u8)((canonical_candidate.data()[bit >> 3u] >>
+                                                   (bit & 7u)) & 1u);
+                                if (observed != expected) {
+                                    canonical_candidate_matches = false;
+                                    break;
+                                }
+                            }
+                            if (!canonical_candidate_matches) continue;
                             bool candidate_symbols_valid = true;
                             for (usize bit = 0u; bit < candidate_prefix_bits; ++bit) {
                                 if (!length_symbol_valid[start + (u32)bit]) {
@@ -9344,13 +9613,52 @@ namespace MetadataTile {
                         }
                     }
                     if (!outer_length_read || total_metadata_cells > square_cells) continue;
+                    BitWriter canonical_outer_length;
+                    if (!write_compact_u16(canonical_outer_length,
+                                           total_metadata_cells) ||
+                        canonical_outer_length.bit_size() !=
+                            outer_length_prefix_bits) continue;
+                    u32 canonical_outer_start =
+                        (TILE_SIDE - (u32)canonical_outer_length.bit_size()) / 2u;
+                    if (!outer_length_forced) {
+                        bool canonical_outer_bits_match = true;
+                        for (usize bit = 0u;
+                             bit < canonical_outer_length.bit_size(); ++bit) {
+                            if (!length_symbol_valid[canonical_outer_start + (u32)bit]) {
+                                canonical_outer_bits_match = false;
+                                break;
+                            }
+                            u8 observed = (u8)((length_data[
+                                (canonical_outer_start + (u32)bit) >> 3u] >>
+                                ((canonical_outer_start + (u32)bit) & 7u)) & 1u);
+                            u8 expected = (u8)((canonical_outer_length.data()[bit >> 3u] >>
+                                (bit & 7u)) & 1u);
+                            if (observed != expected) {
+                                canonical_outer_bits_match = false;
+                                break;
+                            }
+                        }
+                        if (!canonical_outer_bits_match) continue;
+                    }
 
-                    u8 inner_length_data[(TILE_SIDE * TILE_SIDE + 7u) / 8u] = {};
-                    u8 inner_length_symbol_valid[TILE_SIDE * TILE_SIDE] = {};
-                    for (usize cell = 0u; cell < square_cells; ++cell) {
+                    ByteBuffer metadata_square_symbols;
+                    if (!metadata_square_symbols.ensure(total_metadata_cells)) return false;
+                    metadata_square_symbols.size = total_metadata_cells;
+                    for (usize cell = 0u; cell < total_metadata_cells; ++cell) {
                         u32 x = square_x0 + (u32)(cell % square_side);
                         u32 y = square_y0 + (u32)(cell / square_side);
-                        u32 symbol = palette_symbol(x, y, tag_palette, tag_palette_count);
+                        metadata_square_symbols.data[cell] =
+                            (u8)palette_symbol(x, y, tag_palette, tag_palette_count);
+                    }
+                    if (!metadata_palette_symbols_whiten(tag_palette,
+                                                         tag_palette_count,
+                                                         metadata_square_symbols.data,
+                                                         metadata_square_symbols.size,
+                                                         true)) continue;
+                    u8 inner_length_data[(TILE_SIDE * TILE_SIDE + 7u) / 8u] = {};
+                    u8 inner_length_symbol_valid[TILE_SIDE * TILE_SIDE] = {};
+                    for (usize cell = 0u; cell < total_metadata_cells; ++cell) {
+                        u32 symbol = metadata_square_symbols.data[cell];
                         inner_length_symbol_valid[cell] = symbol <= 1u ? 1u : 0u;
                         if (symbol == 1u) {
                             inner_length_data[cell >> 3u] |= (u8)(1u << (cell & 7u));
@@ -9384,10 +9692,8 @@ namespace MetadataTile {
                     if (is_power_of_two_u32(tag_palette_count)) {
                         u32 bits_per_symbol = log2_u32(tag_palette_count);
                         for (usize symbol_index = 0u; symbol_index < body_prefix_symbols; ++symbol_index) {
-                            usize square_cell = length_prefix_bits + symbol_index;
-                            u32 x = square_x0 + (u32)(square_cell % square_side);
-                            u32 y = square_y0 + (u32)(square_cell / square_side);
-                            u32 symbol = palette_symbol(x, y, tag_palette, tag_palette_count);
+                            u32 symbol = metadata_square_symbols.data[
+                                length_prefix_bits + symbol_index];
                             for (u32 bit = 0u; bit < bits_per_symbol; ++bit) {
                                 usize bit_index = symbol_index * bits_per_symbol + bit;
                                 if (bit_index >= body_prefix_bits) break;
@@ -9397,10 +9703,8 @@ namespace MetadataTile {
                         }
                     } else {
                         for (usize symbol_index = metadata_symbol_count; symbol_index > 0u; --symbol_index) {
-                            usize square_cell = length_prefix_bits + symbol_index - 1u;
-                            u32 x = square_x0 + (u32)(square_cell % square_side);
-                            u32 y = square_y0 + (u32)(square_cell / square_side);
-                            u32 carry = palette_symbol(x, y, tag_palette, tag_palette_count);
+                            u32 carry = metadata_square_symbols.data[
+                                length_prefix_bits + symbol_index - 1u];
                             for (usize byte = 0u; byte < sizeof(body_prefix_data); ++byte) {
                                 u32 value = (u32)body_prefix_data[byte] * tag_palette_count + carry;
                                 body_prefix_data[byte] = (u8)value;
@@ -9433,9 +9737,7 @@ namespace MetadataTile {
                                                           ? symbol_count_for_bits(codeword_bits,
                                                                                   tag_palette_count)
                                                           : (usize)metadata_symbol_count;
-                        if (length_prefix_bits + codeword_symbol_count > square_cells) continue;
-                        if (forced_total_metadata_cells > 0u &&
-                            is_power_of_two_u32(tag_palette_count) &&
+                        if (length_prefix_bits + codeword_symbol_count > square_cells ||
                             length_prefix_bits + codeword_symbol_count !=
                                 total_metadata_cells) continue;
 
@@ -9447,10 +9749,8 @@ namespace MetadataTile {
                         if (is_power_of_two_u32(tag_palette_count)) {
                             u32 bits_per_symbol = log2_u32(tag_palette_count);
                             for (usize symbol_index = 0u; symbol_index < codeword_symbol_count; ++symbol_index) {
-                                usize square_cell = length_prefix_bits + symbol_index;
-                                u32 x = square_x0 + (u32)(square_cell % square_side);
-                                u32 y = square_y0 + (u32)(square_cell / square_side);
-                                u32 symbol = palette_symbol(x, y, tag_palette, tag_palette_count);
+                                u32 symbol = metadata_square_symbols.data[
+                                    length_prefix_bits + symbol_index];
                                 for (u32 bit = 0u; bit < bits_per_symbol; ++bit) {
                                     usize bit_index = symbol_index * bits_per_symbol + bit;
                                     if (bit_index >= codeword_bits) break;
@@ -9463,17 +9763,12 @@ namespace MetadataTile {
                         } else {
                             if (forced_total_metadata_cells > 0u &&
                                 codeword_symbol_count > 0u) {
-                                usize last_cell = length_prefix_bits + codeword_symbol_count - 1u;
-                                u32 last_x = square_x0 + (u32)(last_cell % square_side);
-                                u32 last_y = square_y0 + (u32)(last_cell / square_side);
-                                if (palette_symbol(last_x, last_y, tag_palette,
-                                                   tag_palette_count) == 0u) continue;
+                                if (metadata_square_symbols.data[
+                                        length_prefix_bits + codeword_symbol_count - 1u] == 0u) continue;
                             }
                             for (usize symbol_index = codeword_symbol_count; symbol_index > 0u; --symbol_index) {
-                                usize square_cell = length_prefix_bits + symbol_index - 1u;
-                                u32 x = square_x0 + (u32)(square_cell % square_side);
-                                u32 y = square_y0 + (u32)(square_cell / square_side);
-                                u32 carry = palette_symbol(x, y, tag_palette, tag_palette_count);
+                                u32 carry = metadata_square_symbols.data[
+                                    length_prefix_bits + symbol_index - 1u];
                                 for (usize byte = 0u; byte < codeword.size; ++byte) {
                                     u32 value = (u32)codeword.data[byte] * tag_palette_count + carry;
                                     codeword.data[byte] = (u8)value;
@@ -9892,7 +10187,8 @@ namespace MetadataTile {
                                                     inversion != 0u);
                     if (value) ++observed_one_modules;
                     else ++observed_zero_modules;
-                    if (value != makocode_tag_bit(bit)) ++marker_errors;
+                    bool expected = makocode_tag_bit(bit);
+                    if (value != expected) ++marker_errors;
                 }
                 if (!ignore_marker &&
                     (observed_one_modules == 0u || observed_zero_modules == 0u)) continue;
@@ -9937,9 +10233,19 @@ namespace MetadataTile {
                                 candidate_cells > square_cells) continue;
                             usize prefix_bits = (usize)outer_reader.cursor;
                             if (start != (TILE_SIDE - prefix_bits) / 2u) continue;
+                            BitWriter canonical_prefix;
+                            if (!write_compact_u16(canonical_prefix, candidate_cells) ||
+                                canonical_prefix.bit_size() != prefix_bits) continue;
                             bool prefix_valid = true;
                             for (usize bit = 0u; bit < prefix_bits; ++bit) {
-                                if (!row_valid[start + (u32)bit]) { prefix_valid = false; break; }
+                                u8 observed = (u8)((candidate_data[bit >> 3u] >>
+                                                    (bit & 7u)) & 1u);
+                                u8 expected = (u8)((canonical_prefix.data()[bit >> 3u] >>
+                                                    (bit & 7u)) & 1u);
+                                if (!row_valid[start + (u32)bit] || observed != expected) {
+                                    prefix_valid = false;
+                                    break;
+                                }
                             }
                             u32 expected_side = 1u;
                             while ((usize)expected_side * expected_side < candidate_cells) ++expected_side;
@@ -10278,6 +10584,8 @@ namespace MetadataTile {
         // Estimate pixels-per-module. Prefer the caller's logical size hint; fall back to
         // the square-page heuristic when unavailable.
         double pitch_guess = 1.0;
+        u64 logical_page_width_guess = expected_logical_width;
+        u64 logical_page_height_guess = expected_logical_height;
         if (expected_logical_width > 0u && expected_logical_height > 0u) {
             double sx = (double)width_pixels / (double)expected_logical_width;
             double sy = (double)data_height_pixels / (double)expected_logical_height;
@@ -10295,6 +10603,8 @@ namespace MetadataTile {
         } else {
             u64 logical_guess = estimate_square_page_from_image(width_pixels, height_pixels);
             if (logical_guess > 0u) {
+                logical_page_width_guess = logical_guess;
+                logical_page_height_guess = logical_guess;
                 double sx = (double)width_pixels / (double)logical_guess;
                 double sy = (double)height_pixels / (double)logical_guess;
                 pitch_guess = 0.5 * (sx + sy);
@@ -10582,7 +10892,8 @@ namespace MetadataTile {
                                                        inverted,
                                                        confidence,
                                                        true,
-                                                       compact_image_search,
+                                                       compact_image_search ||
+                                                           fabs(pitch_x - pitch_y) > 0.03,
                                                        sample_scaled_cells) ||
                                 confidence < 0.55) continue;
                             Values candidate_values;
@@ -10742,7 +11053,9 @@ namespace MetadataTile {
                                           inverted,
                                           confidence,
                                           true,
-                                          compact_image_search,
+                                          compact_image_search ||
+                                              fabs(affine.pitch_x_pixels -
+                                                   affine.pitch_y_pixels) > 0.03,
                                           sample_scaled_cells);
             AffineParams fast_affine = affine;
             if (header_match && compact_image_search && sample_scaled_cells &&
@@ -11054,6 +11367,119 @@ namespace MetadataTile {
             return true;
         };
 
+        if (!compact_image_search && sample_scaled_cells &&
+            data_height_pixels == height_pixels &&
+            fabs(image_aspect - 1.0) <= 0.02) {
+            u64 logical_side = (u64)floor(
+                sqrt((double)width_pixels * (double)height_pixels) / 2.7 + 0.5);
+            if (logical_side >= TILE_SIDE && logical_side < width_pixels &&
+                logical_side < height_pixels) {
+                const double center_offsets[] = {0.0, -0.5, 0.5};
+                for (u32 center_offset = 0u;
+                     center_offset < sizeof(center_offsets) / sizeof(center_offsets[0]);
+                     ++center_offset) {
+                    AffineParams centered_point_affine = {};
+                    centered_point_affine.center_x =
+                        ((double)width_pixels - 1.0) * 0.5 +
+                        center_offsets[center_offset];
+                    centered_point_affine.center_y =
+                        ((double)height_pixels - 1.0) * 0.5 +
+                        center_offsets[center_offset];
+                    centered_point_affine.pitch_x_pixels =
+                        (double)width_pixels / (double)logical_side;
+                    centered_point_affine.pitch_y_pixels =
+                        (double)height_pixels / (double)logical_side;
+                    centered_point_affine.pitch_pixels =
+                        0.5 * (centered_point_affine.pitch_x_pixels +
+                               centered_point_affine.pitch_y_pixels);
+                    if (!could_match_tile_tag(centered_point_affine, false)) continue;
+                    u64 candidate_tag = 0u;
+                    bool candidate_inverted = false;
+                    double candidate_confidence = 0.0;
+                    if (!match_tile_tag_affine(pixel_data_rgb, width_pixels,
+                                               height_pixels, data_height_pixels,
+                                               centered_point_affine, candidate_tag,
+                                               candidate_inverted, candidate_confidence,
+                                               true, false, false) ||
+                        candidate_confidence < 0.55) continue;
+                    Values candidate_values;
+                    ByteBuffer candidate_palette_text;
+                    if (!decode_tile_affine(pixel_data_rgb, width_pixels,
+                                            height_pixels, data_height_pixels,
+                                            centered_point_affine, candidate_values,
+                                            candidate_palette_text, 0, false) ||
+                        !affine_metadata_plausible(candidate_values) ||
+                        !affine_page_geometry_matches(candidate_values,
+                                                      centered_point_affine)) continue;
+                    out_values = candidate_values;
+                    byte_buffer_move(out_palette_text, candidate_palette_text);
+                    if (found_affine_out) *found_affine_out = centered_point_affine;
+                    return true;
+                }
+            }
+        }
+
+        // A stretched scan can preserve the centered tile while using a different
+        // horizontal and vertical pitch. Try that exact page-extent estimate before
+        // the equal-pitch search grids below.
+        if (!compact_image_search && sample_scaled_cells) {
+            u64 logical_width_candidates[2] = {0u, 0u};
+            u64 logical_height_candidates[2] = {0u, 0u};
+            if (logical_page_width_guess > 0u && logical_page_height_guess > 0u) {
+                logical_width_candidates[1] = logical_page_width_guess;
+                logical_height_candidates[1] = logical_page_height_guess;
+            }
+            double geometric_side_value =
+                sqrt((double)width_pixels * (double)data_height_pixels) / 2.5;
+            if (geometric_side_value >= (double)TILE_SIDE &&
+                geometric_side_value <= 4294967295.0) {
+                u64 geometric_side = (u64)floor(geometric_side_value + 0.5);
+                logical_width_candidates[0] = geometric_side;
+                logical_height_candidates[0] = geometric_side;
+            } else {
+                logical_width_candidates[0] = logical_page_width_guess;
+                logical_height_candidates[0] = logical_page_height_guess;
+            }
+            const int side_offsets[] = {0, -1, 1, -2, 2};
+            const double center_offsets[] = {0.0, -0.25, 0.25, -0.5, 0.5};
+            for (u32 side_guess_index = 0u;
+                 side_guess_index < 2u;
+                 ++side_guess_index) {
+                if (!logical_width_candidates[side_guess_index] ||
+                    !logical_height_candidates[side_guess_index]) continue;
+                for (u32 side_offset_index = 0u;
+                     side_offset_index < sizeof(side_offsets) / sizeof(side_offsets[0]);
+                     ++side_offset_index) {
+                    i64 logical_width = (i64)logical_width_candidates[side_guess_index] +
+                                        side_offsets[side_offset_index];
+                    i64 logical_height = (i64)logical_height_candidates[side_guess_index] +
+                                         side_offsets[side_offset_index];
+                    if (logical_width < (i64)TILE_SIDE ||
+                        logical_height < (i64)TILE_SIDE) continue;
+                    double pitch_x = (double)width_pixels / (double)logical_width;
+                    double pitch_y = (double)data_height_pixels / (double)logical_height;
+                    if (pitch_x < pitch_min || pitch_x > pitch_max ||
+                        pitch_y < pitch_min || pitch_y > pitch_max ||
+                        fabs(pitch_x - pitch_y) <= 0.03) continue;
+                    for (u32 center_y_index = 0u;
+                         center_y_index < sizeof(center_offsets) / sizeof(center_offsets[0]);
+                         ++center_y_index) {
+                        for (u32 center_x_index = 0u;
+                             center_x_index < sizeof(center_offsets) / sizeof(center_offsets[0]);
+                             ++center_x_index) {
+                            AffineParams affine = {};
+                            affine.center_x = base_center_x + center_offsets[center_x_index];
+                            affine.center_y = base_center_y + center_offsets[center_y_index];
+                            affine.pitch_x_pixels = pitch_x;
+                            affine.pitch_y_pixels = pitch_y;
+                            affine.pitch_pixels = 0.5 * (pitch_x + pitch_y);
+                            if (try_fast_affine(affine)) return true;
+                        }
+                    }
+                }
+            }
+        }
+
         if (!compact_image_search && data_height_pixels == height_pixels &&
             fabs((double)width_pixels / (double)height_pixels - 1.0) <= 0.02) {
             AffineParams native_page_affine = {};
@@ -11149,7 +11575,9 @@ namespace MetadataTile {
 
         if (compact_image_search && width_pixels < 160u && height_pixels < 160u) {
             const double center_offsets[] = {
-                -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0};
+                0.0, -0.5, 0.5, -1.0, 1.0, -1.5, 1.5, -2.0, 2.0};
+            const double angle_offsets[] = {
+                0.0, -0.5, 0.5, -1.0, 1.0, -1.25, 1.25, -1.5, 1.5};
             double common_pitch = ceil(pitch_min * 4.0) * 0.25;
             for (; common_pitch <= pitch_max && common_pitch <= 3.0;
                  common_pitch += 0.25) {
@@ -11168,39 +11596,45 @@ namespace MetadataTile {
                         affine.center_x = base_center_x + center_offsets[center_x_index];
                         affine.center_y = base_center_y + center_offsets[center_y_index];
                         bool candidate_scaled_cell_sampling = sample_scaled_cells || common_pitch >= 1.25;
-                if (!could_match_tile_tag(affine, candidate_scaled_cell_sampling)) continue;
-                        u64 header = 0u;
-                        bool inverted = false;
-                        double confidence = 0.0;
-                        if (!match_tile_tag_affine(pixel_data_rgb,
-                                                   width_pixels,
-                                                   height_pixels,
-                                                   data_height_pixels,
-                                                   affine,
-                                                   header,
-                                                   inverted,
-                                                   confidence,
-                                                   true,
-                                                   true,
-                                                   candidate_scaled_cell_sampling) ||
-                            confidence < 0.78) continue;
-                        Values candidate_values;
-                        ByteBuffer candidate_palette_text;
-                        if (!decode_tile_affine(pixel_data_rgb,
-                                                width_pixels,
-                                                height_pixels,
-                                                data_height_pixels,
-                                                affine,
-                                                candidate_values,
-                                                candidate_palette_text,
-                                                0,
-                                                candidate_scaled_cell_sampling) ||
-                            !affine_metadata_plausible(candidate_values) ||
-                            !affine_page_geometry_matches(candidate_values, affine)) continue;
-                        out_values = candidate_values;
-                        byte_buffer_move(out_palette_text, candidate_palette_text);
-                        if (found_affine_out) *found_affine_out = affine;
-                        return true;
+                        for (u32 angle_index = 0u;
+                             angle_index < sizeof(angle_offsets) / sizeof(angle_offsets[0]);
+                             ++angle_index) {
+                            affine.angle_rad = angle_offsets[angle_index] *
+                                (3.14159265358979323846 / 180.0);
+                            if (!could_match_tile_tag(affine, candidate_scaled_cell_sampling)) continue;
+                            u64 header = 0u;
+                            bool inverted = false;
+                            double confidence = 0.0;
+                            if (!match_tile_tag_affine(pixel_data_rgb,
+                                                       width_pixels,
+                                                       height_pixels,
+                                                       data_height_pixels,
+                                                       affine,
+                                                       header,
+                                                       inverted,
+                                                       confidence,
+                                                       true,
+                                                       true,
+                                                       candidate_scaled_cell_sampling) ||
+                                confidence < 0.78) continue;
+                            Values candidate_values;
+                            ByteBuffer candidate_palette_text;
+                            if (!decode_tile_affine(pixel_data_rgb,
+                                                    width_pixels,
+                                                    height_pixels,
+                                                    data_height_pixels,
+                                                    affine,
+                                                    candidate_values,
+                                                    candidate_palette_text,
+                                                    0,
+                                                    candidate_scaled_cell_sampling) ||
+                                !affine_metadata_plausible(candidate_values) ||
+                                !affine_page_geometry_matches(candidate_values, affine)) continue;
+                            out_values = candidate_values;
+                            byte_buffer_move(out_palette_text, candidate_palette_text);
+                            if (found_affine_out) *found_affine_out = affine;
+                            return true;
+                        }
                     }
                 }
             }
@@ -13737,13 +14171,21 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
             double robust_sy_screen_x = 0.0;
             double robust_sx_screen_y = 0.0;
             double robust_sy_screen_y = 0.0;
+            bool candidate_grid_coverage = robust_count * 4u >= visible_count * 3u;
+            u32 candidate_min_row = fiducial_rows;
+            u32 candidate_max_row = 0u;
+            u32 candidate_min_column = fiducial_columns;
+            u32 candidate_max_column = 0u;
             for (u32 row = 0u; row < fiducial_rows; ++row) {
                 double logical_y = fiducial_lattice_center(row, fiducial_rows,
                                                            logical_data_height, fiducial_spacing);
                 double centered_y = logical_y - robust_mean_y;
+                u32 visible_in_row = 0u;
+                u32 inliers_in_row = 0u;
                 for (u32 col = 0u; col < fiducial_columns; ++col) {
                     usize idx = (usize)row * (usize)fiducial_columns + col;
                     if (!visible_mask[idx]) continue;
+                    ++visible_in_row;
                     double logical_x = fiducial_lattice_center(col, fiducial_columns,
                                                                (u32)expected_width, fiducial_spacing);
                     double residual_x = centers_x[idx] - (out_affine->a00 * logical_x +
@@ -13751,6 +14193,11 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                     double residual_y = centers_y[idx] - (out_affine->a10 * logical_x +
                                                             out_affine->a11 * logical_y + out_affine->ty);
                     if (residual_x * residual_x + residual_y * residual_y > residual_limit_sq) continue;
+                    ++inliers_in_row;
+                    if (row < candidate_min_row) candidate_min_row = row;
+                    if (row > candidate_max_row) candidate_max_row = row;
+                    if (col < candidate_min_column) candidate_min_column = col;
+                    if (col > candidate_max_column) candidate_max_column = col;
                     double centered_x = logical_x - robust_mean_x;
                     double centered_screen_x = centers_x[idx] - robust_mean_screen_x;
                     double centered_screen_y = centers_y[idx] - robust_mean_screen_y;
@@ -13762,7 +14209,40 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                     robust_sx_screen_y += centered_x * centered_screen_y;
                     robust_sy_screen_y += centered_y * centered_screen_y;
                 }
+                if (visible_in_row >= 4u && inliers_in_row * 2u < visible_in_row) {
+                    candidate_grid_coverage = false;
+                }
             }
+            for (u32 col = 0u; col < fiducial_columns && candidate_grid_coverage; ++col) {
+                u32 visible_in_column = 0u;
+                u32 inliers_in_column = 0u;
+                double logical_x = fiducial_lattice_center(col, fiducial_columns,
+                                                           (u32)expected_width, fiducial_spacing);
+                for (u32 row = 0u; row < fiducial_rows; ++row) {
+                    usize idx = (usize)row * (usize)fiducial_columns + col;
+                    if (!visible_mask[idx]) continue;
+                    ++visible_in_column;
+                    double logical_y = fiducial_lattice_center(row, fiducial_rows,
+                                                               logical_data_height, fiducial_spacing);
+                    double residual_x = centers_x[idx] -
+                        (out_affine->a00 * logical_x + out_affine->a01 * logical_y + out_affine->tx);
+                    double residual_y = centers_y[idx] -
+                        (out_affine->a10 * logical_x + out_affine->a11 * logical_y + out_affine->ty);
+                    if (residual_x * residual_x + residual_y * residual_y <= residual_limit_sq) {
+                        ++inliers_in_column;
+                    }
+                }
+                if (visible_in_column >= 4u && inliers_in_column * 2u < visible_in_column) {
+                    candidate_grid_coverage = false;
+                }
+            }
+            if (candidate_min_row > min_visible_row + 1u ||
+                candidate_max_row + 1u < max_visible_row ||
+                candidate_min_column > min_visible_col + 1u ||
+                candidate_max_column + 1u < max_visible_col) {
+                candidate_grid_coverage = false;
+            }
+            if (!candidate_grid_coverage) break;
             double robust_det = robust_sxx * robust_syy - robust_sxy * robust_sxy;
             if (robust_det <= 1e-9) break;
             double robust_a00 = (robust_sx_screen_x * robust_syy -
@@ -13773,14 +14253,42 @@ static bool auto_detect_rotation_from_fiducials(const double* centers_x,
                                  robust_sy_screen_y * robust_sxy) / robust_det;
             double robust_a11 = (robust_sy_screen_y * robust_sxx -
                                  robust_sx_screen_y * robust_sxy) / robust_det;
-            out_affine->a00 = robust_a00;
-            out_affine->a01 = robust_a01;
-            out_affine->a10 = robust_a10;
-            out_affine->a11 = robust_a11;
-            out_affine->tx = robust_mean_screen_x - robust_a00 * robust_mean_x -
-                             robust_a01 * robust_mean_y;
-            out_affine->ty = robust_mean_screen_y - robust_a10 * robust_mean_x -
-                             robust_a11 * robust_mean_y;
+            AffineTransform refined_affine = *out_affine;
+            refined_affine.a00 = robust_a00;
+            refined_affine.a01 = robust_a01;
+            refined_affine.a10 = robust_a10;
+            refined_affine.a11 = robust_a11;
+            refined_affine.tx = robust_mean_screen_x - robust_a00 * robust_mean_x -
+                                robust_a01 * robust_mean_y;
+            refined_affine.ty = robust_mean_screen_y - robust_a10 * robust_mean_x -
+                                robust_a11 * robust_mean_y;
+            double current_robust_score = 0.0;
+            double refined_robust_score = 0.0;
+            for (u32 row = 0u; row < fiducial_rows; ++row) {
+                double logical_y = fiducial_lattice_center(row, fiducial_rows,
+                                                           logical_data_height, fiducial_spacing);
+                for (u32 col = 0u; col < fiducial_columns; ++col) {
+                    usize idx = (usize)row * (usize)fiducial_columns + col;
+                    if (!visible_mask[idx]) continue;
+                    double logical_x = fiducial_lattice_center(col, fiducial_columns,
+                                                               (u32)expected_width, fiducial_spacing);
+                    double current_x = centers_x[idx] - (out_affine->a00 * logical_x +
+                        out_affine->a01 * logical_y + out_affine->tx);
+                    double current_y = centers_y[idx] - (out_affine->a10 * logical_x +
+                        out_affine->a11 * logical_y + out_affine->ty);
+                    double refined_x = centers_x[idx] - (refined_affine.a00 * logical_x +
+                        refined_affine.a01 * logical_y + refined_affine.tx);
+                    double refined_y = centers_y[idx] - (refined_affine.a10 * logical_x +
+                        refined_affine.a11 * logical_y + refined_affine.ty);
+                    double current_error = current_x * current_x + current_y * current_y;
+                    double refined_error = refined_x * refined_x + refined_y * refined_y;
+                    current_robust_score += current_error < 25.0 ? current_error : 25.0;
+                    refined_robust_score += refined_error < 25.0 ? refined_error : 25.0;
+                }
+            }
+            if (refined_robust_score + 0.05 * (double)visible_count >=
+                current_robust_score) break;
+            *out_affine = refined_affine;
         }
         double scale_x = sqrt(out_affine->a00 * out_affine->a00 + out_affine->a10 * out_affine->a10);
         double scale_y = sqrt(out_affine->a01 * out_affine->a01 + out_affine->a11 * out_affine->a11);
@@ -15510,7 +16018,8 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    bool detect_uniform_blots,
                                    bool known_tile_is_present,
                                    bool metadata_center_probe_only,
-                                   bool metadata_summary_only) {
+                                   bool metadata_summary_only,
+                                   u64 page_capacity_override) {
     if (frame_erasure_bits) frame_erasure_bits->release();
     if (overlay_selector_seed_out) *overlay_selector_seed_out = 0u;
     if (overlay_selector_counts_out) overlay_selector_counts_out->release();
@@ -15604,11 +16113,68 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     bool marker_orientation_detected = false;
     double marker_orientation_pitch = 0.0;
+    bool canonical_marker_detected = false;
+    if (!metadata_center_probe_only &&
+        !known_tile_override && !use_rgb_pixels_override &&
+        width <= 0x7FFFFFFFull && height <= 0x7FFFFFFFull) {
+        u32 best_errors = 33u;
+        for (u32 footer_rows = 0u; footer_rows < height; footer_rows += 8u) {
+            u32 data_height = (u32)height - footer_rows;
+            if (!data_height) continue;
+            MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
+                (u32)width, data_height);
+            if (!placement.valid) continue;
+            double center_x = (double)placement.x0 +
+                ((double)MetadataTile::TILE_SIDE - 1.0) * 0.5 -
+                (double)placement.offset_x;
+            double center_y = (double)placement.y0 +
+                ((double)MetadataTile::TILE_SIDE - 1.0) * 0.5 -
+                (double)placement.offset_y;
+            for (int tag_y = 0; tag_y <= 21; ++tag_y) {
+                double one_sum = 0.0;
+                double zero_sum = 0.0;
+                double samples[32];
+                bool positions_valid = true;
+                for (u32 bit = 0u; bit < 32u; ++bit) {
+                    int x = (int)floor(center_x + (double)(20u + (bit & 7u)) - 23.5 + 0.5);
+                    int y = (int)floor(center_y + (double)(tag_y + 1 + (int)(bit / 8u)) - 23.5 + 0.5);
+                    if (x < 0 || y < 0 || x >= (int)width || y >= (int)height) {
+                        positions_valid = false;
+                        break;
+                    }
+                    usize rgb = ((usize)y * (usize)width + (usize)x) * 3u;
+                    samples[bit] = 0.2126 * (double)pixel_data[rgb] +
+                                   0.7152 * (double)pixel_data[rgb + 1u] +
+                                   0.0722 * (double)pixel_data[rgb + 2u];
+                    if (MetadataTile::makocode_tag_bit(bit)) one_sum += samples[bit];
+                    else zero_sum += samples[bit];
+                }
+                if (!positions_valid) continue;
+                double threshold = 0.5 * (one_sum / 20.0 + zero_sum / 12.0);
+                for (u32 polarity = 0u; polarity < 2u; ++polarity) {
+                    u32 errors = 0u;
+                    for (u32 bit = 0u; bit < 32u; ++bit) {
+                        bool observed = samples[bit] < threshold;
+                        if (polarity) observed = !observed;
+                        if (observed != MetadataTile::makocode_tag_bit(bit)) ++errors;
+                    }
+                    if (errors < best_errors) best_errors = errors;
+                }
+                if (best_errors <= 1u) break;
+            }
+            if (best_errors <= 1u) break;
+        }
+        canonical_marker_detected = best_errors <= 1u;
+    }
+    if (metadata_summary_only && !canonical_marker_detected) return false;
     // The 4x8 tag is the only orientation-independent cue in a scan: locate
     // its known bit pattern around the centered metadata tile, then normalize
     // the raster before the regular (unoriented) tile decoder runs.
-    if (!metadata_center_probe_only && !known_tile_override &&
-        !use_rgb_pixels_override && width >= 80u && height >= 80u &&
+    if (!metadata_center_probe_only && !metadata_summary_only &&
+        !canonical_marker_detected &&
+        !known_tile_override &&
+        !use_rgb_pixels_override && width >= MetadataTile::TILE_SIDE * 2u &&
+        height >= MetadataTile::TILE_SIDE * 2u &&
         width <= 0xFFFFFFFFull && height <= 0xFFFFFFFFull) {
         double best_separation = 0.0;
         u32 best_errors = 33u;
@@ -15674,13 +16240,17 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                 double separation = fabs(one_mean - zero_mean);
                                 if (separation < 12.0) continue;
                                 double threshold = 0.5 * (one_mean + zero_mean);
+                                u32 polarity_errors[2] = {};
+                                for (u32 bit = 0u; bit < 32u; ++bit) {
+                                    bool dark = samples[bit] < threshold;
+                                    bool expected = MetadataTile::makocode_tag_bit(bit);
+                                    if (dark != expected) ++polarity_errors[0];
+                                    if ((!dark) != expected) ++polarity_errors[1];
+                                    if (polarity_errors[0] > 1u && polarity_errors[1] > 1u) break;
+                                }
                                 for (u32 polarity = 0u; polarity < 2u; ++polarity) {
-                                    u32 errors = 0u;
-                                    for (u32 bit = 0u; bit < 32u; ++bit) {
-                                        bool observed = samples[bit] < threshold;
-                                        if (polarity) observed = !observed;
-                                        if (observed != MetadataTile::makocode_tag_bit(bit)) ++errors;
-                                    }
+                                    u32 errors = polarity_errors[polarity];
+                                    if (errors > 1u) continue;
                                     if (errors < best_errors ||
                                         (errors == best_errors && separation > best_separation)) {
                                         best_errors = errors;
@@ -16053,12 +16623,13 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                         bool candidate_inverted = false;
                                         double candidate_confidence = 0.0;
                                         ++candidate_checks;
-                                        if (!MetadataTile::match_tile_tag_affine(
+                                        bool candidate_tag_matches = MetadataTile::match_tile_tag_affine(
                                                 pixel_data, (u32)width, (u32)height, (u32)height,
                                                 candidate_affine, candidate_tag, candidate_inverted,
                                                 candidate_confidence, true, false,
                                                 sample_scaled_metadata_tile, 0, 0,
-                                                max_marker_errors, ignore_marker)) continue;
+                                                max_marker_errors, ignore_marker);
+                                        if (!candidate_tag_matches) continue;
                                         ++ecc_attempts;
                                         MetadataTile::Values candidate_values;
                                         makocode::ByteBuffer candidate_palette_text;
@@ -16241,7 +16812,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                         if (debug_fiducial_csv) {
                                             console_line(2, ignore_marker
                                                 ? "decode: metadata ECC recovered from header length row"
-                                                : "decode: partial MAKO/CODE marker recovered by metadata ECC");
+                                                : "decode: metadata ECC recovered from marker-constrained search");
                                         }
                                         return true;
                                     }
@@ -16250,6 +16821,18 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                         }
                 }
             }
+        }
+        if (debug_fiducial_csv) {
+            char checks[32];
+            char attempts[32];
+            u64_to_ascii(candidate_checks, checks, sizeof(checks));
+            u64_to_ascii(ecc_attempts, attempts, sizeof(attempts));
+            console_write(2, ignore_marker
+                ? "decode: metadata length-row probe failed checks="
+                : "decode: metadata marker-constrained probe failed checks=");
+            console_write(2, checks);
+            console_write(2, " ECC attempts=");
+            console_line(2, attempts);
         }
         return false;
     };
@@ -16265,13 +16848,8 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     if (metadata_center_probe_only) {
         if (!tile_available || marker_orientation_detected ||
-            tile_values.page_width_pixels != width ||
-            tile_values.page_height_pixels != height ||
-            (!native_tile_available &&
-             (!tile_affine_hint_available ||
-              fabs(tile_affine_hint.pitch_x_pixels - 1.0) > 1e-9 ||
-              fabs(tile_affine_hint.pitch_y_pixels - 1.0) > 1e-9 ||
-              fabs(tile_affine_hint.angle_rad) > 1e-9))) return false;
+            !tile_values.page_width_pixels || !tile_values.page_height_pixels ||
+            (!native_tile_available && !tile_affine_hint_available)) return false;
         metadata_out = state;
         metadata_out.data = 0;
         metadata_out.size = 0u;
@@ -18812,7 +19390,7 @@ struct RotationEstimateCandidate {
                                                                             rotation_margin_est,
                                                                             &fiducial_affine,
                                                                             &fiducial_affine_valid,
-                                                                            centers_visible);
+                                                                            0);
                 if (debug_fiducial_csv) {
                     char estimate_text[32];
                     char affine_text[32];
@@ -20508,6 +21086,10 @@ struct RotationEstimateCandidate {
     if (!payload_rank_reservation_mask.ensure(fiducial_mask.size)) return false;
     payload_rank_reservation_mask.size = fiducial_mask.size;
     memcpy(payload_rank_reservation_mask.data, fiducial_mask.data, fiducial_mask.size);
+    makocode::ByteBuffer fiducial_only_reservation_mask;
+    if (!fiducial_only_reservation_mask.ensure(fiducial_mask.size)) return false;
+    fiducial_only_reservation_mask.size = fiducial_mask.size;
+    memcpy(fiducial_only_reservation_mask.data, fiducial_mask.data, fiducial_mask.size);
     u64 fiducial_reserved_data_pixels = reserved_data_pixels;
     MetadataTile::Placement metadata_placement = MetadataTile::compute_center_tile_placement(
         (u32)logical_width, (u32)data_height);
@@ -20527,23 +21109,27 @@ struct RotationEstimateCandidate {
             if (!fiducial_mask.data[index]) ++reserved_data_pixels;
             fiducial_mask.data[index] = OVERWRITE_MASK_PIXEL;
         };
+        u8 metadata_active_cells[MetadataTile::TILE_SIDE *
+                                 MetadataTile::TILE_SIDE] = {};
         u32 tag_y = state.encoded_tile.metadata_tag_y0;
         u32 tag_width = state.encoded_tile.palette_count + 1u;
         u32 palette_tag_x = MetadataTile::palette_tag_x0(state.encoded_tile.palette_count);
         for (u32 x = 0u; x < tag_width && x < MetadataTile::TILE_TAG_BITS; ++x) {
-            mark_metadata_overwrite(palette_tag_x + x, tag_y);
+            metadata_active_cells[(usize)tag_y * MetadataTile::TILE_SIDE +
+                                  palette_tag_x + x] = 1u;
         }
         u32 marker_x0 = MetadataTile::tag_marker_x0();
         for (u32 dy = 1u; dy < MetadataTile::TILE_TAG_ROWS; ++dy) {
             for (u32 x = 0u; x < MetadataTile::TILE_MARKER_WIDTH; ++x) {
-                mark_metadata_overwrite(marker_x0 + x, tag_y + dy);
+                metadata_active_cells[(usize)(tag_y + dy) * MetadataTile::TILE_SIDE +
+                                      marker_x0 + x] = 1u;
             }
         }
         u32 length_x0 = (MetadataTile::TILE_SIDE -
                          state.encoded_tile.metadata_outer_length_bits) / 2u;
         for (u32 x = 0u; x < state.encoded_tile.metadata_outer_length_bits; ++x) {
-            mark_metadata_overwrite(length_x0 + x,
-                                    tag_y + MetadataTile::TILE_LENGTH_ROW);
+            metadata_active_cells[(usize)(tag_y + MetadataTile::TILE_LENGTH_ROW) *
+                                      MetadataTile::TILE_SIDE + length_x0 + x] = 1u;
         }
         usize metadata_cells = (usize)state.encoded_tile.metadata_length_prefix_bits +
                                state.encoded_tile.metadata_symbol_count;
@@ -20555,7 +21141,19 @@ struct RotationEstimateCandidate {
                         (u32)(cell % state.encoded_tile.metadata_square_side);
                 u32 y = state.encoded_tile.metadata_square_y0 +
                         (u32)(cell / state.encoded_tile.metadata_square_side);
-                mark_metadata_overwrite(x, y);
+                metadata_active_cells[(usize)y * MetadataTile::TILE_SIDE + x] = 1u;
+            }
+        }
+        u8 metadata_guard_cells[MetadataTile::TILE_SIDE *
+                                MetadataTile::TILE_SIDE];
+        if (!MetadataTile::build_active_guard_mask(metadata_active_cells,
+                                                   sizeof(metadata_active_cells),
+                                                   metadata_guard_cells,
+                                                   sizeof(metadata_guard_cells))) return false;
+        for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+            for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
+                usize cell = (usize)y * MetadataTile::TILE_SIDE + x;
+                if (metadata_guard_cells[cell]) mark_metadata_overwrite(x, y);
             }
         }
     }
@@ -20575,7 +21173,7 @@ struct RotationEstimateCandidate {
                                               payload_rank_reservation_mask.size,
                                               payload_rank_map,
                                               payload_pixel_count,
-                                              true,
+                                              false,
                                               active_mapping.symbol_placement_seed) ||
         payload_pixel_count < 8u) return false;
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
@@ -20814,17 +21412,86 @@ struct RotationEstimateCandidate {
     }
     u64 capacity_without_reserve = 0u;
     if (palette_symbol_stream_mode) {
-        u64 capacity_pixels = total_data_pixels - fiducial_reserved_data_pixels;
-        if (state.has_encoded_tile && metadata_placement.valid) {
-            u64 tile_width = logical_width < MetadataTile::TILE_SIDE
-                                 ? logical_width : MetadataTile::TILE_SIDE;
-            u64 tile_height = data_height < MetadataTile::TILE_SIDE
-                                  ? data_height : MetadataTile::TILE_SIDE;
-            u64 metadata_tile_pixels = tile_width * tile_height;
-            if (metadata_tile_pixels > capacity_pixels) return false;
-            capacity_pixels -= metadata_tile_pixels;
+        u64 estimated_pages = 1u;
+        u64 canonical_capacity = 0u;
+        bool capacity_converged = false;
+        for (u32 pass = 0u; pass < 64u; ++pass) {
+            u64 max_reserved_pixels = fiducial_reserved_data_pixels;
+            u64 first_page_index = 1u;
+            for (u32 page_index_bits = 1u;
+                 page_index_bits <= 64u && first_page_index <= estimated_pages;
+                 ++page_index_bits) {
+                u64 last_page_index = page_index_bits == 64u
+                    ? U64_MAX_VALUE : (((u64)1u << page_index_bits) - 1u);
+                u64 candidate_page_index = estimated_pages < last_page_index
+                    ? estimated_pages : last_page_index;
+                MetadataTile::Values candidate_tile = state.encoded_tile;
+                candidate_tile.page_index = candidate_page_index;
+                candidate_tile.metadata_bit_count = 0u;
+                makocode::ByteBuffer candidate_tile_bits;
+                makocode::ByteBuffer candidate_active_mask;
+                if (!MetadataTile::build_tile_bits(candidate_tile,
+                                                   candidate_tile_bits,
+                                                   &candidate_active_mask) ||
+                    !candidate_active_mask.data ||
+                    candidate_active_mask.size !=
+                        (usize)MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE) {
+                    return false;
+                }
+                u64 reserved_pixels = fiducial_reserved_data_pixels;
+                for (u32 tile_y = 0u; tile_y < MetadataTile::TILE_SIDE; ++tile_y) {
+                    for (u32 tile_x = 0u; tile_x < MetadataTile::TILE_SIDE; ++tile_x) {
+                        usize local = (usize)tile_y * MetadataTile::TILE_SIDE + tile_x;
+                        bool reserved = candidate_active_mask.data[local] != 0u;
+                        for (int dy = -1; dy <= 1 && !reserved; ++dy) {
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                int neighbor_x = (int)tile_x + dx;
+                                int neighbor_y = (int)tile_y + dy;
+                                if (neighbor_x >= 0 &&
+                                    neighbor_x < (int)MetadataTile::TILE_SIDE &&
+                                    neighbor_y >= 0 &&
+                                    neighbor_y < (int)MetadataTile::TILE_SIDE &&
+                                    candidate_active_mask.data[(usize)neighbor_y *
+                                        MetadataTile::TILE_SIDE + (usize)neighbor_x]) {
+                                    reserved = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!reserved) continue;
+                        i64 page_x = (i64)metadata_placement.x0 + tile_x -
+                                     metadata_placement.offset_x;
+                        i64 page_y = (i64)metadata_placement.y0 + tile_y -
+                                     metadata_placement.offset_y;
+                        if (page_x < 0 || page_y < 0 ||
+                            page_x >= (i64)logical_width ||
+                            page_y >= (i64)data_height) return false;
+                        usize page_pixel = (usize)page_y * (usize)logical_width +
+                                           (usize)page_x;
+                        if (!fiducial_only_reservation_mask.data[page_pixel]) {
+                            ++reserved_pixels;
+                        }
+                    }
+                }
+                if (reserved_pixels > total_data_pixels) return false;
+                if (reserved_pixels > max_reserved_pixels) max_reserved_pixels = reserved_pixels;
+                if (last_page_index == U64_MAX_VALUE) break;
+                first_page_index = last_page_index + 1u;
+            }
+            u64 candidate_capacity =
+                ((total_data_pixels - max_reserved_pixels) / 8u) * 32u;
+            if (!candidate_capacity) return false;
+            u64 next_pages = (state.encoded_tile.page_bits - 1u) /
+                             candidate_capacity + 1u;
+            canonical_capacity = candidate_capacity;
+            if (next_pages == estimated_pages) {
+                capacity_converged = true;
+                break;
+            }
+            estimated_pages = next_pages;
         }
-        capacity_without_reserve = mapping_capacity_bits(active_mapping, capacity_pixels);
+        if (!capacity_converged) return false;
+        capacity_without_reserve = canonical_capacity;
     } else if (grouped_base_palette) {
         capacity_without_reserve = mapping_capacity_bits(active_mapping, usable_data_pixels);
     } else if (use_custom_palette && !custom_fixed_width) {
@@ -20838,6 +21505,11 @@ struct RotationEstimateCandidate {
                                    (u64)samples_per_pixel;
     }
     u64 capacity_with_reserve = capacity_without_reserve;
+    if (palette_symbol_stream_mode && page_capacity_override) {
+        if ((page_capacity_override & 31u) != 0u ||
+            page_capacity_override > capacity_with_reserve) return false;
+        capacity_with_reserve = page_capacity_override;
+    }
     if (state.has_encoded_tile) {
         if (capacity_with_reserve == 0u || state.encoded_tile.page_bits == 0u) return false;
         u64 derived_page_count = (state.encoded_tile.page_bits - 1u) / capacity_with_reserve + 1u;
@@ -20850,6 +21522,7 @@ struct RotationEstimateCandidate {
         if (!state.has_encoded_tile ||
             !metadata_schema_is_current(state.encoded_tile.schema_version) ||
             !state.encoded_tile.page_count || !state.encoded_tile.page_index) return false;
+        if (page_capacity_bits_out) *page_capacity_bits_out = capacity_with_reserve;
         if (overlay_selector_seed_out) {
             *overlay_selector_seed_out = state.encoded_tile.overlay_selector_seed;
         }
@@ -24714,6 +25387,7 @@ struct RotationEstimateCandidate {
             u8 skew_rgb[3];
             u8 cell_rgb[3];
             bool cell_sampled = false;
+            bool palette_sample_ambiguous = false;
             if (tile_anchored_axis_affine_valid && !alternating_white_damage &&
                 !sample_scaled_cells && !use_custom_palette &&
                 !anchored_area_sample &&
@@ -25014,6 +25688,16 @@ struct RotationEstimateCandidate {
                             }
                         } else {
                             ++white_count;
+                            if (use_custom_palette && palette_symbol_stream_mode &&
+                                palette_symbol_palette_size == 2u) {
+                                u32 sampled_symbol = 0u;
+                                map_rgb_to_custom_symbol(active_mapping,
+                                                         pixel_data + idx,
+                                                         sampled_symbol);
+                                if (sampled_symbol < cell_palette_size) {
+                                    ++palette_symbol_counts[sampled_symbol];
+                                }
+                            }
                         }
                     }
                 }
@@ -25045,6 +25729,7 @@ struct RotationEstimateCandidate {
                     bool white_cell_observed = white_symbol != 0xFFFFFFFFu &&
                                                (nonwhite_count == 0u ||
                                                 white_count * 5u > sample_count * 3u);
+                    bool area_vote_ambiguous = false;
                     if (white_cell_observed) {
                         best_symbol = white_symbol;
                     }
@@ -25074,22 +25759,31 @@ struct RotationEstimateCandidate {
                     if (!white_cell_observed && use_custom_palette && nonwhite_count > 0u) {
                         u64 best_vote_count = 0u;
                         u32 best_voted_symbol = 0xFFFFFFFFu;
+                        bool binary_symbol_vote = palette_symbol_stream_mode &&
+                                                  palette_symbol_palette_size == 2u;
                         for (u32 symbol = 0u; symbol < cell_palette_size; ++symbol) {
-                            if (symbol == white_symbol) continue;
+                            if (!binary_symbol_vote && symbol == white_symbol) continue;
                             if (palette_symbol_counts[symbol] > best_vote_count) {
                                 best_vote_count = palette_symbol_counts[symbol];
                                 best_voted_symbol = symbol;
                             }
                         }
-                        if (best_voted_symbol != 0xFFFFFFFFu) {
+                        if (binary_symbol_vote && best_vote_count * 2u <= sample_count) {
+                            area_vote_ambiguous = true;
+                        } else if (best_voted_symbol != 0xFFFFFFFFu) {
                             best_symbol = best_voted_symbol;
                         }
                     }
                     if (!white_cell_observed && use_custom_palette &&
-                        exact_palette_symbol != 0xFFFFFFFFu) {
+                        exact_palette_symbol != 0xFFFFFFFFu &&
+                        !(palette_symbol_stream_mode &&
+                          palette_symbol_palette_size == 2u)) {
                         best_symbol = exact_palette_symbol;
                     }
-                    if (use_custom_palette && white_count * 2u >= sample_count) {
+                    if (area_vote_ambiguous) palette_sample_ambiguous = true;
+                    if (use_custom_palette && white_count * 2u >= sample_count &&
+                        !(palette_symbol_stream_mode &&
+                          palette_symbol_palette_size == 2u)) {
                         double center_x = (((double)logical_col + 0.5) * cell_scale_x) -
                                           0.5 + warp_dx;
                         double center_y = (((double)logical_row + 0.5) * cell_scale_y) -
@@ -25127,6 +25821,58 @@ struct RotationEstimateCandidate {
                             ((double)sum_nonwhite_r + (double)white_count * 255.0) /
                             (double)sample_count;
                         best_symbol = (mean_luminance < monochrome_threshold) ? 0u : 1u;
+                    }
+                    if (palette_symbol_stream_mode &&
+                        palette_symbol_palette_size == 2u) {
+                        const PaletteColor* symbol_palette = cell_palette;
+                        u32 symbol_palette_size = cell_palette_size;
+                        if (symbol_palette) {
+                            u32 area_sample_symbol = best_symbol;
+                            double center_x = sample_center_x;
+                            double center_y = sample_center_y;
+                            if (center_x < 0.0) center_x = 0.0;
+                            if (center_y < 0.0) center_y = 0.0;
+                            if (center_x > (double)(width - 1u)) {
+                                center_x = (double)(width - 1u);
+                            }
+                            if (center_y > (double)(height - 1u)) {
+                                center_y = (double)(height - 1u);
+                            }
+                            u32 center_pixel_x = (u32)(center_x + 0.5);
+                            u32 center_pixel_y = (u32)(center_y + 0.5);
+                            if (center_pixel_x >= width) center_pixel_x = (u32)width - 1u;
+                            if (center_pixel_y >= height) center_pixel_y = (u32)height - 1u;
+                            usize center_pixel = ((usize)center_pixel_y *
+                                (usize)pixel_stride + center_pixel_x) * 3u;
+                            u32 center_symbol = 0u;
+                            u64 best_center_distance = U64_MAX_VALUE;
+                            u64 second_center_distance = U64_MAX_VALUE;
+                            for (u32 symbol = 0u; symbol < symbol_palette_size; ++symbol) {
+                                i64 dr = (i64)pixel_data[center_pixel] -
+                                         symbol_palette[symbol].r;
+                                i64 dg = (i64)pixel_data[center_pixel + 1u] -
+                                         symbol_palette[symbol].g;
+                                i64 db = (i64)pixel_data[center_pixel + 2u] -
+                                         symbol_palette[symbol].b;
+                                u64 distance = (u64)(dr * dr + dg * dg + db * db);
+                                if (distance < best_center_distance) {
+                                    second_center_distance = best_center_distance;
+                                    best_center_distance = distance;
+                                    center_symbol = symbol;
+                                } else if (distance < second_center_distance) {
+                                    second_center_distance = distance;
+                                }
+                            }
+                            u64 center_margin =
+                                second_center_distance - best_center_distance;
+                            if (center_margin >= 3u * 24u * 24u) {
+                                best_symbol = center_symbol;
+                                palette_sample_ambiguous = palette_sample_ambiguous ||
+                                    center_symbol != area_sample_symbol;
+                            } else {
+                                palette_sample_ambiguous = true;
+                            }
+                        }
                     }
                     cell_rgb[0] = cell_palette[best_symbol].r;
                     cell_rgb[1] = cell_palette[best_symbol].g;
@@ -25401,7 +26147,7 @@ struct RotationEstimateCandidate {
                     // Ink shift can move a clearly classified sample far from
                     // its ideal palette value. Mark only low-margin samples as
                     // erasures; known overwrite regions remain erasures.
-                    if (reserved_pixel ||
+                    if (reserved_pixel || palette_sample_ambiguous ||
                         second_best_distance - best_distance < 3u * 24u * 24u) {
                         palette_symbol_dot_erasures.data[(usize)rank] = 1u;
                     }
@@ -25549,6 +26295,20 @@ struct RotationEstimateCandidate {
         }
         u64 symbol_count = page_segment_bits / 32u;
         if (symbol_count > U64_MAX_VALUE / 8u || symbol_count * 8u > usable_data_pixels) {
+            char required_pixels_text[32], available_pixels_text[32], capacity_text[32];
+            u64_to_ascii(symbol_count <= U64_MAX_VALUE / 8u
+                             ? symbol_count * 8u : U64_MAX_VALUE,
+                         required_pixels_text, sizeof(required_pixels_text));
+            u64_to_ascii(usable_data_pixels, available_pixels_text,
+                         sizeof(available_pixels_text));
+            u64_to_ascii(capacity_with_reserve, capacity_text, sizeof(capacity_text));
+            console_write(2, "decode: symbol groups require ");
+            console_write(2, required_pixels_text);
+            console_write(2, " dots but page has ");
+            console_write(2, available_pixels_text);
+            console_write(2, " (stride ");
+            console_write(2, capacity_text);
+            console_line(2, ")");
             console_line(2, "decode: page has too few complete symbol groups");
             return false;
         }
@@ -27406,6 +28166,13 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (!output.append_ascii("255\n")) {
         return false;
     }
+    u64 output_pixel_count = (u64)width_pixels * (u64)height_pixels;
+    if (output_pixel_count >
+        ((u64)USIZE_MAX_VALUE - (u64)output.size) / 3u) return false;
+    usize output_pixel_bytes = (usize)(output_pixel_count * 3u);
+    usize output_pixel_offset = output.size;
+    if (!output.ensure(output_pixel_offset + output_pixel_bytes)) return false;
+    u8* output_pixels = output.data + output_pixel_offset;
     const u8* frame_data = frame_bits.data;
     const u8* mask_data = fiducial_mask.data;
     u64 page_segment_bits = bit_offset < frame_bit_count
@@ -27413,23 +28180,28 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                 : 0u;
     if (page_segment_bits > bits_per_page) page_segment_bits = bits_per_page;
     makocode::ByteBuffer page_palette_dots;
-    if (palette_symbol_mode && page_segment_bits > 0u) {
+    if (palette_symbol_mode) {
         if ((bit_offset & 31u) != 0u || (page_segment_bits & 31u) != 0u ||
-            page_segment_bits / 32u > (u64)USIZE_MAX_VALUE / 8u) {
+            (bits_per_page & 31u) != 0u ||
+            page_segment_bits / 32u > (u64)USIZE_MAX_VALUE / 8u ||
+            bits_per_page / 32u > (u64)USIZE_MAX_VALUE / 8u) {
             console_line(2, "encode_page_to_ppm: field-symbol page segment is not aligned");
             return false;
         }
         makocode::PaletteSymbolProfile profile;
         u64 page_symbol_count = page_segment_bits / 32u;
+        u64 page_capacity_symbols = bits_per_page / 32u;
         u32 symbol_q = use_custom_palette
                            ? mapping.custom_palette_count
                            : (1u << sample_bits);
         if (!makocode::palette_symbol_profile(use_custom_palette
                                                   ? mapping.custom_palette_count
                                                   : symbol_q,
-                                              profile) || !frame_data ||
-            !page_palette_dots.ensure((usize)page_symbol_count * 8u)) return false;
-        page_palette_dots.size = (usize)page_symbol_count * 8u;
+                                              profile) ||
+            (page_symbol_count && !frame_data) ||
+            page_capacity_symbols < page_symbol_count ||
+            !page_palette_dots.ensure((usize)page_capacity_symbols * 8u)) return false;
+        page_palette_dots.size = (usize)page_capacity_symbols * 8u;
         for (u64 symbol = 0u; symbol < page_symbol_count; ++symbol) {
             u64 source_symbol = (bit_offset >> 5u) + symbol;
             if (source_symbol >= frame_bit_count / 32u) return false;
@@ -27440,6 +28212,29 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                                    page_palette_dots.data + (usize)symbol * 8u)) {
                 console_line(2, "encode_page_to_ppm: invalid field-symbol dot value");
                 return false;
+            }
+        }
+        u64 filler_symbol_count = page_capacity_symbols - page_symbol_count;
+        if (filler_symbol_count) {
+            if (filler_symbol_count > (u64)USIZE_MAX_VALUE / 4u) return false;
+            makocode::ByteBuffer filler_symbols;
+            if (!filler_symbols.ensure((usize)filler_symbol_count * 4u)) return false;
+            filler_symbols.size = (usize)filler_symbol_count * 4u;
+            memset(filler_symbols.data, 0, filler_symbols.size);
+            if (!makocode::palette_symbol_public_whiten(
+                    profile, filler_symbols, false,
+                    (bit_offset >> 5u) + page_symbol_count)) return false;
+            for (u64 symbol = 0u; symbol < filler_symbol_count; ++symbol) {
+                u32 value = (u32)filler_symbols.data[(usize)symbol * 4u] |
+                            ((u32)filler_symbols.data[(usize)symbol * 4u + 1u] << 8u) |
+                            ((u32)filler_symbols.data[(usize)symbol * 4u + 2u] << 16u) |
+                            ((u32)filler_symbols.data[(usize)symbol * 4u + 3u] << 24u);
+                if (!makocode::palette_symbol_to_dots(
+                        profile, value,
+                        page_palette_dots.data + (usize)(page_symbol_count + symbol) * 8u)) {
+                    console_line(2, "encode_page_to_ppm: invalid filler field symbol");
+                    return false;
+                }
             }
         }
     }
@@ -27518,6 +28313,15 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         tile_values.metadata_length_prefix_bits = 0u;
         tile_values.metadata_symbol_count = 0u;
     }
+    if (have_metadata_tile && palette_symbol_mode) {
+        u8 guarded_active_mask[MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE];
+        if (!MetadataTile::build_active_guard_mask(tile_active_mask.data,
+                                                   tile_active_mask.size,
+                                                   guarded_active_mask,
+                                                   sizeof(guarded_active_mask))) return false;
+        memcpy(tile_active_mask.data, guarded_active_mask,
+               sizeof(guarded_active_mask));
+    }
     makocode::ByteBuffer payload_skip_mask;
     if (!payload_skip_mask.ensure(fiducial_mask.size)) return false;
     payload_skip_mask.size = fiducial_mask.size;
@@ -27549,7 +28353,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                               payload_skip_mask.size,
                                               payload_rank_map,
                                               payload_pixel_count,
-                                              !g_encode_metadata_disabled,
+                                              !g_encode_metadata_disabled &&
+                                                  !palette_symbol_mode,
                                               mapping.symbol_placement_seed,
                                               rank_map_cache) ||
         payload_pixel_count < 8u) {
@@ -27557,7 +28362,7 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         return false;
     }
     if (palette_symbol_mode) {
-        u64 symbol_capacity = mapping_capacity_bits(mapping, payload_pixel_count);
+        u64 symbol_capacity = (payload_pixel_count / 8u) * 32u;
         if (symbol_capacity < bits_per_page) {
             char computed[32];
             char rendered[32];
@@ -27712,8 +28517,9 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     }
                 }
             }
-            metadata_noise_symbols.data[cell] = near_metadata
-                ? (u8)noise_background_symbol : random_symbol;
+            metadata_noise_symbols.data[cell] =
+                (u8)(near_metadata && !palette_symbol_mode
+                         ? noise_background_symbol : random_symbol);
         }
         memset(noise_context, 0, sizeof(noise_context));
         memset(noise_key, 0, sizeof(noise_key));
@@ -27777,7 +28583,7 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                     u8 payload_rgb[3] = {0u, 0u, 0u};
                     if (palette_symbol_mode) {
                         u32 symbol = background_symbol;
-                        if (payload_rectangle_pixel && payload_rank < page_palette_dots.size) {
+                        if (payload_rank < page_palette_dots.size) {
                             symbol = page_palette_dots.data[(usize)payload_rank];
                         }
                         if (symbol >= symbol_palette_size) {
@@ -27845,7 +28651,7 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                         }
                         map_samples_to_rgb(mapping.color_channels, samples_raw, payload_rgb);
                     }
-                    if (metadata_tile_pixel && !inside_tile &&
+                    if (!palette_symbol_mode && metadata_tile_pixel && !inside_tile &&
                         metadata_local_index < metadata_noise_symbols.size) {
                         u32 noise_symbol = metadata_noise_symbols.data[metadata_local_index];
                         const PaletteColor& color = tile_values.palette[noise_symbol];
@@ -27853,7 +28659,15 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                         payload_rgb[1] = color.g;
                         payload_rgb[2] = color.b;
                     }
-                    if (inside_tile) {
+                    if (inside_tile &&
+                        tile_active_mask.data[metadata_local_index] == 2u &&
+                        metadata_local_index < metadata_noise_symbols.size) {
+                        const PaletteColor& color = tile_values.palette[
+                            metadata_noise_symbols.data[metadata_local_index]];
+                        rgb[0] = color.r;
+                        rgb[1] = color.g;
+                        rgb[2] = color.b;
+                    } else if (inside_tile) {
                         u32 local_x = column - tile_placement.x0 + tile_placement.offset_x;
                         u32 local_y = row - tile_placement.y0 + tile_placement.offset_y;
                         const PaletteColor* direct_color = 0;
@@ -27930,12 +28744,13 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                 rgb[1] = footer_text_rgb[1];
                 rgb[2] = footer_text_rgb[2];
             }
-            if (!output.append_bytes(rgb, sizeof(rgb))) {
-                console_line(2, "encode_page_to_ppm: output allocation failed");
-                return false;
-            }
+            usize output_pixel_offset = mask_index * 3u;
+            output_pixels[output_pixel_offset] = rgb[0];
+            output_pixels[output_pixel_offset + 1u] = rgb[1];
+            output_pixels[output_pixel_offset + 2u] = rgb[2];
         }
     }
+    output.size = output_pixel_offset + output_pixel_bytes;
     if (metadata_values_out) *metadata_values_out = tile_values;
     return true;
 }
@@ -29199,11 +30014,12 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
         data_height_pixels = footer_layout.data_height_pixels;
         if (ecc_summary && ecc_summary->palette_symbol_stream) {
             u64 reserved_data_pixels = 0u;
+            makocode::ByteBuffer temp_mask;
             if (!compute_fiducial_marker_mask(width_pixels,
                                               height_pixels,
                                               data_height_pixels,
                                               reserved_data_pixels,
-                                              (makocode::ByteBuffer*)0)) return false;
+                                              &temp_mask)) return false;
             MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
                 width_pixels, data_height_pixels);
             MetadataTile::Values values;
@@ -29228,7 +30044,6 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
                                           tile_light,
                                           tile_dark)) return false;
             bool have_metadata_tile = !g_encode_metadata_disabled;
-            u64 metadata_overwrite_pixels = 0u;
             if (!have_metadata_tile) {
                 values.metadata_square_side = 21u;
                 values.metadata_square_x0 = (MetadataTile::TILE_SIDE - 21u) / 2u;
@@ -29239,19 +30054,74 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
                 values.metadata_length_prefix_bits = 0u;
                 values.metadata_symbol_count = 0u;
             } else {
-                u64 tile_width = width_pixels < MetadataTile::TILE_SIDE
-                                     ? width_pixels : MetadataTile::TILE_SIDE;
-                u64 tile_height = data_height_pixels < MetadataTile::TILE_SIDE
-                                      ? data_height_pixels : MetadataTile::TILE_SIDE;
-                metadata_overwrite_pixels = tile_width * tile_height;
+                if (!active_mask.data || active_mask.size !=
+                    (usize)MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE) return false;
+                u64 fiducial_reserved_pixels = reserved_data_pixels;
+                u64 max_reserved_pixels = fiducial_reserved_pixels;
+                u64 pages_to_measure = page_count ? page_count : 1u;
+                for (u64 metadata_page = 1u; metadata_page <= pages_to_measure;
+                     ++metadata_page) {
+                    if (metadata_page > 1u &&
+                        !build_page_metadata_tile(mapping,
+                                                  frame_bit_count,
+                                                  metadata_page,
+                                                  width_pixels,
+                                                  height_pixels,
+                                                  data_height_pixels,
+                                                  ecc_summary,
+                                                  metadata_ecc_redundancy,
+                                                  unknown_parity_budget,
+                                                  overlay_erasure_budget,
+                                                  values,
+                                                  tile_bits,
+                                                  active_mask,
+                                                  tile_light,
+                                                  tile_dark)) return false;
+                    if (!active_mask.data || active_mask.size !=
+                        (usize)MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE) return false;
+                    u64 page_reserved_pixels = fiducial_reserved_pixels;
+                    for (u32 tile_y = 0u; tile_y < MetadataTile::TILE_SIDE; ++tile_y) {
+                        for (u32 tile_x = 0u; tile_x < MetadataTile::TILE_SIDE; ++tile_x) {
+                            usize local = (usize)tile_y * MetadataTile::TILE_SIDE + tile_x;
+                            bool reserved = active_mask.data[local] != 0u;
+                            if (!reserved && ecc_summary->palette_symbol_stream) {
+                                for (int dy = -1; dy <= 1 && !reserved; ++dy) {
+                                    for (int dx = -1; dx <= 1; ++dx) {
+                                        int neighbor_x = (int)tile_x + dx;
+                                        int neighbor_y = (int)tile_y + dy;
+                                        if (neighbor_x >= 0 &&
+                                            neighbor_x < (int)MetadataTile::TILE_SIDE &&
+                                            neighbor_y >= 0 &&
+                                            neighbor_y < (int)MetadataTile::TILE_SIDE &&
+                                            active_mask.data[(usize)neighbor_y *
+                                                                 MetadataTile::TILE_SIDE +
+                                                             (usize)neighbor_x]) {
+                                            reserved = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (!reserved) continue;
+                            i64 page_x = (i64)placement.x0 + tile_x - placement.offset_x;
+                            i64 page_y = (i64)placement.y0 + tile_y - placement.offset_y;
+                            if (page_x < 0 || page_y < 0 ||
+                                page_x >= width_pixels || page_y >= data_height_pixels) return false;
+                            usize page_index = (usize)page_y * width_pixels + (usize)page_x;
+                            if (!temp_mask.data[page_index]) ++page_reserved_pixels;
+                        }
+                    }
+                    if (page_reserved_pixels > max_reserved_pixels) {
+                        max_reserved_pixels = page_reserved_pixels;
+                    }
+                }
+                reserved_data_pixels = max_reserved_pixels;
             }
             u64 data_pixel_count = (u64)width_pixels * data_height_pixels;
-            if (reserved_data_pixels > data_pixel_count ||
-                metadata_overwrite_pixels > data_pixel_count - reserved_data_pixels) return false;
-            u64 payload_pixel_count = data_pixel_count - reserved_data_pixels -
-                                      metadata_overwrite_pixels;
+            if (reserved_data_pixels > data_pixel_count) return false;
+            u64 payload_pixel_count = data_pixel_count - reserved_data_pixels;
             if (payload_pixel_count < 8u) return false;
-            bits_per_page = mapping_capacity_bits(mapping, payload_pixel_count);
+            bits_per_page = (payload_pixel_count / 8u) * 32u;
             if (bits_per_page == 0u || bits_per_page == U64_MAX_VALUE) return false;
         } else if (!compute_bits_per_page(mapping,
                                           width_pixels,
@@ -29571,6 +30441,48 @@ bool find_best_ecc_fill(usize payload_bytes,
     }
     double search_high = max_ratio;
     EccFillCandidate candidate;
+    u32 palette_size = mapping_has_custom_palette(mapping)
+                           ? mapping.custom_palette_count
+                           : (1u << bits_per_sample(mapping.color_channels));
+    makocode::PaletteSymbolProfile fill_profile;
+    if (!makocode::palette_symbol_profile(palette_size, fill_profile)) return false;
+    EccFillCandidate parity_candidates[766] = {};
+    u8 parity_candidate_state[766] = {};
+    auto evaluate_cached_candidate = [&](double redundancy,
+                                         EccFillCandidate& out_candidate) -> bool {
+        u32 parity = 0u;
+        if (!makocode::palette_symbol_parity_for_redundancy(fill_profile,
+                                                             redundancy,
+                                                             parity) ||
+            parity >= sizeof(parity_candidate_state) /
+                          sizeof(parity_candidate_state[0])) return false;
+        if (parity_candidate_state[parity]) {
+            if (parity_candidate_state[parity] != 1u) return false;
+            out_candidate = parity_candidates[parity];
+            out_candidate.requested_ratio = redundancy;
+            return true;
+        }
+        EccFillCandidate local_candidate = {};
+        bool evaluated = evaluate_ecc_fill_candidate(payload_bytes,
+                                                      redundancy,
+                                                      mapping,
+                                                      footer_config,
+                                                      width_pixels,
+                                                      height_pixels,
+                                                      fit_width,
+                                                      fit_height,
+                                                      structural_erasure_fraction,
+                                                      overlay_fraction,
+                                                      local_candidate,
+                                                      2u,
+                                                      required_unknown_errors);
+        parity_candidate_state[parity] = evaluated ? 1u : 2u;
+        if (!evaluated) return false;
+        parity_candidates[parity] = local_candidate;
+        parity_candidates[parity].requested_ratio = redundancy;
+        out_candidate = local_candidate;
+        return true;
+    };
     auto final_page_slack = [](const EccFillCandidate& value) -> u64 {
         if (!value.bits_per_page || !value.page_count) return U64_MAX_VALUE;
         u64 last_page_bits = value.frame_bits % value.bits_per_page;
@@ -29578,21 +30490,7 @@ bool find_best_ecc_fill(usize payload_bytes,
     };
     auto try_candidate = [&](double redundancy) -> bool {
         EccFillCandidate local;
-        if (!evaluate_ecc_fill_candidate(payload_bytes,
-                                          redundancy,
-                                          mapping,
-                                          footer_config,
-                                          width_pixels,
-                                          height_pixels,
-                                          fit_width,
-                                          fit_height,
-                                          structural_erasure_fraction,
-                                          overlay_fraction,
-                                          local,
-                                          2u,
-                                          required_unknown_errors)) {
-            return false;
-        }
+        if (!evaluate_cached_candidate(redundancy, local)) return false;
         u64 bits_remaining = final_page_slack(local);
         if (best_ratio < 0.0 ||
             local.page_count < best_page_count ||
@@ -29629,19 +30527,7 @@ bool find_best_ecc_fill(usize payload_bytes,
         if (mid == search_low || mid == search_high) {
             break;
         }
-        if (!evaluate_ecc_fill_candidate(payload_bytes,
-                                          mid,
-                                          mapping,
-                                          footer_config,
-                                          width_pixels,
-                                          height_pixels,
-                                          fit_width,
-                                          fit_height,
-                                          structural_erasure_fraction,
-                                          overlay_fraction,
-                                          candidate,
-                                          2u,
-                                          required_unknown_errors)) {
+        if (!evaluate_cached_candidate(mid, candidate)) {
             search_high = mid;
             continue;
         }
