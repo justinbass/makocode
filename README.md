@@ -128,22 +128,72 @@ The `archive` section gives `entries COUNT`, followed by `directory PATH` and `f
 
 ### Error correction and overlays
 
-Version 0 stores one field symbol as exactly eight palette dots, most-significant dot first. A `q`-color symbol has `q^8` possible patterns; the codec uses the largest prime `p` below `q^8` as its field size and rejects the remaining patterns. Reed–Solomon corrects whole field symbols, not partial dot or bit errors. Its block length is `N = min(1024, p - 1)`, using distinct nonzero evaluation points. `N` need not be prime. Profiles include:
+Version 0 stores one field symbol as eight palette dots, most-significant dot
+first. For a prime-power palette size `q=p^m`, each color index is expanded to
+`m` base-`p` coefficients and the eight groups form one polynomial-basis
+symbol in `GF(p^(8m)) = GF(q^8)`. Dot 0 supplies the highest-degree group;
+coefficients within each color are least-significant first. Every one of the
+`q^8` dot patterns is valid.
+The fixed irreducible moduli are:
 
-| Palette colors `q` | Largest prime `p < q^8` | Block length `N` |
-| ---: | ---: | ---: |
-| 2 | 251 | 250 |
-| 3 | 6,553 | 1,024 |
-| 4 | 65,521 | 1,024 |
-| 5 | 390,581 | 1,024 |
-| 6 | 1,679,609 | 1,024 |
-| 7 | 5,764,799 | 1,024 |
-| 8 | 16,777,213 | 1,024 |
-| 16 | 4,294,967,291 | 1,024 |
+| `q` | Field | Modulus |
+| ---: | --- | --- |
+| 2 | `GF(2^8)` | `x^8 + x^4 + x^3 + x + 1` |
+| 3 | `GF(3^8)` | `x^8 + x^2 + 2` |
+| 4 | `GF(2^16)` | `x^16 + x^5 + x^3 + x + 1` |
+| 5 | `GF(5^8)` | `x^8 + 2` |
+| 7 | `GF(7^8)` | `x^8 + x + 3` |
+| 8 | `GF(2^24)` | `x^24 + x^4 + x^3 + x + 1` |
+| 9 | `GF(3^16)` | `x^16 + x^3 + x^2 + 1` |
+| 11 | `GF(11^8)` | `x^8 + 7x^7 + 5x^6 + 6x^5 + 9x^4 + 4x^2 + 3x + 4` |
+| 13 | `GF(13^8)` | `x^8 + 12x^7 + 11x^6 + 9x^5 + 7x^4 + 11x^3 + 7x^2 + x + 11` |
+| 16 | `GF(2^32)` | `x^32 + x^7 + x^3 + x^2 + 1` |
 
-The 1,024-symbol cap is a computational bound, not a target: two-color mode is limited to 250 by `p−1`, and short no-overlay streams use shortened blocks. The block is `n=K+P`; the cap does not force a small payload to fill a maximum block. With no padding to the cap, finer percentage steps for a small payload require more parity symbols and paper area. For `K` data and `P` parity symbols, correction obeys `S + 2E <= P`; one parity symbol buys one erasure, while an unknown symbol error costs two. Percentage granularity is set by the actual block length, not by the `p` symbol values. At a fixed parity rate, longer blocks give finer percentage steps and more absolute correction, but use more memory and computation. The current encoder interpolation performs `K(K−1)/2` field updates per block; decoding uses `O(NP + P²)` syndrome/error-location work and `O(K² + NK)` reconstruction, with `O(N+K)` scratch. These are implementation costs, not RS limits. Blocks may span pages. The cap bounds those costs; raising it does not improve a short payload unless its actual block is made longer.
+A finite field can only have prime-power order. Other supported palette sizes
+(6, 10, 12, 14, 15) use the largest prime below `q^8` and reject the unused
+patterns. Six colors use 1,679,609 of 1,679,616 patterns. This fallback keeps
+Reed–Solomon field arithmetic valid; arithmetic modulo a composite `q^8` would
+not be a field.
 
-Compressed bytes, or the authenticated encrypted container, are packed as 96-byte big-endian integers into fixed-width base-`p` symbols. Reed–Solomon blocks have `K` data symbols and `P=N-K` parity symbols. Metadata on every page already carries the source length and block layout, so these streams omit the otherwise redundant 48-symbol bootstrap. Marker-free streams and streams with metadata on only selected pages retain the fixed bootstrap code (`K=32`, `P=16`) so decoding can recover framing before reading a metadata tile. `--ecc RATIO` sets the requested parity/data ratio; `--ecc fill` searches layouts for page use. Version remains 0 and old byte-oriented payload encodings are not supported.
+Reed–Solomon corrects whole eight-dot symbols, not individual dots. Its block
+length is `N = min(1024, field_order - 1)`, with distinct nonzero evaluation
+points; `N` need not be prime. Thus two colors allow 255 symbols, while other
+profiles reach the 1,024 cap. The cap is a computational bound, not a target:
+short streams use shortened blocks. The final block stores exactly its actual
+data symbols plus parity: for `S` data symbols and `C` blocks, the payload uses
+`S + C*P` symbols, with no zero-fill to `K` or to 1,024. For `K` data and `P`
+parity symbols, correction obeys `S + 2E <= P`; one parity symbol buys one
+erasure, while an unknown symbol error costs two. Longer actual blocks give
+finer percentage steps and more absolute correction, at the cost of more
+memory and computation. Auto ECC reserves 85 unknown errors with overlays, 89
+otherwise, or 91 for streams estimated to need at least 1,024 blocks. Parity
+rounding is a policy: explicit ratios round parity
+to multiples of eight once `P >= 8`, auto minimum uses multiples of four, and
+`--ecc fill` may use any even `P` to spend remaining page capacity.
+
+Shortening retains the full configured parity and overlay budget. Because the
+overlay count is based on maximum `N`, its fraction of a shortened codeword
+can be higher than the requested fraction of a maximum-size block.
+
+Full-pattern fields recover the complete eight-dot symbol space. For each
+96-byte input chunk, powers-of-two palettes also fit exactly: 96, 48, 32,
+and 24 symbols for 2, 4, 8, and 16 colors respectively. Other prime-power
+sizes gain all remaining symbol patterns, though a fixed chunk may still need
+the next whole field symbol. This changes version-0 symbol values and field
+arithmetic; earlier version-0 pages are not supported.
+
+The encoder interpolation performs `K(K-1)/2` field updates per block. The
+decoder builds general-field evaluation weights in `O(N^2)` on a per-thread
+cache miss, then uses `O(NP + P^2)` syndrome and error-location work and
+`O(K^2 + NK)` reconstruction. Scratch use is `O(N + K)`; each thread caches
+eight weight tables of up to 1,024 symbols and eight inverse tables of up to
+4,096 entries (about 160 KiB), plus a lazy 64 KiB `GF(2^8)` multiply table
+when arithmetic volume justifies it.
+Extension-field multiplication costs more than prime modular multiplication
+(`O(d)` for characteristic two and `O(d^2)` for odd characteristic, where `d`
+is the extension degree); the 1,024 cap bounds both symbol count and this work.
+Blocks may span pages. Version stays 0; earlier version-0 symbol streams are
+not supported.
 
 `encode --metadata-pages LIST` writes the center metadata tile only on selected pages. `LIST` accepts `all` (the default), page numbers, ranges, `middle`, and `last`; for example, `--metadata-pages=middle` writes the tile on page 2 of a three-page encoding. Pages without a tile still carry payload in the same raster positions. Multi-page decode therefore needs at least one supplied page with readable metadata. The bootstrap is omitted only when every page has metadata; sparse metadata pages keep it.
 
@@ -236,7 +286,7 @@ To turn a scanned image into a P6 `.ppm` file for decoding, install ImageMagick 
 ### Custom Palettes (Field-Symbol Mode)
 
 - Pass `--palette "Color ..."` to `encode`/`decode` with 2–16 unique ordered entries using the built-in names (`White`, `Cyan`, `Magenta`, `Yellow`, `Black`) or `#RRGGBB` values. Examples: `--palette "White Black"` (2 colors), `--palette "White Cyan Magenta"` (base‑3), `--palette "White Cyan Magenta Yellow Black"` (base‑5). Quote the list so the CLI keeps the whitespace intact.
-- Every palette, including non-powers of two, uses eight-dot base-`q` symbols from the version-zero field profile above. The encoder fills complete symbol groups and chooses footer foreground/background colors from palette contrast.
+- Every palette uses eight-dot symbols from the version-zero field profile above. Prime-power palette sizes use all `q^8` patterns; other sizes use the listed largest-prime fallback. The encoder fills complete symbol groups and chooses footer foreground/background colors from palette contrast.
 - Palette metadata is embedded per page (via `MAKOCODE_PALETTE`, `MAKOCODE_PALETTE_BASE`, and `MAKOCODE_PAGE_SYMBOLS`), so `decode` normally discovers the palette automatically, but you can still force it with `--palette ...` if desired.
 - Use `decode --recover-palette` when the embedded palette row is damaged. Recovery first tries the common ordered palettes for 2, 4, 5, and 8 colors, using colors sampled from the whole page to account for scan shifts. It then tries image-derived palette clusters and their orderings before exhaustive RGB candidates. `--recover-limit N` limits ordered palette candidates (default `4`); increase it to continue beyond the common palettes. If you already know the palette, pass the encoder-style ordered list with `--palette` to try it first.
 

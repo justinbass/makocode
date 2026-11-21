@@ -576,6 +576,7 @@ struct EncoderConfig {
     u16 overlay_erasure_budget;
     u16 unknown_error_budget;
     u32 palette_size;
+    u32 parity_step;
     bool omit_palette_symbol_bootstrap;
     const char* password;
     usize password_length;
@@ -588,6 +589,7 @@ struct EncoderConfig {
           overlay_erasure_budget(0u),
           unknown_error_budget(0u),
           palette_size(0u),
+          parity_step(4u),
           omit_palette_symbol_bootstrap(false),
           password(0),
           password_length(0u),
@@ -652,12 +654,21 @@ struct EccDecodeStats {
 namespace makocode {
 struct PaletteSymbolProfile {
     u32 palette_size;
-    u32 field_prime;
+    u64 field_order;
+    u32 field_characteristic;
+    u32 field_degree;
+    u32 palette_digit_degree;
+    u32 field_value_mask;
+    u32 field_reduction;
     u32 block_length;
     u32 symbol_bits;
+    u8 field_polynomial[32];
 
     PaletteSymbolProfile()
-        : palette_size(0u), field_prime(0u), block_length(0u), symbol_bits(0u) {}
+        : palette_size(0u), field_order(0u), field_characteristic(0u),
+          field_degree(0u), palette_digit_degree(0u), field_value_mask(0u),
+          field_reduction(0u), block_length(0u), symbol_bits(0u),
+          field_polynomial{} {}
 };
 
 static const u32 PALETTE_SYMBOL_MAX_BLOCK_LENGTH = 1024u;
@@ -705,7 +716,8 @@ static const u32 PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS = 32u;
 bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile);
 bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
                                           double redundancy,
-                                          u32& parity_symbols);
+                                          u32& parity_symbols,
+                                          u32 parity_step = 4u);
 bool palette_symbol_to_dots(const PaletteSymbolProfile& profile,
                             u32 value,
                             u8 dots[8]);
@@ -748,6 +760,10 @@ bool palette_symbol_selector_mask(u64 seed,
                                  u32 block_length,
                                  u32 selected_count,
                                  u8* mask_out);
+u64 palette_symbol_interleaved_offset(u64 block_index,
+                                      u32 position,
+                                      u64 block_count,
+                                      u32 final_block_length);
 bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   const u8* bytes,
                                   usize byte_count,
@@ -758,7 +774,8 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   usize password_length,
                                   ByteBuffer& encoded_symbols,
                                   EccSummary& summary,
-                                  bool omit_bootstrap = false);
+                                  bool omit_bootstrap = false,
+                                  u32 parity_step = 4u);
 bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                                   const ByteBuffer& encoded_symbols,
                                   const ByteBuffer& erased_symbols,
@@ -853,7 +870,8 @@ struct EncoderContext {
                                           config.password_length,
                                           symbols,
                                           ecc_summary,
-                                          config.omit_palette_symbol_bootstrap)) {
+                                          config.omit_palette_symbol_bootstrap,
+                                          config.parity_step)) {
             return false;
         }
         for (usize symbol_index = 0u; symbol_index < symbols.size / 4u; ++symbol_index) {
@@ -1955,6 +1973,7 @@ bool find_best_ecc_fill(usize payload_bytes,
                                double structural_erasure_fraction,
                                double overlay_fraction,
                                u16 required_unknown_errors,
+                               bool omit_bootstrap,
                                double& best_ratio,
                                double& best_requested_ratio,
                                u16& best_block_data,
@@ -2089,7 +2108,9 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         double overlay_fraction,
                                         EccFillCandidate& candidate,
                                         u32 metadata_ecc_minimum_parity_bytes = 2u,
-                                        u16 required_unknown_errors = 0u);
+                                        u16 required_unknown_errors = 0u,
+                                        u32 parity_step = 4u,
+                                        bool omit_bootstrap = false);
 
 bool write_all_fd(int fd, const u8* data, usize length);
 

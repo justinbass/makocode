@@ -1288,14 +1288,21 @@ retry_decode:
         (bit_count & 31u) == 0u;
     bool palette_symbol_bootstrap_omitted = false;
     if (palette_symbol_metadata_layout &&
-        aggregate_state.encoded_tile.ecc_block_count > 0u) {
-        u64 block_length = (u64)aggregate_state.encoded_tile.ecc_block_data +
-                           aggregate_state.encoded_tile.ecc_parity;
-        if (block_length &&
-            aggregate_state.encoded_tile.ecc_block_count <= U64_MAX_VALUE / block_length) {
+        aggregate_state.encoded_tile.ecc_block_count > 0u &&
+        aggregate_state.encoded_tile.ecc_original_bytes <= (u64)USIZE_MAX_VALUE) {
+        u64 source_symbol_count = makocode::palette_symbol_count_for_bytes(
+            palette_symbol_profile,
+            (usize)aggregate_state.encoded_tile.ecc_original_bytes);
+        if (source_symbol_count != U64_MAX_VALUE &&
+            (!aggregate_state.encoded_tile.ecc_parity ||
+             aggregate_state.encoded_tile.ecc_block_count <=
+                 (U64_MAX_VALUE - source_symbol_count) /
+                     aggregate_state.encoded_tile.ecc_parity)) {
+            u64 payload_symbol_count = source_symbol_count +
+                aggregate_state.encoded_tile.ecc_block_count *
+                    aggregate_state.encoded_tile.ecc_parity;
             palette_symbol_bootstrap_omitted =
-                aggregate_state.encoded_tile.ecc_block_count * block_length ==
-                bit_count / 32u;
+                payload_symbol_count == bit_count / 32u;
         }
     }
     bool palette_symbol_stream_input = palette_symbol_metadata_layout ||

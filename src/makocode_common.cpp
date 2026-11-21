@@ -83,8 +83,8 @@ static bool palette_symbol_bytes_are_zero(const u8* value, usize length) {
     return true;
 }
 
-static u32 palette_symbol_count_for_chunk(usize byte_count, u32 field_prime) {
-    if (!byte_count || byte_count > PALETTE_SYMBOL_BYTE_CHUNK_BYTES || field_prime < 2u) return 0u;
+static u32 palette_symbol_count_for_chunk(usize byte_count, u64 field_order) {
+    if (!byte_count || byte_count > PALETTE_SYMBOL_BYTE_CHUNK_BYTES || field_order < 2u) return 0u;
     u8 maximum[PALETTE_SYMBOL_BYTE_CHUNK_BYTES];
     memset(maximum, 0xFF, byte_count);
     u32 count = 0u;
@@ -92,12 +92,62 @@ static u32 palette_symbol_count_for_chunk(usize byte_count, u32 field_prime) {
         u64 remainder = 0u;
         for (usize i = 0u; i < byte_count; ++i) {
             u64 dividend = (remainder << 8u) | maximum[i];
-            maximum[i] = (u8)(dividend / field_prime);
-            remainder = dividend % field_prime;
+            maximum[i] = (u8)(dividend / field_order);
+            remainder = dividend % field_order;
         }
         ++count;
     }
     return count;
+}
+
+static bool palette_symbol_irreducible_polynomial(u32 characteristic,
+                                                  u32 degree,
+                                                  u8 output[32]) {
+    if (!output || !degree || degree > 32u) return false;
+    memset(output, 0, 32u);
+    const u8* coefficients = 0;
+    static const u8 p2_d8[] = {1,1,0,1,1,0,0,0};
+    static const u8 p3_d8[] = {2,0,1,0,0,0,0,0};
+    static const u8 p2_d16[] = {1,1,0,1,0,1,0,0,0,0,0,0,0,0,0,0};
+    static const u8 p5_d8[] = {2,0,0,0,0,0,0,0};
+    static const u8 p7_d8[] = {3,1,0,0,0,0,0,0};
+    static const u8 p2_d24[] = {1,1,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static const u8 p3_d16[] = {1,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0};
+    static const u8 p2_d32[] = {1,0,1,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static const u8 p11_d8[] = {4,3,4,0,9,6,5,7};
+    static const u8 p13_d8[] = {11,1,7,11,7,9,11,12};
+    if (characteristic == 2u && degree == 8u) coefficients = p2_d8;
+    else if (characteristic == 3u && degree == 8u) coefficients = p3_d8;
+    else if (characteristic == 2u && degree == 16u) coefficients = p2_d16;
+    else if (characteristic == 5u && degree == 8u) coefficients = p5_d8;
+    else if (characteristic == 7u && degree == 8u) coefficients = p7_d8;
+    else if (characteristic == 2u && degree == 24u) coefficients = p2_d24;
+    else if (characteristic == 3u && degree == 16u) coefficients = p3_d16;
+    else if (characteristic == 2u && degree == 32u) coefficients = p2_d32;
+    else if (characteristic == 11u && degree == 8u) coefficients = p11_d8;
+    else if (characteristic == 13u && degree == 8u) coefficients = p13_d8;
+    if (!coefficients) return false;
+    memcpy(output, coefficients, degree);
+    return true;
+}
+
+static bool palette_symbol_prime_power(u32 palette_size,
+                                       u32& characteristic,
+                                       u32& palette_digit_degree) {
+    characteristic = 0u;
+    palette_digit_degree = 0u;
+    for (u32 candidate = 2u; candidate <= palette_size; ++candidate) {
+        if (palette_size % candidate) continue;
+        if (!palette_symbol_is_prime(candidate)) return false;
+        characteristic = candidate;
+        u32 remaining = palette_size;
+        while (remaining % candidate == 0u) {
+            remaining /= candidate;
+            ++palette_digit_degree;
+        }
+        return remaining == 1u;
+    }
+    return false;
 }
 
 bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile) {
@@ -106,21 +156,53 @@ bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile) {
     u64 pattern_count = 1u;
     for (u32 digit = 0u; digit < 8u; ++digit) pattern_count *= palette_size;
     if (pattern_count < 3u || pattern_count > 0x100000000ull) return false;
-    u32 candidate = (u32)(pattern_count - 1u);
-    if (!(candidate & 1u)) --candidate;
-    while (candidate > 2u && !palette_symbol_is_prime(candidate)) candidate -= 2u;
-    if (candidate < 2u || !palette_symbol_is_prime(candidate)) return false;
+    u32 characteristic = 0u;
+    u32 palette_digit_degree = 0u;
+    bool full_pattern = palette_symbol_prime_power(palette_size, characteristic,
+                                                   palette_digit_degree);
+    u64 field_order = 0u;
+    u32 field_degree = 1u;
+    u8 polynomial[32] = {};
+    if (full_pattern) {
+        field_degree = 8u * palette_digit_degree;
+        field_order = 1u;
+        for (u32 degree = 0u; degree < field_degree; ++degree) {
+            field_order *= characteristic;
+        }
+        if (field_order != pattern_count ||
+            !palette_symbol_irreducible_polynomial(characteristic, field_degree,
+                                                   polynomial)) return false;
+    } else {
+        u32 candidate = (u32)(pattern_count - 1u);
+        if (!(candidate & 1u)) --candidate;
+        while (candidate > 2u && !palette_symbol_is_prime(candidate)) candidate -= 2u;
+        if (candidate < 2u || !palette_symbol_is_prime(candidate)) return false;
+        characteristic = candidate;
+        field_order = candidate;
+    }
     u32 bits = 0u;
     u64 representable = 1u;
-    while (representable < candidate) {
+    while (representable < field_order) {
         representable <<= 1u;
         ++bits;
     }
     profile.palette_size = palette_size;
-    profile.field_prime = candidate;
-    u32 evaluation_point_limit = candidate - 1u;
+    profile.field_order = field_order;
+    profile.field_characteristic = characteristic;
+    profile.field_degree = field_degree;
+    profile.palette_digit_degree = full_pattern ? palette_digit_degree : 0u;
+    memcpy(profile.field_polynomial, polynomial, sizeof(polynomial));
+    if (full_pattern && characteristic == 2u) {
+        profile.field_value_mask = field_degree == 32u
+                                       ? 0xFFFFFFFFu
+                                       : ((1u << field_degree) - 1u);
+        for (u32 degree = 0u; degree < field_degree; ++degree) {
+            if (polynomial[degree]) profile.field_reduction |= 1u << degree;
+        }
+    }
+    u64 evaluation_point_limit = field_order - 1u;
     profile.block_length = evaluation_point_limit < PALETTE_SYMBOL_MAX_BLOCK_LENGTH
-                               ? evaluation_point_limit
+                               ? (u32)evaluation_point_limit
                                : PALETTE_SYMBOL_MAX_BLOCK_LENGTH;
     profile.symbol_bits = bits;
     return true;
@@ -128,9 +210,11 @@ bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile) {
 
 bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
                                           double redundancy,
-                                          u32& parity_symbols) {
+                                          u32& parity_symbols,
+                                          u32 parity_step) {
     parity_symbols = 0u;
-    if (!profile.block_length || redundancy < 0.0) return false;
+    if (!profile.block_length || redundancy < 0.0 ||
+        (parity_step != 2u && parity_step != 4u)) return false;
     if (redundancy == 0.0) return true;
     long double requested = (long double)profile.block_length *
                             (long double)redundancy /
@@ -138,7 +222,11 @@ bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
     if (requested > (long double)profile.block_length) return false;
     u32 parity = (u32)ceill(requested);
     if (parity < 2u) parity = 2u;
-    if (parity >= 4u && (parity & 3u)) parity += 4u - (parity & 3u);
+    if (parity_step == 2u) {
+        if (parity & 1u) ++parity;
+    } else if (parity >= 4u && (parity & 3u)) {
+        parity += 4u - (parity & 3u);
+    }
     if (parity >= profile.block_length) parity = profile.block_length - 1u;
     parity_symbols = parity;
     return true;
@@ -147,7 +235,27 @@ bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
 bool palette_symbol_to_dots(const PaletteSymbolProfile& profile,
                             u32 value,
                             u8 dots[8]) {
-    if (!dots || profile.palette_size < 2u || value >= profile.field_prime) return false;
+    if (!dots || profile.palette_size < 2u || value >= profile.field_order) return false;
+    if (profile.palette_digit_degree) {
+        u32 coefficients[32] = {};
+        u32 remaining = value;
+        for (u32 degree = 0u; degree < profile.field_degree; ++degree) {
+            coefficients[degree] = remaining % profile.field_characteristic;
+            remaining /= profile.field_characteristic;
+        }
+        if (remaining) return false;
+        for (u32 dot = 0u; dot < 8u; ++dot) {
+            u32 color = 0u;
+            u32 place = 1u;
+            for (u32 degree = 0u; degree < profile.palette_digit_degree; ++degree) {
+                color += coefficients[(7u - dot) * profile.palette_digit_degree + degree] * place;
+                place *= profile.field_characteristic;
+            }
+            if (color >= profile.palette_size) return false;
+            dots[dot] = (u8)color;
+        }
+        return true;
+    }
     for (u32 reverse = 8u; reverse > 0u; --reverse) {
         dots[reverse - 1u] = (u8)(value % profile.palette_size);
         value /= profile.palette_size;
@@ -160,11 +268,33 @@ bool palette_dots_to_symbol(const PaletteSymbolProfile& profile,
                             u32& value) {
     value = 0u;
     if (!dots || profile.palette_size < 2u) return false;
+    if (profile.palette_digit_degree) {
+        u32 coefficients[32] = {};
+        u32 places[32] = {};
+        places[0] = 1u;
+        for (u32 degree = 1u; degree < profile.field_degree; ++degree) {
+            places[degree] = places[degree - 1u] * profile.field_characteristic;
+        }
+        for (u32 dot = 0u; dot < 8u; ++dot) {
+            if (dots[dot] >= profile.palette_size) return false;
+            u32 color = dots[dot];
+            for (u32 degree = 0u; degree < profile.palette_digit_degree; ++degree) {
+                coefficients[(7u - dot) * profile.palette_digit_degree + degree] =
+                    color % profile.field_characteristic;
+                color /= profile.field_characteristic;
+            }
+            if (color) return false;
+        }
+        for (u32 degree = 0u; degree < profile.field_degree; ++degree) {
+            value += coefficients[degree] * places[degree];
+        }
+        return (u64)value < profile.field_order;
+    }
     for (u32 i = 0u; i < 8u; ++i) {
         if (dots[i] >= profile.palette_size) return false;
         value = value * profile.palette_size + dots[i];
     }
-    return value < profile.field_prime;
+    return value < profile.field_order;
 }
 
 bool palette_bytes_to_symbols(const PaletteSymbolProfile& profile,
@@ -172,14 +302,14 @@ bool palette_bytes_to_symbols(const PaletteSymbolProfile& profile,
                               usize byte_count,
                               ByteBuffer& symbols) {
     symbols.release();
-    if ((byte_count && !bytes) || profile.field_prime < 2u) return false;
+    if ((byte_count && !bytes) || profile.field_order < 2u) return false;
     const usize chunk_size = PALETTE_SYMBOL_BYTE_CHUNK_BYTES;
     usize full_chunks = byte_count / chunk_size;
     usize final_chunk_bytes = byte_count % chunk_size;
     u64 symbol_count = (u64)full_chunks *
-        palette_symbol_count_for_chunk(chunk_size, profile.field_prime);
+        palette_symbol_count_for_chunk(chunk_size, profile.field_order);
     if (final_chunk_bytes) {
-        symbol_count += palette_symbol_count_for_chunk(final_chunk_bytes, profile.field_prime);
+        symbol_count += palette_symbol_count_for_chunk(final_chunk_bytes, profile.field_order);
     }
     if (symbol_count > (u64)USIZE_MAX_VALUE / 4u ||
         !symbols.ensure((usize)symbol_count * 4u)) return false;
@@ -188,7 +318,7 @@ bool palette_bytes_to_symbols(const PaletteSymbolProfile& profile,
     for (usize chunk_start = 0u; chunk_start < byte_count;) {
         usize chunk_bytes = byte_count - chunk_start;
         if (chunk_bytes > chunk_size) chunk_bytes = chunk_size;
-        u32 count = palette_symbol_count_for_chunk(chunk_bytes, profile.field_prime);
+        u32 count = palette_symbol_count_for_chunk(chunk_bytes, profile.field_order);
         u8 quotient[PALETTE_SYMBOL_BYTE_CHUNK_BYTES];
         u32 remainders[520];
         memcpy(quotient, bytes + chunk_start, chunk_bytes);
@@ -197,8 +327,8 @@ bool palette_bytes_to_symbols(const PaletteSymbolProfile& profile,
             u64 remainder = 0u;
             for (usize i = 0u; i < chunk_bytes; ++i) {
                 u64 dividend = (remainder << 8u) | quotient[i];
-                quotient[i] = (u8)(dividend / profile.field_prime);
-                remainder = dividend % profile.field_prime;
+                quotient[i] = (u8)(dividend / profile.field_order);
+                remainder = dividend % profile.field_order;
             }
             if (used >= sizeof(remainders) / sizeof(remainders[0])) return false;
             remainders[used++] = (u32)remainder;
@@ -220,18 +350,18 @@ bool palette_bytes_to_symbols(const PaletteSymbolProfile& profile,
 
 u64 palette_symbol_count_for_bytes(const PaletteSymbolProfile& profile,
                                    usize byte_count) {
-    if (profile.field_prime < 2u) return U64_MAX_VALUE;
+    if (profile.field_order < 2u) return U64_MAX_VALUE;
     u64 full_chunks = (u64)(byte_count / PALETTE_SYMBOL_BYTE_CHUNK_BYTES);
     usize final_chunk_bytes = byte_count % PALETTE_SYMBOL_BYTE_CHUNK_BYTES;
     u32 full_chunk_symbols = palette_symbol_count_for_chunk(PALETTE_SYMBOL_BYTE_CHUNK_BYTES,
-                                                            profile.field_prime);
+                                                            profile.field_order);
     if (full_chunk_symbols && full_chunks > U64_MAX_VALUE / full_chunk_symbols) {
         return U64_MAX_VALUE;
     }
     u64 count = full_chunks * full_chunk_symbols;
     if (final_chunk_bytes) {
         u32 final_chunk_symbols = palette_symbol_count_for_chunk(final_chunk_bytes,
-                                                                 profile.field_prime);
+                                                                 profile.field_order);
         if (count > U64_MAX_VALUE - final_chunk_symbols) return U64_MAX_VALUE;
         count += final_chunk_symbols;
     }
@@ -243,16 +373,16 @@ bool palette_symbols_to_bytes(const PaletteSymbolProfile& profile,
                               usize byte_count,
                               ByteBuffer& bytes) {
     bytes.release();
-    if ((symbols.size % 4u) != 0u || profile.field_prime < 2u ||
+    if ((symbols.size % 4u) != 0u || profile.field_order < 2u ||
         (byte_count && !bytes.ensure(byte_count))) return false;
     bytes.size = byte_count;
     usize symbol_count = symbols.size / 4u;
     usize full_chunks = byte_count / PALETTE_SYMBOL_BYTE_CHUNK_BYTES;
     usize final_chunk_bytes = byte_count % PALETTE_SYMBOL_BYTE_CHUNK_BYTES;
     u64 expected = (u64)full_chunks *
-        palette_symbol_count_for_chunk(PALETTE_SYMBOL_BYTE_CHUNK_BYTES, profile.field_prime);
+        palette_symbol_count_for_chunk(PALETTE_SYMBOL_BYTE_CHUNK_BYTES, profile.field_order);
     if (final_chunk_bytes) {
-        expected += palette_symbol_count_for_chunk(final_chunk_bytes, profile.field_prime);
+        expected += palette_symbol_count_for_chunk(final_chunk_bytes, profile.field_order);
     }
     if (expected != symbol_count) return false;
     usize input_symbol = 0u;
@@ -261,15 +391,15 @@ bool palette_symbols_to_bytes(const PaletteSymbolProfile& profile,
         if (chunk_bytes > PALETTE_SYMBOL_BYTE_CHUNK_BYTES) {
             chunk_bytes = PALETTE_SYMBOL_BYTE_CHUNK_BYTES;
         }
-        u32 count = palette_symbol_count_for_chunk(chunk_bytes, profile.field_prime);
+        u32 count = palette_symbol_count_for_chunk(chunk_bytes, profile.field_order);
         u8 value[PALETTE_SYMBOL_BYTE_CHUNK_BYTES] = {};
         for (u32 symbol = 0u; symbol < count; ++symbol) {
             u32 digit = read_le_u32(symbols.data + input_symbol * 4u);
             ++input_symbol;
-            if (digit >= profile.field_prime) return false;
+            if (digit >= profile.field_order) return false;
             u64 carry = digit;
             for (usize reverse = chunk_bytes; reverse > 0u; --reverse) {
-                u64 accum = (u64)value[reverse - 1u] * profile.field_prime + carry;
+                u64 accum = (u64)value[reverse - 1u] * profile.field_order + carry;
                 value[reverse - 1u] = (u8)accum;
                 carry = accum >> 8u;
             }
@@ -281,75 +411,248 @@ bool palette_symbols_to_bytes(const PaletteSymbolProfile& profile,
     return input_symbol == symbol_count;
 }
 
-static u32 palette_symbol_add(u32 left, u32 right, u32 prime) {
-    u64 sum = (u64)left + right;
-    if (sum >= prime) sum -= prime;
-    return (u32)sum;
+static const u32 PALETTE_SYMBOL_MAX_INVERSE_TABLE = 4096u;
+
+static u32 palette_symbol_field_add(u32 left,
+                                    u32 right,
+                                    const PaletteSymbolProfile& profile) {
+    if (profile.field_degree == 1u) {
+        u64 sum = (u64)left + right;
+        if (sum >= profile.field_order) sum -= profile.field_order;
+        return (u32)sum;
+    }
+    if (profile.field_characteristic == 2u) return left ^ right;
+    u32 result = 0u;
+    u64 place = 1u;
+    for (u32 degree = 0u; degree < profile.field_degree; ++degree) {
+        u32 a = left % profile.field_characteristic;
+        u32 b = right % profile.field_characteristic;
+        left /= profile.field_characteristic;
+        right /= profile.field_characteristic;
+        result += ((a + b) % profile.field_characteristic) * place;
+        place *= profile.field_characteristic;
+    }
+    return result;
 }
 
-static u32 palette_symbol_subtract(u32 left, u32 right, u32 prime) {
-    return left >= right ? left - right : (u32)((u64)left + prime - right);
+static u32 palette_symbol_field_subtract(u32 left,
+                                         u32 right,
+                                         const PaletteSymbolProfile& profile) {
+    if (profile.field_degree == 1u) {
+        return left >= right ? left - right
+                             : (u32)((u64)left + profile.field_order - right);
+    }
+    if (profile.field_characteristic == 2u) return left ^ right;
+    u32 result = 0u;
+    u64 place = 1u;
+    for (u32 degree = 0u; degree < profile.field_degree; ++degree) {
+        u32 a = left % profile.field_characteristic;
+        u32 b = right % profile.field_characteristic;
+        left /= profile.field_characteristic;
+        right /= profile.field_characteristic;
+        u32 difference = a >= b ? a - b
+                                 : a + profile.field_characteristic - b;
+        result += difference * place;
+        place *= profile.field_characteristic;
+    }
+    return result;
 }
 
-static u32 palette_symbol_inverse(u32 value, u32 prime) {
-    if (!value || value >= prime) return 0u;
-    return palette_symbol_modular_power(value, prime - 2u, prime);
+static u32 palette_symbol_field_multiply_binary(u32 left,
+                                               u32 right,
+                                               const PaletteSymbolProfile& profile) {
+    u32 multiplier = right;
+    u32 multiplicand = left;
+    u32 product = 0u;
+    u32 degree = profile.field_degree;
+    for (u32 bit = 0u; bit < degree; ++bit) {
+        product ^= multiplicand & (0u - (multiplier & 1u));
+        multiplier >>= 1u;
+        u32 carry = multiplicand >> (degree - 1u);
+        multiplicand = (multiplicand << 1u) & profile.field_value_mask;
+        multiplicand ^= profile.field_reduction & (0u - carry);
+    }
+    return product;
+}
+
+static u32 palette_symbol_field_multiply(u32 left,
+                                         u32 right,
+                                         const PaletteSymbolProfile& profile) {
+    if (profile.field_degree == 1u) {
+        return (u32)(((u64)left * right) % profile.field_order);
+    }
+    u32 degree = profile.field_degree;
+    if (profile.field_characteristic == 2u) {
+        if (degree == 8u) {
+            static thread_local u8 multiplication_table[256u * 256u] = {};
+            static thread_local bool multiplication_table_ready = false;
+            static thread_local u32 direct_multiplications = 0u;
+            if (!multiplication_table_ready) {
+                if (++direct_multiplications < 1024u) {
+                    return palette_symbol_field_multiply_binary(left, right, profile);
+                }
+                for (u32 a = 0u; a < 256u; ++a) {
+                    for (u32 b = 0u; b < 256u; ++b) {
+                        multiplication_table[a * 256u + b] =
+                            (u8)palette_symbol_field_multiply_binary(a, b, profile);
+                    }
+                }
+                multiplication_table_ready = true;
+            }
+            return multiplication_table[left * 256u + right];
+        }
+        return palette_symbol_field_multiply_binary(left, right, profile);
+    }
+    u8 left_coefficients[32] = {};
+    u8 right_coefficients[32] = {};
+    u16 product[64] = {};
+    u32 left_value = left;
+    u32 right_value = right;
+    for (u32 i = 0u; i < degree; ++i) {
+        left_coefficients[i] = (u8)(left_value % profile.field_characteristic);
+        right_coefficients[i] = (u8)(right_value % profile.field_characteristic);
+        left_value /= profile.field_characteristic;
+        right_value /= profile.field_characteristic;
+    }
+    for (u32 i = 0u; i < degree; ++i) {
+        for (u32 j = 0u; j < degree; ++j) {
+            u32 index = i + j;
+            product[index] = (u16)((product[index] +
+                left_coefficients[i] * right_coefficients[j]) % profile.field_characteristic);
+        }
+    }
+    for (u32 reverse = 2u * degree - 1u; reverse-- > degree;) {
+        u32 factor = product[reverse] % profile.field_characteristic;
+        if (!factor) continue;
+        for (u32 coefficient = 0u; coefficient < degree; ++coefficient) {
+            u32 subtract = factor * profile.field_polynomial[coefficient] %
+                           profile.field_characteristic;
+            product[reverse - degree + coefficient] = (u16)(
+                (product[reverse - degree + coefficient] + profile.field_characteristic -
+                 subtract) % profile.field_characteristic);
+        }
+    }
+    u64 result = 0u;
+    u64 place = 1u;
+    for (u32 i = 0u; i < degree; ++i) {
+        result += product[i] * place;
+        place *= profile.field_characteristic;
+    }
+    return (u32)result;
+}
+
+static u32 palette_symbol_field_power(u32 value,
+                                      u64 exponent,
+                                      const PaletteSymbolProfile& profile) {
+    u32 result = 1u;
+    while (exponent) {
+        if (exponent & 1u) result = palette_symbol_field_multiply(result, value, profile);
+        value = palette_symbol_field_multiply(value, value, profile);
+        exponent >>= 1u;
+    }
+    return result;
+}
+
+static u32 palette_symbol_field_inverse(u32 value,
+                                        const PaletteSymbolProfile& profile) {
+    if (!value || value >= profile.field_order) return 0u;
+    if (profile.field_degree == 1u) {
+        return palette_symbol_modular_power(value, (u32)(profile.field_order - 2u),
+                                            (u32)profile.field_order);
+    }
+    return palette_symbol_field_power(value, profile.field_order - 2u, profile);
+}
+
+static u32 palette_symbol_max_evaluation_difference(const PaletteSymbolProfile& profile,
+                                                    u32 block_length) {
+    if (profile.field_degree == 1u) return block_length - 1u;
+    u64 coefficient_range = 1u;
+    while (coefficient_range <= block_length) {
+        coefficient_range *= profile.field_characteristic;
+    }
+    if (coefficient_range > profile.field_order) coefficient_range = profile.field_order;
+    return (u32)(coefficient_range - 1u);
 }
 
 static bool palette_symbol_build_inverse_table(u32 maximum_value,
-                                               u32 prime,
+                                               const PaletteSymbolProfile& profile,
                                                u32* inverse_values) {
-    if (!maximum_value || maximum_value >= prime || !inverse_values ||
-        maximum_value >= PALETTE_SYMBOL_MAX_BLOCK_LENGTH) return false;
-    u32 prefix_products[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    if (!maximum_value || maximum_value >= profile.field_order || !inverse_values ||
+        maximum_value >= PALETTE_SYMBOL_MAX_INVERSE_TABLE) return false;
+    u32 prefix_products[PALETTE_SYMBOL_MAX_INVERSE_TABLE];
     u32 product = 1u;
     for (u32 value = 1u; value <= maximum_value; ++value) {
-        product = (u32)(((u64)product * value) % prime);
+        product = palette_symbol_field_multiply(product, value, profile);
         prefix_products[value] = product;
     }
-    u32 inverse_product = palette_symbol_inverse(product, prime);
+    u32 inverse_product = palette_symbol_field_inverse(product, profile);
     if (!inverse_product) return false;
     inverse_values[0] = 0u;
     for (u32 reverse = maximum_value; reverse > 0u; --reverse) {
         u32 prefix_before = reverse > 1u ? prefix_products[reverse - 1u] : 1u;
-        inverse_values[reverse] = (u32)(((u64)inverse_product * prefix_before) % prime);
-        inverse_product = (u32)(((u64)inverse_product * reverse) % prime);
+        inverse_values[reverse] = palette_symbol_field_multiply(inverse_product,
+                                                                 prefix_before, profile);
+        inverse_product = palette_symbol_field_multiply(inverse_product, reverse, profile);
     }
+    return true;
+}
+
+static bool palette_symbol_get_inverse_table(const PaletteSymbolProfile& profile,
+                                             u32 maximum_value,
+                                             const u32*& inverse_values) {
+    struct PaletteRsInverseCacheEntry {
+        u32 palette_size;
+        u32 maximum_value;
+        u64 last_used;
+        u32 values[PALETTE_SYMBOL_MAX_INVERSE_TABLE];
+    };
+    static thread_local PaletteRsInverseCacheEntry cache[8] = {};
+    static thread_local u64 cache_clock = 0u;
+    u32 cache_index = 0u;
+    bool cached = false;
+    for (u32 i = 0u; i < 8u; ++i) {
+        if (cache[i].palette_size == profile.palette_size &&
+            cache[i].maximum_value == maximum_value) {
+            cache_index = i;
+            cached = true;
+            break;
+        }
+    }
+    if (!cached) {
+        for (u32 i = 1u; i < 8u; ++i) {
+            if (cache[i].last_used < cache[cache_index].last_used) cache_index = i;
+        }
+        if (!palette_symbol_build_inverse_table(maximum_value, profile,
+                                                cache[cache_index].values)) return false;
+        cache[cache_index].palette_size = profile.palette_size;
+        cache[cache_index].maximum_value = maximum_value;
+    }
+    cache[cache_index].last_used = ++cache_clock;
+    inverse_values = cache[cache_index].values;
     return true;
 }
 
 static bool palette_symbol_interpolate_coefficients(const u32* x,
                                                     const u32* y,
                                                     u32 point_count,
-                                                    u32 prime,
+                                                    const PaletteSymbolProfile& profile,
                                                     u32* coefficients,
                                                     const u32* inverse_differences) {
     if (!x || !y || !coefficients || !inverse_differences || !point_count) return false;
-    bool consecutive_points = true;
-    for (u32 i = 1u; i < point_count; ++i) {
-        if (x[i] != x[0] + i) {
-            consecutive_points = false;
-            break;
-        }
-    }
     for (u32 i = 0u; i < point_count; ++i) coefficients[i] = y[i];
     for (u32 order = 1u; order < point_count; ++order) {
-        u32 shared_inverse = consecutive_points
-                                 ? inverse_differences[order] : 0u;
-        if (consecutive_points && !shared_inverse) return false;
         for (u32 index = point_count; index > order; --index) {
             u32 current = index - 1u;
-            u32 inverse = shared_inverse;
-            if (!consecutive_points) {
-                u32 denominator = palette_symbol_subtract(x[current], x[current - order], prime);
-                inverse = denominator < PALETTE_SYMBOL_MAX_BLOCK_LENGTH
-                              ? inverse_differences[denominator] : 0u;
-            }
+            u32 denominator = palette_symbol_field_subtract(x[current],
+                                                              x[current - order], profile);
+            if (denominator >= PALETTE_SYMBOL_MAX_INVERSE_TABLE) return false;
+            u32 inverse = inverse_differences[denominator];
             if (!inverse) return false;
-            u32 difference = palette_symbol_subtract(coefficients[current],
-                                                      coefficients[current - 1u],
-                                                      prime);
-            coefficients[current] = (u32)(((u64)difference * inverse) % prime);
+            u32 difference = palette_symbol_field_subtract(coefficients[current],
+                                                            coefficients[current - 1u],
+                                                            profile);
+            coefficients[current] = palette_symbol_field_multiply(difference, inverse,
+                                                                   profile);
         }
     }
     return true;
@@ -359,11 +662,13 @@ static u32 palette_symbol_evaluate_newton(const u32* x,
                                           const u32* coefficients,
                                           u32 point_count,
                                           u32 at,
-                                          u32 prime) {
+                                          const PaletteSymbolProfile& profile) {
     u32 value = coefficients[point_count - 1u];
     for (u32 index = point_count - 1u; index > 0u; --index) {
-        u32 delta = palette_symbol_subtract(at, x[index - 1u], prime);
-        value = (u32)(((u64)value * delta + coefficients[index - 1u]) % prime);
+        u32 delta = palette_symbol_field_subtract(at, x[index - 1u], profile);
+        value = palette_symbol_field_add(
+            palette_symbol_field_multiply(value, delta, profile),
+            coefficients[index - 1u], profile);
     }
     return value;
 }
@@ -371,18 +676,20 @@ static u32 palette_symbol_evaluate_newton(const u32* x,
 static u32 palette_symbol_polynomial_evaluate(const u32* coefficients,
                                              u32 degree,
                                              u32 at,
-                                             u32 prime) {
+                                             const PaletteSymbolProfile& profile) {
     u32 value = 0u;
     while (degree > 0u) {
-        value = (u32)(((u64)value * at + coefficients[degree]) % prime);
+        value = palette_symbol_field_add(
+            palette_symbol_field_multiply(value, at, profile), coefficients[degree], profile);
         --degree;
     }
-    return palette_symbol_add((u32)(((u64)value * at) % prime), coefficients[0], prime);
+    return palette_symbol_field_add(
+        palette_symbol_field_multiply(value, at, profile), coefficients[0], profile);
 }
 
 static bool palette_symbol_find_error_locator(const u32* syndromes,
                                               u32 syndrome_count,
-                                              u32 prime,
+                                              const PaletteSymbolProfile& profile,
                                               u32* locator,
                                               u32& error_count) {
     if (!syndromes || !locator || syndrome_count > PALETTE_SYMBOL_MAX_BLOCK_LENGTH) return false;
@@ -397,9 +704,9 @@ static bool palette_symbol_find_error_locator(const u32* syndromes,
     for (u32 index = 0u; index < syndrome_count; ++index) {
         u32 discrepancy = syndromes[index];
         for (u32 coefficient = 1u; coefficient <= degree; ++coefficient) {
-            discrepancy = palette_symbol_add(discrepancy,
-                (u32)(((u64)locator[coefficient] * syndromes[index - coefficient]) % prime),
-                prime);
+            discrepancy = palette_symbol_field_add(discrepancy,
+                palette_symbol_field_multiply(locator[coefficient],
+                    syndromes[index - coefficient], profile), profile);
         }
         if (!discrepancy) {
             ++shift;
@@ -407,16 +714,17 @@ static bool palette_symbol_find_error_locator(const u32* syndromes,
         }
         memcpy(temporary, locator,
                sizeof(u32) * (PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u));
-        u32 inverse = palette_symbol_inverse(prior_discrepancy, prime);
+        u32 inverse = palette_symbol_field_inverse(prior_discrepancy, profile);
         if (!inverse) return false;
-        u32 scale = (u32)(((u64)discrepancy * inverse) % prime);
+        u32 scale = palette_symbol_field_multiply(discrepancy, inverse, profile);
         for (u32 coefficient = 0u;
              coefficient + shift <= PALETTE_SYMBOL_MAX_BLOCK_LENGTH;
              ++coefficient) {
             if (previous[coefficient]) {
-                u32 product = (u32)(((u64)scale * previous[coefficient]) % prime);
-                locator[coefficient + shift] = palette_symbol_subtract(
-                    locator[coefficient + shift], product, prime);
+                u32 product = palette_symbol_field_multiply(scale, previous[coefficient],
+                                                            profile);
+                locator[coefficient + shift] = palette_symbol_field_subtract(
+                    locator[coefficient + shift], product, profile);
             }
         }
         if (2u * degree <= index) {
@@ -439,7 +747,7 @@ bool palette_rs_encode(const PaletteSymbolProfile& profile,
                        ByteBuffer& code_symbols) {
     code_symbols.release();
     if (data_symbols.size % 4u || !block_length ||
-        block_length > profile.block_length || block_length > profile.field_prime ||
+        block_length > profile.block_length || block_length > profile.field_order ||
         !data_symbols_per_block || data_symbols_per_block > block_length) return false;
     usize input_count = data_symbols.size / 4u;
     if (input_count % data_symbols_per_block) return false;
@@ -450,26 +758,26 @@ bool palette_rs_encode(const PaletteSymbolProfile& profile,
     u32 x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     u32 y[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     u32 coefficients[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
-    u32 inverse_differences[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u];
-    if (!palette_symbol_build_inverse_table(block_length - 1u,
-                                            profile.field_prime,
-                                            inverse_differences)) return false;
+    const u32* inverse_differences = 0;
+    if (!palette_symbol_get_inverse_table(
+            profile, palette_symbol_max_evaluation_difference(profile, block_length),
+            inverse_differences)) return false;
     for (u32 i = 0u; i < block_length; ++i) x[i] = i + 1u;
     for (u64 block = 0u; block < block_count; ++block) {
         usize input_start = (usize)block * data_symbols_per_block;
         for (u32 i = 0u; i < data_symbols_per_block; ++i) {
             y[i] = read_le_u32(data_symbols.data + (input_start + i) * 4u);
-            if (y[i] >= profile.field_prime) return false;
+            if (y[i] >= profile.field_order) return false;
         }
         if (!palette_symbol_interpolate_coefficients(x, y, data_symbols_per_block,
-                                                     profile.field_prime, coefficients,
+                                                     profile, coefficients,
                                                      inverse_differences)) return false;
         usize output_start = (usize)block * block_length;
         for (u32 i = 0u; i < block_length; ++i) {
             u32 value = i < data_symbols_per_block
                             ? y[i]
                             : palette_symbol_evaluate_newton(x, coefficients,
-                                  data_symbols_per_block, x[i], profile.field_prime);
+                                  data_symbols_per_block, x[i], profile);
             write_le_u32(code_symbols.data + (output_start + i) * 4u, value);
         }
     }
@@ -486,7 +794,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
     data_symbols.release();
     if (stats) *stats = EccDecodeStats();
     if (code_symbols.size % 4u || !block_length ||
-        block_length > profile.block_length || block_length > profile.field_prime ||
+        block_length > profile.block_length || block_length > profile.field_order ||
         !data_symbols_per_block || data_symbols_per_block > block_length ||
         code_symbols.size / 4u % block_length) return false;
     usize code_count = code_symbols.size / 4u;
@@ -495,41 +803,69 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
     if (block_count > USIZE_MAX_VALUE / data_symbols_per_block / 4u ||
         !data_symbols.ensure(block_count * data_symbols_per_block * 4u)) return false;
     data_symbols.size = block_count * data_symbols_per_block * 4u;
-    const u32 prime = profile.field_prime;
     const u32 parity = block_length - data_symbols_per_block;
     u32 x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
-    u32 weights[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
-    u32 inverse_differences[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u];
-    if (!palette_symbol_build_inverse_table(block_length - 1u, prime,
-                                            inverse_differences)) return false;
-    for (u32 i = 0u; i < block_length; ++i) x[i] = i + 1u;
-    u32 factorials[PALETTE_SYMBOL_MAX_BLOCK_LENGTH + 1u];
+    struct PaletteRsWeightCacheEntry {
+        u32 palette_size;
+        u32 block_length;
+        u64 last_used;
+        u32 weights[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
+    };
+    static thread_local PaletteRsWeightCacheEntry weight_cache[8] = {};
+    static thread_local u64 weight_cache_clock = 0u;
+    u32 cache_index = 0u;
+    bool weights_cached = false;
+    for (u32 i = 0u; i < 8u; ++i) {
+        if (weight_cache[i].palette_size == profile.palette_size &&
+            weight_cache[i].block_length == block_length) {
+            cache_index = i;
+            weights_cached = true;
+            break;
+        }
+    }
+    if (!weights_cached) {
+        for (u32 i = 1u; i < 8u; ++i) {
+            if (weight_cache[i].last_used < weight_cache[cache_index].last_used) {
+                cache_index = i;
+            }
+        }
+        weight_cache[cache_index].palette_size = profile.palette_size;
+        weight_cache[cache_index].block_length = block_length;
+    }
+    weight_cache[cache_index].last_used = ++weight_cache_clock;
+    u32* weights = weight_cache[cache_index].weights;
+    const u32* inverse_differences = 0;
+    if (!palette_symbol_get_inverse_table(
+            profile, palette_symbol_max_evaluation_difference(profile, block_length),
+            inverse_differences)) return false;
     u32 prefix_products[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
     u32 inverse_x[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
-    factorials[0] = 1u;
-    for (u32 i = 1u; i < block_length; ++i) {
-        factorials[i] = (u32)(((u64)factorials[i - 1u] * i) % prime);
-    }
-    for (u32 i = 0u; i < block_length; ++i) {
-        u32 right_factorial = factorials[block_length - 1u - i];
-        u32 denominator = (u32)(((u64)factorials[i] * right_factorial) % prime);
-        if (((block_length - 1u - i) & 1u) != 0u) {
-            denominator = denominator ? prime - denominator : 0u;
+    u32 inverse_product = 0u;
+    for (u32 i = 0u; i < block_length; ++i) x[i] = i + 1u;
+    if (!weights_cached) {
+        for (u32 i = 0u; i < block_length; ++i) {
+            u32 product = 1u;
+            for (u32 j = 0u; j < block_length; ++j) {
+                if (j == i) continue;
+                product = palette_symbol_field_multiply(
+                    product, palette_symbol_field_subtract(x[i], x[j], profile), profile);
+            }
+            if (!product) return false;
+            weights[i] = product;
+            prefix_products[i] = i
+                ? palette_symbol_field_multiply(prefix_products[i - 1u], product, profile)
+                : product;
         }
-        if (!denominator) return false;
-        weights[i] = denominator;
-        prefix_products[i] = i
-            ? (u32)(((u64)prefix_products[i - 1u] * denominator) % prime)
-            : denominator;
-    }
-    u32 inverse_product = palette_symbol_inverse(prefix_products[block_length - 1u], prime);
-    if (!inverse_product) return false;
-    for (u32 reverse = block_length; reverse > 0u; --reverse) {
-        u32 i = reverse - 1u;
-        u32 prefix_before = i ? prefix_products[i - 1u] : 1u;
-        u32 denominator = weights[i];
-        weights[i] = (u32)(((u64)inverse_product * prefix_before) % prime);
-        inverse_product = (u32)(((u64)inverse_product * denominator) % prime);
+        inverse_product = palette_symbol_field_inverse(prefix_products[block_length - 1u],
+                                                        profile);
+        if (!inverse_product) return false;
+        for (u32 reverse = block_length; reverse > 0u; --reverse) {
+            u32 i = reverse - 1u;
+            u32 prefix_before = i ? prefix_products[i - 1u] : 1u;
+            u32 product = weights[i];
+            weights[i] = palette_symbol_field_multiply(inverse_product, prefix_before, profile);
+            inverse_product = palette_symbol_field_multiply(inverse_product, product, profile);
+        }
     }
     bool inverse_x_ready = false;
     for (usize block = 0u; block < block_count; ++block) {
@@ -546,7 +882,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
         for (u32 i = 0u; i < block_length; ++i) {
             received[i] = read_le_u32(code_symbols.data + (code_start + i) * 4u);
             erased[i] = erased_symbols.size && erased_symbols.data[code_start + i] ? 1u : 0u;
-            if (received[i] >= prime) {
+            if (received[i] >= profile.field_order) {
                 erased[i] = 1u;
                 received[i] = 0u;
             }
@@ -612,7 +948,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             }
             if (good_count != data_symbols_per_block ||
                 !palette_symbol_interpolate_coefficients(good_x, good_y, good_count,
-                                                         prime, coefficients,
+                                                         profile, coefficients,
                                                          inverse_differences)) {
                 if (stats) {
                     ++stats->unrecoverable_blocks;
@@ -624,7 +960,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             for (u32 i = 0u; i < block_length; ++i) {
                 if (!erased[i] &&
                     palette_symbol_evaluate_newton(good_x, coefficients,
-                        data_symbols_per_block, x[i], prime) != received[i]) {
+                        data_symbols_per_block, x[i], profile) != received[i]) {
                     if (stats) {
                         ++stats->unrecoverable_blocks;
                         stats->failed_block_stage = 3u;
@@ -637,7 +973,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             for (u32 i = 0u; i < data_symbols_per_block; ++i) {
                 write_le_u32(data_symbols.data + (data_start + i) * 4u,
                     palette_symbol_evaluate_newton(good_x, coefficients,
-                        data_symbols_per_block, x[i], prime));
+                        data_symbols_per_block, x[i], profile));
             }
             if (stats) {
                 stats->corrected_symbols += erased_count;
@@ -648,12 +984,12 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             continue;
         }
         for (u32 i = 0u; i < block_length; ++i) {
-            u32 weighted = (u32)(((u64)received[i] * weights[i]) % prime);
+            u32 weighted = palette_symbol_field_multiply(received[i], weights[i], profile);
             u32 power = 1u;
             for (u32 order = 0u; order < parity; ++order) {
-                syndromes[order] = palette_symbol_add(syndromes[order],
-                    (u32)(((u64)weighted * power) % prime), prime);
-                power = (u32)(((u64)power * x[i]) % prime);
+                syndromes[order] = palette_symbol_field_add(syndromes[order],
+                    palette_symbol_field_multiply(weighted, power, profile), profile);
+                power = palette_symbol_field_multiply(power, x[i], profile);
             }
         }
         if (erased_count == 0u) {
@@ -682,16 +1018,16 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
         for (u32 i = 0u; i < block_length; ++i) {
             if (!erased[i]) continue;
             for (u32 order = 0u; order + 1u < modified_count; ++order) {
-                modified_syndromes[order] = palette_symbol_subtract(
+                modified_syndromes[order] = palette_symbol_field_subtract(
                     modified_syndromes[order + 1u],
-                    (u32)(((u64)x[i] * modified_syndromes[order]) % prime),
-                    prime);
+                    palette_symbol_field_multiply(x[i], modified_syndromes[order], profile),
+                    profile);
             }
             if (modified_count) --modified_count;
         }
         u32 error_count = 0u;
         bool locator_found = palette_symbol_find_error_locator(
-            modified_syndromes, modified_count, prime, locator, error_count);
+            modified_syndromes, modified_count, profile, locator, error_count);
         if (locator_found && 2u * error_count + erased_count == parity + 1u) {
             // A low-confidence symbol can still carry the correct value. If the
             // nominal erasure/error budget misses by one, try those observed
@@ -700,17 +1036,18 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
             for (u32 dropped = 0u; dropped < block_length; ++dropped) {
                 if (!erased[dropped] ||
                     read_le_u32(code_symbols.data +
-                                (code_start + dropped) * 4u) >= prime) continue;
+                                (code_start + dropped) * 4u) >= profile.field_order) continue;
                 u32 trial_modified[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
                 memcpy(trial_modified, syndromes, parity * sizeof(u32));
                 u32 trial_count = parity;
                 for (u32 position = 0u; position < block_length; ++position) {
                     if (!erased[position] || position == dropped) continue;
                     for (u32 order = 0u; order + 1u < trial_count; ++order) {
-                        trial_modified[order] = palette_symbol_subtract(
+                        trial_modified[order] = palette_symbol_field_subtract(
                             trial_modified[order + 1u],
-                            (u32)(((u64)x[position] * trial_modified[order]) % prime),
-                            prime);
+                            palette_symbol_field_multiply(x[position],
+                                                          trial_modified[order], profile),
+                            profile);
                     }
                     if (trial_count) --trial_count;
                 }
@@ -718,7 +1055,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
                 u32 trial_errors = 0u;
                 if (!palette_symbol_find_error_locator(trial_modified,
                                                        trial_count,
-                                                       prime,
+                                                       profile,
                                                        trial_locator,
                                                        trial_errors) ||
                     2u * trial_errors + erased_count - 1u > parity) continue;
@@ -747,22 +1084,22 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
         if (!inverse_x_ready) {
             for (u32 i = 0u; i < block_length; ++i) {
                 u32 prefix_before = i ? prefix_products[i - 1u] : 1u;
-                prefix_products[i] = (u32)(((u64)prefix_before * x[i]) % prime);
+                prefix_products[i] = palette_symbol_field_multiply(prefix_before, x[i], profile);
             }
-            inverse_product = palette_symbol_inverse(prefix_products[block_length - 1u], prime);
+            inverse_product = palette_symbol_field_inverse(prefix_products[block_length - 1u], profile);
             if (!inverse_product) return false;
             for (u32 reverse = block_length; reverse > 0u; --reverse) {
                 u32 i = reverse - 1u;
                 u32 prefix_before = i ? prefix_products[i - 1u] : 1u;
-                inverse_x[i] = (u32)(((u64)inverse_product * prefix_before) % prime);
-                inverse_product = (u32)(((u64)inverse_product * x[i]) % prime);
+                inverse_x[i] = palette_symbol_field_multiply(inverse_product, prefix_before, profile);
+                inverse_product = palette_symbol_field_multiply(inverse_product, x[i], profile);
             }
             inverse_x_ready = true;
         }
         for (u32 i = 0u; i < block_length; ++i) {
             if (erased[i]) continue;
             if (palette_symbol_polynomial_evaluate(locator, error_count,
-                                                  inverse_x[i], prime) == 0u) {
+                                                  inverse_x[i], profile) == 0u) {
                 errors[i] = 1u;
                 ++roots;
             }
@@ -786,7 +1123,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
         }
         if (good_count < data_symbols_per_block ||
             !palette_symbol_interpolate_coefficients(good_x, good_y, good_count,
-                                                     prime, coefficients,
+                                                     profile, coefficients,
                                                      inverse_differences)) {
             if (stats) {
                 ++stats->unrecoverable_blocks;
@@ -801,7 +1138,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
         for (u32 i = 0u; i < block_length; ++i) {
             if (erased[i]) continue;
             u32 expected = palette_symbol_evaluate_newton(good_x, coefficients,
-                data_symbols_per_block, x[i], prime);
+                data_symbols_per_block, x[i], profile);
             bool mismatch = expected != received[i];
             if (mismatch != (errors[i] != 0u)) {
                 if (stats) {
@@ -828,7 +1165,7 @@ bool palette_rs_decode(const PaletteSymbolProfile& profile,
         usize data_start = block * data_symbols_per_block;
         for (u32 i = 0u; i < data_symbols_per_block; ++i) {
             u32 value = palette_symbol_evaluate_newton(good_x, coefficients,
-                data_symbols_per_block, x[i], prime);
+                data_symbols_per_block, x[i], profile);
             write_le_u32(data_symbols.data + (data_start + i) * 4u, value);
         }
         if (stats) {
@@ -6895,7 +7232,7 @@ static bool palette_symbol_password_mask_from_key(const PaletteSymbolProfile& pr
                                                   const u8 base_key[32],
                                                   bool unmask,
                                                   u64 first_symbol_index) {
-    if (!base_key || symbols.size % 4u || profile.field_prime < 2u) return false;
+    if (!base_key || symbols.size % 4u || profile.field_order < 2u) return false;
     u8 stream_key[32];
     u8 nonce_digest[32];
     u8 nonce[12] = {};
@@ -6910,8 +7247,12 @@ static bool palette_symbol_password_mask_from_key(const PaletteSymbolProfile& pr
         return false;
     }
     memcpy(nonce, nonce_digest, sizeof(nonce));
-    u64 block_counter = first_symbol_index / 16u;
-    usize random_offset = (usize)(first_symbol_index % 16u) * 4u;
+    bool power_of_two_order = (profile.field_order & (profile.field_order - 1u)) == 0u;
+    usize bytes_per_symbol = power_of_two_order ? 4u : 16u;
+    u64 symbols_per_random_block = 64u / bytes_per_symbol;
+    u64 block_counter = first_symbol_index / symbols_per_random_block;
+    usize random_offset = (usize)(first_symbol_index % symbols_per_random_block) *
+                          bytes_per_symbol;
     u8 random_block[64] = {};
     usize symbol_count = symbols.size / 4u;
     if (symbol_count && block_counter > 0xFFFFFFFFull) {
@@ -6926,7 +7267,7 @@ static bool palette_symbol_password_mask_from_key(const PaletteSymbolProfile& pr
     }
     bool valid = true;
     for (usize index = 0u; index < symbol_count; ++index) {
-        if (random_offset + 4u > sizeof(random_block)) {
+        if (random_offset + bytes_per_symbol > sizeof(random_block)) {
             if (block_counter > 0xFFFFFFFFull) {
                 valid = false;
                 break;
@@ -6934,17 +7275,32 @@ static bool palette_symbol_password_mask_from_key(const PaletteSymbolProfile& pr
             chacha20_block(stream_key, nonce, (u32)block_counter++, random_block);
             random_offset = 0u;
         }
-        u32 mask = read_le_u32(random_block + random_offset) % profile.field_prime;
-        random_offset += 4u;
+        u32 mask = 0u;
+        if (power_of_two_order) {
+            mask = read_le_u32(random_block + random_offset) % profile.field_order;
+        } else {
+            u64 bound = profile.field_order;
+            u64 rejection_threshold = (0u - bound) % bound;
+            u64 candidate = read_le_u64(random_block + random_offset);
+            if (candidate < rejection_threshold) {
+                candidate = read_le_u64(random_block + random_offset + 8u);
+            }
+            if (candidate < rejection_threshold) {
+                valid = false;
+                break;
+            }
+            mask = (u32)(candidate % bound);
+        }
+        random_offset += bytes_per_symbol;
         u32 value = read_le_u32(symbols.data + index * 4u);
-        if (value >= profile.field_prime) {
+        if (value >= profile.field_order) {
             valid = false;
             break;
         }
         if (unmask) {
-            value = value >= mask ? value - mask : (u32)((u64)value + profile.field_prime - mask);
+            value = palette_symbol_field_subtract(value, mask, profile);
         } else {
-            value = (u32)(((u64)value + mask) % profile.field_prime);
+            value = palette_symbol_field_add(value, mask, profile);
         }
         write_le_u32(symbols.data + index * 4u, value);
     }
@@ -6979,10 +7335,15 @@ static bool palette_symbol_public_whiten(const PaletteSymbolProfile& profile,
                                          ByteBuffer& symbols,
                                          bool unwhiten,
                                          u64 first_symbol_index = 0u) {
-    if (symbols.size % 4u || profile.field_prime < 2u) return false;
-    u8 seed[12];
+    if (symbols.size % 4u || profile.field_order < 2u) return false;
+    u8 seed[64] = {};
     write_le_u64(seed, PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED);
-    write_le_u32(seed + 8u, profile.field_prime);
+    write_le_u64(seed + 8u, profile.field_order);
+    write_le_u32(seed + 16u, profile.palette_size);
+    write_le_u32(seed + 20u, profile.field_characteristic);
+    write_le_u32(seed + 24u, profile.field_degree);
+    write_le_u32(seed + 28u, profile.palette_digit_degree);
+    memcpy(seed + 32u, profile.field_polynomial, sizeof(profile.field_polynomial));
     u8 stream_key[32];
     u8 nonce_digest[32];
     u8 nonce[12] = {};
@@ -6998,15 +7359,19 @@ static bool palette_symbol_public_whiten(const PaletteSymbolProfile& profile,
         return false;
     }
     memcpy(nonce, nonce_digest, sizeof(nonce));
-    u64 block_counter = first_symbol_index / 16u;
-    usize random_offset = (usize)(first_symbol_index % 16u) * 4u;
+    bool power_of_two_order = (profile.field_order & (profile.field_order - 1u)) == 0u;
+    usize bytes_per_symbol = power_of_two_order ? 4u : 16u;
+    u64 symbols_per_random_block = 64u / bytes_per_symbol;
+    u64 block_counter = first_symbol_index / symbols_per_random_block;
+    usize random_offset = (usize)(first_symbol_index % symbols_per_random_block) *
+                          bytes_per_symbol;
     usize symbol_count = symbols.size / 4u;
     u8 random_block[64] = {};
     if (symbol_count && block_counter > 0xFFFFFFFFull) return false;
     if (symbol_count) chacha20_block(stream_key, nonce, (u32)block_counter++, random_block);
     bool valid = true;
     for (usize index = 0u; index < symbol_count; ++index) {
-        if (random_offset + 4u > sizeof(random_block)) {
+        if (random_offset + bytes_per_symbol > sizeof(random_block)) {
             if (block_counter > 0xFFFFFFFFull) {
                 valid = false;
                 break;
@@ -7014,18 +7379,32 @@ static bool palette_symbol_public_whiten(const PaletteSymbolProfile& profile,
             chacha20_block(stream_key, nonce, (u32)block_counter++, random_block);
             random_offset = 0u;
         }
-        u32 mask = read_le_u32(random_block + random_offset) % profile.field_prime;
-        random_offset += 4u;
+        u32 mask = 0u;
+        if (power_of_two_order) {
+            mask = read_le_u32(random_block + random_offset) % profile.field_order;
+        } else {
+            u64 bound = profile.field_order;
+            u64 rejection_threshold = (0u - bound) % bound;
+            u64 candidate = read_le_u64(random_block + random_offset);
+            if (candidate < rejection_threshold) {
+                candidate = read_le_u64(random_block + random_offset + 8u);
+            }
+            if (candidate < rejection_threshold) {
+                valid = false;
+                break;
+            }
+            mask = (u32)(candidate % bound);
+        }
+        random_offset += bytes_per_symbol;
         u32 value = read_le_u32(symbols.data + index * 4u);
-        if (value >= profile.field_prime) {
+        if (value >= profile.field_order) {
             valid = false;
             break;
         }
         if (unwhiten) {
-            value = value >= mask ? value - mask
-                                  : (u32)((u64)value + profile.field_prime - mask);
+            value = palette_symbol_field_subtract(value, mask, profile);
         } else {
-            value = (u32)(((u64)value + mask) % profile.field_prime);
+            value = palette_symbol_field_add(value, mask, profile);
         }
         write_le_u32(symbols.data + index * 4u, value);
     }
@@ -7038,26 +7417,26 @@ static bool palette_symbol_public_whiten(const PaletteSymbolProfile& profile,
 }
 
 static bool palette_symbol_store_base_p(u64 value,
-                                        u32 prime,
+                                        u64 radix,
                                         u32* output,
                                         u32 width) {
-    if (!output || prime < 2u || !width) return false;
+    if (!output || radix < 2u || !width) return false;
     for (u32 reverse = width; reverse > 0u; --reverse) {
-        output[reverse - 1u] = (u32)(value % prime);
-        value /= prime;
+        output[reverse - 1u] = (u32)(value % radix);
+        value /= radix;
     }
     return value == 0u;
 }
 
 static bool palette_symbol_load_base_p(const u32* input,
-                                       u32 prime,
+                                       u64 radix,
                                        u32 width,
                                        u64& value) {
     value = 0u;
-    if (!input || prime < 2u || !width) return false;
+    if (!input || radix < 2u || !width) return false;
     for (u32 i = 0u; i < width; ++i) {
-        if (input[i] >= prime || value > (U64_MAX_VALUE - input[i]) / prime) return false;
-        value = value * prime + input[i];
+        if (input[i] >= radix || value > (U64_MAX_VALUE - input[i]) / radix) return false;
+        value = value * radix + input[i];
     }
     return true;
 }
@@ -7084,6 +7463,27 @@ static bool palette_symbol_append_range(ByteBuffer& destination,
            destination.append_bytes(source.data, source.size);
 }
 
+u64 palette_symbol_interleaved_offset(u64 block,
+                                      u32 position,
+                                      u64 block_count,
+                                      u32 final_block_length) {
+    if (!block_count || block >= block_count) return U64_MAX_VALUE;
+    if (block + 1u == block_count || position < final_block_length) {
+        if (position && block_count > U64_MAX_VALUE / position) return U64_MAX_VALUE;
+        u64 row_offset = (u64)position * block_count;
+        return row_offset > U64_MAX_VALUE - block ? U64_MAX_VALUE : row_offset + block;
+    }
+    u64 initial_rows = (u64)final_block_length * block_count;
+    if (position != final_block_length &&
+        block_count - 1u > U64_MAX_VALUE / (position - final_block_length)) {
+        return U64_MAX_VALUE;
+    }
+    u64 remaining_rows = (u64)(position - final_block_length) * (block_count - 1u);
+    if (remaining_rows > U64_MAX_VALUE - initial_rows) return U64_MAX_VALUE;
+    u64 offset = initial_rows + remaining_rows;
+    return offset > U64_MAX_VALUE - block ? U64_MAX_VALUE : offset + block;
+}
+
 bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   const u8* bytes,
                                   usize byte_count,
@@ -7094,45 +7494,66 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   usize password_length,
                                   ByteBuffer& encoded_symbols,
                                   EccSummary& summary,
-                                  bool omit_bootstrap) {
+                                  bool omit_bootstrap,
+                                  u32 parity_step) {
     encoded_symbols.release();
     summary = EccSummary();
-    if (!bytes || !byte_count || profile.field_prime < 2u ||
+    if (!bytes || !byte_count || profile.field_order < 2u ||
         !profile.block_length ||
         profile.block_length > PALETTE_SYMBOL_MAX_BLOCK_LENGTH || redundancy < 0.0) return false;
     u32 block_length = profile.block_length;
     u32 parity = 0u;
-    if (!palette_symbol_parity_for_redundancy(profile, redundancy, parity)) return false;
+    if (!palette_symbol_parity_for_redundancy(profile, redundancy, parity,
+                                               parity_step)) return false;
     if (overlay_erasure_budget > parity ||
         2u * (u32)unknown_error_budget + overlay_erasure_budget > parity) return false;
     ByteBuffer data_symbols;
     if (!palette_bytes_to_symbols(profile, bytes, byte_count, data_symbols)) return false;
     u64 source_symbol_count = data_symbols.size / 4u;
     if (!source_symbol_count) return false;
-    if (!overlay_erasure_budget &&
-        source_symbol_count < (u64)(profile.block_length - parity)) {
+    if (source_symbol_count < (u64)(profile.block_length - parity)) {
         block_length = (u32)source_symbol_count + parity;
     }
     u32 data_per_block = block_length - parity;
     if (!data_per_block || source_symbol_count > U64_MAX_VALUE - (data_per_block - 1u)) return false;
     u64 block_count = (source_symbol_count + data_per_block - 1u) / data_per_block;
-    if (!block_count || block_count > U64_MAX_VALUE / data_per_block ||
-        block_count * data_per_block > (u64)USIZE_MAX_VALUE / 4u) return false;
-    usize padded_size = (usize)(block_count * data_per_block * 4u);
-    ByteBuffer padded;
-    if (!padded.ensure(padded_size)) return false;
-    padded.size = padded_size;
-    memset(padded.data, 0, padded.size);
-    memcpy(padded.data, data_symbols.data, data_symbols.size);
+    if (!block_count ||
+        (parity && block_count > (U64_MAX_VALUE - source_symbol_count) / parity)) return false;
+    u64 code_symbol_count = source_symbol_count + block_count * parity;
+    if (code_symbol_count > (u64)USIZE_MAX_VALUE / 4u ||
+        block_count - 1u > U64_MAX_VALUE / block_length) return false;
+    usize final_data_count = (usize)(source_symbol_count - (block_count - 1u) * data_per_block);
+    u32 final_block_length = (u32)final_data_count + parity;
     ByteBuffer payload_code;
-    if (!palette_rs_encode(profile, padded, block_length, data_per_block, payload_code)) return false;
-    ByteBuffer interleaved_payload_code;
-    if (!interleaved_payload_code.ensure(payload_code.size)) return false;
-    interleaved_payload_code.size = payload_code.size;
+    if (!payload_code.ensure((usize)code_symbol_count * 4u)) return false;
+    payload_code.size = (usize)code_symbol_count * 4u;
     for (u64 block = 0u; block < block_count; ++block) {
-        for (u32 position = 0u; position < block_length; ++position) {
+        usize data_start = (usize)block * data_per_block;
+        usize block_data_count = block + 1u == block_count
+                                     ? final_data_count
+                                     : data_per_block;
+        u32 block_code_length = (u32)block_data_count + parity;
+        ByteBuffer block_data;
+        ByteBuffer block_code;
+        if (!palette_symbol_copy_range(data_symbols, data_start, block_data_count,
+                                       block_data) ||
+            !palette_rs_encode(profile, block_data, block_code_length,
+                               (u32)block_data_count, block_code)) return false;
+        usize code_start = (usize)block * block_length;
+        memcpy(payload_code.data + code_start * 4u, block_code.data, block_code.size);
+    }
+    ByteBuffer interleaved_payload_code;
+    if (!interleaved_payload_code.ensure((usize)code_symbol_count * 4u)) return false;
+    interleaved_payload_code.size = (usize)code_symbol_count * 4u;
+    for (u64 block = 0u; block < block_count; ++block) {
+        u32 actual_block_length = block + 1u == block_count
+                                      ? final_block_length
+                                      : block_length;
+        for (u32 position = 0u; position < actual_block_length; ++position) {
             u64 source_symbol = block * block_length + position;
-            u64 destination_symbol = (u64)position * block_count + block;
+            u64 destination_symbol = palette_symbol_interleaved_offset(
+                block, position, block_count, final_block_length);
+            if (destination_symbol >= code_symbol_count) return false;
             memcpy(interleaved_payload_code.data + (usize)destination_symbol * 4u,
                    payload_code.data + (usize)source_symbol * 4u, 4u);
         }
@@ -7142,9 +7563,9 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
     header_values[0] = 76u;
     header_values[1] = 0u;
     header_values[2] = password && password_length ? 1u : 0u;
-    if (!palette_symbol_store_base_p((u64)byte_count, profile.field_prime,
+    if (!palette_symbol_store_base_p((u64)byte_count, profile.field_order,
                                      header_values + 3u, 9u) ||
-        !palette_symbol_store_base_p(block_count, profile.field_prime,
+        !palette_symbol_store_base_p(block_count, profile.field_order,
                                      header_values + 16u, 9u)) return false;
     header_values[12] = data_per_block;
     header_values[13] = parity;
@@ -7240,10 +7661,10 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
         recovered_values[2] = recover_masked ? 1u : 0u;
         if ((!recover_masked || (password && password_length)) &&
             palette_symbol_store_base_p(header_recovery->byte_count,
-                                         profile.field_prime,
+                                         profile.field_order,
                                          recovered_values + 3u, 9u) &&
             palette_symbol_store_base_p(header_recovery->block_count,
-                                         profile.field_prime,
+                                         profile.field_order,
                                          recovered_values + 16u, 9u)) {
             recovered_values[12] = header_recovery->data_symbols_per_block;
             recovered_values[13] = header_recovery->parity_symbols;
@@ -7297,10 +7718,10 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                 recovered_values[1] = 0u;
                 recovered_values[2] = recover_masked ? 1u : 0u;
                 if (palette_symbol_store_base_p(header_recovery->byte_count,
-                                                profile.field_prime,
+                                                profile.field_order,
                                                 recovered_values + 3u, 9u) &&
                     palette_symbol_store_base_p(header_recovery->block_count,
-                                                profile.field_prime,
+                                                profile.field_order,
                                                 recovered_values + 16u, 9u)) {
                     recovered_values[12] = header_recovery->data_symbols_per_block;
                     recovered_values[13] = header_recovery->parity_symbols;
@@ -7323,7 +7744,7 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     u32 header_values[PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS] = {};
     for (u32 i = 0u; i < PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS; ++i) {
         header_values[i] = read_le_u32(header_data.data + i * 4u);
-        if (header_values[i] >= profile.field_prime) return false;
+        if (header_values[i] >= profile.field_order) return false;
     }
     if (header_values[1] != 0u || (header_values[2] & ~1u) != 0u) return false;
     if (((header_values[2] & 1u) != 0u) != is_masked) return false;
@@ -7337,7 +7758,7 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     u32 block_length = data_per_block + parity;
     u64 byte_count_u64 = 0u;
     u64 block_count = 0u;
-    if (!palette_symbol_load_base_p(header_values + 3u, profile.field_prime, 9u, byte_count_u64) ||
+    if (!palette_symbol_load_base_p(header_values + 3u, profile.field_order, 9u, byte_count_u64) ||
         byte_count_u64 == 0u || byte_count_u64 > (u64)USIZE_MAX_VALUE ||
         !data_per_block || block_length > profile.block_length ||
         parity >= block_length ||
@@ -7347,8 +7768,7 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     if (expected_source_symbols == U64_MAX_VALUE ||
         expected_source_symbols > U64_MAX_VALUE - (data_per_block - 1u)) return false;
     u32 expected_block_length = profile.block_length;
-    if (!overlay_budget &&
-        expected_source_symbols < (u64)(profile.block_length - parity)) {
+    if (expected_source_symbols < (u64)(profile.block_length - parity)) {
         expected_block_length = (u32)expected_source_symbols + parity;
     }
     if (block_length != expected_block_length ||
@@ -7356,15 +7776,19 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     block_count = (expected_source_symbols + data_per_block - 1u) / data_per_block;
     u64 stored_block_count = 0u;
     if (!block_count ||
-        !palette_symbol_load_base_p(header_values + 16u, profile.field_prime, 9u,
+        !palette_symbol_load_base_p(header_values + 16u, profile.field_order, 9u,
                                     stored_block_count) ||
         stored_block_count != block_count ||
-        block_count > U64_MAX_VALUE / block_length) return false;
-    u64 payload_symbol_count_u64 = block_count * block_length;
+        (block_count - 1u) > U64_MAX_VALUE / block_length ||
+        (parity && block_count > (U64_MAX_VALUE - expected_source_symbols) / parity)) return false;
+    u64 payload_symbol_count_u64 = expected_source_symbols + block_count * parity;
+    u64 final_data_count = expected_source_symbols -
+                           (block_count - 1u) * data_per_block;
+    u32 final_block_length = (u32)final_data_count + parity;
     u64 payload_first_symbol = bootstrap_omitted ? 0u : PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;
     if (payload_symbol_count_u64 > U64_MAX_VALUE - payload_first_symbol ||
         payload_symbol_count_u64 + payload_first_symbol > encoded_symbols.size / 4u ||
-        payload_symbol_count_u64 > (u64)USIZE_MAX_VALUE) return false;
+        payload_symbol_count_u64 > (u64)USIZE_MAX_VALUE / 4u) return false;
     ByteBuffer payload_code;
     if (!palette_symbol_copy_range(encoded_symbols, (usize)payload_first_symbol,
                                    (usize)payload_symbol_count_u64, payload_code)) return false;
@@ -7384,12 +7808,17 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
              !active_password_context->selector_seed(selector_seed))) return false;
         u8 selector_mask[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
         for (u64 block = 0u; block < block_count; ++block) {
+            u32 actual_block_length = block + 1u == block_count
+                                          ? final_block_length
+                                          : block_length;
             if (!palette_symbol_selector_mask(selector_seed, block,
-                                              block_length, overlay_budget,
+                                              actual_block_length, overlay_budget,
                                               selector_mask)) return false;
-            for (u32 symbol = 0u; symbol < block_length; ++symbol) {
+            for (u32 symbol = 0u; symbol < actual_block_length; ++symbol) {
                 if (!selector_mask[symbol]) continue;
-                u64 interleaved_offset = (u64)symbol * block_count + block;
+                u64 interleaved_offset = palette_symbol_interleaved_offset(
+                    block, symbol, block_count, final_block_length);
+                if (interleaved_offset >= payload_symbol_count_u64) return false;
                 payload_erasures.data[(usize)interleaved_offset] = 1u;
             }
         }
@@ -7409,9 +7838,15 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
         block_order_erasures.size = (usize)payload_symbol_count_u64;
     }
     for (u64 block = 0u; block < block_count; ++block) {
-        for (u32 position = 0u; position < block_length; ++position) {
-            u64 interleaved_offset = (u64)position * block_count + block;
+        u32 actual_block_length = block + 1u == block_count
+                                      ? final_block_length
+                                      : block_length;
+        for (u32 position = 0u; position < actual_block_length; ++position) {
+            u64 interleaved_offset = palette_symbol_interleaved_offset(
+                block, position, block_count, final_block_length);
             u64 codeword_offset = block * block_length + position;
+            if (interleaved_offset >= payload_symbol_count_u64 ||
+                codeword_offset >= payload_symbol_count_u64) return false;
             memcpy(block_order_payload.data + (usize)codeword_offset * 4u,
                    payload_code.data + (usize)interleaved_offset * 4u, 4u);
             if (payload_erasures.size) {
@@ -7420,13 +7855,52 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
             }
         }
     }
-    ByteBuffer payload_data;
     EccDecodeStats payload_stats;
-    bool payload_complete = palette_rs_decode(profile, block_order_payload,
-                                               block_length,
-                                               data_per_block,
-                                               block_order_erasures,
-                                               payload_data, &payload_stats);
+    ByteBuffer payload_data;
+    if (expected_source_symbols > (u64)USIZE_MAX_VALUE / 4u ||
+        !payload_data.ensure((usize)expected_source_symbols * 4u)) return false;
+    payload_data.size = (usize)expected_source_symbols * 4u;
+    bool payload_complete = true;
+    for (u64 block = 0u; block < block_count; ++block) {
+        usize data_start = (usize)block * data_per_block;
+        u32 actual_data_count = block + 1u == block_count
+                                    ? (u32)final_data_count
+                                    : data_per_block;
+        u32 actual_block_length = actual_data_count + parity;
+        usize code_start = (usize)block * block_length;
+        ByteBuffer block_code;
+        ByteBuffer block_erasures;
+        ByteBuffer block_data;
+        EccDecodeStats block_stats;
+        if (!palette_symbol_copy_range(block_order_payload, code_start,
+                                       actual_block_length, block_code)) return false;
+        if (block_order_erasures.size) {
+            if (!block_erasures.ensure(actual_block_length)) return false;
+            block_erasures.size = actual_block_length;
+            memcpy(block_erasures.data,
+                   block_order_erasures.data + code_start, actual_block_length);
+        }
+        bool block_complete = palette_rs_decode(profile, block_code,
+                                                actual_block_length,
+                                                actual_data_count,
+                                                block_erasures,
+                                                block_data, &block_stats);
+        payload_stats.corrected_symbols += block_stats.corrected_symbols;
+        payload_stats.total_parity_symbols += block_stats.total_parity_symbols;
+        payload_stats.total_blocks += block_stats.total_blocks;
+        payload_stats.blocks_with_errors += block_stats.blocks_with_errors;
+        payload_stats.unrecoverable_blocks += block_stats.unrecoverable_blocks;
+        if (!block_complete) {
+            payload_stats.failed_block_errors = block_stats.failed_block_errors;
+            payload_stats.failed_block_erasures = block_stats.failed_block_erasures;
+            payload_stats.failed_block_stage = block_stats.failed_block_stage;
+            payload_stats.failed_block_index = block;
+            payload_complete = false;
+            break;
+        }
+        memcpy(payload_data.data + data_start * 4u,
+               block_data.data, block_data.size);
+    }
     usize decoded_byte_count = (usize)byte_count_u64;
     u64 decoded_source_symbols = expected_source_symbols;
     if (!payload_complete) {
@@ -7486,14 +7960,6 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     }
     if (decoded_source_symbols > payload_data.size / 4u ||
         decoded_source_symbols > (u64)USIZE_MAX_VALUE / 4u) return false;
-    u64 padded_source_symbols = block_count * data_per_block;
-    if (payload_complete) {
-        for (u64 symbol = expected_source_symbols; symbol < padded_source_symbols; ++symbol) {
-            if (read_le_u32(payload_data.data + (usize)symbol * 4u) != 0u) {
-                return false;
-            }
-        }
-    }
     ByteBuffer packed_symbols;
     usize packed_size = (usize)decoded_source_symbols * 4u;
     if (!packed_symbols.ensure(packed_size)) return false;
@@ -8697,8 +9163,7 @@ namespace MetadataTile {
             source_symbols > U64_MAX_VALUE - ((u64)values.ecc_block_data - 1u)) return false;
         u32 block_length = (u32)values.ecc_block_data + values.ecc_parity;
         u32 expected_block_length = profile.block_length;
-        if (!values.overlay_erasure_budget &&
-            source_symbols < (u64)(profile.block_length - values.ecc_parity)) {
+        if (source_symbols < (u64)(profile.block_length - values.ecc_parity)) {
             expected_block_length = (u32)source_symbols + values.ecc_parity;
         }
         if (block_length != expected_block_length ||
@@ -8706,8 +9171,11 @@ namespace MetadataTile {
         values.ecc_block_count = (source_symbols + values.ecc_block_data - 1u) /
                                  values.ecc_block_data;
         if (!values.ecc_block_count ||
-            values.ecc_block_count > U64_MAX_VALUE / block_length) return false;
-        u64 payload_symbols = values.ecc_block_count * block_length;
+            (values.ecc_parity &&
+             values.ecc_block_count > (U64_MAX_VALUE - source_symbols) /
+                                          values.ecc_parity)) return false;
+        u64 payload_symbols = source_symbols +
+                              values.ecc_block_count * values.ecc_parity;
         if (payload_symbols > U64_MAX_VALUE / 32u -
                                   makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) return false;
         u64 headerless_page_bits = payload_symbols * 32u;
@@ -11024,22 +11492,12 @@ namespace MetadataTile {
                                         : max_abs_angle_degrees;
         double angle_candidates[201];
         u32 angle_candidate_count = 0u;
-        if (compact_image_search) {
-            angle_candidates[angle_candidate_count++] = 0.0;
-            for (double magnitude = kAngleStepCoarse;
-                 magnitude <= angle_search_limit + 1e-9;
-                 magnitude += kAngleStepCoarse) {
-                angle_candidates[angle_candidate_count++] = magnitude;
-                angle_candidates[angle_candidate_count++] = -magnitude;
-            }
-        } else {
-            angle_candidates[angle_candidate_count++] = 0.0;
-            for (double magnitude = kAngleStepCoarse;
-                 magnitude <= angle_search_limit + 1e-9;
-                 magnitude += kAngleStepCoarse) {
-                angle_candidates[angle_candidate_count++] = magnitude;
-                angle_candidates[angle_candidate_count++] = -magnitude;
-            }
+        angle_candidates[angle_candidate_count++] = 0.0;
+        for (double magnitude = kAngleStepCoarse;
+             magnitude <= angle_search_limit + 1e-9;
+             magnitude += kAngleStepCoarse) {
+            angle_candidates[angle_candidate_count++] = magnitude;
+            angle_candidates[angle_candidate_count++] = -magnitude;
         }
 
         u32 compact_monochrome_refinement_attempts = 0u;
@@ -30303,7 +30761,9 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         double overlay_fraction,
                                         EccFillCandidate& candidate,
                                         u32 metadata_ecc_minimum_parity_bytes,
-                                        u16 required_unknown_errors) {
+                                        u16 required_unknown_errors,
+                                        u32 parity_step,
+                                        bool omit_bootstrap) {
     (void)structural_erasure_fraction;
     if (payload_bytes == 0u || requested_redundancy <= 0.0 ||
         requested_redundancy >
@@ -30317,7 +30777,7 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
     if (!makocode::palette_symbol_profile(palette_size, profile)) return false;
     u32 parity = 0u;
     if (!makocode::palette_symbol_parity_for_redundancy(
-            profile, requested_redundancy, parity)) return false;
+            profile, requested_redundancy, parity, parity_step)) return false;
     u32 overlay_budget = (u32)floor((double)profile.block_length * overlay_fraction);
     if (overlay_budget > parity) return false;
     u32 block_length = profile.block_length;
@@ -30326,19 +30786,19 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
     if (unknown_budget < required_unknown_errors) return false;
     u64 source_symbols = makocode::palette_symbol_count_for_bytes(profile, payload_bytes);
     if (!source_symbols || source_symbols == U64_MAX_VALUE) return false;
-    if (!overlay_budget && source_symbols < (u64)(profile.block_length - parity)) {
+    if (source_symbols < (u64)(profile.block_length - parity)) {
         block_length = (u32)source_symbols + parity;
         data_symbols = block_length - parity;
     }
     if (source_symbols > U64_MAX_VALUE - (data_symbols - 1u)) return false;
     u64 block_count = (source_symbols + data_symbols - 1u) / data_symbols;
     if (!block_count ||
-        block_count > (U64_MAX_VALUE - makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS) /
-                          block_length ||
-        block_count * block_length +
-                makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS > U64_MAX_VALUE / 32u) return false;
-    u64 frame_bits = (makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS +
-                      block_count * block_length) * 32u;
+        (parity && block_count > (U64_MAX_VALUE - source_symbols) / parity)) return false;
+    u64 payload_symbol_count = source_symbols + block_count * parity;
+    u64 bootstrap_symbols = omit_bootstrap
+                                ? 0u : makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;
+    if (payload_symbol_count > U64_MAX_VALUE / 32u - bootstrap_symbols) return false;
+    u64 frame_bits = (bootstrap_symbols + payload_symbol_count) * 32u;
     double encoded_redundancy = (double)parity / (double)data_symbols;
     candidate.block_data = (u16)data_symbols;
     candidate.parity = (u16)parity;
@@ -30369,7 +30829,8 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                              candidate_width,
                              candidate_height,
                              &summary,
-                             0.0,
+                             encoded_redundancy < 0.25
+                                 ? encoded_redundancy : 0.25,
                              unknown_budget,
                              (u16)overlay_budget)) return false;
     FooterLayout layout = FooterLayout();
@@ -30387,7 +30848,8 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                              bits_per_page,
                              page_count,
                              &summary,
-                             0.0,
+                             encoded_redundancy < 0.25
+                                 ? encoded_redundancy : 0.25,
                              unknown_budget,
                              (u16)overlay_budget)) return false;
     makocode::ByteBuffer dummy_frame;
@@ -30427,6 +30889,7 @@ bool find_best_ecc_fill(usize payload_bytes,
                                double structural_erasure_fraction,
                                double overlay_fraction,
                                u16 required_unknown_errors,
+                               bool omit_bootstrap,
                                double& best_ratio,
                                double& best_requested_ratio,
                                u16& best_block_data,
@@ -30460,7 +30923,7 @@ bool find_best_ecc_fill(usize payload_bytes,
         u32 parity = 0u;
         if (!makocode::palette_symbol_parity_for_redundancy(fill_profile,
                                                              redundancy,
-                                                             parity) ||
+                                                             parity, 2u) ||
             parity >= sizeof(parity_candidate_state) /
                           sizeof(parity_candidate_state[0])) return false;
         if (parity_candidate_state[parity]) {
@@ -30482,7 +30945,9 @@ bool find_best_ecc_fill(usize payload_bytes,
                                                       overlay_fraction,
                                                       local_candidate,
                                                       2u,
-                                                      required_unknown_errors);
+                                                      required_unknown_errors,
+                                                      2u,
+                                                      omit_bootstrap);
         parity_candidate_state[parity] = evaluated ? 1u : 2u;
         if (!evaluated) return false;
         parity_candidates[parity] = local_candidate;
