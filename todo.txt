@@ -1,8 +1,8 @@
 TODO
 
-- Steganography (high overlay, no metadata/fiducials). Do a security review of this. There should be no pre-data section that indicates with high probability that this is makocode, e.g. compact_u16/64 may give it away. Calculate probability than an image is actually makocode.
-   - This might need runs of bits to NOT be contiguous. Might also require modifying Reed Solomon to work not on bytes but on the encoded bit-count runs... could clean up the core algorithm too.
-   - I chose N^8, if these are bit shuffled (helps avoid correlation attack?), the trade off is blot damage then affects 8x sectors. If I chose N^2, then 2-color has only 1/4 granularity for ECC. Determine trade-offs. Might need to be larger for better steganography too. Or reserved shuffle mode, either clump (better for damage) or shuffle (better for steganography correlation).
+- Steganography security review
+  - --steganography -> --scatter-payload
+  - When password is supplied, it's used as the static seed value for shuffling (and maybe others). Confirm that shuffling applies to everything, including pre-data.
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
   - Largest page possible that takes <5s.

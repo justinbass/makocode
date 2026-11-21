@@ -48,6 +48,10 @@ int command_decode(int arg_count, char** args) {
             continue;
         }
         const char* arg = args[i];
+        if (ascii_equals_token(arg, ascii_length(arg), "--steganography")) {
+            mapping.steganography_dot_interleave = true;
+            continue;
+        }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-metadata")) {
             no_metadata = true;
             continue;
@@ -216,6 +220,11 @@ int command_decode(int arg_count, char** args) {
     if (no_metadata &&
         (!mapping.page_width_set || !mapping.page_height_set)) {
         console_line(2, "decode: --no-metadata requires --page-width and --page-height");
+        return 1;
+    }
+    if (mapping.steganography_dot_interleave &&
+        (!no_metadata || !no_fiducials || file_count != 1u)) {
+        console_line(2, "decode: --steganography requires one marker-free page");
         return 1;
     }
     const char* raw_fallback_setting =

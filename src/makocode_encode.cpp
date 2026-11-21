@@ -168,6 +168,10 @@ int command_encode(int arg_count, char** args) {
         if (!arg) {
             continue;
         }
+        if (ascii_equals_token(arg, ascii_length(arg), "--steganography")) {
+            mapping.steganography_dot_interleave = true;
+            continue;
+        }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-metadata")) {
             no_metadata = true;
             continue;
@@ -487,17 +491,12 @@ int command_encode(int arg_count, char** args) {
                                    overlay_fraction_length,
                                    overlay_fraction_numerator,
                                    overlay_fraction_denominator) ||
-                overlay_fraction_numerator > overlay_fraction_denominator ||
-                overlay_fraction_numerator * 255u > overlay_fraction_denominator * 254u) {
-                console_line(2, "encode: --overlay-fraction must be between 0.0 and 254/255");
+                overlay_fraction_numerator >= overlay_fraction_denominator) {
+                console_line(2, "encode: --overlay-fraction must be between 0.0 and less than 1.0");
                 return 1;
             }
             overlay_fraction = (double)overlay_fraction_numerator /
                                (double)overlay_fraction_denominator;
-            const double maximum_overlay_fraction = 254.0 / 255.0;
-            if (maximum_overlay_fraction - overlay_fraction < 1.0e-9) {
-                overlay_fraction = maximum_overlay_fraction;
-            }
             overlay_fraction_specified = true;
             continue;
         }
@@ -928,6 +927,15 @@ int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --overlay-ignore-colors requires an overlay image");
         return 1;
     }
+    if (mapping.steganography_dot_interleave) {
+        if (!no_metadata || !no_fiducials || !mapping.page_width_set ||
+            !mapping.page_height_set || overlay_count != 1u ||
+            !overlay_fraction_specified || overlay_ignore_colors_specified ||
+            have_footer || ecc_mode == ECC_FILL || fill_pages_specified) {
+            console_line(2, "encode: --steganography requires one maximum overlay, exact dimensions, no metadata, no fiducials, no ignored colors, no footer, and no page filling");
+            return 1;
+        }
+    }
     if (have_password && !have_random_data) {
         console_line(2, "encode: --password requires --random-data");
         return 1;
@@ -941,6 +949,10 @@ int command_encode(int arg_count, char** args) {
         return 1;
     }
     bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
+    if (mapping.steganography_dot_interleave && hidden_mode_enabled) {
+        console_line(2, "encode: --steganography does not support hidden-volume filler");
+        return 1;
+    }
     if (have_password && !hidden_mode_enabled &&
         !makocode::palette_symbol_password_selector_seed(
             (const char*)password_buffer.data, password_buffer.size,
@@ -981,6 +993,20 @@ int command_encode(int arg_count, char** args) {
     if (no_fiducials) g_fiducial_defaults.spacing_pixels = 0u;
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "encode")) {
+            return 1;
+        }
+    }
+    if (mapping.steganography_dot_interleave) {
+        u32 palette_size = mapping_has_custom_palette(mapping)
+                               ? mapping.custom_palette_count
+                               : (1u << bits_per_sample(mapping.color_channels));
+        makocode::PaletteSymbolProfile steganography_profile;
+        if (!makocode::palette_symbol_profile(palette_size,
+                                              steganography_profile) ||
+            (u32)floor((double)steganography_profile.block_length *
+                       overlay_fraction) !=
+                steganography_profile.block_length - 1u) {
+            console_line(2, "encode: --steganography requires the maximum overlay erasure budget");
             return 1;
         }
     }
@@ -2040,6 +2066,10 @@ int command_encode(int arg_count, char** args) {
         console_line(2, "encode: failed to allocate metadata page selection");
         return 1;
     }
+    if (mapping.steganography_dot_interleave && page_count != 1u) {
+        console_line(2, "encode: --steganography requires a single page");
+        return 1;
+    }
     metadata_page_assignments.size = (usize)page_count;
     memset(metadata_page_assignments.data,
            metadata_pages_value &&
@@ -2901,7 +2931,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                                OverlayPage& base_page,
                                                OverlaySelector& overlay_selector,
                                                bool include_metadata_overwrites = true,
-                                               bool metadata_tile_present = true) {
+                                               bool metadata_tile_present = true,
+                                               bool steganography_dot_interleave = false) {
     (void)include_metadata_overwrites;
     (void)metadata_tile_present;
     if (!overlay_page.pixels.data || !base_page.pixels.data ||
@@ -2982,7 +3013,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                               payload_pixel_count,
                                               false,
                                               overlay_selector.placement_seed,
-                                              &overlay_selector.overlay_rank_map_cache) ||
+                                              &overlay_selector.overlay_rank_map_cache,
+                                              steganography_dot_interleave) ||
         payload_pixel_count < 8u || payload_pixel_count > (u64)USIZE_MAX_VALUE / 8u) {
         return false;
     }
@@ -3018,12 +3050,10 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
             ? 0u : makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS;
     u64 stream_symbol_count = payload_stream_symbols + bootstrap_symbol_count;
     if (stored_stream_symbol_count < stream_symbol_count) return false;
-    if (page_symbol_offset >= stream_symbol_count) return true;
-    u64 page_symbol_count = stream_symbol_count - page_symbol_offset;
+    u64 page_symbol_count = page_symbol_offset < stream_symbol_count
+        ? stream_symbol_count - page_symbol_offset : 0u;
     if (page_symbol_count > page_symbol_capacity) page_symbol_count = page_symbol_capacity;
-    u64 payload_stream_end = bootstrap_symbol_count + payload_stream_symbols;
     u64 page_stream_end = page_symbol_offset + page_symbol_count;
-    if (page_stream_end > payload_stream_end) page_stream_end = payload_stream_end;
     u64 page_dot_count = page_symbol_count * 8u;
     if (payload_pixel_count > (u64)USIZE_MAX_VALUE ||
         !payload_rank_map.data) return false;
@@ -3138,6 +3168,40 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                            overlay_page.pixels.data + pixel_byte, 3u);
                 }
             }
+        }
+    }
+    u64 filler_symbol_start = page_symbol_offset < stream_symbol_count
+        ? stream_symbol_count - page_symbol_offset : 0u;
+    for (u64 symbol = filler_symbol_start;
+         symbol < page_symbol_capacity;
+         ++symbol) {
+        u64 first_dot = symbol * 8u;
+        if (first_dot > payload_pixel_count ||
+            payload_pixel_count - first_dot < 8u) return false;
+        for (u32 dot = 0u; dot < 8u; ++dot) {
+            u64 pixel = pixel_for_rank[first_dot + dot];
+            if (pixel == U64_MAX_VALUE || pixel >= total_data_pixels) return false;
+            usize pixel_byte = (usize)pixel * 3u;
+            if (ignore_list &&
+                overlay_color_matches_ignore(*ignore_list,
+                    overlay_page.pixels.data[pixel_byte],
+                    overlay_page.pixels.data[pixel_byte + 1u],
+                    overlay_page.pixels.data[pixel_byte + 2u])) continue;
+            memcpy(base_page.pixels.data + pixel_byte,
+                   overlay_page.pixels.data + pixel_byte, 3u);
+        }
+    }
+    if (steganography_dot_interleave) {
+        if (payload_pixel_count != total_data_pixels) return false;
+        u64 first_unencoded_rank = page_symbol_capacity * 8u;
+        for (u64 rank = first_unencoded_rank;
+             rank < payload_pixel_count;
+             ++rank) {
+            u64 pixel = pixel_for_rank[rank];
+            if (pixel == U64_MAX_VALUE || pixel >= total_data_pixels) return false;
+            usize pixel_byte = (usize)pixel * 3u;
+            memcpy(base_page.pixels.data + pixel_byte,
+                   overlay_page.pixels.data + pixel_byte, 3u);
         }
     }
     return true;
@@ -3274,7 +3338,9 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                              base_page,
                                              overlay_selector,
                                              include_metadata_overwrites,
-                                             !tile_override)) {
+                                             !tile_override,
+                                             mapping_override &&
+                                                 mapping_override->steganography_dot_interleave)) {
         console_line(2, "encode: failed to apply overlay PPM");
         return false;
     }

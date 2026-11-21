@@ -1032,6 +1032,7 @@ struct ImageMappingConfig {
     u32 custom_palette_base;
     bool custom_palette_valid;
     u64 symbol_placement_seed;
+    bool steganography_dot_interleave;
     bool recover_palette;
     const char* recover_limit_text;
     usize recover_limit_length;
@@ -1048,6 +1049,7 @@ struct ImageMappingConfig {
           custom_palette_base(0u),
           custom_palette_valid(false),
           symbol_placement_seed(makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),
+          steganography_dot_interleave(false),
           recover_palette(false),
           recover_limit_text("4"),
           recover_limit_length(1u) {
@@ -1809,12 +1811,14 @@ bool build_payload_rank_map(u32 width_pixels,
                                        u64& payload_pixel_count,
                                        bool include_metadata_overwrites = false,
                                        u64 symbol_placement_seed = 0u,
-                                       PayloadRankMapCache* cache = 0);
+                                       PayloadRankMapCache* cache = 0,
+                                       bool steganography_dot_interleave = false);
 bool permute_payload_rank_map(u64 pixel_count,
                               const Values& values,
                               u64 symbol_placement_seed,
                               ByteBuffer& rank_map,
-                              u64 payload_pixel_count);
+                              u64 payload_pixel_count,
+                              bool steganography_dot_interleave = false);
 } // namespace MetadataTile
 
 bool arguments_request_help(int arg_count, char** args);
