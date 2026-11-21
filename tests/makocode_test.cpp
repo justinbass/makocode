@@ -2595,7 +2595,7 @@ static void hidden_volumes_case(){
         {"duplicate_fill_pages","--fill-pages may be specified only once",{"--ecc=fill","--fill-pages=1","--fill-pages=2"}},
         {"fill_pages_with_numeric_modes","--fill-pages requires --hidden fill or --ecc fill",{"--hidden=0.5","--ecc=0.5","--fill-pages=1","--password="+visible_password}},
         {"overlay_fraction_without_ppm","--overlay-fraction and overlay images must be used together",{"--ecc=0.5","--overlay-fraction=0.1"}},
-        {"steganography_requires_maximum_overlay","--steganography requires the maximum overlay erasure budget",{"--steganography","--no-metadata","--no-fiducials","--palette","White Black","--overlay-fraction=0.5","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
+        {"removed_steganography_option","encode: unknown option: --steganography",{"--steganography"}},
         {"overlay_ppm_without_fraction","--overlay-fraction and overlay images must be used together",{"--ecc=0.5","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
         {"overlay_fraction_too_large","--overlay-fraction must be between 0.0 and less than 1.0",{"--ecc=0.5","--overlay-fraction=1.1","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
         {"overlay_without_ecc","overlay requires ECC",{"--ecc=0","--overlay-fraction=0.1","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
@@ -2770,7 +2770,7 @@ struct OverlayConfig{
     unsigned center_clear_radius=0;
     std::vector<std::string> encode_options;
     int expected_pages=0;
-    bool skip_grayscale=false,without_metadata=false,without_fiducials=false,encrypted=false,steganography=false;
+    bool skip_grayscale=false,without_metadata=false,without_fiducials=false,encrypted=false,scatter=false;
 };
 
 static void overlay_case(const OverlayConfig& cfg){
@@ -2793,11 +2793,11 @@ static void overlay_case(const OverlayConfig& cfg){
     if(!cfg.ignore_colors.empty()){encode.push_back("--overlay-ignore-colors");encode.push_back(cfg.ignore_colors);}
     if(!cfg.footer.empty()){encode.push_back("--footer");encode.push_back(cfg.footer);}
     if(!cfg.font_size.empty()){encode.push_back("--font-size");encode.push_back(cfg.font_size);}
-    if(cfg.steganography)encode.push_back("--steganography");
+    if(cfg.scatter)encode.push_back("--scatter");
     if(cfg.without_metadata)encode.push_back("--no-metadata");
     if(cfg.without_fiducials)encode.push_back("--no-fiducials");
     if(cfg.without_metadata){
-        encode.push_back("--password=steganography-suite-password");
+        encode.push_back("--password=scatter-suite-password");
         encode.push_back("--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb");
     }
     encode.insert(encode.end(),cfg.encode_options.begin(),cfg.encode_options.end());
@@ -2890,8 +2890,7 @@ static void overlay_case(const OverlayConfig& cfg){
     require(fs::exists(csv),cfg.id+": missing encode fiducial report");
     std::vector<std::string> decode_extra={"--debug"};
     if(cfg.without_metadata){decode_extra.insert(decode_extra.end(),{"--no-metadata","--no-fiducials","--page-width="+std::to_string(cfg.width),"--page-height="+std::to_string(cfg.height),"--palette",cfg.palette});}
-    if(cfg.steganography)decode_extra.push_back("--steganography");
-    if(cfg.encrypted)decode_extra.push_back("--password=steganography-suite-password");
+    if(cfg.encrypted)decode_extra.push_back("--password=scatter-suite-password");
     std::vector<std::string> decode_args=decode_file_args(ordered,decoded,decode_extra);
     auto result=run_cli(work,decode_args,"decode");expect_success(result,cfg.id+" decode");
     require(fs::exists(decoded/"decode_fiducials.csv"),cfg.id+": missing decode fiducial report");
@@ -2902,8 +2901,7 @@ static void overlay_case(const OverlayConfig& cfg){
         fs::create_directories(wrong_password_output);
         std::vector<std::string> wrong_password_options={"--no-metadata","--no-fiducials",
             "--page-width="+std::to_string(cfg.width),"--page-height="+std::to_string(cfg.height),
-            "--palette",cfg.palette,"--password=incorrect-steganography-password"};
-        if(cfg.steganography)wrong_password_options.push_back("--steganography");
+            "--palette",cfg.palette,"--password=incorrect-scatter-password"};
         auto wrong_password=run_cli(work,decode_file_args(ordered,wrong_password_output,
             wrong_password_options),"wrong_password");
         expect_failure(wrong_password,cfg.id+" wrong password");
@@ -2914,8 +2912,7 @@ static void overlay_case(const OverlayConfig& cfg){
         std::vector<std::string> wrong_grid_options={"--no-metadata","--no-fiducials",
             "--page-width="+std::to_string(cfg.width+1u),"--page-height="+std::to_string(cfg.height),
             "--palette",cfg.palette};
-        if(cfg.steganography)wrong_grid_options.push_back("--steganography");
-        if(cfg.encrypted)wrong_grid_options.push_back("--password=steganography-suite-password");
+        if(cfg.encrypted)wrong_grid_options.push_back("--password=scatter-suite-password");
         auto wrong_grid=run_cli(work,decode_file_args(ordered,wrong_grid_output,wrong_grid_options),"wrong_grid");
         expect_failure(wrong_grid,cfg.id+" wrong grid dimensions");
     }
@@ -3668,6 +3665,7 @@ struct RoundTrip {
     bool tiny_dimensions_check = false;
     bool marker_free_compact = false;
     bool default_ecc_check = false;
+    bool scatter_metadata_check = false;
     bool white_checker = false;
 };
 
@@ -3875,6 +3873,11 @@ static void run_roundtrip(const RoundTrip& test) {
         MetadataTile::Values tile = extract_tile_values(pages.front());
         require(tile.ecc_parity >= 170u && tile.unknown_parity_budget >= 85u,
                 test.id + ": default auto-ECC no longer reserves 85 unknown symbol errors");
+    }
+    if (test.scatter_metadata_check) {
+        MetadataTile::Values tile = extract_tile_values(pages.front());
+        require(tile.scatter_payload,
+                test.id + ": metadata does not record the scattered payload layout");
     }
     std::vector<std::string> decode_base{"decode", "--decoded-stdout"};
     decode_base.insert(decode_base.end(), test.decode_args.begin(), test.decode_args.end());
@@ -4913,15 +4916,17 @@ static std::vector<TestCase> build_cases() {
     oc=OverlayConfig{};oc.id="0063_overlay_fill";oc.fraction="0.992156862745098";oc.ecc="fill";overlay(oc);
     oc=OverlayConfig{};oc.id="0068_overlay_fill_mixed";oc.fraction="0.992156862745098";oc.palette="White Cyan Magenta Yellow";oc.circle="255 0 0";oc.background="0 255 0";oc.ignore_colors="#FF0000";oc.skip_grayscale=true;overlay(oc);
     oc=OverlayConfig{};oc.id="0109_overlay_footer_geometry";oc.size=4096;oc.width=640;oc.height=400;oc.footer="Archive title";oc.font_size="5";overlay(oc);
-    const std::vector<std::pair<std::string,std::string>> steganography_palettes={{"2","White Black"},{"4","White Cyan Magenta Yellow"},{"5","White Cyan Magenta Yellow Black"},{"6","White #FF0000 #00FF00 #0000FF Cyan Black"},{"8","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"}};
-    for(const auto& item:steganography_palettes){
-        oc=OverlayConfig{};oc.id="0124_overlay_palette_"+item.first;oc.size=24;oc.fraction="0.9990234375";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encrypted=true;oc.steganography=true;overlay(oc);
+    const std::vector<std::pair<std::string,std::string>> scatter_palettes={{"2","White Black"},{"4","White Cyan Magenta Yellow"},{"5","White Cyan Magenta Yellow Black"},{"6","White #FF0000 #00FF00 #0000FF Cyan Black"},{"8","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"}};
+    for(const auto& item:scatter_palettes){
+        oc=OverlayConfig{};oc.id="0124_overlay_palette_"+item.first;oc.size=24;oc.fraction="0.9990234375";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encrypted=true;oc.scatter=true;overlay(oc);
     }
-    for(const auto& item:steganography_palettes){
-        oc=OverlayConfig{};oc.id="0128_steganography_password_"+item.first;oc.size=24;oc.fraction="0.9990234375";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encrypted=true;oc.steganography=true;overlay(oc);
+    for(const auto& item:scatter_palettes){
+        oc=OverlayConfig{};oc.id="0128_scatter_password_"+item.first;oc.size=24;oc.fraction="0.9990234375";oc.palette=item.second;oc.circle="128 64 0";oc.without_metadata=true;oc.without_fiducials=true;oc.encrypted=true;oc.scatter=true;overlay(oc);
     }
     r.size=4096; r.encode_args={"--page-width=360","--page-height=360","--palette","Black White"}; r.decode_args={"--palette","Black White"}; r.transform_args={"--scale-x","2.5","--scale-y","2.5","--seed","0"}; rt("0131_palette_reversed_q2_scan","Scaled scan with reversed q2 palette order",r); r={};
     cases.push_back({"0132_palette_q2_center_specks","Five center-pixel specks are erased from area-vote disagreements",[](const fs::path&){palette_q2_center_speck_case();}});
+    r.size=4096; r.encode_args={"--scatter"}; r.scatter_metadata_check=true; rt("0133_scatter_plain_roundtrip","Plain unencrypted payload round-trip with scattered layout inferred from metadata",r); r={};
+    r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black","--password=unused"}; r.marker_free_compact=true; rt("0134_scatter_public_seed_fallback","Metadata-free scatter autodetection retries both layouts with public placement when a decode password was supplied",r); r={};
     return cases;
 }
 

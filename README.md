@@ -201,7 +201,7 @@ not supported.
 
 For marker-free single-page use, encode with `--no-metadata --no-fiducials`. Decode with the same `--no-metadata --no-fiducials`, the exact `--palette`, and matching `--page-width`/`--page-height`. The decoder reads the PPM as a one-pixel-per-dot grid from its top-left origin. Crops, rotation, rescaling, and origin shifts are unsupported; without registration marks, an image transformed back to the declared dimensions cannot always be distinguished from the original grid.
 
-For maximum-density steganography, add `--steganography` on encode and decode. This requires one marker-free page, explicit dimensions, one overlay image, and the maximum overlay erasure budget for the palette. It rejects ignored overlay colors, metadata, fiducials, footers, and page-filling modes. Payload dots are spatially interleaved; all non-payload page pixels, including the center tile area, are replaced by the overlay.
+Use `--scatter` on encode to scatter payload dots across the page. The encoded metadata records this layout, so decode selects it automatically. Marker-free decode tries both payload layouts and uses ECC plus payload validation to identify the correct one.
 
 
 ## Tests

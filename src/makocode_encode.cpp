@@ -168,8 +168,8 @@ int command_encode(int arg_count, char** args) {
         if (!arg) {
             continue;
         }
-        if (ascii_equals_token(arg, ascii_length(arg), "--steganography")) {
-            mapping.steganography_dot_interleave = true;
+        if (ascii_equals_token(arg, ascii_length(arg), "--scatter")) {
+            mapping.scatter_payload = true;
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-metadata")) {
@@ -927,15 +927,6 @@ int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --overlay-ignore-colors requires an overlay image");
         return 1;
     }
-    if (mapping.steganography_dot_interleave) {
-        if (!no_metadata || !no_fiducials || !mapping.page_width_set ||
-            !mapping.page_height_set || overlay_count != 1u ||
-            !overlay_fraction_specified || overlay_ignore_colors_specified ||
-            have_footer || ecc_mode == ECC_FILL || fill_pages_specified) {
-            console_line(2, "encode: --steganography requires one maximum overlay, exact dimensions, no metadata, no fiducials, no ignored colors, no footer, and no page filling");
-            return 1;
-        }
-    }
     if (have_password && !have_random_data) {
         console_line(2, "encode: --password requires --random-data");
         return 1;
@@ -949,10 +940,6 @@ int command_encode(int arg_count, char** args) {
         return 1;
     }
     bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
-    if (mapping.steganography_dot_interleave && hidden_mode_enabled) {
-        console_line(2, "encode: --steganography does not support hidden-volume filler");
-        return 1;
-    }
     if (have_password && !hidden_mode_enabled &&
         !makocode::palette_symbol_password_selector_seed(
             (const char*)password_buffer.data, password_buffer.size,
@@ -993,20 +980,6 @@ int command_encode(int arg_count, char** args) {
     if (no_fiducials) g_fiducial_defaults.spacing_pixels = 0u;
     if (mapping.palette_set) {
         if (!image_mapping_build_custom_palette(mapping, "encode")) {
-            return 1;
-        }
-    }
-    if (mapping.steganography_dot_interleave) {
-        u32 palette_size = mapping_has_custom_palette(mapping)
-                               ? mapping.custom_palette_count
-                               : (1u << bits_per_sample(mapping.color_channels));
-        makocode::PaletteSymbolProfile steganography_profile;
-        if (!makocode::palette_symbol_profile(palette_size,
-                                              steganography_profile) ||
-            (u32)floor((double)steganography_profile.block_length *
-                       overlay_fraction) !=
-                steganography_profile.block_length - 1u) {
-            console_line(2, "encode: --steganography requires the maximum overlay erasure budget");
             return 1;
         }
     }
@@ -2066,10 +2039,6 @@ int command_encode(int arg_count, char** args) {
         console_line(2, "encode: failed to allocate metadata page selection");
         return 1;
     }
-    if (mapping.steganography_dot_interleave && page_count != 1u) {
-        console_line(2, "encode: --steganography requires a single page");
-        return 1;
-    }
     metadata_page_assignments.size = (usize)page_count;
     memset(metadata_page_assignments.data,
            metadata_pages_value &&
@@ -2931,8 +2900,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                                OverlayPage& base_page,
                                                OverlaySelector& overlay_selector,
                                                bool include_metadata_overwrites = true,
-                                               bool metadata_tile_present = true,
-                                               bool steganography_dot_interleave = false) {
+                                               bool metadata_tile_present = true) {
     (void)include_metadata_overwrites;
     (void)metadata_tile_present;
     if (!overlay_page.pixels.data || !base_page.pixels.data ||
@@ -3014,7 +2982,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                               false,
                                               overlay_selector.placement_seed,
                                               &overlay_selector.overlay_rank_map_cache,
-                                              steganography_dot_interleave) ||
+                                              tile.scatter_payload) ||
         payload_pixel_count < 8u || payload_pixel_count > (u64)USIZE_MAX_VALUE / 8u) {
         return false;
     }
@@ -3191,18 +3159,19 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                    overlay_page.pixels.data + pixel_byte, 3u);
         }
     }
-    if (steganography_dot_interleave) {
-        if (payload_pixel_count != total_data_pixels) return false;
-        u64 first_unencoded_rank = page_symbol_capacity * 8u;
-        for (u64 rank = first_unencoded_rank;
-             rank < payload_pixel_count;
-             ++rank) {
-            u64 pixel = pixel_for_rank[rank];
-            if (pixel == U64_MAX_VALUE || pixel >= total_data_pixels) return false;
-            usize pixel_byte = (usize)pixel * 3u;
-            memcpy(base_page.pixels.data + pixel_byte,
-                   overlay_page.pixels.data + pixel_byte, 3u);
-        }
+    for (u64 rank = page_symbol_capacity * 8u;
+         rank < payload_pixel_count;
+         ++rank) {
+        u64 pixel = pixel_for_rank[rank];
+        if (pixel == U64_MAX_VALUE || pixel >= total_data_pixels) return false;
+        usize pixel_byte = (usize)pixel * 3u;
+        if (ignore_list &&
+            overlay_color_matches_ignore(*ignore_list,
+                overlay_page.pixels.data[pixel_byte],
+                overlay_page.pixels.data[pixel_byte + 1u],
+                overlay_page.pixels.data[pixel_byte + 2u])) continue;
+        memcpy(base_page.pixels.data + pixel_byte,
+               overlay_page.pixels.data + pixel_byte, 3u);
     }
     return true;
 }
@@ -3338,9 +3307,7 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                              base_page,
                                              overlay_selector,
                                              include_metadata_overwrites,
-                                             !tile_override,
-                                             mapping_override &&
-                                                 mapping_override->steganography_dot_interleave)) {
+                                             !tile_override)) {
         console_line(2, "encode: failed to apply overlay PPM");
         return false;
     }

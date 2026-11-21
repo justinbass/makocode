@@ -48,10 +48,6 @@ int command_decode(int arg_count, char** args) {
             continue;
         }
         const char* arg = args[i];
-        if (ascii_equals_token(arg, ascii_length(arg), "--steganography")) {
-            mapping.steganography_dot_interleave = true;
-            continue;
-        }
         if (ascii_equals_token(arg, ascii_length(arg), "--no-metadata")) {
             no_metadata = true;
             continue;
@@ -222,11 +218,6 @@ int command_decode(int arg_count, char** args) {
         console_line(2, "decode: --no-metadata requires --page-width and --page-height");
         return 1;
     }
-    if (mapping.steganography_dot_interleave &&
-        (!no_metadata || !no_fiducials || file_count != 1u)) {
-        console_line(2, "decode: --steganography requires one marker-free page");
-        return 1;
-    }
     const char* raw_fallback_setting =
         makocode_platform_getenv("MAKOCODE_DECODE_RAW_FALLBACK");
     bool allow_metadata_free_recovery = no_metadata ||
@@ -246,6 +237,39 @@ int command_decode(int arg_count, char** args) {
         return 1;
     }
     ImageMappingConfig mapping_overrides = mapping;
+    const u64 requested_symbol_placement_seed = mapping.symbol_placement_seed;
+    bool metadata_free_layout_autodetect = no_metadata;
+    u32 scatter_layout_attempt = 0u;
+    makocode::ByteBuffer validated_metadata_free_payload;
+    makocode::EccDecodeStats validated_metadata_free_ecc_stats;
+    makocode::EncodedPayloadMetadata validated_metadata_free_payload_metadata;
+    bool have_validated_metadata_free_payload = false;
+    bool metadata_free_candidates_ambiguous = false;
+    bool validated_metadata_free_password_attempted = false;
+    bool validated_metadata_free_password_not_encrypted = false;
+    auto advance_scatter_layout = [&]() -> bool {
+        if (!metadata_free_layout_autodetect) return false;
+        if (scatter_layout_attempt == 0u) {
+            scatter_layout_attempt = 1u;
+        } else if (scatter_layout_attempt == 1u) {
+            if (have_validated_metadata_free_payload || !have_password ||
+                requested_symbol_placement_seed ==
+                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED) return false;
+            scatter_layout_attempt = 2u;
+            mapping_overrides.symbol_placement_seed =
+                makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+            retried_public_symbol_placement = true;
+        } else if (scatter_layout_attempt == 2u) {
+            scatter_layout_attempt = 3u;
+        } else {
+            return false;
+        }
+        mapping_overrides.scatter_payload = (scatter_layout_attempt & 1u) != 0u;
+        if (scatter_layout_attempt < 2u) {
+            mapping_overrides.symbol_placement_seed = requested_symbol_placement_seed;
+        }
+        return true;
+    };
     makocode::ByteBuffer bitstream;
     makocode::ByteBuffer erased_payload_symbols;
     makocode::ByteBuffer overlay_selector_counts;
@@ -413,6 +437,7 @@ retry_decode:
                 console_line(2, "decode: invalid ppm input");
                 return 1;
             }
+            metadata_free_layout_autodetect = true;
             frame_extracted = true;
             single_color_rotation = false;
         }
@@ -901,6 +926,7 @@ retry_decode:
                             recovered_values);
                     }
                     if (recovered) {
+                        metadata_free_layout_autodetect = true;
                         frame_extracted = true;
                         page_color_rotation = false;
                     }
@@ -1317,6 +1343,9 @@ retry_decode:
     bool palette_symbol_stream_input = palette_symbol_metadata_layout ||
         (!metadata_v2_layout && !aggregate_state.has_encoded_tile &&
          mapping_has_custom_palette(mapping) && (bit_count & 31u) == 0u);
+    if (palette_symbol_stream_input && !aggregate_state.has_encoded_tile) {
+        metadata_free_layout_autodetect = true;
+    }
     if (!palette_symbol_stream_input) {
         console_line(2, "decode: unsupported payload format; expected version-zero field symbols");
         return 1;
@@ -1325,6 +1354,22 @@ retry_decode:
     const char* password_ptr = have_password ? (const char*)password_buffer.data : (const char*)0;
     usize password_length = have_password ? password_buffer.size : 0u;
     bool decoder_parse_succeeded = false;
+    auto restore_validated_metadata_free_payload = [&]() -> bool {
+        decoder.payload.release();
+        if (!have_validated_metadata_free_payload ||
+            !decoder.payload.append_bytes(validated_metadata_free_payload.data,
+                                         validated_metadata_free_payload.size)) return false;
+        decoder.has_payload = true;
+        decoder.ecc_failed = false;
+        decoder.partial_payload = false;
+        decoder.password_attempted = validated_metadata_free_password_attempted;
+        decoder.password_failed = false;
+        decoder.password_not_encrypted = validated_metadata_free_password_not_encrypted;
+        decoder.ecc_stats = validated_metadata_free_ecc_stats;
+        decoder.encoded_metadata = validated_metadata_free_payload_metadata;
+        decoder_parse_succeeded = true;
+        return true;
+    };
     if (palette_symbol_stream_input) {
         makocode::ByteBuffer compressed_or_container;
         makocode::EccDecodeStats symbol_stats;
@@ -1547,49 +1592,100 @@ retry_decode:
         }
     }
     if (!decoder_parse_succeeded) {
-        if (have_password && !retried_public_symbol_placement) {
-            retried_public_symbol_placement = true;
-            mapping.symbol_placement_seed =
-                makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
-            mapping_overrides.symbol_placement_seed =
-                makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+        if (advance_scatter_layout()) {
+            console_line(2, "decode: metadata absent; retrying alternate payload layout");
             goto retry_decode;
         }
-        if (decoder.password_auth_failed()) {
-            console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
-            return 1;
-        }
-        if (!force_disable_subgrid && !retried_subgrid) {
+        if (metadata_free_layout_autodetect &&
+            !metadata_free_candidates_ambiguous &&
+            restore_validated_metadata_free_payload()) {
+            // A prior layout passed ECC and complete payload validation.
+        } else {
+            if (!metadata_free_layout_autodetect && have_password &&
+                !retried_public_symbol_placement) {
+                retried_public_symbol_placement = true;
+                mapping.symbol_placement_seed =
+                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                mapping_overrides.symbol_placement_seed =
+                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                goto retry_decode;
+            }
+            if (decoder.password_auth_failed()) {
+                console_line(2, "decode: decryption failed (password mismatch or corrupted data)");
+                return 1;
+            }
+            if (!force_disable_subgrid && !retried_subgrid) {
                 console_line(2, "decode: parse failure; retrying without fiducial subgrid");
                 force_disable_subgrid = true;
                 retried_subgrid = true;
                 goto retry_decode;
+            }
+            if (decoder.ecc_correction_failed() && !force_tile_center_sampling &&
+                aggregate_state.has_encoded_tile &&
+                aggregate_state.encoded_tile.page_width_pixels <= 96u &&
+                aggregate_state.encoded_tile.page_height_pixels <= 96u) {
+                force_tile_center_sampling = true;
+                force_disable_subgrid = true;
+                retried_subgrid = true;
+                goto retry_decode;
+            }
+            if (decoder.ecc_correction_failed() && force_tile_center_sampling &&
+                aggregate_state.has_encoded_tile &&
+                aggregate_state.encoded_tile.palette_count == 2u &&
+                aggregate_state.encoded_tile.page_width_pixels <= 96u &&
+                aggregate_state.encoded_tile.page_height_pixels <= 96u &&
+                small_scan_geometry_variant < 10u) {
+                ++small_scan_geometry_variant;
+                console_line(2, "decode: ECC could not repair payload; retrying adjacent small-scan geometry");
+                goto retry_decode;
+            }
+            if (decoder.ecc_correction_failed()) {
+                console_line(2, "decode: ECC could not repair the payload");
+            } else {
+                console_line(2, "decode: parse failure");
+            }
+            return 1;
         }
-        if (decoder.ecc_correction_failed() && !force_tile_center_sampling &&
-            aggregate_state.has_encoded_tile &&
-            aggregate_state.encoded_tile.page_width_pixels <= 96u &&
-            aggregate_state.encoded_tile.page_height_pixels <= 96u) {
-            force_tile_center_sampling = true;
-            force_disable_subgrid = true;
-            retried_subgrid = true;
+    }
+    if (metadata_free_layout_autodetect &&
+        (decoder.partial_payload || !archive_is_well_formed(decoder.payload))) {
+        if (advance_scatter_layout()) {
+            console_line(2, "decode: metadata absent; retrying alternate payload layout after ECC/archive validation");
             goto retry_decode;
         }
-        if (decoder.ecc_correction_failed() && force_tile_center_sampling &&
-            aggregate_state.has_encoded_tile &&
-            aggregate_state.encoded_tile.palette_count == 2u &&
-            aggregate_state.encoded_tile.page_width_pixels <= 96u &&
-            aggregate_state.encoded_tile.page_height_pixels <= 96u &&
-            small_scan_geometry_variant < 10u) {
-            ++small_scan_geometry_variant;
-            console_line(2, "decode: ECC could not repair payload; retrying adjacent small-scan geometry");
-            goto retry_decode;
-        }
-        if (decoder.ecc_correction_failed()) {
-            console_line(2, "decode: ECC could not repair the payload");
+        if (!metadata_free_candidates_ambiguous &&
+            restore_validated_metadata_free_payload()) {
+            // A prior layout passed ECC and complete payload validation.
         } else {
-            console_line(2, "decode: parse failure");
+            console_line(2, "decode: metadata-free payload failed ECC/archive validation");
+            return 1;
         }
-        return 1;
+    } else if (metadata_free_layout_autodetect) {
+        if (!have_validated_metadata_free_payload) {
+            if (!validated_metadata_free_payload.append_bytes(decoder.payload.data,
+                                                              decoder.payload.size)) {
+                console_line(2, "decode: failed to retain validated metadata-free payload");
+                return 1;
+            }
+            validated_metadata_free_ecc_stats = decoder.ecc_stats;
+            validated_metadata_free_payload_metadata = decoder.encoded_metadata;
+            validated_metadata_free_password_attempted = decoder.password_attempted;
+            validated_metadata_free_password_not_encrypted = decoder.password_not_encrypted;
+            have_validated_metadata_free_payload = true;
+        } else if (decoder.payload.size != validated_metadata_free_payload.size ||
+                   (decoder.payload.size &&
+                    memcmp(decoder.payload.data, validated_metadata_free_payload.data,
+                           decoder.payload.size) != 0)) {
+            metadata_free_candidates_ambiguous = true;
+        }
+        if (advance_scatter_layout()) {
+            console_line(2, "decode: metadata absent; checking alternate payload layout");
+            goto retry_decode;
+        }
+        if (metadata_free_candidates_ambiguous) {
+            console_line(2, "decode: metadata-free payload layout is ambiguous");
+            return 1;
+        }
     }
     if (decoder.has_payload &&
         !decoder.partial_payload &&

@@ -9238,7 +9238,8 @@ namespace MetadataTile {
             !write_compact_u64(writer, (u64)values.fiducial_columns) ||
             !write_compact_u64(writer, (u64)values.fiducial_rows) ||
             !writer.write_bit(values.palette_is_custom ? 1u : 0u) ||
-            !writer.write_bit(values.metadata_ecc_minimum_parity_bytes >= 8u ? 1u : 0u)) return false;
+            !writer.write_bit(values.metadata_ecc_minimum_parity_bytes >= 8u ? 1u : 0u) ||
+            !writer.write_bit(values.scatter_payload ? 1u : 0u)) return false;
 
         if (!writer.align_to_byte()) return false;
         usize bytes = writer.byte_size();
@@ -9366,6 +9367,7 @@ namespace MetadataTile {
         out_values.fiducial_rows = (u32)value;
         out_values.palette_is_custom = reader.read_bit() != 0u;
         out_values.metadata_ecc_minimum_parity_bytes = reader.read_bit() ? 8u : 2u;
+        out_values.scatter_payload = reader.read_bit() != 0u;
         if (reader.failed) return false;
         out_values.metadata_ecc_redundancy = out_values.ecc_block_data
             ? (double)out_values.ecc_parity / (double)out_values.ecc_block_data
@@ -9499,7 +9501,7 @@ namespace MetadataTile {
                                        bool include_metadata_overwrites,
                                        u64 symbol_placement_seed,
                                        PayloadRankMapCache* cache,
-                                       bool steganography_dot_interleave) {
+                                       bool scatter_payload) {
         payload_pixel_count = 0u;
         if (!width_pixels || !data_height_pixels ||
             (u64)width_pixels > U64_MAX_VALUE / data_height_pixels) return false;
@@ -9568,7 +9570,7 @@ namespace MetadataTile {
             return permute_payload_rank_map(pixel_count, values,
                                             symbol_placement_seed, rank_map,
                                             payload_pixel_count,
-                                            steganography_dot_interleave);
+                                            scatter_payload);
         }
         if (!rank_map.ensure(rank_bytes)) return false;
         rank_map.size = rank_bytes;
@@ -9624,7 +9626,7 @@ namespace MetadataTile {
         }
         return permute_payload_rank_map(pixel_count, values, symbol_placement_seed,
                                         rank_map, payload_pixel_count,
-                                        steganography_dot_interleave);
+                                        scatter_payload);
     }
 
     bool permute_payload_rank_map(u64 pixel_count,
@@ -9632,7 +9634,7 @@ namespace MetadataTile {
                                   u64 symbol_placement_seed,
                                   ByteBuffer& rank_map,
                                   u64 payload_pixel_count,
-                                  bool steganography_dot_interleave) {
+                                  bool scatter_payload) {
         if (pixel_count > (u64)USIZE_MAX_VALUE / sizeof(u64) ||
             rank_map.size != (usize)pixel_count * sizeof(u64)) return false;
         u64* ranks = (u64*)rank_map.data;
@@ -9683,9 +9685,9 @@ namespace MetadataTile {
             for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
                 u64 rank = ranks[pixel];
                 if (rank == U64_MAX_VALUE || rank >= group_count * 8u) continue;
-                u64 group = steganography_dot_interleave
+                u64 group = scatter_payload
                     ? rank % group_count : rank / 8u;
-                u64 dot = steganography_dot_interleave
+                u64 dot = scatter_payload
                     ? rank / group_count : rank & 7u;
                 ranks[pixel] = permuted_groups[group] * 8u + dot;
             }
@@ -19344,6 +19346,10 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
     if (state.has_encoded_tile &&
+        metadata_schema_is_current(state.encoded_tile.schema_version)) {
+        active_mapping.scatter_payload = state.encoded_tile.scatter_payload;
+    }
+    if (state.has_encoded_tile &&
         state.encoded_tile.palette_background_first &&
         mapping_has_custom_palette(active_mapping)) {
         u32 background_index = 0u;
@@ -21645,7 +21651,7 @@ struct RotationEstimateCandidate {
                                               false,
                                               active_mapping.symbol_placement_seed,
                                               0,
-                                              active_mapping.steganography_dot_interleave) ||
+                                              active_mapping.scatter_payload) ||
         payload_pixel_count < 8u) return false;
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u32 custom_palette_base = 0u;
@@ -27379,6 +27385,7 @@ bool merge_parser_state(PpmParserState& dest, const PpmParserState& src) {
             if (left.schema_version != right.schema_version ||
                 left.page_bits != right.page_bits ||
                 left.page_count != right.page_count ||
+                left.scatter_payload != right.scatter_payload ||
                 left.ecc_enabled != right.ecc_enabled ||
                 left.ecc_block_data != right.ecc_block_data ||
                 left.ecc_parity != right.ecc_parity ||
@@ -27838,7 +27845,7 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                                       false,
                                                       candidate_mapping.symbol_placement_seed,
                                                       0,
-                                                      candidate_mapping.steganography_dot_interleave)) return false;
+                                                      candidate_mapping.scatter_payload)) return false;
             u64 group_count = payload_pixel_count / 8u;
             if (!group_count || group_count > (u64)USIZE_MAX_VALUE / 4u ||
                 group_count > U64_MAX_VALUE / 32u) return false;
@@ -28520,6 +28527,7 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
     tile_values.page_height_pixels = height_pixels;
     tile_values.footer_rows = height_pixels - data_height_pixels;
     tile_values.fiducial_spacing_pixels = g_fiducial_defaults.spacing_pixels;
+    tile_values.scatter_payload = mapping.scatter_payload;
     tile_values.overwrite_layout = true;
     compute_centered_fiducial_dimensions(width_pixels,
                                          data_height_pixels,
@@ -28691,27 +28699,23 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         if (unused_symbol_count) {
             u8* unused_dots = page_palette_dots.data +
                               (usize)page_symbol_count * 8u;
-            if (mapping.steganography_dot_interleave) {
-                memset(unused_dots, 0, (usize)unused_symbol_count * 8u);
-            } else {
-                if (unused_symbol_count > (u64)USIZE_MAX_VALUE / 4u) return false;
-                makocode::ByteBuffer unused_symbols;
-                if (!unused_symbols.ensure((usize)unused_symbol_count * 4u)) return false;
-                unused_symbols.size = (usize)unused_symbol_count * 4u;
-                memset(unused_symbols.data, 0, unused_symbols.size);
-                if (!makocode::palette_symbol_public_whiten(
-                        profile, unused_symbols, false,
-                        (bit_offset >> 5u) + page_symbol_count)) return false;
-                for (u64 symbol = 0u; symbol < unused_symbol_count; ++symbol) {
-                    u32 value = (u32)unused_symbols.data[(usize)symbol * 4u] |
-                                ((u32)unused_symbols.data[(usize)symbol * 4u + 1u] << 8u) |
-                                ((u32)unused_symbols.data[(usize)symbol * 4u + 2u] << 16u) |
-                                ((u32)unused_symbols.data[(usize)symbol * 4u + 3u] << 24u);
-                    if (!makocode::palette_symbol_to_dots(
-                            profile, value, unused_dots + (usize)symbol * 8u)) {
-                        console_line(2, "encode_page_to_ppm: invalid unused field symbol");
-                        return false;
-                    }
+            if (unused_symbol_count > (u64)USIZE_MAX_VALUE / 4u) return false;
+            makocode::ByteBuffer unused_symbols;
+            if (!unused_symbols.ensure((usize)unused_symbol_count * 4u)) return false;
+            unused_symbols.size = (usize)unused_symbol_count * 4u;
+            memset(unused_symbols.data, 0, unused_symbols.size);
+            if (!makocode::palette_symbol_public_whiten(
+                    profile, unused_symbols, false,
+                    (bit_offset >> 5u) + page_symbol_count)) return false;
+            for (u64 symbol = 0u; symbol < unused_symbol_count; ++symbol) {
+                u32 value = (u32)unused_symbols.data[(usize)symbol * 4u] |
+                            ((u32)unused_symbols.data[(usize)symbol * 4u + 1u] << 8u) |
+                            ((u32)unused_symbols.data[(usize)symbol * 4u + 2u] << 16u) |
+                            ((u32)unused_symbols.data[(usize)symbol * 4u + 3u] << 24u);
+                if (!makocode::palette_symbol_to_dots(
+                        profile, value, unused_dots + (usize)symbol * 8u)) {
+                    console_line(2, "encode_page_to_ppm: invalid unused field symbol");
+                    return false;
                 }
             }
         }
@@ -28835,7 +28839,7 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                                   !palette_symbol_mode,
                                               mapping.symbol_placement_seed,
                                               rank_map_cache,
-                                              mapping.steganography_dot_interleave) ||
+                                              mapping.scatter_payload) ||
         payload_pixel_count < 8u) {
         console_line(2, "encode_page_to_ppm: failed to build payload rank map");
         return false;
@@ -30228,7 +30232,7 @@ void write_encode_help() {
     console_line(1, "  --no-fiducials       Omit fiducial markers; overrides --fiducial-spacing.");
     console_line(1, "  --metadata-pages LIST Pages/ranges carrying the center metadata tile (all, 1,3-5,middle,last). Default: all.");
     console_line(1, "  --no-metadata        Omit metadata tiles; marker-free decode requires exact page dimensions and palette.");
-    console_line(1, "  --steganography      Maximum marker-free overlay; scatters payload dots to keep data runs short.");
+    console_line(1, "  --scatter            Scatter payload dots across the page; decode reads the layout from metadata or detects it on marker-free pages.");
     console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
@@ -30277,7 +30281,6 @@ void write_decode_help() {
     console_line(1, "  --page-width PX      Fallback page width in pixels when metadata is unavailable.");
     console_line(1, "  --page-height PX     Fallback page height in pixels when metadata is unavailable.");
     console_line(1, "  --no-metadata        Decode one page without metadata; requires --no-fiducials, --palette, and exact dimensions.");
-    console_line(1, "  --steganography      Use the scattered-dot layout selected by the marker-free encoder.");
     console_line(1, "  --no-fiducials       Read the page as unrotated, uncropped, native-scale pixels from its origin.");
     console_line(1, "  --recover-palette    Usually only needed when the embedded palette row is damaged.");
     console_line(1, "  --recover-limit N    Palette candidates to try (default 4; common 2/4/5/8-color modes first).");

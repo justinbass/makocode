@@ -1,8 +1,7 @@
 TODO
 
+- When password is supplied, it's used as the static seed value for shuffling (and maybe others). Confirm that shuffling applies to everything, including pre-data.
 - Steganography security review
-  - --steganography -> --scatter-payload
-  - When password is supplied, it's used as the static seed value for shuffling (and maybe others). Confirm that shuffling applies to everything, including pre-data.
 - Improve performance in each section
   - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
   - Largest page possible that takes <5s.
