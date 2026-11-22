@@ -39,15 +39,19 @@
 #include <iterator>
 #include <tuple>
 #include <vector>
+#include <poll.h>
 
 static unsigned long minify_allocation_count=0;
 static unsigned long minify_allocation_failure_at=0;
 extern "C" void* makocode_test_malloc(unsigned long size);
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 extern char** environ;
@@ -1977,6 +1981,121 @@ static ProcessResult run_cli(const fs::path& work,
     return result;
 }
 
+static ProcessResult run_cli_with_password_prompts(
+        const fs::path& work,
+        const std::vector<std::string>& args,
+        const std::vector<std::pair<std::string, std::string>>& prompts,
+        bool cancel_at_first_prompt = false,
+        bool* terminal_restored = nullptr) {
+    if (terminal_restored) *terminal_restored = false;
+    int master = ::posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0) {
+        if (master >= 0) ::close(master);
+        throw Failure("unable to initialize password prompt pseudo-terminal");
+    }
+    char* slave_name = ::ptsname(master);
+    if (!slave_name) {
+        ::close(master);
+        throw Failure("unable to find password prompt terminal");
+    }
+    std::vector<std::string> command{makocode_bin.string()};
+    command.insert(command.end(), args.begin(), args.end());
+    std::vector<char*> argv;
+    argv.reserve(command.size() + 1u);
+    for (std::string& item : command) argv.push_back(item.data());
+    argv.push_back(nullptr);
+
+    pid_t child = ::fork();
+    if (child < 0) {
+        ::close(master);
+        throw Failure("unable to fork password prompt test process");
+    }
+    if (child == 0) {
+        if (::setsid() < 0) _exit(126);
+        int slave = ::open(slave_name, O_RDWR);
+        if (slave < 0 || ::ioctl(slave, TIOCSCTTY, 0) != 0 ||
+            ::dup2(slave, STDIN_FILENO) < 0 ||
+            ::dup2(slave, STDOUT_FILENO) < 0 ||
+            ::dup2(slave, STDERR_FILENO) < 0 || ::chdir(work.c_str()) != 0) {
+            _exit(126);
+        }
+        if (slave > STDERR_FILENO) ::close(slave);
+        ::close(master);
+        ::execv(makocode_bin.c_str(), argv.data());
+        _exit(127);
+    }
+
+    ProcessResult result;
+    auto read_more = [&]() -> bool {
+        struct pollfd descriptor;
+        descriptor.fd = master;
+        descriptor.events = POLLIN | POLLHUP;
+        descriptor.revents = 0;
+        int ready;
+        do {
+            ready = ::poll(&descriptor, 1u, 30000);
+        } while (ready < 0 && errno == EINTR);
+        if (ready <= 0) return false;
+        char buffer[4096];
+        ssize_t count = ::read(master, buffer, sizeof(buffer));
+        if (count <= 0) return false;
+        result.out.append(buffer, (size_t)count);
+        return true;
+    };
+    bool interaction_ok = true;
+    size_t prompt_search_offset = 0u;
+    for (const auto& item : prompts) {
+        while (result.out.find(item.first, prompt_search_offset) == std::string::npos) {
+            if (!read_more()) {
+                interaction_ok = false;
+                break;
+            }
+        }
+        if (!interaction_ok) break;
+        prompt_search_offset = result.out.size();
+        if (cancel_at_first_prompt) {
+            if (::kill(child, SIGINT) != 0) interaction_ok = false;
+            cancel_at_first_prompt = false;
+            break;
+        }
+        std::string response = item.second + "\n";
+        size_t written = 0u;
+        while (written < response.size()) {
+            size_t remaining = response.size() - written;
+            size_t chunk = remaining < 128u ? remaining : 128u;
+            ssize_t count = ::write(master, response.data() + written, chunk);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                interaction_ok = false;
+                break;
+            }
+            written += (size_t)count;
+        }
+        if (!interaction_ok) break;
+    }
+    while (read_more()) {}
+    int status = 0;
+    while (::waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        ::close(master);
+        throw Failure("unable to wait for password prompt test process");
+    }
+    if (terminal_restored) {
+        struct termios current_terminal;
+        if (::tcgetattr(master, &current_terminal) == 0) {
+            const tcflag_t prompt_flags = (tcflag_t)(ECHO | ICANON);
+            *terminal_restored = (current_terminal.c_lflag & prompt_flags) == prompt_flags;
+        }
+    }
+    ::close(master);
+    result.status = WIFEXITED(status) ? WEXITSTATUS(status)
+                                      : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    if (!interaction_ok) {
+        throw Failure("password prompt did not appear or accept input: " + result.out);
+    }
+    return result;
+}
+
 static ProcessResult run_transform(const fs::path& work,
                                    const std::vector<std::string>& args,
                                    const std::string& tag,
@@ -2222,12 +2341,12 @@ static void password_failure_case() {
     fs::path work = make_work_dir(id), payload = work / "payload.bin";
     generate_bytes(work, payload, 32768, case_seed("payload/" + id), "payload");
     const std::string password = "suite-password", prefix = id + "_page";
-    auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--page-width=1000", "--page-height=1000", "--password=" + password,
+    auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--page-width=1000", "--page-height=1000", "--password-cli=" + password,
         "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb", "--debug"}), "encode", {},
         {{"MAKOCODE_TEST_SEED", std::to_string(case_seed("crypto/" + id))}});
     expect_success(encoded, id + " encode");
     auto pages = ppm_paths(work, prefix); require(pages.size() == 1, id + ": expected one encrypted page");
-    for (const auto& credentials : {std::vector<std::string>{}, std::vector<std::string>{"--password=bad-password"}}) {
+    for (const auto& credentials : {std::vector<std::string>{}, std::vector<std::string>{"--password-cli=bad-password"}}) {
         fs::path decoded = work / (credentials.empty() ? "no_password" : "wrong_password");
         std::vector<std::string> args{"decode", pages.front(), "--output-dir=" + decoded.string(), "--debug"};
         args.insert(args.end(), credentials.begin(), credentials.end());
@@ -2235,6 +2354,188 @@ static void password_failure_case() {
         expect_failure(result, id + " decode");
         check_fiducials(work / (prefix + "_encode_fiducials.csv"), decoded / "decode_fiducials.csv", id);
     }
+}
+
+static void chacha20_poly1305_vector_case() {
+    auto from_hex = [](const std::string& value) {
+        auto digit = [](char ch) -> unsigned {
+            if (ch >= '0' && ch <= '9') return static_cast<unsigned>(ch - '0');
+            if (ch >= 'a' && ch <= 'f') return static_cast<unsigned>(ch - 'a' + 10);
+            if (ch >= 'A' && ch <= 'F') return static_cast<unsigned>(ch - 'A' + 10);
+            throw Failure("invalid hexadecimal test vector");
+        };
+        require((value.size() & 1u) == 0u, "odd hexadecimal test vector");
+        std::string bytes(value.size() / 2u, '\0');
+        for (size_t i = 0u; i < bytes.size(); ++i) {
+            bytes[i] = static_cast<char>((digit(value[i * 2u]) << 4u) |
+                                         digit(value[i * 2u + 1u]));
+        }
+        return bytes;
+    };
+    auto to_hex = [](const u8* data, size_t length) {
+        static const char digits[] = "0123456789abcdef";
+        std::string value;
+        value.reserve(length * 2u);
+        for (size_t i = 0u; i < length; ++i) {
+            value.push_back(digits[data[i] >> 4u]);
+            value.push_back(digits[data[i] & 15u]);
+        }
+        return value;
+    };
+    auto check_vector = [&](const std::string& key_hex,
+                            const std::string& nonce_hex,
+                            const std::string& aad_hex,
+                            const std::string& plaintext_hex,
+                            const std::string& expected_hex,
+                            const std::string& label) {
+        std::string key = from_hex(key_hex);
+        std::string nonce = from_hex(nonce_hex);
+        std::string aad = from_hex(aad_hex);
+        std::string plaintext = from_hex(plaintext_hex);
+        std::string expected = from_hex(expected_hex);
+        require(key.size() == 32u && nonce.size() == 12u && expected.size() >= 16u,
+                label + ": invalid vector dimensions");
+        makocode::ByteBuffer ciphertext;
+        u8 tag[16];
+        require(MetadataTile::chacha20_poly1305_encrypt(
+                    (const u8*)key.data(), (const u8*)nonce.data(),
+                    (const u8*)plaintext.data(), plaintext.size(),
+                    (const u8*)aad.data(), aad.size(), ciphertext, tag),
+                label + ": encryption failed");
+        bool matches = ciphertext.size + sizeof(tag) == expected.size() &&
+                       (!ciphertext.size ||
+                        memcmp(ciphertext.data, expected.data(), ciphertext.size) == 0) &&
+                       memcmp(tag, expected.data() + ciphertext.size, sizeof(tag)) == 0;
+        require(matches,
+                label + ": RFC 8439 ciphertext or tag mismatch, got " +
+                    to_hex(ciphertext.data, ciphertext.size) + to_hex(tag, sizeof(tag)));
+        makocode::ByteBuffer decoded;
+        bool auth_failed = false;
+        require(MetadataTile::chacha20_poly1305_decrypt(
+                    (const u8*)key.data(), (const u8*)nonce.data(),
+                    ciphertext.data, ciphertext.size, (const u8*)aad.data(),
+                    aad.size(), decoded, tag, &auth_failed) &&
+                decoded.size == plaintext.size() &&
+                (!plaintext.size() ||
+                 memcmp(decoded.data, plaintext.data(), plaintext.size()) == 0),
+                label + ": decryption failed");
+        tag[0] ^= 1u;
+        require(!MetadataTile::chacha20_poly1305_decrypt(
+                    (const u8*)key.data(), (const u8*)nonce.data(),
+                    ciphertext.data, ciphertext.size, (const u8*)aad.data(),
+                    aad.size(), decoded, tag, &auth_failed) && auth_failed,
+                label + ": altered tag was accepted");
+    };
+
+    const std::string plaintext =
+        "Ladies and Gentlemen of the class of '99: If I could offer you only one "
+        "tip for the future, sunscreen would be it.";
+    std::string plaintext_hex;
+    static const char hex_digits[] = "0123456789abcdef";
+    for (unsigned char byte : plaintext) {
+        plaintext_hex.push_back(hex_digits[byte >> 4u]);
+        plaintext_hex.push_back(hex_digits[byte & 15u]);
+    }
+    check_vector(
+        "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "070000004041424344454647", "50515253c0c1c2c3c4c5c6c7",
+        plaintext_hex,
+        "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
+        "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
+        "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
+        "3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691",
+        "RFC 8439 partial blocks");
+    check_vector("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                 "000102030405060708090a0b", "000102030405060708090a0b0c0d0e0f",
+                 "101112131415161718191a1b1c1d1e1f",
+                 "99ea1a133d02b357af9a25e88400107c5ff71fb29cccbf62f39f168aa2f6e9cb",
+                 "independent aligned vector");
+    check_vector("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                 "000102030405060708090a0b", "000102030405060708090a0b0c0d0e0f",
+                 "", "36744a8792bab9b41cce2ab3a75d45b7",
+                 "independent empty-message vector");
+}
+
+static void secure_random_padding_case() {
+    makocode::ByteBuffer first;
+    makocode::ByteBuffer second;
+    require(makocode::stealth_fill_random(first, 4096u) &&
+            makocode::stealth_fill_random(second, 4096u),
+            "OS-backed padding randomness failed");
+    require(first.size == second.size && first.size == 4096u &&
+            memcmp(first.data, second.data, first.size) != 0,
+            "padding repeated across independent random fills");
+}
+
+static void interactive_password_case() {
+    const std::string id = "0138_interactive_password";
+    fs::path work = make_work_dir(id);
+    fs::path visible = work / "visible.bin";
+    fs::path hidden = work / "hidden.bin";
+    fs::path pages_dir = work / "pages";
+    fs::path visible_out = work / "visible_out";
+    fs::path hidden_out = work / "hidden_out";
+    write_file(visible, "visible test content");
+    write_file(hidden, "hidden test content");
+    fs::create_directories(pages_dir);
+    const std::string visible_password = "visible-prompt-secret";
+    const std::string hidden_password = "hidden-prompt-secret";
+    bool terminal_restored = false;
+    ProcessResult cancelled = run_cli_with_password_prompts(
+        work,
+        {"encode", "--input=visible.bin", "--prefix=cancelled", "--password",
+         "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"},
+        {{"Password: ", ""}}, true, &terminal_restored);
+    require(cancelled.status != 0 &&
+            cancelled.out.find("password input failed") != std::string::npos,
+            id + ": cancelling password prompt did not abort password entry");
+    require(terminal_restored,
+            id + ": password prompt cancellation did not restore terminal settings");
+
+    ProcessResult overlong = run_cli_with_password_prompts(
+        work,
+        {"encode", "--input=visible.bin", "--prefix=overlong", "--password",
+         "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"},
+        {{"Password: ", std::string(4096u, 'x')}});
+    expect_failure(overlong, id + " overlong password");
+    require(overlong.out.find("password input failed") != std::string::npos &&
+            overlong.out.find(std::string(16u, 'x')) == std::string::npos,
+            id + ": overlong input was accepted or echoed");
+
+    ProcessResult encoded = run_cli_with_password_prompts(
+        work,
+        {"encode", "--input=visible.bin", "--hidden-input=hidden.bin",
+         "--password", "--hidden-password", "--hidden=64",
+         "--page-width=1000", "--page-height=1000", "--output-dir=pages",
+         "--prefix=prompted",
+         "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"},
+        {{"Password: ", visible_password},
+         {"Confirm password: ", visible_password},
+         {"Hidden password: ", hidden_password},
+         {"Confirm password: ", hidden_password}});
+    if (encoded.status != 0) {
+        throw Failure(id + " encode failed: " + encoded.out);
+    }
+    require(encoded.out.find(visible_password) == std::string::npos &&
+            encoded.out.find(hidden_password) == std::string::npos,
+            id + ": terminal echoed a password");
+
+    auto pages = ppm_paths(pages_dir, "prompted");
+    require(!pages.empty(), id + ": no encoded pages");
+    ProcessResult visible_decoded = run_cli_with_password_prompts(
+        work, {"decode", "--output-dir=" + visible_out.string(), "--password",
+               pages.front()}, {{"Password: ", visible_password}});
+    expect_success(visible_decoded, id + " visible decode");
+    require(visible_decoded.out.find(visible_password) == std::string::npos,
+            id + ": terminal echoed the decode password");
+    compare_files(visible, visible_out / "visible.bin", id + " visible");
+
+    ProcessResult hidden_decoded = run_cli(
+        work, {"decode", "--output-dir=" + hidden_out.string(),
+               "--password-cli", hidden_password, pages.front()},
+        "hidden_decode");
+    expect_success(hidden_decoded, id + " hidden decode");
+    compare_files(hidden, hidden_out / "hidden.bin", id + " hidden");
 }
 
 static void header_copy_corruption_case() {
@@ -2437,9 +2738,9 @@ static void decoded_file_case(){
     const std::string id="0086_decoded_file";fs::path work=make_work_dir(id),input=work/"input",pages_dir=work/"pages",out=work/"out",stdin_out=work/"stdin_out";
     fs::create_directories(input/"empty");fs::create_directories(input/"sub");fs::create_directories(pages_dir);fs::create_directories(out);
     write_file(input/"sub"/"a b",std::string("hello\nback\\slash\0\xff",18));write_file(input/"blank","");
-    auto enc=run_cli(work,{"encode","--input=input","--password=secret","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb","--prefix=page","--output-dir=pages"},"encode",{},{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("crypto/"+id))}});
+    auto enc=run_cli(work,{"encode","--input=input","--password-cli=secret","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb","--prefix=page","--output-dir=pages"},"encode",{},{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("crypto/"+id))}});
     expect_success(enc,id+" encode");auto pages=ppm_paths(pages_dir,"page");require(!pages.empty(),id+": no encoded pages");
-    auto decoded=run_cli(work,decode_file_args(pages,out,{"--decoded-file","--password=secret"}),"decoded_file");expect_success(decoded,id+" decode file");
+    auto decoded=run_cli(work,decode_file_args(pages,out,{"--decoded-file","--password-cli=secret"}),"decoded_file");expect_success(decoded,id+" decode file");
     auto text_files=matching_files(out,"makocode_decoded_",".txt");require(text_files.size()==1,id+": expected one timestamped decoded file");
     std::regex name_re("^makocode_decoded_[0-9]{14}\\.txt$");require(std::regex_match(text_files[0].filename().string(),name_re),id+": invalid decoded filename");
     std::string report=read_file(text_files[0]);
@@ -2451,9 +2752,9 @@ static void decoded_file_case(){
         std::string prefix="metadata "+field.first+" ";size_t pos=report.find(prefix);require(pos!=std::string::npos,id+": missing "+field.first);pos+=prefix.size();size_t end=report.find('\n',pos);std::string hex=report.substr(pos,end-pos);
         require(hex.size()==field.second,id+": wrong hex length for "+field.first);for(char ch:hex)require((ch>='0'&&ch<='9')||(ch>='A'&&ch<='F'),id+": invalid hex metadata");
     }
-    fs::create_directories(stdin_out);auto stdin_decode=run_cli(work,{"decode","--decoded-file","--password=secret","--output-dir="+stdin_out.string()},"decode_stdin",pages.front());
+    fs::create_directories(stdin_out);auto stdin_decode=run_cli(work,{"decode","--decoded-file","--password-cli=secret","--output-dir="+stdin_out.string()},"decode_stdin",pages.front());
     expect_success(stdin_decode,id+" stdin decoded-file");auto stdin_reports=matching_files(stdin_out,"makocode_decoded_",".txt");require(stdin_reports.size()==1,id+": stdin decoded-file output missing");compare_files(text_files[0],stdin_reports[0],id+" stdin");
-    auto stdout_decode=run_cli(work,{"decode","--decoded-stdout","--password=secret","--output-dir="+(work/"not_created").string(),pages.front()},"decode_stdout");
+    auto stdout_decode=run_cli(work,{"decode","--decoded-stdout","--password-cli=secret","--output-dir="+(work/"not_created").string(),pages.front()},"decode_stdout");
     expect_success(stdout_decode,id+" stdout");require(stdout_decode.out==report,id+": stdout output differs from decoded file");require(!fs::exists(work/"not_created"),id+": decoded-stdout created output directory");
     for(const std::string& flag:{"--decoded-file","--debug"}){
         auto conflict=run_cli(work,{"decode","--decoded-stdout",flag,pages.front()},"conflict");expect_failure(conflict,id+" conflicting mode");require(conflict.out.empty(),id+": conflicting mode wrote output");
@@ -2517,7 +2818,7 @@ static void hidden_volumes_case(){
     const std::vector<Success> scenarios={
         {"visible_default",1,"","",false,false,{}},{"visible_hidden_zero",1,"","",false,false,{"--hidden=0","--ecc=0.5"}},
         {"visible_password_hidden_zero",1,"visible test password","",false,false,{"--hidden=0"}},
-        {"ecc_fill_one_page",1,"","",false,true,{"--ecc=fill","--fill-pages=1"}},
+        {"ecc_fill_one_page",1,"","",false,false,{"--ecc=fill","--fill-pages=1"}},
         {"ecc_fill_two_pages",2,"","",false,true,{"--ecc=fill","--fill-pages=2"}},
         {"ecc_fill_current_page",1,"","",false,false,{"--ecc=fill"}},
         {"hidden_ratio_auto",1,"visible test password","hidden test password",true,false,{"--hidden=0.5"}},
@@ -2544,22 +2845,22 @@ static void hidden_volumes_case(){
         fs::create_directories(pages_dir);fs::create_directories(visible_out);
         std::vector<std::string> args={"encode","--input=visible.bin","--page-width=1000","--page-height=1000","--output-dir="+pages_dir.string(),"--prefix="+name};
         std::string random_data=random_for(name);
-        if(*scenario.visible_password)args.push_back(std::string("--password=")+scenario.visible_password);
+        if(*scenario.visible_password)args.push_back(std::string("--password-cli=")+scenario.visible_password);
         if(*scenario.visible_password||scenario.random_fill)args.push_back("--random-data="+random_data);
-        if(*scenario.hidden_password){args.push_back("--hidden-input=hidden_tree");args.push_back(std::string("--hidden-password=")+scenario.hidden_password);}
+        if(*scenario.hidden_password){args.push_back("--hidden-input=hidden_tree");args.push_back(std::string("--hidden-password-cli=")+scenario.hidden_password);}
         args.insert(args.end(),scenario.options.begin(),scenario.options.end());
         auto encoded=run_cli(source,args,name+"_encode",{},{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("encoder/"+id+"/"+name))}});
         expect_success(encoded,id+" encode "+name);
         auto pages=ppm_paths(pages_dir,name);require(static_cast<int>(pages.size())==scenario.pages,id+" "+name+": page count mismatch");
         std::vector<std::string> visible_decode_options;
         if(scenario.marker_free)visible_decode_options={"--no-metadata","--no-fiducials","--page-width=1000","--page-height=1000","--palette","White Black"};
-        if(*scenario.visible_password)visible_decode_options.push_back(std::string("--password=")+scenario.visible_password);
+        if(*scenario.visible_password)visible_decode_options.push_back(std::string("--password-cli=")+scenario.visible_password);
         std::vector<std::string> visible_args=decode_file_args(pages,visible_out,visible_decode_options);
         auto visible_decoded=run_cli(work,visible_args,name+"_visible_decode");expect_success(visible_decoded,id+" visible decode "+name);compare_files(visible,visible_out/"visible.bin",id+" visible "+name);
         if(*scenario.hidden_password){
             fs::create_directories(hidden_out);std::vector<std::string> hidden_decode_options;
             if(scenario.marker_free)hidden_decode_options={"--no-metadata","--no-fiducials","--page-width=1000","--page-height=1000","--palette","White Black"};
-            hidden_decode_options.push_back(std::string("--password=")+scenario.hidden_password);
+            hidden_decode_options.push_back(std::string("--password-cli=")+scenario.hidden_password);
             std::vector<std::string> hidden_args=decode_file_args(pages,hidden_out,hidden_decode_options);
             auto hidden_decoded=run_cli(work,hidden_args,name+"_hidden_decode");expect_success(hidden_decoded,id+" hidden decode "+name);
             compare_files(hidden/"root.txt",hidden_out/"hidden_tree/root.txt",id+" hidden root "+name);
@@ -2569,39 +2870,41 @@ static void hidden_volumes_case(){
         }else if(scenario.hidden_capable){
             fs::create_directories(hidden_out);
             auto no_password=run_cli(work,decode_file_args(pages,hidden_out),"hidden_no_password");expect_failure(no_password,id+" no-password container "+name);
-            auto wrong=run_cli(work,decode_file_args(pages,hidden_out,{"--password=not-the-hidden-password"}),"hidden_wrong_password");expect_failure(wrong,id+" wrong hidden password "+name);
+            auto wrong=run_cli(work,decode_file_args(pages,hidden_out,{"--password-cli=not-the-hidden-password"}),"hidden_wrong_password");expect_failure(wrong,id+" wrong hidden password "+name);
             require(!fs::exists(hidden_out/"visible.bin")&&!fs::exists(hidden_out/"hidden_tree"),id+" filler-only output "+name);
         }
     }
     struct Reject {const char* name;const char* message;std::vector<std::string> args;};
     const std::string visible_password="visible test password",hidden_password="hidden test password";
     std::vector<Reject> rejects={
-        {"hidden_fill_ecc_fill","--hidden fill and --ecc fill compete",{"--hidden=fill","--ecc=fill","--password="+visible_password}},
+        {"hidden_fill_ecc_fill","--hidden fill and --ecc fill compete",{"--hidden=fill","--ecc=fill","--password-cli="+visible_password}},
         {"ecc_disabled_visible","ECC cannot cover structural erasures",{"--ecc=0"}},
-        {"ecc_disabled_hidden_ratio","ECC cannot cover structural erasures",{"--hidden=64","--ecc=0","--password="+visible_password}},
-        {"ecc_disabled_hidden_fill","ECC cannot cover structural erasures",{"--hidden=fill","--ecc=0","--fill-pages=1","--password="+visible_password}},
-        {"fill_pages_without_fill","--fill-pages requires --hidden fill or --ecc fill",{"--hidden=2","--ecc=0.5","--fill-pages=1","--password="+visible_password}},
-        {"hidden_inputs_without_mode","hidden inputs and password require --hidden",{"--hidden-input=hidden_tree","--hidden-password="+hidden_password}},
-        {"hidden_input_without_password","--hidden-input and --hidden-password must be supplied together",{"--hidden=0.5","--hidden-input=hidden_tree","--password="+visible_password}},
-        {"hidden_password_without_input","--hidden-input and --hidden-password must be supplied together",{"--hidden=0.5","--password="+visible_password,"--hidden-password="+hidden_password}},
-        {"hidden_options_with_zero","hidden inputs and password require --hidden",{"--hidden=0","--hidden-input=hidden_tree","--hidden-password="+hidden_password,"--password="+visible_password}},
+        {"ecc_disabled_hidden_ratio","ECC cannot cover structural erasures",{"--hidden=64","--ecc=0","--password-cli="+visible_password}},
+        {"ecc_disabled_hidden_fill","ECC cannot cover structural erasures",{"--hidden=fill","--ecc=0","--fill-pages=1","--password-cli="+visible_password}},
+        {"fill_pages_without_fill","--fill-pages requires --hidden fill or --ecc fill",{"--hidden=2","--ecc=0.5","--fill-pages=1","--password-cli="+visible_password}},
+        {"hidden_inputs_without_mode","hidden inputs and password require --hidden",{"--hidden-input=hidden_tree","--hidden-password-cli="+hidden_password}},
+        {"hidden_input_without_password","--hidden-input and --hidden-password must be supplied together",{"--hidden=0.5","--hidden-input=hidden_tree","--password-cli="+visible_password}},
+        {"hidden_password_without_input","--hidden-input and --hidden-password must be supplied together",{"--hidden=0.5","--password-cli="+visible_password,"--hidden-password-cli="+hidden_password}},
+        {"hidden_options_with_zero","hidden inputs and password require --hidden",{"--hidden=0","--hidden-input=hidden_tree","--hidden-password-cli="+hidden_password,"--password-cli="+visible_password}},
         {"hidden_without_visible_password","--hidden requires --password and --random-data",{"--hidden=0.5"}},
-        {"identical_passwords","visible and hidden passwords must differ",{"--hidden=0.5","--hidden-input=hidden_tree","--hidden-password="+visible_password,"--password="+visible_password}},
-        {"hidden_capacity_too_small","hidden payload exceeds the --hidden capacity",{"--hidden=0.001","--hidden-input=hidden_tree","--hidden-password="+hidden_password,"--password="+visible_password}},
+        {"identical_passwords","visible and hidden passwords must differ",{"--hidden=0.5","--hidden-input=hidden_tree","--hidden-password-cli="+visible_password,"--password-cli="+visible_password}},
+        {"hidden_capacity_too_small","hidden payload exceeds the --hidden capacity",{"--hidden=0.001","--hidden-input=hidden_tree","--hidden-password-cli="+hidden_password,"--password-cli="+visible_password}},
         {"hidden_ratio_negative","--hidden ratio must be between 0 and 64",{"--hidden=-1"}},
         {"hidden_ratio_too_large","--hidden ratio must be between 0 and 64",{"--hidden=65"}},
         {"duplicate_hidden_option","--hidden may be specified only once",{"--hidden=0.5","--hidden=2"}},
         {"fill_pages_zero","--fill-pages must be between 1 and 1000000",{"--ecc=fill","--fill-pages=0"}},
         {"duplicate_fill_pages","--fill-pages may be specified only once",{"--ecc=fill","--fill-pages=1","--fill-pages=2"}},
-        {"fill_pages_with_numeric_modes","--fill-pages requires --hidden fill or --ecc fill",{"--hidden=0.5","--ecc=0.5","--fill-pages=1","--password="+visible_password}},
+        {"fill_pages_with_numeric_modes","--fill-pages requires --hidden fill or --ecc fill",{"--hidden=0.5","--ecc=0.5","--fill-pages=1","--password-cli="+visible_password}},
         {"overlay_fraction_without_ppm","--overlay-fraction and overlay images must be used together",{"--ecc=0.5","--overlay-fraction=0.1"}},
         {"removed_steganography_option","encode: unknown option: --steganography",{"--steganography"}},
         {"overlay_ppm_without_fraction","--overlay-fraction and overlay images must be used together",{"--ecc=0.5","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
         {"overlay_fraction_too_large","--overlay-fraction must be between 0.0 and less than 1.0",{"--ecc=0.5","--overlay-fraction=1.1","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
         {"overlay_without_ecc","overlay requires ECC",{"--ecc=0","--overlay-fraction=0.1","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
-        {"multipage_overlay_ecc_too_low","multi-page overlays require --ecc of at least 0.5",{"--hidden=fill","--hidden-input=hidden_tree","--hidden-password="+hidden_password,"--password="+visible_password,"--ecc=0.25","--fill-pages=2","--overlay-fraction=0.1","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
+        {"multipage_overlay_ecc_too_low","multi-page overlays require --ecc of at least 0.5",{"--hidden=fill","--hidden-input=hidden_tree","--hidden-password-cli="+hidden_password,"--password-cli="+visible_password,"--ecc=0.25","--fill-pages=2","--overlay-fraction=0.1","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}},
         {"overlay_wrong_dimensions","--overlay-ppm dimensions must match",{"--ecc=0.5","--overlay-fraction=0.1","--overlay-ppm="+bad_overlay.string(),"--overlay-pages=all"}},
         {"random_data_without_password_or_fill","--random-data requires --password or --fill-pages",{"--random-data=ffeeddccbbaa99887766554433221100123456789abcdef012345678"}},
+        {"removed_password_argument_syntax","use --password-cli to provide a password argument",{"--password=must-not-appear"}},
+        {"removed_hidden_password_argument_syntax","use --hidden-password-cli to provide a password argument",{"--hidden-password=must-not-appear"}},
         {"hidden_missing_value","--hidden requires a ratio or 'fill'",{"--hidden"}},
         {"hidden_ratio_not_numeric","--hidden ratio must be between 0 and 64",{"--hidden=secret"}},
         {"fill_pages_missing_value","--fill-pages requires a positive page count",{"--ecc=fill","--fill-pages"}},
@@ -2610,14 +2913,18 @@ static void hidden_volumes_case(){
     for(const auto& reject:rejects){
         fs::path out=work/(std::string(reject.name)+"-rejected");fs::create_directories(out);
         std::vector<std::string> args={"encode","--input=visible.bin","--page-width=1000","--page-height=1000","--output-dir="+out.string(),std::string("--prefix=")+reject.name};
-        bool password=false,random=false;for(const auto& a:reject.args){password|=a.rfind("--password=",0)==0;random|=a.rfind("--random-data=",0)==0;}
+        bool password=false,random=false;for(const auto& a:reject.args){password|=a.rfind("--password-cli=",0)==0;random|=a.rfind("--random-data=",0)==0;}
         if(password&&!random)args.push_back("--random-data="+random_for(reject.name));
         args.insert(args.end(),reject.args.begin(),reject.args.end());
         auto failed=run_cli(source,args,std::string(reject.name)+"_reject");expect_failure(failed,id+" reject "+reject.name);
         std::string output=failed.err+failed.out;require(output.find(reject.message)!=std::string::npos,id+" rejection reason mismatch for "+reject.name);
+        if (std::string(reject.name).find("removed_") == 0u) {
+            require(output.find("must-not-appear") == std::string::npos,
+                    id + " printed a rejected password argument");
+        }
         require(matching_files(out,"",".ppm").empty(),id+" rejected encode emitted page "+reject.name);
     }
-    std::vector<std::string> missing_random={"encode","--input=visible.bin","--page-width=1000","--page-height=1000","--password="+visible_password,"--output-dir="+(work/"missing_random").string()};
+    std::vector<std::string> missing_random={"encode","--input=visible.bin","--page-width=1000","--page-height=1000","--password-cli="+visible_password,"--output-dir="+(work/"missing_random").string()};
     auto missing=run_cli(source,missing_random,"missing_random");expect_failure(missing,id+" missing random data");
     require((missing.err+missing.out).find("--password requires --random-data")!=std::string::npos,id+": missing random error changed");
 }
@@ -2797,7 +3104,7 @@ static void overlay_case(const OverlayConfig& cfg){
     if(cfg.without_metadata)encode.push_back("--no-metadata");
     if(cfg.without_fiducials)encode.push_back("--no-fiducials");
     if(cfg.without_metadata){
-        encode.push_back("--password=scatter-suite-password");
+        encode.push_back("--password-cli=scatter-suite-password");
         encode.push_back("--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb");
     }
     encode.insert(encode.end(),cfg.encode_options.begin(),cfg.encode_options.end());
@@ -2890,7 +3197,7 @@ static void overlay_case(const OverlayConfig& cfg){
     require(fs::exists(csv),cfg.id+": missing encode fiducial report");
     std::vector<std::string> decode_extra={"--debug"};
     if(cfg.without_metadata){decode_extra.insert(decode_extra.end(),{"--no-metadata","--no-fiducials","--page-width="+std::to_string(cfg.width),"--page-height="+std::to_string(cfg.height),"--palette",cfg.palette});}
-    if(cfg.encrypted)decode_extra.push_back("--password=scatter-suite-password");
+    if(cfg.encrypted)decode_extra.push_back("--password-cli=scatter-suite-password");
     std::vector<std::string> decode_args=decode_file_args(ordered,decoded,decode_extra);
     auto result=run_cli(work,decode_args,"decode");expect_success(result,cfg.id+" decode");
     require(fs::exists(decoded/"decode_fiducials.csv"),cfg.id+": missing decode fiducial report");
@@ -2901,7 +3208,7 @@ static void overlay_case(const OverlayConfig& cfg){
         fs::create_directories(wrong_password_output);
         std::vector<std::string> wrong_password_options={"--no-metadata","--no-fiducials",
             "--page-width="+std::to_string(cfg.width),"--page-height="+std::to_string(cfg.height),
-            "--palette",cfg.palette,"--password=incorrect-scatter-password"};
+            "--palette",cfg.palette,"--password-cli=incorrect-scatter-password"};
         auto wrong_password=run_cli(work,decode_file_args(ordered,wrong_password_output,
             wrong_password_options),"wrong_password");
         expect_failure(wrong_password,cfg.id+" wrong password");
@@ -2912,7 +3219,7 @@ static void overlay_case(const OverlayConfig& cfg){
         std::vector<std::string> wrong_grid_options={"--no-metadata","--no-fiducials",
             "--page-width="+std::to_string(cfg.width+1u),"--page-height="+std::to_string(cfg.height),
             "--palette",cfg.palette};
-        if(cfg.encrypted)wrong_grid_options.push_back("--password=scatter-suite-password");
+        if(cfg.encrypted)wrong_grid_options.push_back("--password-cli=scatter-suite-password");
         auto wrong_grid=run_cli(work,decode_file_args(ordered,wrong_grid_output,wrong_grid_options),"wrong_grid");
         expect_failure(wrong_grid,cfg.id+" wrong grid dimensions");
     }
@@ -3131,7 +3438,7 @@ static void metadata_free_case(bool large){
         auto decoded=run_cli(work,decode_args,"decode_"+std::to_string(i));expect_success(decoded,id+" decode");
         std::string expected=read_file(payload);std::vector<unsigned char> expected_bytes(expected.begin(),expected.end());check_decoded(decoded.out,expected_bytes,0.0,id);
         if(!large&&i==0u){
-            auto password_args=decode_args;password_args.insert(password_args.end()-1,"--password=ignored");auto password_decoded=run_cli(work,password_args,"password_ignored_decode");
+            auto password_args=decode_args;password_args.insert(password_args.end()-1,"--password-cli=ignored");auto password_decoded=run_cli(work,password_args,"password_ignored_decode");
             expect_success(password_decoded,id+" plaintext password decode");
             check_decoded(password_decoded.out,expected_bytes,0.0,id+" plaintext password");
         }
@@ -3145,7 +3452,7 @@ static void missing_pages_case(){
         std::vector<std::string> args={"decode","--decoded-stdout"};args.insert(args.end(),item.second.begin(),item.second.end());auto decoded=run_cli(work,args,item.first);
         expect_success(decoded,id+" "+item.first);std::string bytes=read_file(payload);check_decoded(decoded.out,std::vector<unsigned char>(bytes.begin(),bytes.end()),0.0,id+" "+item.first);
         if(item.first=="first"){
-            std::vector<std::string> ignored_password={"decode","--decoded-stdout","--password=unused-password"};ignored_password.insert(ignored_password.end(),item.second.begin(),item.second.end());
+            std::vector<std::string> ignored_password={"decode","--decoded-stdout","--password-cli=unused-password"};ignored_password.insert(ignored_password.end(),item.second.begin(),item.second.end());
             auto password_decode=run_cli(work,ignored_password,"first_page_missing_ignored_password");expect_success(password_decode,id+" first page missing with ignored password");
             require((password_decode.out+password_decode.err).find("decode: warning: payload was not encrypted; password ignored")!=std::string::npos,id+": missing-page ignored-password warning missing");
             check_decoded(password_decode.out,std::vector<unsigned char>(bytes.begin(),bytes.end()),0.0,id+" ignored password");
@@ -3476,7 +3783,7 @@ static void cli_decoder_paths_case(){
     for(unsigned i=0;i<256;++i){char line[100];std::snprintf(line,sizeof(line),"LZMA CLI decoder path regression payload; repetition=%03u\n",i);repeated+=line;}fs::path payload=input_dir/"payload.bin";write_file(payload,repeated);
     const std::string prefix="cli_decoder_paths_auto";auto enc=run_cli(input_dir,{"encode","--input=payload.bin","--page-width=500","--page-height=500","--output-dir="+ppm_dir.string(),"--prefix="+prefix,"--debug"},"cli_encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(ppm_dir,prefix);require(!ppms.empty()&&fs::exists(ppm_dir/(prefix+"_encode_fiducials.csv")),id+": encode fiducial report/pages missing");
     auto dec=run_cli(work,decode_file_args(ppms,decoded_dir,{"--debug"}),"cli_decode");expect_success(dec,id+" decode");compare_files(payload,decoded_dir/"payload.bin",id);check_fiducials(ppm_dir/(prefix+"_encode_fiducials.csv"),decoded_dir/"decode_fiducials.csv",id);
-    fs::path pass_out=work/"decoded_with_ignored_password";auto pass=run_cli(work,decode_file_args(ppms,pass_out,{"--password=unused-password"}),"ignored_password");expect_success(pass,id+" ignored password");require((pass.out+pass.err).find("decode: warning: payload was not encrypted; password ignored")!=std::string::npos,id+": ignored-password warning missing");compare_files(payload,pass_out/"payload.bin",id+" ignored password");
+    fs::path pass_out=work/"decoded_with_ignored_password";auto pass=run_cli(work,decode_file_args(ppms,pass_out,{"--password-cli=unused-password"}),"ignored_password");expect_success(pass,id+" ignored password");require((pass.out+pass.err).find("decode: warning: payload was not encrypted; password ignored")!=std::string::npos,id+": ignored-password warning missing");compare_files(payload,pass_out/"payload.bin",id+" ignored password");
 }
 
 static void footer_features_case(){
@@ -4857,6 +5164,15 @@ static std::vector<TestCase> build_cases() {
         cases.push_back({id, description, [test](const fs::path&) { run_roundtrip(test); }});
     };
     RoundTrip r;
+    cases.push_back({"0136_chacha20_poly1305_vectors",
+                     "RFC 8439 authenticated encryption vectors",
+                     [](const fs::path&) { chacha20_poly1305_vector_case(); }});
+    cases.push_back({"0137_secure_random_padding",
+                     "Padding uses independent operating-system randomness",
+                     [](const fs::path&) { secure_random_padding_case(); }});
+    cases.push_back({"0138_interactive_password",
+                     "Passwords are prompted without terminal echo",
+                     [](const fs::path&) { interactive_password_case(); }});
     r.size=1; r.literal="0"; r.encode_args={"--ecc=0.001","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black"}; r.tiny_dimensions_check=true; r.marker_free_compact=true; rt("0000_tiny_0", "1 byte payload literal '0' encoded from stdin", r); r={};
     const char* makocode_ids[]={"0001_makocode_2_colors","0002_makocode_4_colors","0003_makocode_5_colors","0004_makocode_8_colors"};
     const char* makocode_palettes[]={"White Black","White Cyan Magenta Yellow","White Cyan Magenta Yellow Black","White #FF0000 #00FF00 #0000FF Cyan Magenta Yellow Black"};
@@ -4886,7 +5202,7 @@ static std::vector<TestCase> build_cases() {
     r.size=65536; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0024_gray_skew_xy_seeded","Grayscale XY skew",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","-5","--skew-y","5","--seed","7331"}; rt("0025_gray_skew_xy_reverse_seeded","Grayscale reverse XY skew",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1003199588u; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0026_gray_rotate_skew_seeded","Grayscale rotation and skew",r); r={};
-    r.size=32768; r.encode_args={"--password=suite-password","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--password=suite-password"}; rt("0027_password_ecc","Password-protected payload with ECC",r); r={};
+    r.size=32768; r.encode_args={"--password-cli=suite-password","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--password-cli=suite-password"}; rt("0027_password_ecc","Password-protected payload with ECC",r); r={};
     r.size=262144; r.encode_args={"--page-width=520","--page-height=520"}; r.require_multiple_pages=true; rt("0028_ecc_multi_page_massive","262 KiB ECC multi-page stress",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=703681913u; r.encode_args={"--page-width=620","--page-height=620","--ecc=0.41"}; r.transform_args={"--scale-x","2.10","--scale-y","2.10","--rotate","1","--seed","7331"}; r.require_multiple_pages=true; rt("0029_multi_page_distorted","Multi-page distorted payload",r); r={};
     r.size=16384; r.encode_args={"--palette","White Cyan Magenta Yellow Black"}; r.decode_args={"--palette","White Cyan Magenta Yellow Black"}; rt("0030_palette_base5_custom","Custom palette/base-5 mode",r); r={};
@@ -4988,8 +5304,8 @@ static std::vector<TestCase> build_cases() {
     r.size=4096; r.encode_args={"--page-width=360","--page-height=360","--palette","Black White"}; r.decode_args={"--palette","Black White"}; r.transform_args={"--scale-x","2.5","--scale-y","2.5","--seed","0"}; rt("0131_palette_reversed_q2_scan","Scaled scan with reversed q2 palette order",r); r={};
     cases.push_back({"0132_palette_q2_center_specks","Five center-pixel specks are erased from area-vote disagreements",[](const fs::path&){palette_q2_center_speck_case();}});
     r.size=4096; r.encode_args={"--scatter"}; r.scatter_metadata_check=true; rt("0133_scatter_plain_roundtrip","Plain unencrypted payload round-trip with scattered layout inferred from metadata",r); r={};
-    r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black","--password=unused"}; r.marker_free_compact=true; rt("0134_scatter_public_seed_fallback","Metadata-free scatter autodetection retries both layouts with public placement when a decode password was supplied",r); r={};
-    r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black",u8"--password=pāss🔐","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black",u8"--password=pāss🔐"}; r.marker_free_compact=true; rt("0135_scatter_utf8_password","Metadata-free scatter round-trip uses the full password-derived key, including for bootstrap placement",r); r={};
+    r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black","--password-cli=unused"}; r.marker_free_compact=true; rt("0134_scatter_public_seed_fallback","Metadata-free scatter autodetection retries both layouts with public placement when a decode password was supplied",r); r={};
+    r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black",u8"--password-cli=pāss🔐","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black",u8"--password-cli=pāss🔐"}; r.marker_free_compact=true; rt("0135_scatter_utf8_password","Metadata-free scatter round-trip uses the full password-derived key, including for bootstrap placement",r); r={};
     return cases;
 }
 

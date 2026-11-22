@@ -6426,7 +6426,8 @@ static bool chacha20_xor(const u8 key[32],
                          const u8* input,
                          u8* output,
                          usize length) {
-    if ((!input && length > 0u) || !output) {
+    if ((!input && length > 0u) || !output || !key || !nonce ||
+        (u64)length > ((u64)0x100000000ull - (u64)counter) * 64u) {
         return false;
     }
     u8 block[64];
@@ -6549,7 +6550,9 @@ static void poly1305_process_block(Poly1305State& state, const u8 block[16], u64
     state.h4 = h4;
 }
 
-static void poly1305_update(Poly1305State& state, const u8* data, usize length) {
+static void poly1305_update_padded(Poly1305State& state,
+                                   const u8* data,
+                                   usize length) {
     while (length >= 16u) {
         poly1305_process_block(state, data, (1ull << 24u));
         data += 16u;
@@ -6557,27 +6560,13 @@ static void poly1305_update(Poly1305State& state, const u8* data, usize length) 
     }
     if (length > 0u) {
         u8 buffer[16];
-        for (usize i = 0u; i < 16u; ++i) {
-            buffer[i] = 0u;
-        }
+        memset(buffer, 0, sizeof(buffer));
         for (usize i = 0u; i < length; ++i) {
             buffer[i] = data[i];
         }
-        buffer[length] = 1u;
-        poly1305_process_block(state, buffer, 0u);
+        poly1305_process_block(state, buffer, (1ull << 24u));
+        memset(buffer, 0, sizeof(buffer));
     }
-}
-
-static void poly1305_pad16(Poly1305State& state, usize length) {
-    usize remainder = length & 15u;
-    if (!remainder) {
-        return;
-    }
-    u8 padding[16];
-    for (usize i = 0u; i < 16u; ++i) {
-        padding[i] = 0u;
-    }
-    poly1305_update(state, padding, 16u - remainder);
 }
 
 static void poly1305_finish(Poly1305State& state, const u8 pad[16], u8 tag[16]) {
@@ -6637,9 +6626,10 @@ static void poly1305_finish(Poly1305State& state, const u8 pad[16], u8 tag[16]) 
                ((u128)state.h2 << 52u) |
                ((u128)state.h3 << 78u) |
                ((u128)state.h4 << 104u);
-    u128 sum0 = acc + (u128)read_le_u64(pad);
+    u128 sum0 = (u128)(u64)acc + (u128)read_le_u64(pad);
     u64 f0 = (u64)sum0;
-    u128 sum1 = ((acc >> 64u) + (u128)read_le_u64(pad + 8u) + (sum0 >> 64u));
+    u128 sum1 = ((u128)(u64)(acc >> 64u) +
+                 (u128)read_le_u64(pad + 8u) + (sum0 >> 64u));
     u64 f1 = (u64)sum1;
     write_le_u64(tag, f0);
     write_le_u64(tag + 8u, f1);
@@ -6654,25 +6644,26 @@ static bool chacha20_poly1305_encrypt(const u8* key,
                                       ByteBuffer& ciphertext,
                                       u8 tag[16]) {
     ciphertext.release();
+    if (!key || !nonce || !tag || (plaintext_length && !plaintext) ||
+        (aad_length && !aad)) return false;
     if (plaintext_length > 0u && !ciphertext.ensure(plaintext_length)) {
         return false;
     }
     ciphertext.size = plaintext_length;
     u8 initial_block[64];
     chacha20_block(key, nonce, 0u, initial_block);
-    if (plaintext_length > 0u) {
-        chacha20_xor(key, nonce, 1u, plaintext, ciphertext.data, plaintext_length);
+    if (plaintext_length > 0u &&
+        !chacha20_xor(key, nonce, 1u, plaintext, ciphertext.data, plaintext_length)) {
+        ciphertext.release();
+        memset(initial_block, 0, sizeof(initial_block));
+        return false;
     }
     Poly1305State mac;
     poly1305_init_state(mac, initial_block);
-    if (aad && aad_length > 0u) {
-        poly1305_update(mac, aad, aad_length);
-    }
-    poly1305_pad16(mac, aad_length);
+    if (aad_length > 0u) poly1305_update_padded(mac, aad, aad_length);
     if (plaintext_length > 0u) {
-        poly1305_update(mac, ciphertext.data, plaintext_length);
+        poly1305_update_padded(mac, ciphertext.data, plaintext_length);
     }
-    poly1305_pad16(mac, plaintext_length);
     u8 length_block[16];
     for (u32 i = 0u; i < 16u; ++i) {
         length_block[i] = 0u;
@@ -6696,6 +6687,9 @@ static bool chacha20_poly1305_decrypt(const u8* key,
                                       ByteBuffer& plaintext,
                                       const u8 tag[16],
                                       bool* auth_failed) {
+    if (!key || !nonce || !tag || (ciphertext_length && !ciphertext) ||
+        (aad_length && !aad) ||
+        (u64)ciphertext_length > (u64)0xFFFFFFFFu * 64u) return false;
     if (auth_failed) {
         *auth_failed = false;
     }
@@ -6704,14 +6698,10 @@ static bool chacha20_poly1305_decrypt(const u8* key,
     chacha20_block(key, nonce, 0u, initial_block);
     Poly1305State mac;
     poly1305_init_state(mac, initial_block);
-    if (aad && aad_length > 0u) {
-        poly1305_update(mac, aad, aad_length);
-    }
-    poly1305_pad16(mac, aad_length);
+    if (aad_length > 0u) poly1305_update_padded(mac, aad, aad_length);
     if (ciphertext_length > 0u) {
-        poly1305_update(mac, ciphertext, ciphertext_length);
+        poly1305_update_padded(mac, ciphertext, ciphertext_length);
     }
-    poly1305_pad16(mac, ciphertext_length);
     u8 length_block[16];
     for (u32 i = 0u; i < 16u; ++i) {
         length_block[i] = 0u;
@@ -6742,7 +6732,12 @@ static bool chacha20_poly1305_decrypt(const u8* key,
             return false;
         }
         plaintext.size = ciphertext_length;
-        chacha20_xor(key, nonce, 1u, ciphertext, plaintext.data, ciphertext_length);
+        if (!chacha20_xor(key, nonce, 1u, ciphertext, plaintext.data,
+                          ciphertext_length)) {
+            plaintext.release();
+            memset(initial_block, 0, sizeof(initial_block));
+            return false;
+        }
     }
     for (u32 i = 0u; i < 64u; ++i) {
         initial_block[i] = 0u;
@@ -7952,33 +7947,54 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
     return true;
 }
 
-bool stealth_fill_random(ByteBuffer& output,
-                                usize size,
-                                const u8* random_data,
-                                usize random_data_length,
-                                const char* domain) {
-    if (!random_data || random_data_length != ENCRYPTION_SALT_BYTES + ENCRYPTION_NONCE_BYTES ||
-        !domain || !output.ensure(size)) return false;
-    u8 key[32];
-    u8 nonce_hash[32];
-    if (!hmac_sha256(random_data, random_data_length, (const u8*)domain,
-                     ascii_length(domain), key) ||
-        !hmac_sha256(key, sizeof(key), random_data,
-                     random_data_length, nonce_hash)) {
-        for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
-        for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
-        return false;
-    }
-    for (usize i = 0u; i < size; ++i) output.data[i] = 0u;
-    if (!chacha20_xor(key, nonce_hash, 1u, output.data, output.data, size)) {
-        for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
-        for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
+bool stealth_fill_random(ByteBuffer& output, usize size) {
+    output.release();
+    if (!output.ensure(size)) return false;
+    if (!makocode_platform_secure_random(output.data, (unsigned long)size)) {
+        output.release();
         return false;
     }
     output.size = size;
-    for (usize i = 0u; i < sizeof(key); ++i) key[i] = 0u;
-    for (usize i = 0u; i < sizeof(nonce_hash); ++i) nonce_hash[i] = 0u;
     return true;
+}
+
+bool read_password_from_terminal(SecretBuffer& output,
+                                 const char* prompt,
+                                 bool confirm) {
+    static const unsigned long PASSWORD_CAPACITY = 4096u;
+    char first[PASSWORD_CAPACITY];
+    char second[PASSWORD_CAPACITY];
+    unsigned long first_length = 0u;
+    unsigned long second_length = 0u;
+    memset(first, 0, sizeof(first));
+    memset(second, 0, sizeof(second));
+    bool ok = makocode_platform_read_password(first, sizeof(first),
+                                               &first_length, prompt);
+    if (ok && confirm) {
+        ok = makocode_platform_read_password(second, sizeof(second),
+                                              &second_length,
+                                              "Confirm password: ") &&
+             first_length == second_length &&
+             constant_time_equal((const u8*)first, (const u8*)second,
+                                 first_length);
+    }
+    if (ok && output.ensure((usize)first_length)) {
+        memcpy(output.data, first, first_length);
+        output.size = (usize)first_length;
+    } else {
+        ok = false;
+    }
+    volatile char* clear_first = first;
+    volatile char* clear_second = second;
+    for (unsigned long i = 0u; i < PASSWORD_CAPACITY; ++i) {
+        clear_first[i] = 0;
+        clear_second[i] = 0;
+    }
+    if (!ok) {
+        console_line(2, confirm ? "password input failed or confirmation did not match"
+                                : "password input failed");
+    }
+    return ok;
 }
 
 } // namespace makocode
@@ -30330,11 +30346,13 @@ void write_encode_help() {
     console_line(1, "                       Repeat the pair; each encoded page may have at most one overlay.");
     console_line(1, "                       Overlay images and --overlay-fraction must be supplied together.");
     console_line(1, "  --overlay-ignore-colors LIST  Skip overlay pixels matching named or hex colors.");
-    console_line(1, "  --password TEXT      Encrypt payload with ChaCha20-Poly1305.");
-    console_line(1, "  --random-data HEX    28 random bytes as 56 hex digits; required with --password and page filler.");
+    console_line(1, "  --password           Prompt for an encryption password without terminal echo.");
+    console_line(1, "  --password-cli TEXT  Supply the encryption password as a command-line argument.");
+    console_line(1, "  --random-data HEX    28 bytes as 56 hex digits for the salt and nonce seed; required with --password.");
     console_line(1, "  --hidden R|fill      Hidden-capacity ratio to visible data, or fill the current page; 0 disables it.");
     console_line(1, "  --hidden-input PATH  Add a hidden file/directory; requires --hidden-password.");
-    console_line(1, "  --hidden-password TEXT  Password for hidden archive; must differ from --password.");
+    console_line(1, "  --hidden-password    Prompt for the hidden archive password and confirmation.");
+    console_line(1, "  --hidden-password-cli TEXT  Supply the hidden password as a command-line argument.");
     console_line(1, "  --fill-pages N       Fill through N physical pages; requires --hidden fill or --ecc fill.");
     console_line(1, "                       --hidden fill and --ecc fill cannot be combined.");
     console_line(1, "");
@@ -30358,7 +30376,8 @@ void write_decode_help() {
     console_line(1, "  --output-dir PATH    Destination directory (default current directory).");
     console_line(1, "  --decoded-file       Write a single decoded file instead of restoring the tree.");
     console_line(1, "  --decoded-stdout     Write decoded file content to stdout without creating files.");
-    console_line(1, "  --password TEXT      Supply the decryption password for protected payloads.");
+    console_line(1, "  --password           Prompt for the decryption password without terminal echo.");
+    console_line(1, "  --password-cli TEXT  Supply the decryption password as a command-line argument.");
     console_line(1, "");
     console_line(1, "Layout overrides (match encoder settings when non-default):");
     console_line(1, "  --palette \"Color ...\"   Custom palette (2-16 ordered names or #RRGGBB values; default is \"White Black\").");

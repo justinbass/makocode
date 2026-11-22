@@ -25,14 +25,15 @@ Runtime host services are routed through `makocode_platform_*` in
 `-ffreestanding` and `INCLUDES=0`, without linking a host OS adapter. A target
 integration supplies definitions for the platform ABI when it links the
 application; select its source with `PLATFORM_SOURCE=path/to/platform.cpp`.
-File access, directory traversal, terminal input/output,
+File access, directory traversal, no-echo password input, secure random bytes,
 environment lookup, allocation, timestamps, and formatting stay behind this
 OS-relevant C++ module. The runtime does not invoke shell utilities.
 
 Keeping OS headers and services behind this boundary is part of making the
-implementation futureproof and self-contained: a port can provide the
-services supported by its environment while codec and archive logic remain
-independent of the host filesystem and process environment.
+implementation futureproof and self-contained: a port must provide secure
+random bytes and terminal password input as well as the other host services.
+Codec and archive logic remain independent of the host filesystem and process
+environment.
 
 ## Usage
 
@@ -58,8 +59,8 @@ make test
 
 ```sh
 ./build/bin/makocode checkpoint create --input current --base previous --output current.mcp --chunk-size 4M
-./build/bin/makocode encode --input current.mcp --output-dir pages --password 'secret' --random-data="$random"
-./build/bin/makocode decode --output-dir decoded --password 'secret' pages/*.ppm
+./build/bin/makocode encode --input current.mcp --output-dir pages --password --random-data="$random"
+./build/bin/makocode decode --output-dir decoded --password pages/*.ppm
 ./build/bin/makocode checkpoint restore --input decoded/current.mcp --base previous --output restored
 ```
 
@@ -75,7 +76,9 @@ Decode restores the original file tree by default. `--decoded-file` writes a tim
 
 ### Encryption randomness
 
-Password-protected encoding uses an authenticated container with encrypted length descriptors. Its fixed cryptographic settings are built into the program and are not written as a clear header. The container carries a 16-byte salt and 12-byte nonce seed. Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes). Generate fresh data for every encoding. MakoCode accepts the bytes from you and does not obtain randomness from the operating system.
+Password-protected encoding uses an authenticated container with encrypted length descriptors. Its fixed cryptographic settings are built into the program and are not written as a clear header. The container carries a 16-byte salt and 12-byte nonce seed. Encrypted encoding requires `--random-data HEX`: exactly 56 hexadecimal digits (28 bytes). Generate fresh data for every encoding. MakoCode uses these supplied bytes for the salt and nonce seed. It obtains hidden-volume padding and physical page filler independently from the operating-system random source.
+
+Use `--password` to enter a password through a no-echo terminal prompt. Encoding asks for confirmation. Decoding prompts once. `--password-cli TEXT` and `--password-cli=TEXT` explicitly pass a password through the process arguments, which may be visible in shell history or process inspection. The equivalent hidden-volume options are `--hidden-password` and `--hidden-password-cli`.
 
 In version 0, password text is consumed as its exact UTF-8 bytes by every password derivation. Unicode is supported when the same UTF-8 bytes are supplied to encode and decode; no Unicode normalization is performed, so canonically equivalent spellings are different passwords. One-password streams derive a 256-bit key with PBKDF2-HMAC-SHA256 (60,000 iterations and a fixed public salt). Separate domain-separated HMAC-SHA256 keys drive the selector ordering and spatial payload permutation; the spatial permutation includes the bootstrap symbols when present. These keys are not stored in page metadata. The field-symbol mask also uses the 256-bit derived key. Hidden-volume mode uses separate visible and hidden passwords, so it uses public selector and spatial ordering and relies on the authenticated encrypted container rather than applying one shared symbol mask. In both modes, decoding authenticates encrypted content before decompressing it.
 
@@ -83,7 +86,7 @@ Linux and macOS:
 
 ```sh
 random=$(od -An -N28 -tx1 /dev/urandom | tr -d ' \n')
-./build/bin/makocode encode --input=file.txt --password=... --random-data="$random"
+./build/bin/makocode encode --input=file.txt --password --random-data="$random"
 ```
 
 Windows PowerShell:
@@ -92,7 +95,7 @@ Windows PowerShell:
 $bytes = [byte[]]::new(28)
 [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
 $random = [Convert]::ToHexString($bytes)
-.\build\bin\makocode.exe encode --input=file.txt --password=... --random-data=$random
+.\build\bin\makocode.exe encode --input=file.txt --password --random-data=$random
 ```
 
 Diceware can supply the randomness too; these words are entropy input, not the encryption password. Use 18 independently selected words (about 232 bits of entropy), hash their exact space-separated text, and take 56 hex digits (28 bytes). Linux:
@@ -100,7 +103,7 @@ Diceware can supply the randomness too; these words are entropy input, not the e
 ```sh
 words='word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 word14 word15 word16 word17 word18'
 random=$(printf '%s' "$words" | sha256sum | cut -c1-56)
-./build/bin/makocode encode --input=file.txt --password=... --random-data="$random"
+./build/bin/makocode encode --input=file.txt --password --random-data="$random"
 ```
 
 On macOS replace `sha256sum` with `shasum -a 256`. In PowerShell, set `$words` to the 18 words, then run:
@@ -109,18 +112,20 @@ On macOS replace `sha256sum` with `shasum -a 256`. In PowerShell, set `$words` t
 $sha = [Security.Cryptography.SHA256]::Create()
 $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($words))
 $random = [Convert]::ToHexString($digest).Substring(0, 56)
-.\build\bin\makocode.exe encode --input=file.txt --password=... --random-data=$random
+.\build\bin\makocode.exe encode --input=file.txt --password --random-data=$random
 ```
 
 Use a newly generated value for every encryption. Hashing formats the Diceware entropy into the required bytes; it does not add entropy.
 
 ### Hidden-capacity volumes and random page fill
 
-`--hidden 0` is the default and reserves no hidden capacity. `--hidden R` reserves hidden capacity equal to `R` times the visible encrypted body length: `0.5` reserves about one third of the combined data region, and `2` reserves about two thirds. The hidden capacity is a limit; unused bytes at its end contain pseudorandom filler. Hidden mode requires the visible `--password` and `--random-data`, so its visible-body length descriptor is encrypted.
+`--hidden 0` is the default and reserves no hidden capacity. `--hidden R` reserves hidden capacity equal to `R` times the visible encrypted body length: `0.5` reserves about one third of the combined data region, and `2` reserves about two thirds. The hidden capacity is a limit; unused bytes at its end contain fresh operating-system random data. Hidden mode requires the visible `--password` and `--random-data`, so its visible-body length descriptor is encrypted.
 
-To store a hidden archive, provide both `--hidden-input PATH` and `--hidden-password TEXT`, in addition to the visible `--password` and `--random-data`. The two passwords must differ. Decode the visible or hidden archive by supplying its corresponding password. If no hidden input is supplied, the hidden-capacity region contains random filler only. `--hidden fill` uses the remaining data capacity of one page; `--fill-pages N` extends page fill to `N` physical pages when used with `--hidden fill` or `--ecc fill`. Combining `--hidden fill` with `--ecc fill` is rejected because both would claim the same capacity.
+To store a hidden archive, provide `--hidden-input PATH` and enter `--hidden-password`, in addition to the visible `--password` and `--random-data`. Both password prompts ask for confirmation. The two passwords must differ. Decode the visible or hidden archive by supplying its corresponding password. If no hidden input is supplied, the hidden-capacity region contains operating-system random data only. Hidden descriptor and body bytes are authenticated ciphertext. Within a matching layout, their byte distribution is computationally indistinguishable from independent random filler, assuming a secure platform random source and a hidden password that resists guessing. This does not hide observable page count, dimensions, or public metadata, and does not guarantee that the image as a whole is visually undetectable. `--hidden fill` uses the remaining data capacity of one page; `--fill-pages N` extends page fill to `N` physical pages when used with `--hidden fill` or `--ecc fill`. Combining `--hidden fill` with `--ecc fill` is rejected because both would claim the same capacity.
 
-Visible and hidden descriptors and archive bodies are authenticated and encrypted in the data section. Password-protected data begins with only the supplied salt and nonce seed; it has no clear format marker or length. Decoding recognizes a protected container only when a supplied password authenticates a descriptor. Page count and page dimensions remain observable. ECC covers the encoded data section; random physical page fill after the protected stream is outside the RS codewords and is ignored during extraction. Page filling requires fresh `--random-data`, which can be supplied without `--password` when it is used only to seed filler.
+Visible and hidden descriptors and archive bodies are authenticated and encrypted in the data section. Password-protected data begins with only the supplied salt and nonce seed; it has no clear format marker or length. Decoding recognizes a protected container only when a supplied password authenticates a descriptor. Page count and page dimensions remain observable. ECC covers the encoded data section; random physical page fill after the protected stream is outside the RS codewords and is ignored during extraction. `--fill-pages` uses the operating-system random source and does not require `--random-data` unless password protection is also enabled.
+
+The version 0 AEAD implementation now conforms to RFC 8439. This corrects the authentication tags generated by earlier builds, so previously encoded password-protected data is not compatible with this implementation. Version remains 0 as specified by the current format policy.
 
 The decoded file uses ASCII lines, begins with `MAKOCODE-DECODED`, and ends with `end`. Each `page N` section contains `metadata NAME VALUE` lines and ends with `end-page`. The `payload` section uses the same metadata form and ends with `end-payload`. Byte arrays in metadata are uppercase hexadecimal; numeric fields are decimal. Fields are present only when recovered. Page sections report the recovered metadata fields without the raw tile header or tile bytes.
 

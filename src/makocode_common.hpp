@@ -235,6 +235,13 @@ struct ByteBuffer {
         return append_bytes((const u8*)&c, 1u);
     }
 };
+
+struct SecretBuffer : ByteBuffer {
+    ~SecretBuffer() {
+        volatile u8* clear = data;
+        for (usize i = 0u; i < capacity; ++i) clear[i] = 0u;
+    }
+};
 } // namespace makocode
 
 namespace makocode {
@@ -2045,10 +2052,10 @@ bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
 
 namespace makocode {
 bool stealth_fill_random(ByteBuffer& output,
-                                usize size,
-                                const u8* random_data,
-                                usize random_data_length,
-                                const char* domain);
+                         usize size);
+bool read_password_from_terminal(SecretBuffer& output,
+                                 const char* prompt,
+                                 bool confirm);
 } // namespace makocode
 
 namespace MetadataTile {

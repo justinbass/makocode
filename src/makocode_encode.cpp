@@ -136,13 +136,15 @@ int command_encode(int arg_count, char** args) {
     const char* hidden_input_paths[MAX_INPUT_ITEMS];
     usize hidden_input_count = 0u;
     makocode::ByteBuffer footer_buffer;
-    makocode::ByteBuffer password_buffer;
-    makocode::ByteBuffer hidden_password_buffer;
+    makocode::SecretBuffer password_buffer;
+    makocode::SecretBuffer hidden_password_buffer;
     makocode::ByteBuffer random_data_buffer;
     makocode::ByteBuffer output_dir_buffer;
     makocode::ByteBuffer prefix_buffer;
     bool have_password = false;
     bool have_hidden_password = false;
+    bool password_prompt_requested = false;
+    bool hidden_password_prompt_requested = false;
     bool have_random_data = false;
     bool hidden_option_specified = false;
     bool hidden_fill = false;
@@ -838,32 +840,38 @@ int command_encode(int arg_count, char** args) {
             have_random_data = true;
             continue;
         }
-        const char password_prefix[] = "--password=";
+        const char password_cli_prefix[] = "--password-cli=";
         const char* password_value = 0;
         usize password_length = 0u;
         if (ascii_equals_token(arg, ascii_length(arg), "--password")) {
-            if (have_password) {
+            if (have_password || password_prompt_requested) {
                 console_line(2, "encode: password specified multiple times");
                 return 1;
             }
-            if ((i + 1) >= arg_count) {
-                console_line(2, "encode: --password requires a non-empty value");
+            password_prompt_requested = true;
+            continue;
+        } else if (ascii_equals_token(arg, ascii_length(arg), "--password-cli")) {
+            if (have_password || password_prompt_requested) {
+                console_line(2, "encode: password specified multiple times");
                 return 1;
             }
-            password_value = args[i + 1];
+            if ((i + 1) >= arg_count || args[i + 1][0] == '-') {
+                console_line(2, "encode: --password-cli requires a non-empty value");
+                return 1;
+            }
+            password_value = args[++i];
             password_length = ascii_length(password_value);
-            i += 1;
-        } else if (ascii_starts_with(arg, password_prefix)) {
-            if (have_password) {
+        } else if (ascii_starts_with(arg, password_cli_prefix)) {
+            if (have_password || password_prompt_requested) {
                 console_line(2, "encode: password specified multiple times");
                 return 1;
             }
-            password_value = arg + (sizeof(password_prefix) - 1u);
+            password_value = arg + sizeof(password_cli_prefix) - 1u;
             password_length = ascii_length(password_value);
         }
         if (password_value) {
             if (password_length == 0u) {
-                console_line(2, "encode: --password requires a non-empty value");
+                console_line(2, "encode: --password-cli requires a non-empty value");
                 return 1;
             }
             if (!password_buffer.ensure(password_length)) {
@@ -877,27 +885,42 @@ int command_encode(int arg_count, char** args) {
             have_password = true;
             continue;
         }
-        const char hidden_password_prefix[] = "--hidden-password=";
+        if (ascii_starts_with(arg, "--password=")) {
+            console_line(2, "encode: use --password-cli to provide a password argument");
+            return 1;
+        }
+        const char hidden_password_cli_prefix[] = "--hidden-password-cli=";
         const char* hidden_password_value = 0;
         usize hidden_password_length = 0u;
         if (ascii_equals_token(arg, ascii_length(arg), "--hidden-password")) {
-            if (have_hidden_password || (i + 1) >= arg_count) {
-                console_line(2, "encode: --hidden-password requires a non-empty value and may be specified once");
+            if (have_hidden_password || hidden_password_prompt_requested) {
+                console_line(2, "encode: hidden password specified multiple times");
+                return 1;
+            }
+            hidden_password_prompt_requested = true;
+            continue;
+        } else if (ascii_equals_token(arg, ascii_length(arg), "--hidden-password-cli")) {
+            if (have_hidden_password || hidden_password_prompt_requested) {
+                console_line(2, "encode: hidden password specified multiple times");
+                return 1;
+            }
+            if ((i + 1) >= arg_count || args[i + 1][0] == '-') {
+                console_line(2, "encode: --hidden-password-cli requires a non-empty value");
                 return 1;
             }
             hidden_password_value = args[++i];
             hidden_password_length = ascii_length(hidden_password_value);
-        } else if (ascii_starts_with(arg, hidden_password_prefix)) {
-            if (have_hidden_password) {
-                console_line(2, "encode: --hidden-password may be specified only once");
+        } else if (ascii_starts_with(arg, hidden_password_cli_prefix)) {
+            if (have_hidden_password || hidden_password_prompt_requested) {
+                console_line(2, "encode: hidden password specified multiple times");
                 return 1;
             }
-            hidden_password_value = arg + sizeof(hidden_password_prefix) - 1u;
+            hidden_password_value = arg + sizeof(hidden_password_cli_prefix) - 1u;
             hidden_password_length = ascii_length(hidden_password_value);
         }
         if (hidden_password_value) {
             if (!hidden_password_length) {
-                console_line(2, "encode: --hidden-password requires a non-empty value");
+                console_line(2, "encode: --hidden-password-cli requires a non-empty value");
                 return 1;
             }
             if (!hidden_password_buffer.ensure(hidden_password_length)) {
@@ -911,9 +934,28 @@ int command_encode(int arg_count, char** args) {
             have_hidden_password = true;
             continue;
         }
+        if (ascii_starts_with(arg, "--hidden-password=")) {
+            console_line(2, "encode: use --hidden-password-cli to provide a password argument");
+            return 1;
+        }
+        if ((password_prompt_requested || hidden_password_prompt_requested) &&
+            arg[0] != '-') {
+            console_line(2, "encode: password prompt options take no value; use the matching --password-cli option for argv input");
+            return 1;
+        }
         console_write(2, "encode: unknown option: ");
         console_line(2, arg);
         return 1;
+    }
+    if (password_prompt_requested) {
+        if (!makocode::read_password_from_terminal(password_buffer,
+                                                   "Password: ", true)) return 1;
+        have_password = true;
+    }
+    if (hidden_password_prompt_requested) {
+        if (!makocode::read_password_from_terminal(hidden_password_buffer,
+                                                   "Hidden password: ", true)) return 1;
+        have_hidden_password = true;
     }
     if ((footer_config.pages || footer_config.over_barcode) && !have_footer) {
         console_line(2, "encode: --footer-pages and --footer-over-barcode require --footer");
@@ -943,10 +985,6 @@ int command_encode(int arg_count, char** args) {
     }
     if (have_random_data && !have_password && !fill_pages_specified) {
         console_line(2, "encode: --random-data requires --password or --fill-pages");
-        return 1;
-    }
-    if (fill_pages_specified && !have_random_data) {
-        console_line(2, "encode: --fill-pages requires --random-data for cryptographic filler");
         return 1;
     }
     bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
@@ -1445,9 +1483,8 @@ int command_encode(int arg_count, char** args) {
         }
         if (container_ok) {
             if (carrier_size > (u64)USIZE_MAX_VALUE ||
-                !MetadataTile::stealth_fill_random(stealth_container, (usize)carrier_size,
-                                     random_data_buffer.data, random_data_buffer.size,
-                                     "makocode hidden-region fill v1")) {
+                !makocode::stealth_fill_random(stealth_container,
+                                               (usize)carrier_size)) {
                 container_ok = false;
             }
         }
@@ -1981,11 +2018,7 @@ int command_encode(int arg_count, char** args) {
             return 1;
         }
         makocode::ByteBuffer random_fill;
-        if (!MetadataTile::stealth_fill_random(random_fill,
-                                               target_bytes,
-                                               random_data_buffer.data,
-                                               random_data_buffer.size,
-                                               "makocode page fill v1")) {
+        if (!makocode::stealth_fill_random(random_fill, target_bytes)) {
             console_line(2, "encode: failed to generate random page filler");
             return 1;
         }

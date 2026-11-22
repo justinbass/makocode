@@ -51,6 +51,11 @@ const char* makocode_platform_getenv(const char* name);
 int makocode_platform_snprintf(char* buffer, unsigned long size, const char* format, ...);
 bool makocode_platform_utc_timestamp(char* buffer, unsigned long capacity);
 bool makocode_platform_local_timestamp(char* buffer, unsigned long capacity);
+bool makocode_platform_secure_random(void* buffer, unsigned long size);
+bool makocode_platform_read_password(char* buffer,
+                                     unsigned long capacity,
+                                     unsigned long* length,
+                                     const char* prompt);
 }
 
 #endif

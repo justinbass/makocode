@@ -14,8 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/select.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #endif
@@ -24,6 +27,27 @@
 struct MakoPlatformDirectory {
     DIR* handle;
 };
+
+namespace {
+
+volatile sig_atomic_t password_prompt_signal = 0;
+
+void password_prompt_signal_handler(int signal_number) {
+    password_prompt_signal = signal_number;
+}
+
+bool write_terminal_text(int fd, const char* text, size_t length) {
+    size_t written = 0u;
+    while (written < length) {
+        ssize_t result = ::write(fd, text + written, length - written);
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) return false;
+        written += (size_t)result;
+    }
+    return true;
+}
+
+} // namespace
 
 #ifdef MAKOCODE_TEST_BUILD
 extern "C" void* makocode_test_malloc(unsigned long size);
@@ -164,5 +188,161 @@ extern "C" bool makocode_platform_local_timestamp(char* buffer, unsigned long ca
                                "makocode_decoded_%Y%m%d%H%M%S.txt",
                                &local);
     return length > 0u && length < capacity;
+}
+
+extern "C" bool makocode_platform_secure_random(void* buffer, unsigned long size) {
+    if (!buffer && size) return false;
+    int fd = ::open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return false;
+    unsigned long offset = 0u;
+    while (offset < size) {
+        ssize_t result = ::read(fd, (char*)buffer + offset, (size_t)(size - offset));
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) {
+            ::close(fd);
+            return false;
+        }
+        offset += (unsigned long)result;
+    }
+    return ::close(fd) == 0;
+}
+
+extern "C" bool makocode_platform_read_password(char* buffer,
+                                                 unsigned long capacity,
+                                                 unsigned long* length,
+                                                 const char* prompt) {
+    if (!buffer || capacity < 2u || !length || !prompt) return false;
+    *length = 0u;
+    buffer[0] = '\0';
+    int fd = ::open("/dev/tty", O_RDWR);
+    if (fd < 0) return false;
+
+    struct termios original;
+    if (::tcgetattr(fd, &original) != 0) {
+        ::close(fd);
+        return false;
+    }
+    int original_flags = ::fcntl(fd, F_GETFL);
+    bool nonblocking = original_flags >= 0 &&
+                       ::fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) == 0;
+    struct sigaction old_actions[5];
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = password_prompt_signal_handler;
+    sigemptyset(&action.sa_mask);
+    const int signals[5] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP};
+    unsigned long actions_installed = 0u;
+    password_prompt_signal = 0;
+    for (; actions_installed < 5u; ++actions_installed) {
+        if (::sigaction(signals[actions_installed], &action,
+                        &old_actions[actions_installed]) != 0) break;
+    }
+    if (actions_installed != 5u) {
+        while (actions_installed) {
+            --actions_installed;
+            ::sigaction(signals[actions_installed], &old_actions[actions_installed], 0);
+        }
+        ::close(fd);
+        return false;
+    }
+
+    struct termios hidden = original;
+    hidden.c_lflag &= (tcflag_t)~(ECHO | ECHONL | ICANON);
+    hidden.c_iflag &= (tcflag_t)~(IXON | IXOFF);
+    hidden.c_cc[VMIN] = 1;
+    hidden.c_cc[VTIME] = 0;
+    bool changed = ::tcsetattr(fd, TCSANOW, &hidden) == 0;
+    bool ok = nonblocking && changed && ::tcflush(fd, TCIFLUSH) == 0 &&
+              write_terminal_text(fd, prompt, strlen(prompt));
+    bool overflow = false;
+    unsigned long used = 0u;
+    while (ok && !password_prompt_signal) {
+        if (fd >= FD_SETSIZE) {
+            ok = false;
+            break;
+        }
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(fd, &readable);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100000;
+        int ready = ::select(fd + 1, &readable, 0, 0, &timeout);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            ok = false;
+            break;
+        }
+        if (ready == 0) continue;
+        if (!FD_ISSET(fd, &readable)) {
+            ok = false;
+            break;
+        }
+        if (password_prompt_signal) break;
+        char ch = '\0';
+        ssize_t result = ::read(fd, &ch, 1u);
+        if (result < 0 && errno == EINTR) {
+            if (password_prompt_signal) break;
+            continue;
+        }
+        if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (password_prompt_signal) break;
+            continue;
+        }
+        if (result != 1) {
+            ok = false;
+            break;
+        }
+        if (ch == '\n' || ch == '\r') break;
+        if (ch == original.c_cc[VERASE] || ch == '\b' || ch == '\x7f') {
+            if (used) {
+                --used;
+                while (used && ((unsigned char)buffer[used] & 0xC0u) == 0x80u) --used;
+                buffer[used] = '\0';
+            }
+            continue;
+        }
+        if (ch == original.c_cc[VKILL] || ch == '\x15') {
+            memset(buffer, 0, (size_t)capacity);
+            used = 0u;
+            continue;
+        }
+        if (ch == original.c_cc[VEOF] || ch == '\x04') {
+            ok = false;
+            break;
+        }
+        if (used + 1u < capacity) buffer[used++] = ch;
+        else overflow = true;
+    }
+
+    if (changed) {
+        int restored;
+        do {
+            restored = ::tcsetattr(fd, TCSAFLUSH, &original);
+        } while (restored != 0 && errno == EINTR);
+        if (restored != 0) ok = false;
+    }
+    if (nonblocking && ::fcntl(fd, F_SETFL, original_flags) != 0) ok = false;
+    if (!write_terminal_text(fd, "\n", 1u)) ok = false;
+    if (::close(fd) != 0) ok = false;
+    for (unsigned long i = 0u; i < 5u; ++i) {
+        ::sigaction(signals[i], &old_actions[i], 0);
+    }
+    if (password_prompt_signal) {
+        int signal_number = (int)password_prompt_signal;
+        password_prompt_signal = 0;
+        if (signal_number == SIGTSTP) ::raise(signal_number);
+        ok = false;
+    }
+    if (overflow || !used) ok = false;
+    if (!ok) {
+        volatile char* clear = buffer;
+        for (unsigned long i = 0u; i < capacity; ++i) clear[i] = 0;
+        *length = 0u;
+        return false;
+    }
+    buffer[used] = '\0';
+    *length = used;
+    return true;
 }
 #endif

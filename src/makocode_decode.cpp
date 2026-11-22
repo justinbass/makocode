@@ -22,8 +22,9 @@ int command_decode(int arg_count, char** args) {
     bool decoded_file_requested = false;
     bool decoded_stdout_requested = false;
     u64 encoded_frame_bits = 0u;
-    makocode::ByteBuffer password_buffer;
+    makocode::SecretBuffer password_buffer;
     bool have_password = false;
+    bool password_prompt_requested = false;
     bool retried_public_symbol_placement = false;
     makocode::ByteBuffer output_dir_buffer;
     const char* output_dir = ".";
@@ -147,32 +148,38 @@ int command_decode(int arg_count, char** args) {
             have_output_dir = true;
             continue;
         }
-        const char password_prefix[] = "--password=";
+        const char password_cli_prefix[] = "--password-cli=";
         const char* password_value = 0;
         usize password_length = 0u;
         if (ascii_equals_token(arg, ascii_length(arg), "--password")) {
-            if (have_password) {
+            if (have_password || password_prompt_requested) {
                 console_line(2, "decode: password specified multiple times");
                 return 1;
             }
-            if ((i + 1) >= arg_count) {
-                console_line(2, "decode: --password requires a non-empty value");
+            password_prompt_requested = true;
+            continue;
+        } else if (ascii_equals_token(arg, ascii_length(arg), "--password-cli")) {
+            if (have_password || password_prompt_requested) {
+                console_line(2, "decode: password specified multiple times");
                 return 1;
             }
-            password_value = args[i + 1];
+            if ((i + 1) >= arg_count || args[i + 1][0] == '-') {
+                console_line(2, "decode: --password-cli requires a non-empty value");
+                return 1;
+            }
+            password_value = args[++i];
             password_length = ascii_length(password_value);
-            i += 1;
-        } else if (ascii_starts_with(arg, password_prefix)) {
-            if (have_password) {
+        } else if (ascii_starts_with(arg, password_cli_prefix)) {
+            if (have_password || password_prompt_requested) {
                 console_line(2, "decode: password specified multiple times");
                 return 1;
             }
-            password_value = arg + (sizeof(password_prefix) - 1u);
+            password_value = arg + sizeof(password_cli_prefix) - 1u;
             password_length = ascii_length(password_value);
         }
         if (password_value) {
             if (password_length == 0u) {
-                console_line(2, "decode: --password requires a non-empty value");
+                console_line(2, "decode: --password-cli requires a non-empty value");
                 return 1;
             }
             if (!password_buffer.ensure(password_length)) {
@@ -185,6 +192,10 @@ int command_decode(int arg_count, char** args) {
             password_buffer.size = password_length;
             have_password = true;
             continue;
+        }
+        if (ascii_starts_with(arg, "--password=")) {
+            console_line(2, "decode: use --password-cli to provide a password argument");
+            return 1;
         }
         if (file_count >= MAX_INPUT_FILES) {
             console_line(2, "decode: too many input files");
@@ -227,6 +238,11 @@ int command_decode(int arg_count, char** args) {
         if (!image_mapping_build_custom_palette(mapping, "decode")) {
             return 1;
         }
+    }
+    if (password_prompt_requested) {
+        if (!makocode::read_password_from_terminal(password_buffer,
+                                                   "Password: ", false)) return 1;
+        have_password = true;
     }
     makocode::PaletteSymbolPasswordContext palette_password_context;
     if (have_password &&
