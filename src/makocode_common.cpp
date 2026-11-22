@@ -14248,7 +14248,7 @@ bool write_all_fd(int fd, const u8* data, usize length) {
 }
 
 bool write_bytes_to_file(const char* path, const u8* data, usize length) {
-    int fd = makocode_platform_create_file(path, 0644);
+    int fd = makocode_platform_create_file(path, 0600);
     if (fd < 0) {
         return false;
     }

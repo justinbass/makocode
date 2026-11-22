@@ -135,10 +135,10 @@ int command_decode(int arg_count, char** args) {
                 console_line(2, "decode: --output-dir requires a non-empty path");
                 return 1;
             }
-    if (!output_dir_buffer.ensure(output_length + 1u)) {
-        console_line(2, "decode: failed to allocate output directory buffer");
-        return 1;
-    }
+            if (!output_dir_buffer.ensure(output_length + 1u)) {
+                console_line(2, "decode: failed to allocate output directory buffer");
+                return 1;
+            }
             for (usize j = 0u; j < output_length; ++j) {
                 output_dir_buffer.data[j] = (u8)output_value[j];
             }
@@ -682,6 +682,9 @@ retry_decode:
         AffineTransform previous_page_affine_hint = {};
         bool previous_page_affine_hint_available = false;
         AffineTransform center_probe_page_affines[MAX_INPUT_FILES] = {};
+        double center_probe_page_angles[MAX_INPUT_FILES] = {};
+        double center_probe_page_scale_x[MAX_INPUT_FILES] = {};
+        double center_probe_page_scale_y[MAX_INPUT_FILES] = {};
         bool center_probe_affine_present[MAX_INPUT_FILES] = {};
         if (!no_metadata && !center_probe_attempted && !force_disable_subgrid &&
             !force_tile_center_sampling && !retried_subgrid) {
@@ -723,6 +726,13 @@ retry_decode:
                     if (probe_state.has_affine_transform &&
                         probe_state.affine_fit_covers_page) {
                         center_probe_page_affines[probe_index] = probe_state.affine_transform;
+                        const AffineTransform& affine = probe_state.affine_transform;
+                        center_probe_page_angles[probe_index] =
+                            atan2(affine.a10 - affine.a01, affine.a00 + affine.a11);
+                        center_probe_page_scale_x[probe_index] =
+                            sqrt(affine.a00 * affine.a00 + affine.a10 * affine.a10);
+                        center_probe_page_scale_y[probe_index] =
+                            sqrt(affine.a01 * affine.a01 + affine.a11 * affine.a11);
                         center_probe_affine_present[probe_index] = true;
                     }
                     if (!center_probe_available) {
@@ -734,6 +744,7 @@ retry_decode:
             if (center_probe_available && file_count > 1u) {
                 u64 minimum_page_capacity_bits = U64_MAX_VALUE;
                 bool complete_page_set = true;
+                bool seen_page_indices[MAX_INPUT_FILES] = {};
                 for (usize page = 0u; page < file_count; ++page) {
                     if (!center_probe_page_present[page]) {
                         complete_page_set = false;
@@ -743,21 +754,12 @@ retry_decode:
                     const MetadataTile::Values& tile = encoded_pages[page];
                     if (tile.page_bits != center_probe_tile.page_bits ||
                         tile.page_count != file_count ||
-                        tile.page_index == 0u) {
+                        tile.page_index == 0u || tile.page_index > file_count ||
+                        seen_page_indices[tile.page_index - 1u]) {
                         complete_page_set = false;
                         break;
                     }
-                    for (usize prior = 0u; prior < page; ++prior) {
-                        if (encoded_pages[prior].page_index == tile.page_index) {
-                            complete_page_set = false;
-                            break;
-                        }
-                    }
-                }
-                for (usize page = 0u; page < file_count && complete_page_set; ++page) {
-                    if (encoded_pages[page].page_index > file_count) {
-                        complete_page_set = false;
-                    }
+                    seen_page_indices[tile.page_index - 1u] = true;
                 }
                 if (!complete_page_set) {
                     for (usize page = 0u; page < file_count; ++page) {
@@ -803,23 +805,15 @@ retry_decode:
                     for (usize page = 0u; page < file_count; ++page) {
                         if (!center_probe_affine_present[page]) continue;
                         ++valid_affine_count;
-                        const AffineTransform& candidate = center_probe_page_affines[page];
-                        double candidate_angle = atan2(candidate.a10 - candidate.a01,
-                                                       candidate.a00 + candidate.a11);
-                        double candidate_scale_x = sqrt(candidate.a00 * candidate.a00 +
-                                                         candidate.a10 * candidate.a10);
-                        double candidate_scale_y = sqrt(candidate.a01 * candidate.a01 +
-                                                         candidate.a11 * candidate.a11);
+                        double candidate_angle = center_probe_page_angles[page];
+                        double candidate_scale_x = center_probe_page_scale_x[page];
+                        double candidate_scale_y = center_probe_page_scale_y[page];
                         usize cluster_count = 0u;
                         for (usize other_page = 0u; other_page < file_count; ++other_page) {
                             if (!center_probe_affine_present[other_page]) continue;
-                            const AffineTransform& other = center_probe_page_affines[other_page];
-                            double other_angle = atan2(other.a10 - other.a01,
-                                                       other.a00 + other.a11);
-                            double other_scale_x = sqrt(other.a00 * other.a00 +
-                                                        other.a10 * other.a10);
-                            double other_scale_y = sqrt(other.a01 * other.a01 +
-                                                        other.a11 * other.a11);
+                            double other_angle = center_probe_page_angles[other_page];
+                            double other_scale_x = center_probe_page_scale_x[other_page];
+                            double other_scale_y = center_probe_page_scale_y[other_page];
                             double angle_delta = fabs(atan2(
                                 sin(candidate_angle - other_angle),
                                 cos(candidate_angle - other_angle)));

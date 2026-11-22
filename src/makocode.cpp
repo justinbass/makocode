@@ -36,6 +36,12 @@ int main(int argc, char** argv) {
     if (ascii_compare(command, "minify") == 0) {
         return command_minify(command_argc, command_argv);
     }
+    if (arguments_request_help(command_argc, command_argv)) {
+        write_usage();
+        return 0;
+    }
+    console_write(2, "makocode: unknown command: ");
+    console_line(2, command);
     write_usage();
-    return 0;
+    return 2;
 }

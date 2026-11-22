@@ -133,7 +133,7 @@ extern "C" int makocode_platform_is_symlink(const char* path) {
 }
 
 extern "C" int makocode_platform_create_directory(const char* path) {
-    if (::mkdir(path, 0755) == 0) return 0;
+    if (::mkdir(path, 0700) == 0) return 0;
     return errno == EEXIST ? 1 : -1;
 }
 

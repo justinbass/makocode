@@ -2605,6 +2605,12 @@ static void archive_tree_case() {
         std::sort(aa.begin(),aa.end());std::sort(bb.begin(),bb.end());require(aa==bb,id+": directory tree differs for "+name);
     }
     for(const auto& path:{"root.txt","nested/leaf.txt","zero.bin"})compare_files(source/"tree"/path,decoded/"tree"/path,id);
+    auto output_permissions=fs::status(decoded/"tree/root.txt").permissions();
+    require((output_permissions&(fs::perms::group_all|fs::perms::others_all))==fs::perms::none,
+            id+": restored files must not be readable by other users");
+    auto directory_permissions=fs::status(decoded/"tree").permissions();
+    require((directory_permissions&(fs::perms::group_all|fs::perms::others_all))==fs::perms::none,
+            id+": restored directories must not be accessible by other users");
 }
 
 static void archive_symlink_case() {
@@ -2661,8 +2667,11 @@ static void ppm_transform_cli_case() {
 static void cli_help_case() {
     const std::string id="0058_cli_help";fs::path work=make_work_dir(id);
     struct HelpCheck{std::vector<std::string> args;const char* first;const char* second;};
-    std::vector<HelpCheck> help={{{},"Usage:","makocode encode [options]"},{{"--help"},"Usage:","makocode encode [options]"},{{"-h"},"Usage:","makocode encode [options]"},{{"unknown-command"},"Usage:","makocode encode [options]"},{{"encode","--help"},"Usage: makocode encode","--input PATH"},{{"decode","--help"},"Usage: makocode decode","stdin"},{{"checkpoint","--help"},"makocode checkpoint","checkpoint restore"},{{"overlay","--help"},"Usage:","makocode encode [options]"},{{"minify","--help"},"Usage: makocode minify","Strips comments/whitespace"}};
+    std::vector<HelpCheck> help={{{},"Usage:","makocode encode [options]"},{{"--help"},"Usage:","makocode encode [options]"},{{"-h"},"Usage:","makocode encode [options]"},{{"encode","--help"},"Usage: makocode encode","--input PATH"},{{"decode","--help"},"Usage: makocode decode","stdin"},{{"checkpoint","--help"},"makocode checkpoint","checkpoint restore"},{{"overlay","--help"},"Usage:","makocode encode [options]"},{{"minify","--help"},"Usage: makocode minify","Strips comments/whitespace"}};
     for(size_t i=0;i<help.size();++i){auto result=run_cli(work,help[i].args,"help_"+std::to_string(i));require(result.status==0,id+": help command failed");std::string all=result.out+result.err;require(all.find(help[i].first)!=std::string::npos&&all.find(help[i].second)!=std::string::npos,id+": missing expected help text");}
+    auto unknown_command=run_cli(work,{"unknown-command"},"unknown_command");
+    require(unknown_command.status==2&&unknown_command.err.find("makocode: unknown command: unknown-command")!=std::string::npos,
+            id+": unknown commands must report an error and return status 2");
     for(const auto& pair:std::vector<std::pair<std::vector<std::string>,std::string>>{
         {{"encode","--ecc=1023.01"},"--ecc ratio must be between 0 and 1023"},
         {{"encode","--overlay-fraction=1.01"},"--overlay-fraction must be between 0.0 and less than 1.0"},
