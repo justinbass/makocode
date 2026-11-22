@@ -208,6 +208,82 @@ bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile) {
     return true;
 }
 
+bool palette_symbol_encode_page_salt(const PaletteSymbolProfile& profile,
+                                     const u8 salt[PALETTE_SYMBOL_PAGE_SALT_BYTES],
+                                     u64 page_index,
+                                     u64 page_count,
+                                     ByteBuffer& encoded_symbols) {
+    encoded_symbols.release();
+    if (!salt || !page_index || !page_count || page_index > page_count ||
+        page_index > 0xFFFFFFFFull || page_count > 0xFFFFFFFFull ||
+        profile.block_length < PALETTE_SYMBOL_PAGE_SALT_SYMBOLS) return false;
+    ByteBuffer packed_symbols;
+    if (!palette_bytes_to_symbols(profile, salt, PALETTE_SYMBOL_PAGE_SALT_BYTES,
+                                  packed_symbols)) return false;
+    u64 expected_symbol_count = palette_symbol_count_for_bytes(
+        profile, PALETTE_SYMBOL_PAGE_SALT_BYTES);
+    if (!expected_symbol_count || expected_symbol_count > PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS ||
+        packed_symbols.size / 4u != expected_symbol_count) return false;
+    ByteBuffer data_symbols;
+    if (!data_symbols.ensure(PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS * 4u)) return false;
+    data_symbols.size = PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS * 4u;
+    memset(data_symbols.data, 0, data_symbols.size);
+    memcpy(data_symbols.data, packed_symbols.data, packed_symbols.size);
+    return palette_rs_encode(profile, data_symbols, PALETTE_SYMBOL_PAGE_SALT_SYMBOLS,
+                             PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS, encoded_symbols);
+}
+
+bool palette_symbol_decode_page_salt(const PaletteSymbolProfile& profile,
+                                     const ByteBuffer& encoded_symbols,
+                                     const ByteBuffer& erased_symbols,
+                                     u64 expected_page_index,
+                                     u64 expected_page_count,
+                                     PaletteSymbolPageSalt& page_salt,
+                                     EccDecodeStats* stats) {
+    page_salt = PaletteSymbolPageSalt();
+    if (stats) *stats = EccDecodeStats();
+    if (encoded_symbols.size / 4u != PALETTE_SYMBOL_PAGE_SALT_SYMBOLS ||
+        (erased_symbols.size && erased_symbols.size < PALETTE_SYMBOL_PAGE_SALT_SYMBOLS)) return false;
+    ByteBuffer code_symbols;
+    ByteBuffer erasures;
+    ByteBuffer data_symbols;
+    EccDecodeStats decode_stats;
+    if (!code_symbols.ensure(PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 4u)) return false;
+    code_symbols.size = PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 4u;
+    memcpy(code_symbols.data, encoded_symbols.data, code_symbols.size);
+    if (erased_symbols.size) {
+        if (!erasures.ensure(PALETTE_SYMBOL_PAGE_SALT_SYMBOLS)) return false;
+        erasures.size = PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+        memcpy(erasures.data, erased_symbols.data, PALETTE_SYMBOL_PAGE_SALT_SYMBOLS);
+    }
+    if (!palette_rs_decode(profile, code_symbols, PALETTE_SYMBOL_PAGE_SALT_SYMBOLS,
+                           PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS, erasures,
+                           data_symbols, &decode_stats)) return false;
+    for (u32 i = 0u; i < PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS; ++i) {
+        if (read_le_u32(data_symbols.data + (usize)i * 4u) >= profile.field_order) return false;
+    }
+    u64 packed_count = palette_symbol_count_for_bytes(
+        profile, PALETTE_SYMBOL_PAGE_SALT_BYTES);
+    if (!packed_count || packed_count > PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS) return false;
+    ByteBuffer packed_payload;
+    ByteBuffer payload;
+    if (!packed_payload.ensure((usize)packed_count * 4u)) return false;
+    packed_payload.size = (usize)packed_count * 4u;
+    memcpy(packed_payload.data, data_symbols.data, packed_payload.size);
+    if (!palette_symbols_to_bytes(profile, packed_payload,
+                                  PALETTE_SYMBOL_PAGE_SALT_BYTES, payload) ||
+        payload.size != PALETTE_SYMBOL_PAGE_SALT_BYTES) return false;
+    if ((expected_page_index && expected_page_count &&
+         expected_page_index > expected_page_count) ||
+        expected_page_index > 0xFFFFFFFFull || expected_page_count > 0xFFFFFFFFull) return false;
+    memcpy(page_salt.salt, payload.data, PALETTE_SYMBOL_PAGE_SALT_BYTES);
+    page_salt.page_index = (u32)expected_page_index;
+    page_salt.page_count = (u32)expected_page_count;
+    page_salt.available = true;
+    if (stats) *stats = decode_stats;
+    return true;
+}
+
 bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
                                           double redundancy,
                                           u32& parity_symbols,
@@ -7078,12 +7154,14 @@ bool stealth_derive_base_key(const char* password,
 
 static bool palette_symbol_derive_password_key(const char* password,
                                               usize password_length,
+                                              const u8 salt[ENCRYPTION_SALT_BYTES],
                                               u8 key[32]) {
     static const u8 public_salt[ENCRYPTION_SALT_BYTES] = {
         'M','a','k','o','C','o','d','e','-','v','0','-','s','y','m','b'
     };
     return password && password_length && key &&
-           stealth_derive_base_key(password, password_length, public_salt, key);
+           stealth_derive_base_key(password, password_length,
+                                   salt ? salt : public_salt, key);
 }
 
 PaletteSymbolPasswordContext::PaletteSymbolPasswordContext()
@@ -7095,10 +7173,32 @@ PaletteSymbolPasswordContext::~PaletteSymbolPasswordContext() {
 }
 
 bool PaletteSymbolPasswordContext::derive(const char* password,
-                                          usize password_length) {
+                                          usize password_length,
+                                          const u8 salt[ENCRYPTION_SALT_BYTES]) {
     memset(key_, 0, sizeof(key_));
     available_ = false;
-    if (!palette_symbol_derive_password_key(password, password_length, key_)) {
+    if (!palette_symbol_derive_password_key(password, password_length, salt, key_)) {
+        memset(key_, 0, sizeof(key_));
+        return false;
+    }
+    available_ = true;
+    return true;
+}
+
+bool PaletteSymbolPasswordContext::derive_salted(
+    const PaletteSymbolPasswordContext& locator_context,
+    const u8 salt[ENCRYPTION_SALT_BYTES]) {
+    memset(key_, 0, sizeof(key_));
+    available_ = false;
+    if (!locator_context.available_ || !salt) return false;
+    static const u8 domain[] = "MakoCode v0 per-archive password key";
+    u8 input[sizeof(domain) - 1u + ENCRYPTION_SALT_BYTES];
+    memcpy(input, domain, sizeof(domain) - 1u);
+    memcpy(input + sizeof(domain) - 1u, salt, ENCRYPTION_SALT_BYTES);
+    bool derived = hmac_sha256(locator_context.key_, sizeof(locator_context.key_),
+                               input, sizeof(input), key_);
+    memset(input, 0, sizeof(input));
+    if (!derived) {
         memset(key_, 0, sizeof(key_));
         return false;
     }
@@ -7471,7 +7571,8 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   ByteBuffer& encoded_symbols,
                                   EccSummary& summary,
                                   bool omit_bootstrap,
-                                  u32 parity_step) {
+                                  u32 parity_step,
+                                  const PaletteSymbolPasswordContext* password_context) {
     encoded_symbols.release();
     summary = EccSummary();
     if (!bytes || !byte_count || profile.field_order < 2u ||
@@ -7560,10 +7661,15 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
         !palette_symbol_append_range(encoded_symbols, header_code) ||
         !palette_symbol_append_range(encoded_symbols, interleaved_payload_code) ||
         !palette_symbol_public_whiten(profile, encoded_symbols, false)) return false;
-    PaletteSymbolPasswordContext password_key;
+    PaletteSymbolPasswordContext derived_password_key;
+    const PaletteSymbolPasswordContext* active_password_key = password_context;
     if (password && password_length) {
-        if (!password_key.derive(password, password_length) ||
-            !password_key.mask(profile, encoded_symbols, false, 0u)) return false;
+        if ((!active_password_key || !active_password_key->available()) &&
+            !derived_password_key.derive(password, password_length)) return false;
+        if (!active_password_key || !active_password_key->available()) {
+            active_password_key = &derived_password_key;
+        }
+        if (!active_password_key->mask(profile, encoded_symbols, false, 0u)) return false;
     }
     if (omit_bootstrap) {
         usize bootstrap_bytes = (usize)PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS * 4u;
@@ -9499,7 +9605,9 @@ namespace MetadataTile {
                                        u64 symbol_placement_seed,
                                        PayloadRankMapCache* cache,
                                        bool scatter_payload,
-                                       const u8* password_shuffle_key) {
+                                       const u8* password_shuffle_key,
+                                       const u8* symbol_placement_salt,
+                                       const u8* salted_password_shuffle_key) {
         payload_pixel_count = 0u;
         if (!width_pixels || !data_height_pixels ||
             (u64)width_pixels > U64_MAX_VALUE / data_height_pixels) return false;
@@ -9569,7 +9677,9 @@ namespace MetadataTile {
                                             symbol_placement_seed, rank_map,
                                             payload_pixel_count,
                                             scatter_payload,
-                                            password_shuffle_key);
+                                            password_shuffle_key,
+                                            symbol_placement_salt,
+                                            salted_password_shuffle_key);
         }
         if (!rank_map.ensure(rank_bytes)) return false;
         rank_map.size = rank_bytes;
@@ -9626,7 +9736,9 @@ namespace MetadataTile {
         return permute_payload_rank_map(pixel_count, values, symbol_placement_seed,
                                         rank_map, payload_pixel_count,
                                         scatter_payload,
-                                        password_shuffle_key);
+                                        password_shuffle_key,
+                                        symbol_placement_salt,
+                                        salted_password_shuffle_key);
     }
 
     bool permute_payload_rank_map(u64 pixel_count,
@@ -9635,7 +9747,9 @@ namespace MetadataTile {
                                   ByteBuffer& rank_map,
                                   u64 payload_pixel_count,
                                   bool scatter_payload,
-                                  const u8* password_shuffle_key) {
+                                  const u8* password_shuffle_key,
+                                  const u8* symbol_placement_salt,
+                                  const u8* salted_password_shuffle_key) {
         if (pixel_count > (u64)USIZE_MAX_VALUE / sizeof(u64) ||
             rank_map.size != (usize)pixel_count * sizeof(u64)) return false;
         u64* ranks = (u64*)rank_map.data;
@@ -9654,28 +9768,47 @@ namespace MetadataTile {
             }
             u8 derivation_input[24];
             write_le_u64(derivation_input, symbol_placement_seed);
-            write_le_u64(derivation_input + 8u, values.page_index ? values.page_index : 1u);
-            write_le_u64(derivation_input + 16u, values.palette_count);
+            bool legacy_public_placement = !symbol_placement_salt;
+            if (legacy_public_placement) {
+                write_le_u64(derivation_input + 8u,
+                             values.page_index ? values.page_index : 1u);
+                write_le_u64(derivation_input + 16u, values.palette_count);
+            } else {
+                write_le_u64(derivation_input + 8u, values.palette_count);
+            }
             u8 placement_key[32];
-            static const u8 placement_domain[] = "MakoCode v0 spatial interleaver";
+            static const u8 public_placement_domain[] = "MakoCode v0 spatial interleaver";
+            static const u8 salt_locator_domain[] = "MakoCode v0 salt locator interleaver";
+            const u8* placement_domain = legacy_public_placement
+                ? public_placement_domain : salt_locator_domain;
+            usize placement_domain_length = legacy_public_placement
+                ? sizeof(public_placement_domain) - 1u
+                : sizeof(salt_locator_domain) - 1u;
             bool placement_key_derived = false;
             if (password_shuffle_key) {
-                u8 keyed_derivation_input[sizeof(placement_domain) - 1u + 16u];
-                memcpy(keyed_derivation_input, placement_domain,
-                       sizeof(placement_domain) - 1u);
-                write_le_u64(keyed_derivation_input + sizeof(placement_domain) - 1u,
-                             values.page_index ? values.page_index : 1u);
-                write_le_u64(keyed_derivation_input + sizeof(placement_domain) - 1u + 8u,
-                             values.palette_count);
+                u8 keyed_derivation_input[sizeof(salt_locator_domain) - 1u + 16u];
+                usize keyed_prefix_length = placement_domain_length;
+                memcpy(keyed_derivation_input, placement_domain, keyed_prefix_length);
+                if (legacy_public_placement) {
+                    write_le_u64(keyed_derivation_input + keyed_prefix_length,
+                                 values.page_index ? values.page_index : 1u);
+                    write_le_u64(keyed_derivation_input + keyed_prefix_length + 8u,
+                                 values.palette_count);
+                } else {
+                    write_le_u64(keyed_derivation_input + keyed_prefix_length,
+                                 values.palette_count);
+                }
                 placement_key_derived = hmac_sha256(
                     password_shuffle_key, 32u,
-                    keyed_derivation_input, sizeof(keyed_derivation_input),
+                    keyed_derivation_input, keyed_prefix_length +
+                        (legacy_public_placement ? 16u : 8u),
                     placement_key);
                 memset(keyed_derivation_input, 0, sizeof(keyed_derivation_input));
             } else {
                 placement_key_derived = hmac_sha256(
-                    derivation_input, sizeof(derivation_input),
-                    placement_domain, sizeof(placement_domain) - 1u,
+                    derivation_input, legacy_public_placement
+                        ? sizeof(derivation_input) : 16u,
+                    placement_domain, placement_domain_length,
                     placement_key);
             }
             if (!placement_key_derived) return false;
@@ -9701,13 +9834,11 @@ namespace MetadataTile {
                 permuted_groups[last] = permuted_groups[other];
                 permuted_groups[other] = temporary;
             }
-            // Keep password-keyed scattered bootstrap ranks out of the overlay's
-            // central window while still shuffling them across the page.
+            // Keep the per-page salt prefix out of the central metadata window.
             const u64 bootstrap_rank_count =
-                (u64)PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS * 8u;
+                (u64)PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 8u;
             u64 page_width = values.page_width_pixels;
-            if (password_shuffle_key && scatter_payload &&
-                (!values.page_index || values.page_index == 1u) &&
+            if (symbol_placement_salt && scatter_payload &&
                 page_width && pixel_count % page_width == 0u &&
                 group_count > bootstrap_rank_count / 8u) {
                 u64 data_height = pixel_count / page_width;
@@ -9756,6 +9887,88 @@ namespace MetadataTile {
                     permuted_groups[safe_group_cursor] = temporary;
                     ++safe_group_cursor;
                 }
+            }
+            if (symbol_placement_salt) {
+                const u64 prefix_groups = PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+                if (group_count <= prefix_groups) return false;
+                u64 remaining_group_count = group_count - prefix_groups;
+                if (remaining_group_count > (u64)USIZE_MAX_VALUE / sizeof(u64)) return false;
+                ByteBuffer source_groups;
+                ByteBuffer destination_groups;
+                if (!source_groups.ensure((usize)remaining_group_count * sizeof(u64)) ||
+                    !destination_groups.ensure((usize)remaining_group_count * sizeof(u64))) return false;
+                source_groups.size = (usize)remaining_group_count * sizeof(u64);
+                destination_groups.size = (usize)remaining_group_count * sizeof(u64);
+                u64* source_values = (u64*)source_groups.data;
+                u64* destination_values = (u64*)destination_groups.data;
+                u64 cursor = 0u;
+                for (u64 source = 0u; source < group_count; ++source) {
+                    if (permuted_groups[source] < prefix_groups) continue;
+                    source_values[cursor++] = source;
+                }
+                if (cursor != remaining_group_count) return false;
+                for (u64 group = 0u; group < remaining_group_count; ++group) {
+                    destination_values[group] = group + prefix_groups;
+                }
+                u8 salted_derivation_input[40];
+                write_le_u64(salted_derivation_input, symbol_placement_seed);
+                memcpy(salted_derivation_input + 8u, symbol_placement_salt,
+                       PALETTE_SYMBOL_PAGE_SALT_BYTES);
+                write_le_u64(salted_derivation_input + 24u,
+                             values.page_index ? values.page_index : 1u);
+                write_le_u64(salted_derivation_input + 32u, values.palette_count);
+                static const u8 salted_domain[] = "MakoCode v0 salted page interleaver";
+                u8 salted_key[32];
+                bool salted_key_derived = false;
+                if (salted_password_shuffle_key) {
+                    u8 keyed_salted_input[sizeof(salted_domain) - 1u +
+                                          PALETTE_SYMBOL_PAGE_SALT_BYTES + 16u];
+                    memcpy(keyed_salted_input, salted_domain, sizeof(salted_domain) - 1u);
+                    memcpy(keyed_salted_input + sizeof(salted_domain) - 1u,
+                           symbol_placement_salt, PALETTE_SYMBOL_PAGE_SALT_BYTES);
+                    write_le_u64(keyed_salted_input + sizeof(salted_domain) - 1u +
+                                     PALETTE_SYMBOL_PAGE_SALT_BYTES,
+                                 values.page_index ? values.page_index : 1u);
+                    write_le_u64(keyed_salted_input + sizeof(salted_domain) - 1u +
+                                     PALETTE_SYMBOL_PAGE_SALT_BYTES + 8u,
+                                 values.palette_count);
+                    salted_key_derived = hmac_sha256(
+                        salted_password_shuffle_key, 32u,
+                        keyed_salted_input, sizeof(keyed_salted_input), salted_key);
+                    memset(keyed_salted_input, 0, sizeof(keyed_salted_input));
+                } else {
+                    salted_key_derived = hmac_sha256(
+                        salted_derivation_input, sizeof(salted_derivation_input),
+                        salted_domain, sizeof(salted_domain) - 1u, salted_key);
+                }
+                if (!salted_key_derived) return false;
+                memset(salted_derivation_input, 0, sizeof(salted_derivation_input));
+                memset(nonce, 0, sizeof(nonce));
+                memset(random_block, 0, sizeof(random_block));
+                counter = 0u;
+                random_offset = sizeof(random_block);
+                for (u64 count = remaining_group_count; count > 1u; --count) {
+                    u64 other = 0u;
+                    u64 rejection_threshold = (u64)(0u - count) % count;
+                    do {
+                        if (random_offset + 8u > sizeof(random_block)) {
+                            if (counter > 0xFFFFFFFFull) return false;
+                            chacha20_block(salted_key, nonce, (u32)counter++, random_block);
+                            random_offset = 0u;
+                        }
+                        other = read_le_u64(random_block + random_offset);
+                        random_offset += 8u;
+                    } while (other < rejection_threshold);
+                    other %= count;
+                    u64 last = count - 1u;
+                    u64 temporary = destination_values[last];
+                    destination_values[last] = destination_values[other];
+                    destination_values[other] = temporary;
+                }
+                for (u64 group = 0u; group < remaining_group_count; ++group) {
+                    permuted_groups[source_values[group]] = destination_values[group];
+                }
+                memset(salted_key, 0, sizeof(salted_key));
             }
             for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
                 u64 rank = ranks[pixel];
@@ -16565,7 +16778,8 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    bool known_tile_is_present,
                                    bool metadata_center_probe_only,
                                    bool metadata_summary_only,
-                                   u64 page_capacity_override) {
+                                   u64 page_capacity_override,
+                                   makocode::PaletteSymbolPageSalt* page_salt_out) {
     if (frame_erasure_bits) frame_erasure_bits->release();
     if (overlay_selector_seed_out) *overlay_selector_seed_out = 0u;
     if (overlay_selector_counts_out) overlay_selector_counts_out->release();
@@ -16573,6 +16787,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     if (overlay_erasure_budget_out) *overlay_erasure_budget_out = 0u;
     if (color_rotation_out) *color_rotation_out = false;
     if (page_capacity_bits_out) *page_capacity_bits_out = 0u;
+    if (page_salt_out) *page_salt_out = makocode::PaletteSymbolPageSalt();
     if (retry_without_subgrid_out) {
         *retry_without_subgrid_out = false;
     }
@@ -21715,6 +21930,13 @@ struct RotationEstimateCandidate {
     }
     makocode::ByteBuffer payload_rank_map;
     u64 payload_pixel_count = 0u;
+    const u8* requested_page_salt = active_mapping.symbol_placement_salt;
+    const bool password_placement_requested =
+        active_mapping.symbol_placement_password_context != 0;
+    u8 locator_probe_salt[makocode::PALETTE_SYMBOL_PAGE_SALT_BYTES] = {};
+    if (password_placement_requested) {
+        active_mapping.symbol_placement_salt = locator_probe_salt;
+    }
     if (!MetadataTile::build_payload_rank_map((u32)logical_width,
                                               (u32)data_height,
                                               metadata_placement,
@@ -21723,14 +21945,22 @@ struct RotationEstimateCandidate {
                                               payload_rank_reservation_mask.size,
                                               payload_rank_map,
                                               payload_pixel_count,
-                                              false,
+                                              password_placement_requested,
                                               active_mapping.symbol_placement_seed,
                                               0,
                                               active_mapping.scatter_payload,
                                               active_mapping.symbol_placement_password_context
                                                   ? active_mapping.symbol_placement_password_context->shuffle_key()
+                                                  : 0,
+                                              active_mapping.symbol_placement_salt,
+                                              active_mapping.symbol_payload_password_context
+                                                  ? active_mapping.symbol_payload_password_context->shuffle_key()
                                                   : 0) ||
-        payload_pixel_count < 8u) return false;
+        payload_pixel_count < 8u) {
+        active_mapping.symbol_placement_salt = requested_page_salt;
+        return false;
+    }
+    active_mapping.symbol_placement_salt = requested_page_salt;
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u32 custom_palette_base = 0u;
     u32 custom_symbol_bits = 0u;
@@ -21966,6 +22196,7 @@ struct RotationEstimateCandidate {
         usable_data_pixels = payload_pixel_count;
     }
     u64 capacity_without_reserve = 0u;
+    u64 unsalted_canonical_capacity = 0u;
     if (palette_symbol_stream_mode) {
         u64 estimated_pages = 1u;
         u64 canonical_capacity = 0u;
@@ -22033,8 +22264,16 @@ struct RotationEstimateCandidate {
                 if (last_page_index == U64_MAX_VALUE) break;
                 first_page_index = last_page_index + 1u;
             }
-            u64 candidate_capacity =
-                ((total_data_pixels - max_reserved_pixels) / 8u) * 32u;
+            u64 unsalted_candidate_groups =
+                (total_data_pixels - max_reserved_pixels) / 8u;
+            unsalted_canonical_capacity = unsalted_candidate_groups * 32u;
+            u64 candidate_groups = password_placement_requested
+                ? payload_pixel_count / 8u
+                : unsalted_candidate_groups;
+            u64 page_salt_symbols = active_mapping.symbol_placement_password_context
+                ? makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS : 0u;
+            if (candidate_groups <= page_salt_symbols) return false;
+            u64 candidate_capacity = (candidate_groups - page_salt_symbols) * 32u;
             if (!candidate_capacity) return false;
             u64 next_pages = (state.encoded_tile.page_bits - 1u) /
                              candidate_capacity + 1u;
@@ -22061,8 +22300,12 @@ struct RotationEstimateCandidate {
     }
     u64 capacity_with_reserve = capacity_without_reserve;
     if (palette_symbol_stream_mode && page_capacity_override) {
+        u64 maximum_override = password_placement_requested
+            ? (capacity_without_reserve > unsalted_canonical_capacity
+                   ? capacity_without_reserve : unsalted_canonical_capacity)
+            : capacity_with_reserve;
         if ((page_capacity_override & 31u) != 0u ||
-            page_capacity_override > capacity_with_reserve) return false;
+            page_capacity_override > maximum_override) return false;
         capacity_with_reserve = page_capacity_override;
     }
     if (state.has_encoded_tile) {
@@ -22179,18 +22422,22 @@ struct RotationEstimateCandidate {
         (use_custom_palette && custom_fixed_width) ||
         (!use_custom_palette && color_mode == 1u && sample_bits == 1u && samples_per_pixel == 1u);
     u32 uniform_symbol_bits = use_custom_palette ? custom_symbol_bits : 1u;
-    u32 uniform_symbol_count = use_custom_palette ? active_mapping.custom_palette_count : 2u;
-    bool record_uniform_palette_symbols = detect_uniform_blots && prefix_payload_order &&
-        (palette_symbol_stream_mode || binary_fixed_width_page || grouped_base_palette) &&
-        state.has_encoded_tile &&
-        metadata_schema_is_current(state.encoded_tile.schema_version) &&
-        state.encoded_tile.page_bits >= 4096u &&
-        logical_width <= 0xFFFFFFFFu && data_height <= 0xFFFFFFFFu &&
-        logical_width <= U64_MAX_VALUE / data_height &&
-        logical_width * data_height >= 256u &&
-        logical_width * data_height <= 0xFFFFFFFFu &&
+    u32 uniform_symbol_count = palette_symbol_stream_mode
+                                   ? palette_symbol_palette_size
+                                   : (use_custom_palette ? active_mapping.custom_palette_count : 2u);
+    bool can_record_logical_symbols = logical_width <= 0xFFFFFFFFu &&
+        data_height <= 0xFFFFFFFFu && logical_width <= U64_MAX_VALUE / data_height &&
+        logical_width * data_height >= 256u && logical_width * data_height <= 0xFFFFFFFFu &&
         logical_width * data_height <= (u64)USIZE_MAX_VALUE &&
         logical_palette_symbols.ensure((usize)(logical_width * data_height));
+    bool record_uniform_palette_symbols = can_record_logical_symbols &&
+        (palette_symbol_stream_mode ||
+         (detect_uniform_blots && prefix_payload_order &&
+          (binary_fixed_width_page || grouped_base_palette) &&
+          state.has_encoded_tile &&
+          metadata_schema_is_current(state.encoded_tile.schema_version) &&
+          state.encoded_tile.page_bits >= 4096u));
+    if (palette_symbol_stream_mode && !record_uniform_palette_symbols) return false;
     if (record_uniform_palette_symbols) {
         logical_palette_symbols.size = (usize)(logical_width * data_height);
         memset(logical_palette_symbols.data, 0, logical_palette_symbols.size);
@@ -26692,18 +26939,16 @@ struct RotationEstimateCandidate {
                         second_best_distance = distance;
                     }
                 }
-                if (record_uniform_palette_symbols &&
-                    best_symbol < uniform_symbol_count) {
+                bool sample_is_erased = reserved_pixel || palette_sample_ambiguous ||
+                    second_best_distance - best_distance < 3u * 24u * 24u;
+                if (record_uniform_palette_symbols && best_symbol < uniform_symbol_count) {
                     logical_palette_symbols.data[(usize)pixel_index] =
-                        (u8)best_symbol;
+                        (u8)best_symbol |
+                        ((password_placement_requested && sample_is_erased) ? 0x80u : 0u);
                 }
                 if (rank < usable_data_pixels) {
                     palette_symbol_dots.data[(usize)rank] = (u8)best_symbol;
-                    // Ink shift can move a clearly classified sample far from
-                    // its ideal palette value. Mark only low-margin samples as
-                    // erasures; known overwrite regions remain erasures.
-                    if (reserved_pixel || palette_sample_ambiguous ||
-                        second_best_distance - best_distance < 3u * 24u * 24u) {
+                    if (sample_is_erased) {
                         palette_symbol_dot_erasures.data[(usize)rank] = 1u;
                     }
                 }
@@ -26782,7 +27027,131 @@ struct RotationEstimateCandidate {
     }
 
     if (palette_symbol_stream_mode) {
-        if (record_uniform_palette_symbols && frame_erasure_bits &&
+        if (logical_palette_symbols.size != (usize)(logical_width * data_height)) return false;
+        auto decode_page_salt_prefix = [&](makocode::PaletteSymbolPageSalt& decoded) -> bool {
+            if (palette_symbol_dots.size <
+                (usize)makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 8u ||
+                palette_symbol_dot_erasures.size <
+                (usize)makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 8u) return false;
+            makocode::ByteBuffer code_symbols;
+            makocode::ByteBuffer salt_erasures;
+            if (!code_symbols.ensure(makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 4u) ||
+                !salt_erasures.ensure(makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS)) return false;
+            code_symbols.size = makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 4u;
+            salt_erasures.size = makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+            memset(salt_erasures.data, 0, salt_erasures.size);
+            for (u32 symbol = 0u; symbol < makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+                 ++symbol) {
+                u8 dots[8];
+                bool erased = false;
+                for (u32 dot = 0u; dot < 8u; ++dot) {
+                    u64 rank = (u64)symbol * 8u + dot;
+                    dots[dot] = palette_symbol_dots.data[(usize)rank];
+                    if (palette_symbol_dot_erasures.data[(usize)rank]) erased = true;
+                }
+                u32 value = 0u;
+                if (!makocode::palette_dots_to_symbol(palette_symbol_profile, dots, value)) {
+                    erased = true;
+                    value = 0u;
+                }
+                write_le_u32(code_symbols.data + (usize)symbol * 4u, value);
+                if (erased) salt_erasures.data[symbol] = 1u;
+            }
+            u64 expected_index = state.encoded_tile.page_index
+                                     ? state.encoded_tile.page_index : debug_page;
+            u64 expected_count = state.encoded_tile.page_count
+                                     ? state.encoded_tile.page_count : 1u;
+            return makocode::palette_symbol_decode_page_salt(
+                palette_symbol_profile, code_symbols, salt_erasures,
+                expected_index, expected_count, decoded, 0);
+        };
+        auto place_logical_symbol_ranks = [&]() -> bool {
+            memset(palette_symbol_dots.data, 0, palette_symbol_dots.size);
+            memset(palette_symbol_dot_erasures.data, 0,
+                   palette_symbol_dot_erasures.size);
+            const u64* current_ranks = (const u64*)payload_rank_map.data;
+            u64 pixel_count = logical_width * data_height;
+            for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
+                u64 rank = current_ranks[pixel];
+                if (rank == U64_MAX_VALUE || rank >= usable_data_pixels) continue;
+                u8 classified = logical_palette_symbols.data[(usize)pixel];
+                palette_symbol_dots.data[(usize)rank] = classified & 0x7Fu;
+                palette_symbol_dot_erasures.data[(usize)rank] =
+                    (classified & 0x80u) ? 1u : 0u;
+            }
+            return true;
+        };
+        makocode::PaletteSymbolPageSalt decoded_page_salt;
+        bool page_salt_decoded = password_placement_requested &&
+            decode_page_salt_prefix(decoded_page_salt);
+        if (!page_salt_decoded && password_placement_requested) {
+            active_mapping.symbol_placement_password_context = 0;
+            active_mapping.symbol_payload_password_context = 0;
+            active_mapping.symbol_placement_salt = locator_probe_salt;
+            if (!MetadataTile::build_payload_rank_map(
+                    (u32)logical_width, (u32)data_height, metadata_placement,
+                    state.encoded_tile, payload_rank_reservation_mask.data,
+                    payload_rank_reservation_mask.size, payload_rank_map,
+                    payload_pixel_count, true, active_mapping.symbol_placement_seed,
+                    0, active_mapping.scatter_payload, 0,
+                    locator_probe_salt, 0) ||
+                payload_pixel_count != usable_data_pixels ||
+                !place_logical_symbol_ranks()) return false;
+            page_salt_decoded = decode_page_salt_prefix(decoded_page_salt);
+        }
+        if (!page_salt_decoded && password_placement_requested) {
+            active_mapping.symbol_placement_password_context = 0;
+            active_mapping.symbol_payload_password_context = 0;
+            active_mapping.symbol_placement_salt = 0;
+            if (!MetadataTile::build_payload_rank_map(
+                    (u32)logical_width, (u32)data_height, metadata_placement,
+                    state.encoded_tile, payload_rank_reservation_mask.data,
+                    payload_rank_reservation_mask.size, payload_rank_map,
+                    payload_pixel_count, false, active_mapping.symbol_placement_seed,
+                    0, active_mapping.scatter_payload, 0, 0, 0) ||
+                payload_pixel_count < 8u ||
+                !place_logical_symbol_ranks()) return false;
+            usable_data_pixels = payload_pixel_count;
+            capacity_without_reserve = unsalted_canonical_capacity;
+            capacity_with_reserve = capacity_without_reserve;
+            if (state.encoded_tile.page_bits && capacity_with_reserve) {
+                state.encoded_tile.page_count =
+                    (state.encoded_tile.page_bits - 1u) / capacity_with_reserve + 1u;
+                update_metadata_field(state.has_page_count, state.page_count_value,
+                                      state.encoded_tile.page_count);
+            }
+        }
+        u64 page_salt_symbol_count = page_salt_decoded
+            ? makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS : 0u;
+        makocode::PaletteSymbolPasswordContext salted_password_context;
+        const makocode::PaletteSymbolPasswordContext* salted_password_context_ptr = 0;
+        if (page_salt_decoded && active_mapping.symbol_placement_password_context) {
+            if (!salted_password_context.derive_salted(
+                    *active_mapping.symbol_placement_password_context,
+                    decoded_page_salt.salt)) return false;
+            salted_password_context_ptr = &salted_password_context;
+        }
+        if (page_salt_decoded) {
+            active_mapping.symbol_placement_salt = decoded_page_salt.salt;
+            active_mapping.symbol_payload_password_context = salted_password_context_ptr;
+            if (!MetadataTile::build_payload_rank_map(
+                    (u32)logical_width, (u32)data_height, metadata_placement,
+                    state.encoded_tile, payload_rank_reservation_mask.data,
+                    payload_rank_reservation_mask.size, payload_rank_map,
+                    payload_pixel_count, true, active_mapping.symbol_placement_seed,
+                    0, active_mapping.scatter_payload,
+                    active_mapping.symbol_placement_password_context
+                        ? active_mapping.symbol_placement_password_context->shuffle_key() : 0,
+                    active_mapping.symbol_placement_salt,
+                    active_mapping.symbol_payload_password_context
+                        ? active_mapping.symbol_payload_password_context->shuffle_key() : 0) ||
+                payload_pixel_count != usable_data_pixels ||
+                !place_logical_symbol_ranks()) return false;
+        }
+        payload_ranks = (const u64*)payload_rank_map.data;
+        if (page_salt_out) *page_salt_out = page_salt_decoded
+            ? decoded_page_salt : makocode::PaletteSymbolPageSalt();
+        if (detect_uniform_blots && record_uniform_palette_symbols && frame_erasure_bits &&
             frame_erasure_bits->data) {
             u64 blot_page_capacity_bits = capacity_with_reserve;
             u64 blot_page_index = state.encoded_tile.page_index
@@ -26810,7 +27179,9 @@ struct RotationEstimateCandidate {
                         for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
                             if (!blot_cells.data[pixel]) continue;
                             u64 rank = payload_ranks[pixel];
-                            if (rank < page_segment_bits / 4u &&
+                            if (rank >= page_salt_symbol_count * 8u &&
+                                rank < (page_salt_symbol_count * 8u +
+                                        page_segment_bits / 4u) &&
                                 rank < palette_symbol_dot_erasures.size) {
                                 palette_symbol_dot_erasures.data[(usize)rank] = 1u;
                             }
@@ -26849,7 +27220,10 @@ struct RotationEstimateCandidate {
             return false;
         }
         u64 symbol_count = page_segment_bits / 32u;
-        if (symbol_count > U64_MAX_VALUE / 8u || symbol_count * 8u > usable_data_pixels) {
+        u64 page_salt_prefix_dots = page_salt_symbol_count * 8u;
+        if (usable_data_pixels < page_salt_prefix_dots ||
+            symbol_count > U64_MAX_VALUE / 8u ||
+            symbol_count * 8u > usable_data_pixels - page_salt_prefix_dots) {
             char required_pixels_text[32], available_pixels_text[32], capacity_text[32];
             u64_to_ascii(symbol_count <= U64_MAX_VALUE / 8u
                              ? symbol_count * 8u : U64_MAX_VALUE,
@@ -26887,7 +27261,7 @@ struct RotationEstimateCandidate {
         for (u64 symbol = 0u; symbol < symbol_count; ++symbol) {
             u8 dots[8];
             bool erased = false;
-            u64 first_dot = symbol * 8u;
+            u64 first_dot = page_salt_prefix_dots + symbol * 8u;
             for (u32 dot = 0u; dot < 8u; ++dot) {
                 dots[dot] = palette_symbol_dots.data[(usize)(first_dot + dot)];
                 if (palette_symbol_dot_erasures.data[(usize)(first_dot + dot)]) {
@@ -27768,11 +28142,13 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                               u64& frame_bit_count_out,
                                               u64& page_capacity_bits_out,
                                               PpmParserState& state_out,
-                                              MetadataTile::Values& values_out) {
+                                              MetadataTile::Values& values_out,
+                                              makocode::PaletteSymbolPageSalt* page_salt_out) {
     frame_bits_out.release();
     frame_erasures_out.release();
     frame_bit_count_out = 0u;
     page_capacity_bits_out = 0u;
+    if (page_salt_out) *page_salt_out = makocode::PaletteSymbolPageSalt();
     if (!input.data || !input.size) return false;
 
     PpmParserState ppm;
@@ -27911,6 +28287,12 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
             makocode::ByteBuffer reservation_mask;
             u64 reserved_pixels = 0u;
             u64 payload_pixel_count = 0u;
+            const bool requested_password_placement =
+                candidate_mapping.symbol_placement_password_context != 0;
+            u8 locator_probe_salt[makocode::PALETTE_SYMBOL_PAGE_SALT_BYTES] = {};
+            if (requested_password_placement) {
+                candidate_mapping.symbol_placement_salt = locator_probe_salt;
+            }
             if (!placement.valid ||
                 !compute_fiducial_marker_mask(width, height, height, reserved_pixels,
                                               &reservation_mask, false, 0u, 0u, 0u) ||
@@ -27920,22 +28302,27 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                                       reservation_mask.size,
                                                       rank_map,
                                                       payload_pixel_count,
-                                                      false,
+                                                      requested_password_placement,
                                                       candidate_mapping.symbol_placement_seed,
                                                       0,
                                                       candidate_mapping.scatter_payload,
                                                       candidate_mapping.symbol_placement_password_context
                                                           ? candidate_mapping.symbol_placement_password_context->shuffle_key()
+                                                          : 0,
+                                                      candidate_mapping.symbol_placement_salt,
+                                                      candidate_mapping.symbol_payload_password_context
+                                                          ? candidate_mapping.symbol_payload_password_context->shuffle_key()
                                                           : 0)) return false;
             u64 group_count = payload_pixel_count / 8u;
-            if (!group_count || group_count > (u64)USIZE_MAX_VALUE / 4u ||
-                group_count > U64_MAX_VALUE / 32u) return false;
-            usize symbol_bytes = (usize)group_count * 4u;
+            if (group_count == 0u || group_count > (u64)USIZE_MAX_VALUE / 4u ||
+                group_count > U64_MAX_VALUE / 32u ||
+                total_pixels > (u64)USIZE_MAX_VALUE) return false;
             usize erasure_bytes = (usize)group_count;
-            if (payload_pixel_count > (u64)USIZE_MAX_VALUE ||
-                !frame_bits_out.ensure(symbol_bytes) ||
+            makocode::ByteBuffer logical_symbols;
+            if (!logical_symbols.ensure((usize)total_pixels) ||
                 !frame_erasures_out.ensure(erasure_bytes)) return false;
-            frame_bits_out.size = symbol_bytes;
+            logical_symbols.size = (usize)total_pixels;
+            memset(logical_symbols.data, 0, logical_symbols.size);
             frame_erasures_out.size = erasure_bytes;
             memset(frame_erasures_out.data, 0, erasure_bytes);
             makocode::ByteBuffer ranked_dots;
@@ -27970,18 +28357,162 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                     second_distance - best_distance < 3u * 24u * 24u) {
                     frame_erasures_out.data[(usize)(rank / 8u)] = 1u;
                 }
+                bool erased = second_distance - best_distance < 3u * 24u * 24u;
+                logical_symbols.data[(usize)pixel] =
+                    (u8)color | (erased ? 0x80u : 0u);
                 ranked_dots.data[(usize)rank] = (u8)color;
             }
-            for (u64 group = 0u; group < group_count; ++group) {
+            auto decode_marker_free_salt = [&](makocode::PaletteSymbolPageSalt& decoded) -> bool {
+                if (ranked_dots.size <
+                    (usize)makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 8u) return false;
+                makocode::ByteBuffer code_symbols;
+                makocode::ByteBuffer salt_erasures;
+                if (!code_symbols.ensure(makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 4u) ||
+                    !salt_erasures.ensure(makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS)) return false;
+                code_symbols.size = makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 4u;
+                salt_erasures.size = makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+                for (u32 symbol = 0u; symbol < makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+                     ++symbol) {
+                    u8 dots[8];
+                    bool erased = false;
+                    for (u32 dot = 0u; dot < 8u; ++dot) {
+                        u64 rank = (u64)symbol * 8u + dot;
+                        dots[dot] = ranked_dots.data[(usize)rank];
+                        if (frame_erasures_out.data[(usize)(rank / 8u)]) erased = true;
+                    }
+                    u32 value = 0u;
+                    if (!makocode::palette_dots_to_symbol(profile, dots, value)) {
+                        erased = true;
+                        value = 0u;
+                    }
+                    write_le_u32(code_symbols.data + (usize)symbol * 4u, value);
+                    salt_erasures.data[symbol] = erased ? 1u : 0u;
+                }
+                return makocode::palette_symbol_decode_page_salt(
+                    profile, code_symbols, salt_erasures, 1u, 1u, decoded, 0);
+            };
+            auto place_marker_free_symbols = [&]() -> bool {
+                memset(ranked_dots.data, 0, ranked_dots.size);
+                memset(frame_erasures_out.data, 0, frame_erasures_out.size);
+                const u64* current_ranks = (const u64*)rank_map.data;
+                for (u64 pixel = 0u; pixel < total_pixels; ++pixel) {
+                    u64 rank = current_ranks[(usize)pixel];
+                    if (rank == U64_MAX_VALUE || rank >= payload_pixel_count) continue;
+                    u8 value = logical_symbols.data[(usize)pixel];
+                    ranked_dots.data[(usize)rank] = value & 0x7Fu;
+                    if (value & 0x80u) {
+                        frame_erasures_out.data[(usize)(rank / 8u)] = 1u;
+                    }
+                }
+                return true;
+            };
+            makocode::PaletteSymbolPageSalt decoded_page_salt;
+            bool marker_free_salt_decoded = false;
+            const bool requested_scatter = candidate_mapping.scatter_payload;
+            bool decoded_salt_scatter = requested_scatter;
+            if (width >= MetadataTile::TILE_SIDE && height >= MetadataTile::TILE_SIDE) {
+                for (u32 key_attempt = 0u; key_attempt < 2u && !marker_free_salt_decoded;
+                     ++key_attempt) {
+                    if (key_attempt) {
+                        candidate_mapping.symbol_placement_password_context = 0;
+                        candidate_mapping.symbol_payload_password_context = 0;
+                        candidate_mapping.symbol_placement_salt = locator_probe_salt;
+                        candidate_mapping.symbol_placement_seed =
+                            makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                    }
+                    if (key_attempt && !requested_password_placement) break;
+                    for (u32 scatter_attempt = 0u; scatter_attempt < 2u;
+                         ++scatter_attempt) {
+                        candidate_mapping.scatter_payload =
+                            requested_scatter != (scatter_attempt != 0u);
+                        if (!MetadataTile::build_payload_rank_map(
+                                width, height, placement, marker_free_layout,
+                                reservation_mask.data, reservation_mask.size, rank_map,
+                                payload_pixel_count, true,
+                                candidate_mapping.symbol_placement_seed,
+                                0, candidate_mapping.scatter_payload,
+                                candidate_mapping.symbol_placement_password_context
+                                    ? candidate_mapping.symbol_placement_password_context->shuffle_key() : 0,
+                                locator_probe_salt, 0)) return false;
+                        if (payload_pixel_count <
+                            (u64)makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 8u) continue;
+                        if (!place_marker_free_symbols()) return false;
+                        if (decode_marker_free_salt(decoded_page_salt)) {
+                            marker_free_salt_decoded = true;
+                            decoded_salt_scatter = candidate_mapping.scatter_payload;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!marker_free_salt_decoded) {
+                candidate_mapping.symbol_placement_password_context = 0;
+                candidate_mapping.symbol_payload_password_context = 0;
+                candidate_mapping.symbol_placement_salt = 0;
+                candidate_mapping.symbol_placement_seed =
+                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                candidate_mapping.scatter_payload = requested_scatter;
+                if (!MetadataTile::build_payload_rank_map(
+                        width, height, placement, marker_free_layout,
+                        reservation_mask.data, reservation_mask.size, rank_map,
+                        payload_pixel_count, false,
+                        candidate_mapping.symbol_placement_seed,
+                        0, candidate_mapping.scatter_payload, 0, 0, 0) ||
+                    !place_marker_free_symbols()) return false;
+            }
+            u64 page_salt_symbol_count = marker_free_salt_decoded
+                ? makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS : 0u;
+            makocode::PaletteSymbolPasswordContext salted_password_context;
+            if (marker_free_salt_decoded && candidate_mapping.symbol_placement_password_context &&
+                !salted_password_context.derive_salted(
+                    *candidate_mapping.symbol_placement_password_context,
+                    decoded_page_salt.salt)) return false;
+            candidate_mapping.symbol_placement_salt = marker_free_salt_decoded
+                ? decoded_page_salt.salt : 0;
+            candidate_mapping.symbol_payload_password_context =
+                marker_free_salt_decoded && candidate_mapping.symbol_placement_password_context
+                    ? &salted_password_context : 0;
+            candidate_mapping.scatter_payload = marker_free_salt_decoded
+                ? decoded_salt_scatter : requested_scatter;
+            if (!MetadataTile::build_payload_rank_map(
+                    width, height, placement, marker_free_layout,
+                    reservation_mask.data, reservation_mask.size, rank_map,
+                    payload_pixel_count, marker_free_salt_decoded,
+                    candidate_mapping.symbol_placement_seed,
+                    0, candidate_mapping.scatter_payload,
+                    candidate_mapping.symbol_placement_password_context
+                        ? candidate_mapping.symbol_placement_password_context->shuffle_key() : 0,
+                    candidate_mapping.symbol_placement_salt,
+                    candidate_mapping.symbol_payload_password_context
+                        ? candidate_mapping.symbol_payload_password_context->shuffle_key() : 0) ||
+                !place_marker_free_symbols()) return false;
+            if (page_salt_out) *page_salt_out = marker_free_salt_decoded
+                ? decoded_page_salt : makocode::PaletteSymbolPageSalt();
+            u64 stream_group_count = group_count - page_salt_symbol_count;
+            makocode::ByteBuffer physical_erasures;
+            if (!physical_erasures.append_bytes(frame_erasures_out.data,
+                                               frame_erasures_out.size)) return false;
+            if (stream_group_count > (u64)USIZE_MAX_VALUE / 4u ||
+                !frame_bits_out.ensure((usize)stream_group_count * 4u) ||
+                !frame_erasures_out.ensure((usize)stream_group_count)) return false;
+            frame_bits_out.size = (usize)stream_group_count * 4u;
+            frame_erasures_out.size = (usize)stream_group_count;
+            memset(frame_erasures_out.data, 0, frame_erasures_out.size);
+            for (u64 group = 0u; group < stream_group_count; ++group) {
                 u8 dots[8];
                 for (u32 dot = 0u; dot < 8u; ++dot) {
-                    dots[dot] = ranked_dots.data[(usize)(group * 8u + dot)];
+                    u64 physical_group =
+                        page_salt_symbol_count + group;
+                    dots[dot] = ranked_dots.data[(usize)(physical_group * 8u + dot)];
                 }
                 u32 value = 0u;
                 bool valid = makocode::palette_dots_to_symbol(profile, dots, value);
                 if (!valid) {
                     frame_erasures_out.data[(usize)group] = 1u;
                     value = 0u;
+                } else if (physical_erasures.data[(usize)(group +
+                               page_salt_symbol_count)]) {
+                    frame_erasures_out.data[(usize)group] = 1u;
                 }
                 u8* output = frame_bits_out.data + (usize)group * 4u;
                 output[0] = (u8)value;
@@ -27989,7 +28520,7 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                 output[2] = (u8)(value >> 16u);
                 output[3] = (u8)(value >> 24u);
             }
-            frame_bit_count_out = group_count * 32u;
+            frame_bit_count_out = stream_group_count * 32u;
             page_capacity_bits_out = frame_bit_count_out;
             state_out = PpmParserState();
             state_out.has_page_width_pixels = true;
@@ -28440,6 +28971,11 @@ bool compute_bits_per_page(const ImageMappingConfig& mapping,
     if (fiducial_pixels > total_pixels) return false;
     u64 usable_pixels = total_pixels - fiducial_pixels;
     bits_per_page = mapping_capacity_bits(mapping, usable_pixels);
+    if (mapping.symbol_placement_salt) {
+        u64 salt_prefix_bits = (u64)makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS * 32u;
+        if (bits_per_page <= salt_prefix_bits) return false;
+        bits_per_page -= salt_prefix_bits;
+    }
     if (bits_per_page == 0u || bits_per_page == U64_MAX_VALUE) return false;
     return true;
 }
@@ -28662,7 +29198,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u16 overlay_erasure_budget,
                                bool include_metadata_tile,
                                MetadataTile::Values* metadata_values_out,
-                               MetadataTile::PayloadRankMapCache* rank_map_cache) {
+                               MetadataTile::PayloadRankMapCache* rank_map_cache,
+                               u64 page_count) {
     const u8 sample_bits = bits_per_sample(mapping.color_channels);
     bool palette_symbol_mode = ecc_summary && ecc_summary->palette_symbol_stream;
     u8 samples_per_pixel = color_mode_samples_per_pixel(mapping.color_channels);
@@ -28741,6 +29278,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                 ? frame_bit_count - bit_offset
                                 : 0u;
     if (page_segment_bits > bits_per_page) page_segment_bits = bits_per_page;
+    u64 page_salt_symbol_count = palette_symbol_mode && mapping.symbol_placement_salt
+        ? makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS : 0u;
     makocode::ByteBuffer page_palette_dots;
     if (palette_symbol_mode) {
         if ((bit_offset & 31u) != 0u || (page_segment_bits & 31u) != 0u ||
@@ -28753,6 +29292,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         makocode::PaletteSymbolProfile profile;
         u64 page_symbol_count = page_segment_bits / 32u;
         u64 page_capacity_symbols = bits_per_page / 32u;
+        u64 physical_page_capacity_symbols = page_capacity_symbols +
+            page_salt_symbol_count;
         u32 symbol_q = use_custom_palette
                            ? mapping.custom_palette_count
                            : (1u << sample_bits);
@@ -28762,8 +29303,24 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                               profile) ||
             (page_symbol_count && !frame_data) ||
             page_capacity_symbols < page_symbol_count ||
-            !page_palette_dots.ensure((usize)page_capacity_symbols * 8u)) return false;
-        page_palette_dots.size = (usize)page_capacity_symbols * 8u;
+            physical_page_capacity_symbols > (u64)USIZE_MAX_VALUE / 8u ||
+            !page_palette_dots.ensure((usize)physical_page_capacity_symbols * 8u)) return false;
+        page_palette_dots.size = (usize)physical_page_capacity_symbols * 8u;
+        if (page_salt_symbol_count) {
+            makocode::ByteBuffer page_salt_symbols;
+            if (!makocode::palette_symbol_encode_page_salt(
+                    profile, mapping.symbol_placement_salt, page_index, page_count,
+                    page_salt_symbols) ||
+                page_salt_symbols.size / 4u != page_salt_symbol_count) return false;
+            for (u64 symbol = 0u; symbol < page_salt_symbol_count; ++symbol) {
+                const u8* value_bytes = page_salt_symbols.data + (usize)symbol * 4u;
+                u32 value = (u32)value_bytes[0] | ((u32)value_bytes[1] << 8u) |
+                            ((u32)value_bytes[2] << 16u) | ((u32)value_bytes[3] << 24u);
+                if (!makocode::palette_symbol_to_dots(
+                        profile, value,
+                        page_palette_dots.data + (usize)symbol * 8u)) return false;
+            }
+        }
         for (u64 symbol = 0u; symbol < page_symbol_count; ++symbol) {
             u64 source_symbol = (bit_offset >> 5u) + symbol;
             if (source_symbol >= frame_bit_count / 32u) return false;
@@ -28771,7 +29328,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             u32 value = (u32)value_bytes[0] | ((u32)value_bytes[1] << 8u) |
                         ((u32)value_bytes[2] << 16u) | ((u32)value_bytes[3] << 24u);
             if (!makocode::palette_symbol_to_dots(profile, value,
-                                                   page_palette_dots.data + (usize)symbol * 8u)) {
+                    page_palette_dots.data +
+                        (usize)(page_salt_symbol_count + symbol) * 8u)) {
                 console_line(2, "encode_page_to_ppm: invalid field-symbol dot value");
                 return false;
             }
@@ -28779,7 +29337,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         u64 unused_symbol_count = page_capacity_symbols - page_symbol_count;
         if (unused_symbol_count) {
             u8* unused_dots = page_palette_dots.data +
-                              (usize)page_symbol_count * 8u;
+                (usize)(page_salt_symbol_count +
+                        page_symbol_count) * 8u;
             if (unused_symbol_count > (u64)USIZE_MAX_VALUE / 4u) return false;
             makocode::ByteBuffer unused_symbols;
             if (!unused_symbols.ensure((usize)unused_symbol_count * 4u)) return false;
@@ -28916,13 +29475,18 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                               payload_skip_mask.size,
                                               payload_rank_map,
                                               payload_pixel_count,
-                                              !g_encode_metadata_disabled &&
-                                                  !palette_symbol_mode,
+                                              page_salt_symbol_count != 0u ||
+                                                  (!g_encode_metadata_disabled &&
+                                                   !palette_symbol_mode),
                                               mapping.symbol_placement_seed,
                                               rank_map_cache,
                                               mapping.scatter_payload,
                                               mapping.symbol_placement_password_context
                                                   ? mapping.symbol_placement_password_context->shuffle_key()
+                                                  : 0,
+                                              mapping.symbol_placement_salt,
+                                              mapping.symbol_payload_password_context
+                                                  ? mapping.symbol_payload_password_context->shuffle_key()
                                                   : 0) ||
         payload_pixel_count < 8u) {
         console_line(2, "encode_page_to_ppm: failed to build payload rank map");
@@ -28930,7 +29494,9 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     }
     if (palette_symbol_mode) {
         u64 symbol_capacity = (payload_pixel_count / 8u) * 32u;
-        if (symbol_capacity < bits_per_page) {
+        u64 required_symbol_capacity = bits_per_page +
+            (u64)page_salt_symbol_count * 32u;
+        if (symbol_capacity < required_symbol_capacity) {
             char computed[32];
             char rendered[32];
             u64_to_ascii(bits_per_page, computed, sizeof(computed));
@@ -28969,6 +29535,7 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
     if (footer_render_layout.over_barcode && has_footer_text) {
         u64 active_pixel_count = page_segment_bits / fixed_bits_per_pixel +
                                  ((page_segment_bits % fixed_bits_per_pixel) ? 1u : 0u);
+        if (palette_symbol_mode) active_pixel_count += page_salt_symbol_count * 8u;
         bool found_active_row = false;
         u32 last_active_row = 0u;
         for (u64 pixel = 0u; pixel < total_data_pixels; ++pixel) {
@@ -29135,7 +29702,10 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
             }
             bool payload_rectangle_pixel = payload_rank != U64_MAX_VALUE &&
                 payload_rank < (page_segment_bits / fixed_bits_per_pixel +
-                                ((page_segment_bits % fixed_bits_per_pixel) ? 1u : 0u));
+                                ((page_segment_bits % fixed_bits_per_pixel) ? 1u : 0u) +
+                                (palette_symbol_mode
+                                     ? page_salt_symbol_count * 8u
+                                     : 0u));
             bool base_digit_rectangle_pixel = payload_rank != U64_MAX_VALUE &&
                                               payload_rank < base_digits_used;
             u64 data_slot_cursor = payload_rank == U64_MAX_VALUE
@@ -30607,6 +31177,7 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
                                               data_height_pixels,
                                               reserved_data_pixels,
                                               &temp_mask)) return false;
+            const u64 fiducial_reserved_base = reserved_data_pixels;
             MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
                 width_pixels, data_height_pixels);
             MetadataTile::Values values;
@@ -30704,11 +31275,28 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
                 }
                 reserved_data_pixels = max_reserved_pixels;
             }
+            if (mapping.symbol_placement_salt) {
+                reserved_data_pixels = fiducial_reserved_base;
+                for (u32 tile_y = 0u; tile_y < MetadataTile::TILE_SIDE; ++tile_y) {
+                    for (u32 tile_x = 0u; tile_x < MetadataTile::TILE_SIDE; ++tile_x) {
+                        i64 page_x = (i64)placement.x0 + tile_x - placement.offset_x;
+                        i64 page_y = (i64)placement.y0 + tile_y - placement.offset_y;
+                        if (page_x < 0 || page_y < 0 ||
+                            page_x >= width_pixels || page_y >= data_height_pixels) return false;
+                        usize page_pixel = (usize)page_y * width_pixels + (usize)page_x;
+                        if (!temp_mask.data[page_pixel]) ++reserved_data_pixels;
+                    }
+                }
+            }
             u64 data_pixel_count = (u64)width_pixels * data_height_pixels;
             if (reserved_data_pixels > data_pixel_count) return false;
             u64 payload_pixel_count = data_pixel_count - reserved_data_pixels;
             if (payload_pixel_count < 8u) return false;
-            bits_per_page = (payload_pixel_count / 8u) * 32u;
+            u64 payload_groups = payload_pixel_count / 8u;
+            u64 page_salt_symbols = mapping.symbol_placement_salt
+                ? makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS : 0u;
+            if (payload_groups <= page_salt_symbols) return false;
+            bits_per_page = (payload_groups - page_salt_symbols) * 32u;
             if (bits_per_page == 0u || bits_per_page == U64_MAX_VALUE) return false;
         } else if (!compute_bits_per_page(mapping,
                                           width_pixels,

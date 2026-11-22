@@ -295,6 +295,9 @@ int command_decode(int arg_count, char** args) {
     };
     makocode::ByteBuffer bitstream;
     makocode::ByteBuffer erased_payload_symbols;
+    makocode::PaletteSymbolPageSalt archive_page_salt;
+    bool archive_page_salt_initialized = false;
+    bool archive_has_page_salt = false;
     makocode::ByteBuffer overlay_selector_counts;
     u64 overlay_selector_seed = 0u;
     u16 overlay_unknown_parity_budget = 0u;
@@ -339,6 +342,9 @@ int command_decode(int arg_count, char** args) {
         }
     }
 retry_decode:
+    archive_page_salt = makocode::PaletteSymbolPageSalt();
+    archive_page_salt_initialized = false;
+    archive_has_page_salt = false;
     if (!aggregate_state.has_encoded_tile ||
         aggregate_state.encoded_tile.page_width_pixels <= 96u ||
         aggregate_state.encoded_tile.page_height_pixels <= 96u) {
@@ -414,7 +420,11 @@ retry_decode:
                                                       0u,
                                                       small_scan_geometry_variant,
                                                       true,
-                                                      true);
+                                                      true,
+                                                      false,
+                                                      false,
+                                                      0u,
+                                                      &archive_page_salt);
 
         if (!frame_extracted) {
             if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
@@ -438,7 +448,8 @@ retry_decode:
                 frame_bit_count,
                 single_page_capacity_bits,
                 single_state,
-                recovered_values);
+                recovered_values,
+                &archive_page_salt);
             if (!recovered && have_password &&
                 mapping_overrides.symbol_placement_password_context) {
                 ImageMappingConfig public_placement_mapping = mapping_overrides;
@@ -454,7 +465,8 @@ retry_decode:
                     frame_bit_count,
                     single_page_capacity_bits,
                     single_state,
-                    recovered_values);
+                    recovered_values,
+                    &archive_page_salt);
             }
             if (!recovered) {
                 console_line(2, "decode: invalid ppm input");
@@ -860,6 +872,7 @@ retry_decode:
             u64 page_bit_count = 0u;
             u64 page_capacity_bits = 0u;
             PpmParserState page_state;
+            makocode::PaletteSymbolPageSalt page_salt;
             u16 page_unknown_parity_budget = 0u;
             u16 page_overlay_erasure_budget = 0u;
             bool page_color_rotation = false;
@@ -909,7 +922,8 @@ retry_decode:
                                                           false,
                                                           page_tile_override_ptr
                                                               ? common_page_capacity_override
-                                                              : 0u);
+                                                              : 0u,
+                                                          &page_salt);
 
             if (!frame_extracted) {
                 if (retry_without_subgrid_allowed && !force_disable_subgrid && !retried_subgrid) {
@@ -930,7 +944,8 @@ retry_decode:
                                                           page_bit_count,
                                                           page_capacity_bits,
                                                           page_state,
-                                                          recovered_values);
+                                                          recovered_values,
+                                                          &page_salt);
                     if (!recovered && allow_metadata_free_recovery && have_password &&
                         mapping_overrides.symbol_placement_password_context) {
                         ImageMappingConfig public_placement_mapping = mapping_overrides;
@@ -946,7 +961,8 @@ retry_decode:
                             page_bit_count,
                             page_capacity_bits,
                             page_state,
-                            recovered_values);
+                            recovered_values,
+                            &page_salt);
                     }
                     if (recovered) {
                         metadata_free_layout_autodetect = true;
@@ -963,6 +979,18 @@ retry_decode:
                     console_line(2, input_files[file_index]);
                     return 1;
                 }
+            }
+            if (!archive_page_salt_initialized) {
+                archive_page_salt = page_salt;
+                archive_has_page_salt = page_salt.available;
+                archive_page_salt_initialized = true;
+            } else if (archive_has_page_salt != page_salt.available ||
+                       (page_salt.available &&
+                        !makocode::constant_time_equal(archive_page_salt.salt,
+                                                       page_salt.salt,
+                                                       sizeof(page_salt.salt)))) {
+                console_line(2, "decode: symbol salt differs between pages");
+                return 1;
             }
             bool has_explicit_page_index = page_state.has_page_index &&
                                            page_state.page_index_value > 0u;
@@ -1394,6 +1422,21 @@ retry_decode:
         return true;
     };
     if (palette_symbol_stream_input) {
+        makocode::PaletteSymbolPasswordContext stream_password_context;
+        const makocode::PaletteSymbolPasswordContext* stream_password_context_ptr =
+            have_password ? &palette_password_context : 0;
+        if (have_password && archive_page_salt.available) {
+            if (!stream_password_context.derive_salted(palette_password_context,
+                                                       archive_page_salt.salt)) {
+                console_line(2, "decode: failed to derive salt-bound stream key");
+                return 1;
+            }
+            stream_password_context_ptr = &stream_password_context;
+        }
+        if (have_password && !stream_password_context_ptr) {
+            console_line(2, "decode: failed to derive salt-bound stream key");
+            return 1;
+        }
         makocode::ByteBuffer compressed_or_container;
         makocode::EccDecodeStats symbol_stats;
         bool password_protected = false;
@@ -1441,7 +1484,7 @@ retry_decode:
                                                        &header_recovery,
                                                        false,
                                                        palette_symbol_bootstrap_omitted,
-                                                       &palette_password_context);
+                                                       stream_password_context_ptr);
         }
         if (!decoder_parse_succeeded && have_password && header_recovery.available) {
             header_recovery.password_protected = true;
@@ -1457,7 +1500,7 @@ retry_decode:
                                                        &header_recovery,
                                                        false,
                                                        palette_symbol_bootstrap_omitted,
-                                                       &palette_password_context);
+                                                       stream_password_context_ptr);
         }
         if (!decoder_parse_succeeded && have_password &&
             !header_recovery.available) {
@@ -1473,7 +1516,7 @@ retry_decode:
                                                        0,
                                                        false,
                                                        palette_symbol_bootstrap_omitted,
-                                                       &palette_password_context);
+                                                       stream_password_context_ptr);
         }
         bool field_symbols_decoded = decoder_parse_succeeded;
         if (decoder_parse_succeeded) {

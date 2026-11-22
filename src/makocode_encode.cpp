@@ -61,6 +61,10 @@ struct OverlaySelector {
     u64 placement_seed;
     u8 password_shuffle_key[32];
     bool has_password_shuffle_key;
+    u8 salted_password_shuffle_key[32];
+    bool has_salted_password_shuffle_key;
+    u8 symbol_placement_salt[makocode::PALETTE_SYMBOL_PAGE_SALT_BYTES];
+    bool has_symbol_placement_salt;
     u16 overlay_erasure_budget;
     u16 block_total;
     u64 block_count;
@@ -75,6 +79,10 @@ struct OverlaySelector {
           placement_seed(makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),
           password_shuffle_key{},
           has_password_shuffle_key(false),
+          salted_password_shuffle_key{},
+          has_salted_password_shuffle_key(false),
+          symbol_placement_salt{},
+          has_symbol_placement_salt(false),
           overlay_erasure_budget(0u),
           block_total(0u),
           block_count(0u),
@@ -87,6 +95,10 @@ struct OverlaySelector {
     ~OverlaySelector() {
         memset(password_shuffle_key, 0, sizeof(password_shuffle_key));
         has_password_shuffle_key = false;
+        memset(salted_password_shuffle_key, 0, sizeof(salted_password_shuffle_key));
+        has_salted_password_shuffle_key = false;
+        memset(symbol_placement_salt, 0, sizeof(symbol_placement_salt));
+        has_symbol_placement_salt = false;
     }
 };
 
@@ -112,6 +124,8 @@ int command_encode(int arg_count, char** args) {
     g_encode_metadata_disabled = false;
     ImageMappingConfig mapping;
     makocode::PaletteSymbolPasswordContext password_shuffle_context;
+    makocode::PaletteSymbolPasswordContext password_payload_shuffle_context;
+    u8 symbol_placement_salt[makocode::PALETTE_SYMBOL_PAGE_SALT_BYTES] = {};
     OverlaySelector overlay_selector;
     PageFooterConfig footer_config;
     enum EccMode { ECC_AUTO_MINIMUM, ECC_EXPLICIT_RATIO, ECC_FILL };
@@ -988,6 +1002,18 @@ int command_encode(int arg_count, char** args) {
         return 1;
     }
     bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
+    bool use_symbol_placement_salt = have_password || hidden_mode_enabled;
+    if (use_symbol_placement_salt) {
+        if (!makocode_platform_secure_random(symbol_placement_salt,
+                                             sizeof(symbol_placement_salt))) {
+            console_line(2, "encode: failed to generate per-archive symbol salt");
+            return 1;
+        }
+        mapping.symbol_placement_salt = symbol_placement_salt;
+        memcpy(overlay_selector.symbol_placement_salt, symbol_placement_salt,
+               sizeof(overlay_selector.symbol_placement_salt));
+        overlay_selector.has_symbol_placement_salt = true;
+    }
     if (have_password && !hidden_mode_enabled &&
         !password_shuffle_context.derive((const char*)password_buffer.data,
                                          password_buffer.size)) {
@@ -995,7 +1021,13 @@ int command_encode(int arg_count, char** args) {
         return 1;
     }
     if (have_password && !hidden_mode_enabled) {
+        if (!password_payload_shuffle_context.derive_salted(password_shuffle_context,
+                                                            symbol_placement_salt)) {
+            console_line(2, "encode: failed to derive salt-bound symbol key");
+            return 1;
+        }
         mapping.symbol_placement_password_context = &password_shuffle_context;
+        mapping.symbol_payload_password_context = &password_payload_shuffle_context;
     }
     if ((hidden_input_count > 0u) != have_hidden_password) {
         console_line(2, "encode: --hidden-input and --hidden-password must be supplied together");
@@ -1908,6 +1940,8 @@ int command_encode(int arg_count, char** args) {
                                   ? (const char*)password_buffer.data : (const char*)0;
     encoder.config.password_length = have_password && !hidden_mode_enabled
                                         ? password_buffer.size : 0u;
+    encoder.config.password_context = have_password && !hidden_mode_enabled
+                                          ? &password_payload_shuffle_context : 0;
     if (have_password) {
         encoder.payload_is_preencoded = true;
     }
@@ -2365,7 +2399,8 @@ int command_encode(int arg_count, char** args) {
                                 overlay_erasure_budget,
                                 metadata_page_assignments.data[0u] != 0u,
                                 &overlay_tile_values,
-                                &overlay_selector.encode_rank_map_cache)) {
+                                &overlay_selector.encode_rank_map_cache,
+                                page_count)) {
            console_line(2, "encode: failed to format ppm");
            return 1;
        }
@@ -2462,7 +2497,8 @@ int command_encode(int arg_count, char** args) {
                                     overlay_erasure_budget,
                                     metadata_page_assignments.data[(usize)page] != 0u,
                                     &overlay_tile_values,
-                                    &overlay_selector.encode_rank_map_cache)) {
+                                    &overlay_selector.encode_rank_map_cache,
+                                    page_count)) {
                 console_line(2, "encode: failed to format ppm page");
                 return 1;
             }
@@ -2947,7 +2983,6 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                                bool include_metadata_overwrites = true,
                                                bool metadata_tile_present = true) {
     (void)include_metadata_overwrites;
-    (void)metadata_tile_present;
     if (!overlay_page.pixels.data || !base_page.pixels.data ||
         overlay_page.width != base_page.width ||
         overlay_page.height != base_page.height ||
@@ -3014,6 +3049,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
             U64_MAX_VALUE / final_block_length)) return false;
     MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
         base_page.width, apply_height);
+    u64 page_salt_symbol_count = overlay_selector.has_symbol_placement_salt
+        ? makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS : 0u;
     makocode::ByteBuffer& payload_rank_map = overlay_selector.overlay_rank_map_cache.page_rank_map;
     u64 payload_pixel_count = 0u;
     if (!MetadataTile::build_payload_rank_map(base_page.width,
@@ -3024,12 +3061,18 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                               base_mask.size,
                                               payload_rank_map,
                                               payload_pixel_count,
-                                              false,
+                                              overlay_selector.has_symbol_placement_salt,
                                               overlay_selector.placement_seed,
                                               &overlay_selector.overlay_rank_map_cache,
                                               tile.scatter_payload,
                                               overlay_selector.has_password_shuffle_key
                                                   ? overlay_selector.password_shuffle_key
+                                                  : 0,
+                                              overlay_selector.has_symbol_placement_salt
+                                                  ? overlay_selector.symbol_placement_salt
+                                                  : 0,
+                                              overlay_selector.has_salted_password_shuffle_key
+                                                  ? overlay_selector.salted_password_shuffle_key
                                                   : 0) ||
         payload_pixel_count < 8u || payload_pixel_count > (u64)USIZE_MAX_VALUE / 8u) {
         return false;
@@ -3057,7 +3100,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
     u64 page_symbol_capacity = overlay_selector.page_capacity_bits / 32u;
     if (!page_symbol_capacity) page_symbol_capacity = payload_pixel_count / 8u;
     if (!page_symbol_capacity ||
-        page_symbol_capacity > payload_pixel_count / 8u ||
+        page_symbol_capacity + page_salt_symbol_count >
+            payload_pixel_count / 8u ||
         tile.page_index - 1u > U64_MAX_VALUE / page_symbol_capacity) return false;
     u64 page_symbol_offset = (tile.page_index - 1u) * page_symbol_capacity;
     u64 stored_stream_symbol_count = tile.page_bits / 32u;
@@ -3070,7 +3114,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         ? stream_symbol_count - page_symbol_offset : 0u;
     if (page_symbol_count > page_symbol_capacity) page_symbol_count = page_symbol_capacity;
     u64 page_stream_end = page_symbol_offset + page_symbol_count;
-    u64 page_dot_count = page_symbol_count * 8u;
+    u64 page_dot_count =
+        (page_symbol_count + page_salt_symbol_count) * 8u;
     if (payload_pixel_count > (u64)USIZE_MAX_VALUE ||
         !payload_rank_map.data) return false;
     if (payload_pixel_count > (u64)USIZE_MAX_VALUE / sizeof(u64) ||
@@ -3088,6 +3133,11 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         if (rank < payload_pixel_count) pixel_for_rank[rank] = pixel;
     }
     bool cached_selector_masks = false;
+    const u8* selector_shuffle_key =
+        overlay_selector.has_salted_password_shuffle_key
+            ? overlay_selector.salted_password_shuffle_key
+            : (overlay_selector.has_password_shuffle_key
+                   ? overlay_selector.password_shuffle_key : 0);
     if (overlay_selector.block_count <=
         (u64)USIZE_MAX_VALUE / overlay_selector.block_total) {
         usize selector_mask_bytes =
@@ -3106,9 +3156,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                         overlay_selector.overlay_erasure_budget,
                         overlay_selector.masks.data +
                             (usize)block * overlay_selector.block_total,
-                        overlay_selector.has_password_shuffle_key
-                            ? overlay_selector.password_shuffle_key
-                            : 0)) {
+                        selector_shuffle_key)) {
                     masks_valid = false;
                     break;
                 }
@@ -3136,9 +3184,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         } else if (!makocode::palette_symbol_selector_mask(
                        overlay_selector.seed, block, actual_block_length,
                        overlay_selector.overlay_erasure_budget, selector_mask,
-                       overlay_selector.has_password_shuffle_key
-                           ? overlay_selector.password_shuffle_key
-                           : 0)) {
+                       selector_shuffle_key)) {
             return false;
         }
         for (u32 segment = 0u; segment < 2u; ++segment) {
@@ -3149,7 +3195,9 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                        : overlay_selector.block_count - 1u;
             u64 segment_base = segment == 0u
                 ? 0u : (u64)final_block_length * overlay_selector.block_count;
-            if (segment_base > U64_MAX_VALUE - block) return false;
+            if (segment_base > U64_MAX_VALUE - block) {
+                return false;
+            }
             u64 block_offset = segment_base + block;
             u64 first_distance = page_interleaved_start > block_offset
                 ? page_interleaved_start - block_offset : 0u;
@@ -3170,16 +3218,24 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                 u64 interleaved_offset = makocode::palette_symbol_interleaved_offset(
                     block, position, overlay_selector.block_count,
                     final_block_length);
-                if (interleaved_offset >= payload_stream_symbols) return false;
+                if (interleaved_offset >= payload_stream_symbols) {
+                    return false;
+                }
                 u64 stream_symbol = bootstrap_symbol_count + interleaved_offset;
                 u64 local_symbol = stream_symbol - page_symbol_offset;
                 if (local_symbol >= page_symbol_count) continue;
-                u64 first_dot = local_symbol * 8u;
-                if (first_dot > page_dot_count || page_dot_count - first_dot < 8u) return false;
+                u64 first_dot =
+                    page_salt_symbol_count * 8u +
+                    local_symbol * 8u;
+                if (first_dot > page_dot_count || page_dot_count - first_dot < 8u) {
+                    return false;
+                }
                 for (u32 dot = 0u; dot < 8u; ++dot) {
                     u64 rank = first_dot + dot;
                     u64 pixel = pixel_for_rank[rank];
-                    if (pixel == U64_MAX_VALUE || pixel >= total_data_pixels) return false;
+                    if (pixel == U64_MAX_VALUE || pixel >= total_data_pixels) {
+                        return false;
+                    }
                     usize pixel_byte = (usize)pixel * 3u;
                     if (ignore_list &&
                         overlay_color_matches_ignore(*ignore_list,
@@ -3197,7 +3253,8 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
     for (u64 symbol = filler_symbol_start;
          symbol < page_symbol_capacity;
          ++symbol) {
-        u64 first_dot = symbol * 8u;
+        u64 first_dot =
+            (page_salt_symbol_count + symbol) * 8u;
         if (first_dot > payload_pixel_count ||
             payload_pixel_count - first_dot < 8u) return false;
         for (u32 dot = 0u; dot < 8u; ++dot) {
@@ -3213,7 +3270,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                    overlay_page.pixels.data + pixel_byte, 3u);
         }
     }
-    for (u64 rank = page_symbol_capacity * 8u;
+    for (u64 rank = (page_salt_symbol_count + page_symbol_capacity) * 8u;
          rank < payload_pixel_count;
          ++rank) {
         u64 pixel = pixel_for_rank[rank];
@@ -3226,6 +3283,26 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                 overlay_page.pixels.data[pixel_byte + 2u])) continue;
         memcpy(base_page.pixels.data + pixel_byte,
                overlay_page.pixels.data + pixel_byte, 3u);
+    }
+    if (!metadata_tile_present && overlay_selector.has_symbol_placement_salt) {
+        i64 tile_page_x = (i64)placement.x0 - placement.offset_x;
+        i64 tile_page_y = (i64)placement.y0 - placement.offset_y;
+        for (u32 tile_y = 0u; tile_y < MetadataTile::TILE_SIDE; ++tile_y) {
+            i64 page_y = tile_page_y + tile_y;
+            if (page_y < 0 || page_y >= apply_height) continue;
+            for (u32 tile_x = 0u; tile_x < MetadataTile::TILE_SIDE; ++tile_x) {
+                i64 page_x = tile_page_x + tile_x;
+                if (page_x < 0 || page_x >= page_width) continue;
+                usize pixel = (usize)page_y * page_width + (usize)page_x;
+                if (base_mask.data[pixel]) continue;
+                u64 rank = payload_ranks[pixel];
+                if (rank != U64_MAX_VALUE &&
+                    rank < page_salt_symbol_count * 8u) continue;
+                usize pixel_byte = pixel * 3u;
+                memcpy(base_page.pixels.data + pixel_byte,
+                       overlay_page.pixels.data + pixel_byte, 3u);
+            }
+        }
     }
     return true;
 }
@@ -3339,6 +3416,16 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
             memcpy(overlay_selector.password_shuffle_key, shuffle_key,
                    sizeof(overlay_selector.password_shuffle_key));
             overlay_selector.has_password_shuffle_key = true;
+            makocode::PaletteSymbolPasswordContext salted_password_context;
+            if (!salted_password_context.derive_salted(password_context,
+                                                       overlay_selector.symbol_placement_salt)) {
+                console_line(2, "encode: failed to derive salt-bound overlay key");
+                return false;
+            }
+            memcpy(overlay_selector.salted_password_shuffle_key,
+                   salted_password_context.shuffle_key(),
+                   sizeof(overlay_selector.salted_password_shuffle_key));
+            overlay_selector.has_salted_password_shuffle_key = true;
             overlay_selector.placement_seed =
                 makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
         }

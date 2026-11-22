@@ -82,6 +82,16 @@ Use `--password` to enter a password through a no-echo terminal prompt. Encoding
 
 In version 0, password text is consumed as its exact UTF-8 bytes by every password derivation. Unicode is supported when the same UTF-8 bytes are supplied to encode and decode; no Unicode normalization is performed, so canonically equivalent spellings are different passwords. One-password streams derive a 256-bit key with PBKDF2-HMAC-SHA256 (60,000 iterations and a fixed public salt). Separate domain-separated HMAC-SHA256 keys drive the selector ordering and spatial payload permutation; the spatial permutation includes the bootstrap symbols when present. These keys are not stored in page metadata. The field-symbol mask also uses the 256-bit derived key. Hidden-volume mode uses separate visible and hidden passwords, so it uses public selector and spatial ordering and relies on the authenticated encrypted container rather than applying one shared symbol mask. In both modes, decoding authenticates encrypted content before decompressing it.
 
+### Palette-symbol placement salt
+
+Password-protected and hidden-volume encodings generate a random 16-byte archive
+placement salt and repeat it on each page as a 48-symbol RS(48,16) prefix.
+Each copy has independent ECC protection. A password-keyed locator shuffle
+places the prefix in one-password mode; hidden-volume mode uses the public
+locator. The salt and page index derive each page's remaining symbol shuffle.
+This placement salt is separate from the encryption salt inside the protected
+container. Unprotected public streams omit it.
+
 Linux and macOS:
 
 ```sh

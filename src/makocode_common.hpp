@@ -576,6 +576,7 @@ static const usize RS_POLY_CAPACITY = 256u;
 } // namespace makocode
 
 namespace makocode {
+class PaletteSymbolPasswordContext;
 struct EncoderConfig {
     u32 metadata_key_count;
     u32 fiducial_density;
@@ -587,6 +588,7 @@ struct EncoderConfig {
     bool omit_palette_symbol_bootstrap;
     const char* password;
     usize password_length;
+    const PaletteSymbolPasswordContext* password_context;
     u32 max_parallelism;
 
     EncoderConfig()
@@ -600,6 +602,7 @@ struct EncoderConfig {
           omit_palette_symbol_bootstrap(false),
           password(0),
           password_length(0u),
+          password_context(0),
           max_parallelism(1u) {}
 };
 } // namespace makocode
@@ -685,7 +688,11 @@ public:
     PaletteSymbolPasswordContext(const PaletteSymbolPasswordContext&) = delete;
     PaletteSymbolPasswordContext& operator=(const PaletteSymbolPasswordContext&) = delete;
 
-    bool derive(const char* password, usize password_length);
+    bool derive(const char* password,
+                usize password_length,
+                const u8 salt[ENCRYPTION_SALT_BYTES] = 0);
+    bool derive_salted(const PaletteSymbolPasswordContext& locator_context,
+                       const u8 salt[ENCRYPTION_SALT_BYTES]);
     const u8* shuffle_key() const;
     bool mask(const PaletteSymbolProfile& profile,
               ByteBuffer& symbols,
@@ -717,8 +724,33 @@ struct PaletteSymbolHeaderRecovery {
 static const u64 PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED = 0x4D616B6F76300005ull;
 static const u32 PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS = 48u;
 static const u32 PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS = 32u;
+static const u32 PALETTE_SYMBOL_PAGE_SALT_SYMBOLS = 48u;
+static const u32 PALETTE_SYMBOL_PAGE_SALT_DATA_SYMBOLS = 16u;
+static const usize PALETTE_SYMBOL_PAGE_SALT_BYTES = 16u;
+
+struct PaletteSymbolPageSalt {
+    bool available;
+    u8 salt[PALETTE_SYMBOL_PAGE_SALT_BYTES];
+    u32 page_index;
+    u32 page_count;
+
+    PaletteSymbolPageSalt()
+        : available(false), salt{}, page_index(0u), page_count(0u) {}
+};
 
 bool palette_symbol_profile(u32 palette_size, PaletteSymbolProfile& profile);
+bool palette_symbol_encode_page_salt(const PaletteSymbolProfile& profile,
+                                     const u8 salt[PALETTE_SYMBOL_PAGE_SALT_BYTES],
+                                     u64 page_index,
+                                     u64 page_count,
+                                     ByteBuffer& encoded_symbols);
+bool palette_symbol_decode_page_salt(const PaletteSymbolProfile& profile,
+                                     const ByteBuffer& encoded_symbols,
+                                     const ByteBuffer& erased_symbols,
+                                     u64 expected_page_index,
+                                     u64 expected_page_count,
+                                     PaletteSymbolPageSalt& page_salt,
+                                     EccDecodeStats* stats = 0);
 bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
                                           double redundancy,
                                           u32& parity_symbols,
@@ -778,7 +810,8 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   ByteBuffer& encoded_symbols,
                                   EccSummary& summary,
                                   bool omit_bootstrap = false,
-                                  u32 parity_step = 4u);
+                                  u32 parity_step = 4u,
+                                  const PaletteSymbolPasswordContext* password_context = 0);
 bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                                   const ByteBuffer& encoded_symbols,
                                   const ByteBuffer& erased_symbols,
@@ -874,7 +907,8 @@ struct EncoderContext {
                                           symbols,
                                           ecc_summary,
                                           config.omit_palette_symbol_bootstrap,
-                                          config.parity_step)) {
+                                          config.parity_step,
+                                          config.password_context)) {
             return false;
         }
         for (usize symbol_index = 0u; symbol_index < symbols.size / 4u; ++symbol_index) {
@@ -1036,6 +1070,8 @@ struct ImageMappingConfig {
     bool custom_palette_valid;
     u64 symbol_placement_seed;
     const makocode::PaletteSymbolPasswordContext* symbol_placement_password_context;
+    const makocode::PaletteSymbolPasswordContext* symbol_payload_password_context;
+    const u8* symbol_placement_salt;
     bool scatter_payload;
     bool recover_palette;
     const char* recover_limit_text;
@@ -1054,6 +1090,8 @@ struct ImageMappingConfig {
           custom_palette_valid(false),
           symbol_placement_seed(makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),
           symbol_placement_password_context(0),
+          symbol_payload_password_context(0),
+          symbol_placement_salt(0),
           scatter_payload(false),
           recover_palette(false),
           recover_limit_text("4"),
@@ -1820,14 +1858,18 @@ bool build_payload_rank_map(u32 width_pixels,
                                        u64 symbol_placement_seed = 0u,
                                        PayloadRankMapCache* cache = 0,
                                        bool scatter_payload = false,
-                                       const u8* password_shuffle_key = 0);
+                                       const u8* password_shuffle_key = 0,
+                                       const u8* symbol_placement_salt = 0,
+                                       const u8* salted_password_shuffle_key = 0);
 bool permute_payload_rank_map(u64 pixel_count,
                               const Values& values,
                               u64 symbol_placement_seed,
                               ByteBuffer& rank_map,
                               u64 payload_pixel_count,
                               bool scatter_payload = false,
-                              const u8* password_shuffle_key = 0);
+                              const u8* password_shuffle_key = 0,
+                              const u8* symbol_placement_salt = 0,
+                              const u8* salted_password_shuffle_key = 0);
 } // namespace MetadataTile
 
 bool arguments_request_help(int arg_count, char** args);
@@ -1887,7 +1929,8 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                u16 overlay_erasure_budget = 0u,
                                bool include_metadata_tile = true,
                                MetadataTile::Values* metadata_values_out = 0,
-                               MetadataTile::PayloadRankMapCache* rank_map_cache = 0);
+                               MetadataTile::PayloadRankMapCache* rank_map_cache = 0,
+                               u64 page_count = 1u);
 
 namespace MetadataTile {
 using namespace makocode;
@@ -1970,7 +2013,8 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    bool known_tile_is_present = true,
                                    bool metadata_center_probe_only = false,
                                    bool metadata_summary_only = false,
-                                   u64 page_capacity_override = 0u);
+                                   u64 page_capacity_override = 0u,
+                                   makocode::PaletteSymbolPageSalt* page_salt_out = 0);
 
 bool palette_colors_equal(const PaletteColor& a, const PaletteColor& b);
 
@@ -2016,7 +2060,8 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                               u64& frame_bit_count_out,
                                               u64& page_capacity_bits_out,
                                               PpmParserState& state_out,
-                                              MetadataTile::Values& values_out);
+                                              MetadataTile::Values& values_out,
+                                              makocode::PaletteSymbolPageSalt* page_salt_out = 0);
 
 void write_decode_help();
 

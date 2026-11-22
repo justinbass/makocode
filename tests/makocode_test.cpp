@@ -5306,6 +5306,55 @@ static std::vector<TestCase> build_cases() {
     r.size=4096; r.encode_args={"--scatter"}; r.scatter_metadata_check=true; rt("0133_scatter_plain_roundtrip","Plain unencrypted payload round-trip with scattered layout inferred from metadata",r); r={};
     r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black","--password-cli=unused"}; r.marker_free_compact=true; rt("0134_scatter_public_seed_fallback","Metadata-free scatter autodetection retries both layouts with public placement when a decode password was supplied",r); r={};
     r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black",u8"--password-cli=pāss🔐","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black",u8"--password-cli=pāss🔐"}; r.marker_free_compact=true; rt("0135_scatter_utf8_password","Metadata-free scatter round-trip uses the full password-derived key, including for bootstrap placement",r); r={};
+    cases.push_back({"0136_page_salt_ecc_shuffle","Per-page salt has ECC and separates password, archive, and page placement",[](const fs::path&){
+        makocode::PaletteSymbolProfile profile;
+        require(makocode::palette_symbol_profile(2u,profile),"0136: q2 profile unavailable");
+        const u8 salt_a[makocode::PALETTE_SYMBOL_PAGE_SALT_BYTES]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+        const u8 salt_b[makocode::PALETTE_SYMBOL_PAGE_SALT_BYTES]={15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0};
+        makocode::ByteBuffer encoded,erasures;
+        require(makocode::palette_symbol_encode_page_salt(profile,salt_a,1u,2u,encoded),"0136: salt encoding failed");
+        require(erasures.ensure(makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS),"0136: erasure allocation failed");
+        erasures.size=makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS;
+        memset(erasures.data,0,erasures.size);
+        makocode::PaletteSymbolPageSalt decoded;
+        require(makocode::palette_symbol_decode_page_salt(profile,encoded,erasures,1u,2u,decoded,0)&&decoded.available&&decoded.page_index==1u&&decoded.page_count==2u&&memcmp(decoded.salt,salt_a,sizeof(salt_a))==0,"0136: salt metadata round-trip failed");
+        makocode::ByteBuffer damaged;
+        require(damaged.append_bytes(encoded.data,encoded.size),"0136: damaged codeword allocation failed");
+        for(u32 symbol=0u;symbol<12u;++symbol){u32 value=read_le_u32(damaged.data+(usize)symbol*4u);write_le_u32(damaged.data+(usize)symbol*4u,value^(0x51u+symbol));}
+        require(makocode::palette_symbol_decode_page_salt(profile,damaged,erasures,1u,2u,decoded,0)&&decoded.available&&memcmp(decoded.salt,salt_a,sizeof(salt_a))==0,"0136: salt ECC did not correct 12 symbol errors");
+        require(!makocode::palette_symbol_decode_page_salt(profile,encoded,erasures,3u,2u,decoded,0),"0136: salt accepted an invalid page index");
+        makocode::ByteBuffer legacy_header_data,legacy_header_code;
+        require(legacy_header_data.ensure(makocode::PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS*4u),"0136: legacy header allocation failed");
+        legacy_header_data.size=makocode::PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS*4u;
+        memset(legacy_header_data.data,0,legacy_header_data.size);
+        write_le_u32(legacy_header_data.data,76u);
+        require(makocode::palette_rs_encode(profile,legacy_header_data,
+                    makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS,
+                    makocode::PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS,legacy_header_code),
+                "0136: legacy header ECC encoding failed");
+        require(!makocode::palette_symbol_decode_page_salt(profile,legacy_header_code,
+                    erasures,1u,2u,decoded,0),
+                "0136: legacy stream bootstrap was mistaken for a salt");
+        makocode::PaletteSymbolPasswordContext locator_a,locator_b,salted_a,salted_b,salted_other_password;
+        require(locator_a.derive("password one",12u)&&locator_b.derive("password two",12u)&&salted_a.derive_salted(locator_a,salt_a)&&salted_b.derive_salted(locator_a,salt_b)&&salted_other_password.derive_salted(locator_b,salt_a),"0136: password shuffle key derivation failed");
+        auto build_map=[&](u64 page_index,const makocode::PaletteSymbolPasswordContext& locator,const makocode::PaletteSymbolPasswordContext& salted,const u8* salt,makocode::ByteBuffer& ranks,u64& pixel_count){
+            MetadataTile::Values values;values.page_width_pixels=256u;values.page_height_pixels=256u;values.page_index=page_index;values.page_count=2u;values.palette_count=2u;
+            MetadataTile::Placement placement=MetadataTile::compute_center_tile_placement(256u,256u);
+            return placement.valid&&MetadataTile::build_payload_rank_map(256u,256u,placement,values,0,0,ranks,pixel_count,false,makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED,0,false,locator.shuffle_key(),salt,salted.shuffle_key());
+        };
+        makocode::ByteBuffer map_a,map_b,map_page_two,map_other_password;u64 count_a=0,count_b=0,count_page_two=0,count_other_password=0;
+        require(build_map(1u,locator_a,salted_a,salt_a,map_a,count_a)&&build_map(1u,locator_a,salted_b,salt_b,map_b,count_b)&&build_map(2u,locator_a,salted_a,salt_a,map_page_two,count_page_two)&&build_map(1u,locator_b,salted_other_password,salt_a,map_other_password,count_other_password),"0136: page rank map construction failed");
+        require(count_a==count_b&&count_a==count_page_two&&count_a==count_other_password,"0136: rank map capacities differ");
+        const u64* ranks_a=(const u64*)map_a.data;const u64* ranks_b=(const u64*)map_b.data;const u64* ranks_page_two=(const u64*)map_page_two.data;const u64* ranks_other=(const u64*)map_other_password.data;bool archive_suffix_diff=false,page_suffix_diff=false,password_locator_diff=false;
+        for(u64 pixel=0u;pixel<count_a;++pixel){
+            if(ranks_a[pixel]<makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS*8u||ranks_b[pixel]<makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS*8u)require(ranks_a[pixel]==ranks_b[pixel],"0136: archive salt changed bootstrap positions");
+            if(ranks_a[pixel]<makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS*8u||ranks_page_two[pixel]<makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS*8u)require(ranks_a[pixel]==ranks_page_two[pixel],"0136: page index changed bootstrap positions");
+            if(ranks_a[pixel]!=ranks_b[pixel])archive_suffix_diff=true;
+            if(ranks_a[pixel]!=ranks_page_two[pixel])page_suffix_diff=true;
+            if(ranks_a[pixel]<makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS*8u&&ranks_a[pixel]!=ranks_other[pixel])password_locator_diff=true;
+        }
+        require(archive_suffix_diff&&page_suffix_diff&&password_locator_diff,"0136: salt, page, or password did not alter its intended shuffle");
+    }});
     return cases;
 }
 
