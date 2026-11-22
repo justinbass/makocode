@@ -9108,13 +9108,18 @@ namespace MetadataTile {
                                    const PaletteColor* palette,
                                    u32 palette_count,
                                    bool inverted = false,
-                                   double* margin_out = 0) {
+                                   double* margin_out = 0,
+                                   u32 zero_index_hint = 0xFFFFFFFFu,
+                                   u32 one_index_hint = 0xFFFFFFFFu) {
         if (!rgb || !palette || palette_count < 2u) {
             if (margin_out) *margin_out = 0.0;
             return false;
         }
-        u32 zero_index = 0u, one_index = 0u;
-        palette_marker_indices(palette, palette_count, zero_index, one_index);
+        u32 zero_index = zero_index_hint;
+        u32 one_index = one_index_hint;
+        if (zero_index >= palette_count || one_index >= palette_count) {
+            palette_marker_indices(palette, palette_count, zero_index, one_index);
+        }
         const PaletteColor& zero = palette[zero_index];
         const PaletteColor& one = palette[one_index];
         i64 first_r = (i64)rgb[0] - zero.r;
@@ -10283,6 +10288,10 @@ namespace MetadataTile {
                 u32 tag_palette_count = 0u;
                 if (!decode_palette_tag_row(tag_row, tag_palette, tag_palette_count,
                                             inversion != 0u)) continue;
+                u32 marker_zero_index = 0u;
+                u32 marker_one_index = 0u;
+                palette_marker_indices(tag_palette, tag_palette_count,
+                                       marker_zero_index, marker_one_index);
                 u32 marker_errors = 0u;
                 u32 marker_x0 = tag_marker_x0();
                 for (u32 bit = 0u; bit < 32u; ++bit) {
@@ -10292,7 +10301,9 @@ namespace MetadataTile {
                     bool observed = palette_marker_bit(tile_rgb + rgb_index,
                                                        tag_palette,
                                                        tag_palette_count,
-                                                       inversion != 0u);
+                                                       inversion != 0u, 0,
+                                                       marker_zero_index,
+                                                       marker_one_index);
                     if (observed != makocode_tag_bit(bit)) ++marker_errors;
                 }
                 if (!ignore_marker && marker_errors > max_marker_errors) {
@@ -22582,7 +22593,12 @@ struct RotationEstimateCandidate {
             fiducial_row_count == 0u) {
             return true;
         }
-        if (state.has_affine_transform && state.affine_from_previous_page &&
+        bool unit_screen_affine = state.has_affine_transform &&
+            fabs(state.affine_transform.a00 - 1.0) < 0.01 &&
+            fabs(state.affine_transform.a11 - 1.0) < 0.01 &&
+            fabs(state.affine_transform.a01) < 0.01 &&
+            fabs(state.affine_transform.a10) < 0.01;
+        if (unit_screen_affine &&
             logical_width <= 0xFFFFFFFFull && logical_height <= 0xFFFFFFFFull &&
             data_height <= 0xFFFFFFFFull) {
             AffineTransform final_screen_transform = state.affine_transform;

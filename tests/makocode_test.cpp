@@ -1744,10 +1744,25 @@ struct TestCase {
     std::function<void(const fs::path&)> run;
 };
 
-static fs::path repo_root;
-static fs::path output_root;
-static fs::path makocode_bin;
-static fs::path test_executable;
+static fs::path& repo_root() {
+    static fs::path value;
+    return value;
+}
+
+static fs::path& output_root() {
+    static fs::path value;
+    return value;
+}
+
+static fs::path& makocode_bin() {
+    static fs::path value;
+    return value;
+}
+
+static fs::path& test_executable() {
+    static fs::path value;
+    return value;
+}
 static unsigned master_seed = 0;
 static std::mutex output_mutex;
 
@@ -1960,7 +1975,7 @@ static unsigned case_seed(const std::string& key) {
 }
 
 static fs::path make_work_dir(const std::string& label) {
-    fs::path pattern = output_root / (label + "_work.XXXXXX");
+    fs::path pattern = output_root() / (label + "_work.XXXXXX");
     std::string mutable_pattern = pattern.string();
     std::vector<char> buffer(mutable_pattern.begin(), mutable_pattern.end());
     buffer.push_back('\0');
@@ -1974,7 +1989,7 @@ static ProcessResult run_cli(const fs::path& work,
                              const std::string& tag,
                              const fs::path& stdin_file = {},
                              const std::map<std::string, std::string>& env = {}) {
-    std::vector<std::string> command{makocode_bin.string()};
+    std::vector<std::string> command{makocode_bin().string()};
     command.insert(command.end(), args.begin(), args.end());
     ProcessResult result = run_process(command, work, stdin_file,
         work / (tag + ".stdout"), work / (tag + ".stderr"), env);
@@ -1998,7 +2013,7 @@ static ProcessResult run_cli_with_password_prompts(
         ::close(master);
         throw Failure("unable to find password prompt terminal");
     }
-    std::vector<std::string> command{makocode_bin.string()};
+    std::vector<std::string> command{makocode_bin().string()};
     command.insert(command.end(), args.begin(), args.end());
     std::vector<char*> argv;
     argv.reserve(command.size() + 1u);
@@ -2021,7 +2036,7 @@ static ProcessResult run_cli_with_password_prompts(
         }
         if (slave > STDERR_FILENO) ::close(slave);
         ::close(master);
-        ::execv(makocode_bin.c_str(), argv.data());
+        ::execv(makocode_bin().c_str(), argv.data());
         _exit(127);
     }
 
@@ -2100,7 +2115,7 @@ static ProcessResult run_transform(const fs::path& work,
                                    const std::vector<std::string>& args,
                                    const std::string& tag,
                                    const std::map<std::string, std::string>& env = {}) {
-    std::vector<std::string> command{test_executable.string(), "--ppm-transform"};
+    std::vector<std::string> command{test_executable().string(), "--ppm-transform"};
     command.insert(command.end(), args.begin(), args.end());
     return run_process(command, work, {}, work / (tag + ".stdout"), work / (tag + ".stderr"),env);
 }
@@ -2633,13 +2648,13 @@ static void fiducials_case() {
 
 static void ppm_transform_cli_case() {
     const std::string id="0070_ppm_transform_cli";fs::path work=make_work_dir(id);
-    auto help=run_process({test_executable.string(),"--ppm-transform","--help"},work,{},work/"help.out",work/"help.err");
+    auto help=run_process({test_executable().string(),"--ppm-transform","--help"},work,{},work/"help.out",work/"help.err");
     require(help.status==0&&help.err.find("Usage:")!=std::string::npos,id+": helper help did not print usage");
-    auto no_command=run_process({test_executable.string(),"--ppm-transform"},work,{},work/"none.out",work/"none.err");
+    auto no_command=run_process({test_executable().string(),"--ppm-transform"},work,{},work/"none.out",work/"none.err");
     require(no_command.status==1&&no_command.err.find("Usage:")!=std::string::npos,id+": helper no-command path changed");
-    auto missing=run_process({test_executable.string(),"--ppm-transform","bytes-len"},work,{},work/"missing.out",work/"missing.err");
+    auto missing=run_process({test_executable().string(),"--ppm-transform","bytes-len"},work,{},work/"missing.out",work/"missing.err");
     require(missing.status==1&&missing.err.find("bytes-len requires TEXT")!=std::string::npos,id+": bytes-len error changed");
-    auto unknown=run_process({test_executable.string(),"--ppm-transform","unknown-command"},work,{},work/"unknown.out",work/"unknown.err");
+    auto unknown=run_process({test_executable().string(),"--ppm-transform","unknown-command"},work,{},work/"unknown.out",work/"unknown.err");
     require(unknown.status==1&&unknown.err.find("unknown command unknown-command")!=std::string::npos,id+": unknown command error changed");
 }
 
@@ -3594,7 +3609,7 @@ if(!text_matches(MINIFY_DIRECTIVE_VALUE,"preprocessor directive kept"))return 4;
     fs::path crlf=work/"crlf";fs::create_directories(crlf);std::string crlf_source;for(char c:source){if(c=='\n')crlf_source.push_back('\r');crlf_source.push_back(c);}write_file(crlf/"makocode.cpp",crlf_source);auto crlf_min=run_cli(crlf,{"minify","makocode.cpp","--width","240","--height","80"},"crlf");expect_success(crlf_min,id+" CRLF");std::string crlf_result=read_file(crlf/"makocode_minified.cpp");require(crlf_result.find('\r')==std::string::npos,id+": CRLF remains");
     auto crlf_compile=run_process({"g++","-std=c++17","-Wall","-Wextra","-pedantic",(crlf/"makocode_minified.cpp").string(),"-o",(work/"crlf_test").string()},work,{},work/"crlf_compile.out",work/"crlf_compile.err");expect_success(crlf_compile,id+" CRLF compile");
     fs::path write_fail=work/"write_failure";fs::create_directories(write_fail/"makocode_minified.cpp");write_file(write_fail/"makocode.cpp",source);auto write_error=run_cli(write_fail,{"minify","makocode.cpp","--width","240","--height","80"},"write_error");expect_failure(write_error,id+" output write failure");require(write_error.out.find("minify: failed to write makocode_minified.cpp")!=std::string::npos||write_error.err.find("minify: failed to write makocode_minified.cpp")!=std::string::npos,id+": output-write diagnostic changed");
-    auto allocation_check=[&](const fs::path& dir,unsigned long at,const std::string& expected){auto fail=run_process({test_executable.string(),"--minify-allocation-failure",std::to_string(at)},dir,{},dir/"alloc.out",dir/"alloc.err");expect_success(fail,id+" allocation failure mode");require(fail.out.find(expected)!=std::string::npos||fail.err.find(expected)!=std::string::npos,id+": allocation diagnostic changed at "+std::to_string(at));};
+    auto allocation_check=[&](const fs::path& dir,unsigned long at,const std::string& expected){auto fail=run_process({test_executable().string(),"--minify-allocation-failure",std::to_string(at)},dir,{},dir/"alloc.out",dir/"alloc.err");expect_success(fail,id+" allocation failure mode");require(fail.out.find(expected)!=std::string::npos||fail.err.find(expected)!=std::string::npos,id+": allocation diagnostic changed at "+std::to_string(at));};
     fs::path alloc=work/"alloc";fs::create_directories(alloc);write_file(alloc/"makocode.cpp","int value;\n");allocation_check(alloc,5,"minify: failed to compact whitespace");allocation_check(alloc,3,"minify: failed to read input file");allocation_check(alloc,4,"minify: failed to strip comments");
     fs::path literal_alloc=work/"literal_alloc";fs::create_directories(literal_alloc);write_file(literal_alloc/"makocode.cpp",std::string(64,'0')+"'x");allocation_check(literal_alloc,4,"minify: failed to strip comments");
     fs::path ws_alloc=work/"ws_alloc";fs::create_directories(ws_alloc);write_file(ws_alloc/"makocode.cpp",std::string(64,'0')+"\n");allocation_check(ws_alloc,6,"minify: failed to compact whitespace");
@@ -5394,15 +5409,15 @@ int main(int argc, char** argv) {
         char* args[]={source_path,width_option,width_value,height_option,height_value};
         return command_minify(5,args)==1?0:1;
     }
-    test_executable = fs::canonical(fs::path(argv[0]));
-    repo_root = test_executable.parent_path();
-    while (!repo_root.empty() && !fs::exists(repo_root / "src" / "makocode.cpp")) {
-        fs::path parent = repo_root.parent_path();
-        if (parent == repo_root) break;
-        repo_root = parent;
+    test_executable() = fs::canonical(fs::path(argv[0]));
+    repo_root() = test_executable().parent_path();
+    while (!repo_root().empty() && !fs::exists(repo_root() / "src" / "makocode.cpp")) {
+        fs::path parent = repo_root().parent_path();
+        if (parent == repo_root()) break;
+        repo_root() = parent;
     }
-    if (!fs::exists(repo_root / "src" / "makocode.cpp")) {
-        std::cerr << "Unable to locate repository root from " << test_executable << '\n';
+    if (!fs::exists(repo_root() / "src" / "makocode.cpp")) {
+        std::cerr << "Unable to locate repository root from " << test_executable() << '\n';
         return 2;
     }
     std::vector<TestCase> cases = build_cases();
@@ -5420,19 +5435,19 @@ int main(int argc, char** argv) {
     const char* test_label = stdout_color ? "\033[1;34m[TEST]\033[0m " : "[TEST] ";
     const char* pass_label = stdout_color ? "\033[32m[PASS]\033[0m " : "[PASS] ";
     const char* fail_label = stderr_color ? "\033[31m[FAIL]\033[0m " : "[FAIL] ";
-    output_root = repo_root / "test_output";
-    makocode_bin = test_executable.parent_path() / "makocode";
-    fs::create_directories(output_root / "test_logs");
+    output_root() = repo_root() / "test_output";
+    makocode_bin() = test_executable().parent_path() / "makocode";
+    fs::create_directories(output_root() / "test_logs");
     master_seed = parse_master_seed();
     {
-        std::ofstream seed_file(output_root / "test_logs/test_seed.txt", std::ios::trunc);
+        std::ofstream seed_file(output_root() / "test_logs/test_seed.txt", std::ios::trunc);
         seed_file << master_seed << '\n';
     }
     std::cout << test_label << "Test seed: " << master_seed << "\n";
     if (argc == 3 && std::strcmp(argv[1], "--case") == 0) {
         auto found = std::find_if(cases.begin(), cases.end(), [&](const TestCase& test) { return test.id == std::string(argv[2]); });
         if (found == cases.end()) { std::cerr << "unknown test case: " << argv[2] << '\n'; return 2; }
-        try { found->run(output_root); std::cout << pass_label << found->id << '\n'; return 0; }
+        try { found->run(output_root()); std::cout << pass_label << found->id << '\n'; return 0; }
         catch (const std::exception& error) { std::cerr << fail_label << found->id << ": " << error.what() << '\n'; return 1; }
     }
     if (argc == 2 && std::strcmp(argv[1], "--all") == 0) {
@@ -5459,7 +5474,7 @@ int main(int argc, char** argv) {
                 if (index >= parallel_cases.size()) break;
                 const auto& test = parallel_cases[index];
                 try {
-                    test.run(output_root);
+                    test.run(output_root());
                     std::lock_guard<std::mutex> lock(output_mutex); std::cout << pass_label << test.id << "\n";
                 } catch (const std::exception& error) {
                     failed.fetch_add(1);
@@ -5472,7 +5487,7 @@ int main(int argc, char** argv) {
         // failed while other metadata decoders ran in the worker pool.
         if (isolated_marker_case) {
             try {
-                isolated_marker_case->run(output_root);
+                isolated_marker_case->run(output_root());
                 std::cout << pass_label << isolated_marker_case->id << "\n";
             } catch (const std::exception& error) {
                 ++failed;

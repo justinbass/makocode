@@ -1,6 +1,5 @@
 TODO
 
-- Remove error ignoring in Makefile, fix all errors/warnings
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
 - Run physical tests, against calibration script.
