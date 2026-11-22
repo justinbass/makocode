@@ -1268,12 +1268,18 @@ retry_decode:
                 }
                 usize page_symbol_count = (usize)(effective_bits / 32u);
                 if (page_erasure_bits.data && page_erasure_bits.size) {
-                    if (page_symbol_count > page_erasure_bits.size ||
-                        symbol_erasure_aggregator.size >
-                            USIZE_MAX_VALUE - page_symbol_count ||
-                        !symbol_erasure_aggregator.append_bytes(
+                    if (page_symbol_count > page_erasure_bits.size) {
+                        console_line(2, "decode: field-symbol erasure map is truncated");
+                        return 1;
+                    }
+                    if (symbol_erasure_aggregator.size >
+                        USIZE_MAX_VALUE - page_symbol_count) {
+                        console_line(2, "decode: field-symbol erasure map size overflow");
+                        return 1;
+                    }
+                    if (!symbol_erasure_aggregator.append_bytes(
                             page_erasure_bits.data, page_symbol_count)) {
-                        console_line(2, "decode: failed to assemble field-symbol erasures");
+                        console_line(2, "decode: failed to allocate field-symbol erasure map");
                         return 1;
                     }
                 } else {

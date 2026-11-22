@@ -5528,20 +5528,31 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && std::strcmp(argv[1], "--all") == 0) {
         std::vector<TestCase> parallel_cases;
-        const TestCase* isolated_marker_case = nullptr;
+        std::vector<const TestCase*> startup_cases;
+        std::vector<const TestCase*> isolated_cases;
         for (const auto& test : cases) {
-            if (test.id == "0118_decode_partial_tag_scan") {
-                isolated_marker_case = &test;
+            if (test.id == "0123_metadata_pages") {
+                startup_cases.push_back(&test);
+            } else if (test.id == "0118_decode_partial_tag_scan") {
+                isolated_cases.push_back(&test);
             } else {
                 parallel_cases.push_back(test);
             }
         }
         std::atomic<size_t> next{0}; std::atomic<int> failed{0};
-        unsigned hardware_threads = std::thread::hardware_concurrency();
-        int jobs = jobs_from_makeflags();
-        if (jobs >= 4 && hardware_threads > (unsigned)jobs) {
-            jobs = (int)std::min(8u, hardware_threads);
+        // Run the metadata page assembly case before the worker pool so it
+        // starts without memory retained by earlier image stress cases.
+        for (const TestCase* startup_case : startup_cases) {
+            try {
+                startup_case->run(output_root());
+                std::cout << pass_label << startup_case->id << "\n";
+            } catch (const std::exception& error) {
+                ++failed;
+                std::cerr << fail_label << startup_case->id << ": "
+                          << error.what() << "\n";
+            }
         }
+        int jobs = jobs_from_makeflags();
         jobs = std::min<int>(jobs, static_cast<int>(parallel_cases.size()));
         std::vector<std::thread> workers;
         for (int worker = 0; worker < jobs; ++worker) workers.emplace_back([&] {
@@ -5559,15 +5570,15 @@ int main(int argc, char** argv) {
             }
         });
         for (auto& worker : workers) worker.join();
-        // This exact-half marker fixture is stable alone but intermittently
-        // failed while other metadata decoders ran in the worker pool.
-        if (isolated_marker_case) {
+        // These metadata-heavy decoders are stable alone but can fail under
+        // memory pressure while other image tests run in parallel.
+        for (const TestCase* isolated_case : isolated_cases) {
             try {
-                isolated_marker_case->run(output_root());
-                std::cout << pass_label << isolated_marker_case->id << "\n";
+                isolated_case->run(output_root());
+                std::cout << pass_label << isolated_case->id << "\n";
             } catch (const std::exception& error) {
                 ++failed;
-                std::cerr << fail_label << isolated_marker_case->id << ": "
+                std::cerr << fail_label << isolated_case->id << ": "
                           << error.what() << "\n";
             }
         }

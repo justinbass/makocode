@@ -30010,11 +30010,17 @@ bool read_entire_stdin(makocode::ByteBuffer& buffer) {
     const usize chunk = 4096u;
     usize total = 0u;
     for (;;) {
+        if (total > USIZE_MAX_VALUE - chunk) {
+            buffer.release();
+            return false;
+        }
         if (!buffer.ensure(total + chunk)) {
+            buffer.release();
             return false;
         }
         long read_result = makocode_platform_read(0, buffer.data + total, chunk);
         if (read_result < 0 || (unsigned long)read_result > chunk) {
+            buffer.release();
             return false;
         }
         if (read_result == 0) {
@@ -30036,16 +30042,22 @@ bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
     const usize chunk = 4096u;
     usize total = 0u;
     for (;;) {
+        if (total > USIZE_MAX_VALUE - chunk) {
+            makocode_platform_close(fd);
+            buffer.release();
+            return false;
+        }
         if (!buffer.ensure(total + chunk)) {
             makocode_platform_close(fd);
+            buffer.release();
             return false;
         }
         long read_result = makocode_platform_read(fd, buffer.data + total, chunk);
         if (read_result < 0 || (unsigned long)read_result > chunk) {
             makocode_platform_close(fd);
+            buffer.release();
             return false;
         }
-        
         if (read_result == 0) {
             break;
         }
@@ -30053,7 +30065,11 @@ bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
         buffer.size = total;
     }
     buffer.size = total;
-    return makocode_platform_close(fd) == 0;
+    if (makocode_platform_close(fd) == 0) {
+        return true;
+    }
+    buffer.release();
+    return false;
 }
 
 
