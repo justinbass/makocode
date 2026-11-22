@@ -1,19 +1,18 @@
 TODO
 
-- When password is supplied, it's used as the static seed value for shuffling (and maybe others). Confirm that shuffling applies to everything, including pre-data.
-- Steganography security review
-- Improve performance in each section
-  - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
-  - Largest page possible that takes <5s.
+- Steganography security review, tool to idenitfy the percentage chance of an input overlay being detected as makocode? Depends on things like how much noise is in the image.
 - Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - Remove error ignoring in Makefile, fix all errors/warnings
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
-- Replace barcode with barkode everywhere. Other fun shiba names potentially (could be a different compile mode).
 - Run physical tests, against calibration script.
   - Improve calibration script until max data density is found. Convert to cpp, ./makocode calibration?
   - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
   - Tests for physical row/column skip/expand (scan/print damage)
   - Increase all distortions until decoding breaks, make improvements
+- Replace barcode with barkode everywhere. Other fun shiba names potentially (could be a different compile mode).
+- Improve performance in each section
+  - Color channels non-base-2 (CMYKW) works but is slow, improve speed and make test data larger
+  - Largest page possible that takes <5s.
 - Clean up cli args (-h), README
 - One last ask to surmise any way to improve detection of a scanned image, use optar/paperbak/others as reference
 - Reorganize tests logically from simple to complex, and document each one in full. Remove duplicate unnecessary testing.

@@ -7091,21 +7091,6 @@ static bool palette_symbol_derive_password_key(const char* password,
            stealth_derive_base_key(password, password_length, public_salt, key);
 }
 
-static bool palette_symbol_password_selector_seed_from_key(const u8 key[32],
-                                                           u64& seed) {
-    seed = 0u;
-    if (!key) return false;
-    u8 digest[32];
-    static const u8 domain[] = "MakoCode v0 overlay selector";
-    if (!hmac_sha256(key, 32u, domain, sizeof(domain) - 1u, digest)) {
-        memset(digest, 0, sizeof(digest));
-        return false;
-    }
-    seed = read_le_u64(digest);
-    memset(digest, 0, sizeof(digest));
-    return true;
-}
-
 PaletteSymbolPasswordContext::PaletteSymbolPasswordContext()
     : key_{}, available_(false) {}
 
@@ -7126,31 +7111,20 @@ bool PaletteSymbolPasswordContext::derive(const char* password,
     return true;
 }
 
-bool PaletteSymbolPasswordContext::selector_seed(u64& seed) const {
-    if (!available_) {
-        seed = 0u;
-        return false;
-    }
-    return palette_symbol_password_selector_seed_from_key(key_, seed);
+const u8* PaletteSymbolPasswordContext::shuffle_key() const {
+    return available_ ? key_ : 0;
 }
 
 bool PaletteSymbolPasswordContext::available() const {
     return available_;
 }
 
-bool palette_symbol_password_selector_seed(const char* password,
-                                           usize password_length,
-                                           u64& seed) {
-    seed = 0u;
-    PaletteSymbolPasswordContext context;
-    return context.derive(password, password_length) && context.selector_seed(seed);
-}
-
 bool palette_symbol_selector_mask(u64 seed,
                                   u64 block_index,
                                   u32 block_length,
                                   u32 selected_count,
-                                  u8* mask_out) {
+                                  u8* mask_out,
+                                  const u8* password_shuffle_key) {
     if (!mask_out || !block_length || block_length > PALETTE_SYMBOL_MAX_BLOCK_LENGTH ||
         selected_count > block_length) return false;
     u16 pool[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
@@ -7158,18 +7132,25 @@ bool palette_symbol_selector_mask(u64 seed,
     for (u32 i = 0u; i < block_length; ++i) pool[i] = (u16)i;
     if (!selected_count) return true;
     u8 seed_bytes[8];
-    u8 derivation_input[sizeof("MakoCode v0 overlay shuffle") - 1u + 8u];
+    u8 derivation_input[sizeof("MakoCode v0 overlay selector") - 1u + 8u];
     u8 key[32];
     u8 nonce[12] = {};
     u8 zero_stream[1024u] = {};
     u8 random_stream[sizeof(zero_stream)];
+    const char* derivation_domain = password_shuffle_key
+        ? "MakoCode v0 overlay selector"
+        : "MakoCode v0 overlay shuffle";
+    usize derivation_domain_length = password_shuffle_key
+        ? sizeof("MakoCode v0 overlay selector") - 1u
+        : sizeof("MakoCode v0 overlay shuffle") - 1u;
+    memcpy(derivation_input, derivation_domain, derivation_domain_length);
+    write_le_u64(derivation_input + derivation_domain_length, block_index);
     write_le_u64(seed_bytes, seed);
-    memcpy(derivation_input, "MakoCode v0 overlay shuffle",
-           sizeof("MakoCode v0 overlay shuffle") - 1u);
-    write_le_u64(derivation_input + sizeof("MakoCode v0 overlay shuffle") - 1u,
-                 block_index);
-    if (!hmac_sha256(seed_bytes, sizeof(seed_bytes), derivation_input,
-                     sizeof(derivation_input), key) ||
+    if (!(password_shuffle_key
+              ? hmac_sha256(password_shuffle_key, 32u, derivation_input,
+                            derivation_domain_length + 8u, key)
+              : hmac_sha256(seed_bytes, sizeof(seed_bytes), derivation_input,
+                            derivation_domain_length + 8u, key)) ||
         !chacha20_xor(key, nonce, 1u, zero_stream, random_stream,
                       sizeof(random_stream))) {
         memset(seed_bytes, 0, sizeof(seed_bytes));
@@ -7587,8 +7568,7 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
     PaletteSymbolPasswordContext password_key;
     if (password && password_length) {
         if (!password_key.derive(password, password_length) ||
-            !password_key.mask(profile, encoded_symbols, false, 0u) ||
-            !password_key.selector_seed(summary.overlay_selector_seed)) return false;
+            !password_key.mask(profile, encoded_symbols, false, 0u)) return false;
     }
     if (omit_bootstrap) {
         usize bootstrap_bytes = (usize)PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS * 4u;
@@ -7802,18 +7782,19 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                    erased_symbols.data + (usize)payload_first_symbol,
                    payload_erasures.size);
         }
-        u64 selector_seed = 0u;
-        if (is_masked &&
-            (!active_password_context ||
-             !active_password_context->selector_seed(selector_seed))) return false;
+        const u8* password_shuffle_key = is_masked && active_password_context
+            ? active_password_context->shuffle_key()
+            : 0;
+        if (is_masked && !password_shuffle_key) return false;
         u8 selector_mask[PALETTE_SYMBOL_MAX_BLOCK_LENGTH];
         for (u64 block = 0u; block < block_count; ++block) {
             u32 actual_block_length = block + 1u == block_count
                                           ? final_block_length
                                           : block_length;
-            if (!palette_symbol_selector_mask(selector_seed, block,
+            if (!palette_symbol_selector_mask(0u, block,
                                               actual_block_length, overlay_budget,
-                                              selector_mask)) return false;
+                                              selector_mask,
+                                              password_shuffle_key)) return false;
             for (u32 symbol = 0u; symbol < actual_block_length; ++symbol) {
                 if (!selector_mask[symbol]) continue;
                 u64 interleaved_offset = palette_symbol_interleaved_offset(
@@ -9501,7 +9482,8 @@ namespace MetadataTile {
                                        bool include_metadata_overwrites,
                                        u64 symbol_placement_seed,
                                        PayloadRankMapCache* cache,
-                                       bool scatter_payload) {
+                                       bool scatter_payload,
+                                       const u8* password_shuffle_key) {
         payload_pixel_count = 0u;
         if (!width_pixels || !data_height_pixels ||
             (u64)width_pixels > U64_MAX_VALUE / data_height_pixels) return false;
@@ -9570,7 +9552,8 @@ namespace MetadataTile {
             return permute_payload_rank_map(pixel_count, values,
                                             symbol_placement_seed, rank_map,
                                             payload_pixel_count,
-                                            scatter_payload);
+                                            scatter_payload,
+                                            password_shuffle_key);
         }
         if (!rank_map.ensure(rank_bytes)) return false;
         rank_map.size = rank_bytes;
@@ -9626,7 +9609,8 @@ namespace MetadataTile {
         }
         return permute_payload_rank_map(pixel_count, values, symbol_placement_seed,
                                         rank_map, payload_pixel_count,
-                                        scatter_payload);
+                                        scatter_payload,
+                                        password_shuffle_key);
     }
 
     bool permute_payload_rank_map(u64 pixel_count,
@@ -9634,7 +9618,8 @@ namespace MetadataTile {
                                   u64 symbol_placement_seed,
                                   ByteBuffer& rank_map,
                                   u64 payload_pixel_count,
-                                  bool scatter_payload) {
+                                  bool scatter_payload,
+                                  const u8* password_shuffle_key) {
         if (pixel_count > (u64)USIZE_MAX_VALUE / sizeof(u64) ||
             rank_map.size != (usize)pixel_count * sizeof(u64)) return false;
         u64* ranks = (u64*)rank_map.data;
@@ -9657,9 +9642,27 @@ namespace MetadataTile {
             write_le_u64(derivation_input + 16u, values.palette_count);
             u8 placement_key[32];
             static const u8 placement_domain[] = "MakoCode v0 spatial interleaver";
-            if (!hmac_sha256(derivation_input, sizeof(derivation_input),
-                             placement_domain, sizeof(placement_domain) - 1u,
-                             placement_key)) return false;
+            bool placement_key_derived = false;
+            if (password_shuffle_key) {
+                u8 keyed_derivation_input[sizeof(placement_domain) - 1u + 16u];
+                memcpy(keyed_derivation_input, placement_domain,
+                       sizeof(placement_domain) - 1u);
+                write_le_u64(keyed_derivation_input + sizeof(placement_domain) - 1u,
+                             values.page_index ? values.page_index : 1u);
+                write_le_u64(keyed_derivation_input + sizeof(placement_domain) - 1u + 8u,
+                             values.palette_count);
+                placement_key_derived = hmac_sha256(
+                    password_shuffle_key, 32u,
+                    keyed_derivation_input, sizeof(keyed_derivation_input),
+                    placement_key);
+                memset(keyed_derivation_input, 0, sizeof(keyed_derivation_input));
+            } else {
+                placement_key_derived = hmac_sha256(
+                    derivation_input, sizeof(derivation_input),
+                    placement_domain, sizeof(placement_domain) - 1u,
+                    placement_key);
+            }
+            if (!placement_key_derived) return false;
             u8 nonce[12] = {};
             u8 random_block[64];
             u64 counter = 0u;
@@ -9681,6 +9684,62 @@ namespace MetadataTile {
                 u64 temporary = permuted_groups[last];
                 permuted_groups[last] = permuted_groups[other];
                 permuted_groups[other] = temporary;
+            }
+            // Keep password-keyed scattered bootstrap ranks out of the overlay's
+            // central window while still shuffling them across the page.
+            const u64 bootstrap_rank_count =
+                (u64)PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS * 8u;
+            u64 page_width = values.page_width_pixels;
+            if (password_shuffle_key && scatter_payload &&
+                (!values.page_index || values.page_index == 1u) &&
+                page_width && pixel_count % page_width == 0u &&
+                group_count > bootstrap_rank_count / 8u) {
+                u64 data_height = pixel_count / page_width;
+                u64 page_height = values.page_height_pixels
+                    ? values.page_height_pixels
+                    : data_height;
+                u64 center_radius = TILE_SIDE / 2u;
+                u64 center_x = page_width / 2u;
+                u64 center_y = page_height / 2u;
+                u64 center_x0 = center_x > center_radius
+                    ? center_x - center_radius : 0u;
+                u64 center_y0 = center_y > center_radius
+                    ? center_y - center_radius : 0u;
+                u64 center_x1 = center_x + center_radius < page_width
+                    ? center_x + center_radius : page_width;
+                u64 center_y1 = center_y + center_radius < page_height
+                    ? center_y + center_radius : page_height;
+                if (center_y1 > data_height) center_y1 = data_height;
+                ByteBuffer center_source_groups;
+                if (!center_source_groups.ensure((usize)group_count)) return false;
+                center_source_groups.size = (usize)group_count;
+                memset(center_source_groups.data, 0, center_source_groups.size);
+                for (u64 y = center_y0; y < center_y1; ++y) {
+                    for (u64 x = center_x0; x < center_x1; ++x) {
+                        u64 rank = ranks[y * page_width + x];
+                        if (rank == U64_MAX_VALUE || rank >= group_count * 8u) continue;
+                        center_source_groups.data[(usize)(rank % group_count)] = 1u;
+                    }
+                }
+                u64 safe_group_cursor = 0u;
+                for (u64 source_group = 0u; source_group < group_count;
+                     ++source_group) {
+                    if (!center_source_groups.data[(usize)source_group] ||
+                        permuted_groups[source_group] >= bootstrap_rank_count / 8u) {
+                        continue;
+                    }
+                    while (safe_group_cursor < group_count &&
+                           (center_source_groups.data[(usize)safe_group_cursor] ||
+                            permuted_groups[safe_group_cursor] <
+                                bootstrap_rank_count / 8u)) {
+                        ++safe_group_cursor;
+                    }
+                    if (safe_group_cursor >= group_count) return false;
+                    u64 temporary = permuted_groups[source_group];
+                    permuted_groups[source_group] = permuted_groups[safe_group_cursor];
+                    permuted_groups[safe_group_cursor] = temporary;
+                    ++safe_group_cursor;
+                }
             }
             for (u64 pixel = 0u; pixel < pixel_count; ++pixel) {
                 u64 rank = ranks[pixel];
@@ -21651,7 +21710,10 @@ struct RotationEstimateCandidate {
                                               false,
                                               active_mapping.symbol_placement_seed,
                                               0,
-                                              active_mapping.scatter_payload) ||
+                                              active_mapping.scatter_payload,
+                                              active_mapping.symbol_placement_password_context
+                                                  ? active_mapping.symbol_placement_password_context->shuffle_key()
+                                                  : 0) ||
         payload_pixel_count < 8u) return false;
     bool use_custom_palette = mapping_has_custom_palette(active_mapping);
     u32 custom_palette_base = 0u;
@@ -27845,7 +27907,10 @@ bool recover_metadata_free_single_page(const makocode::ByteBuffer& input,
                                                       false,
                                                       candidate_mapping.symbol_placement_seed,
                                                       0,
-                                                      candidate_mapping.scatter_payload)) return false;
+                                                      candidate_mapping.scatter_payload,
+                                                      candidate_mapping.symbol_placement_password_context
+                                                          ? candidate_mapping.symbol_placement_password_context->shuffle_key()
+                                                          : 0)) return false;
             u64 group_count = payload_pixel_count / 8u;
             if (!group_count || group_count > (u64)USIZE_MAX_VALUE / 4u ||
                 group_count > U64_MAX_VALUE / 32u) return false;
@@ -28839,7 +28904,10 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
                                                   !palette_symbol_mode,
                                               mapping.symbol_placement_seed,
                                               rank_map_cache,
-                                              mapping.scatter_payload) ||
+                                              mapping.scatter_payload,
+                                              mapping.symbol_placement_password_context
+                                                  ? mapping.symbol_placement_password_context->shuffle_key()
+                                                  : 0) ||
         payload_pixel_count < 8u) {
         console_line(2, "encode_page_to_ppm: failed to build payload rank map");
         return false;
@@ -28953,9 +29021,25 @@ bool encode_page_to_ppm(const ImageMappingConfig& mapping,
         }
         u8 noise_key[32];
         static const u8 noise_domain[] = "MakoCode v0 metadata ring noise";
-        if (!MetadataTile::hmac_sha256(noise_context, sizeof(noise_context),
-                                       noise_domain, sizeof(noise_domain) - 1u,
-                                       noise_key)) {
+        const u8* password_shuffle_key = mapping.symbol_placement_password_context
+            ? mapping.symbol_placement_password_context->shuffle_key()
+            : 0;
+        bool noise_key_derived = false;
+        if (password_shuffle_key) {
+            u8 keyed_noise_input[sizeof(noise_domain) - 1u + sizeof(noise_context)];
+            memcpy(keyed_noise_input, noise_domain, sizeof(noise_domain) - 1u);
+            memcpy(keyed_noise_input + sizeof(noise_domain) - 1u,
+                   noise_context, sizeof(noise_context));
+            noise_key_derived = MetadataTile::hmac_sha256(
+                password_shuffle_key, 32u, keyed_noise_input,
+                sizeof(keyed_noise_input), noise_key);
+            memset(keyed_noise_input, 0, sizeof(keyed_noise_input));
+        } else {
+            noise_key_derived = MetadataTile::hmac_sha256(
+                noise_context, sizeof(noise_context), noise_domain,
+                sizeof(noise_domain) - 1u, noise_key);
+        }
+        if (!noise_key_derived) {
             return false;
         }
         u8 nonce[12] = {};

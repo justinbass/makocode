@@ -230,14 +230,18 @@ int command_decode(int arg_count, char** args) {
     }
     makocode::PaletteSymbolPasswordContext palette_password_context;
     if (have_password &&
-        (!palette_password_context.derive((const char*)password_buffer.data,
-                                          password_buffer.size) ||
-         !palette_password_context.selector_seed(mapping.symbol_placement_seed))) {
+        !palette_password_context.derive((const char*)password_buffer.data,
+                                         password_buffer.size)) {
         console_line(2, "decode: failed to derive password-keyed symbol placement");
         return 1;
     }
+    if (have_password) {
+        mapping.symbol_placement_password_context = &palette_password_context;
+    }
     ImageMappingConfig mapping_overrides = mapping;
     const u64 requested_symbol_placement_seed = mapping.symbol_placement_seed;
+    const bool requested_password_placement =
+        mapping.symbol_placement_password_context != 0;
     bool metadata_free_layout_autodetect = no_metadata;
     u32 scatter_layout_attempt = 0u;
     makocode::ByteBuffer validated_metadata_free_payload;
@@ -253,11 +257,11 @@ int command_decode(int arg_count, char** args) {
             scatter_layout_attempt = 1u;
         } else if (scatter_layout_attempt == 1u) {
             if (have_validated_metadata_free_payload || !have_password ||
-                requested_symbol_placement_seed ==
-                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED) return false;
+                !requested_password_placement) return false;
             scatter_layout_attempt = 2u;
             mapping_overrides.symbol_placement_seed =
                 makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+            mapping_overrides.symbol_placement_password_context = 0;
             retried_public_symbol_placement = true;
         } else if (scatter_layout_attempt == 2u) {
             scatter_layout_attempt = 3u;
@@ -267,6 +271,9 @@ int command_decode(int arg_count, char** args) {
         mapping_overrides.scatter_payload = (scatter_layout_attempt & 1u) != 0u;
         if (scatter_layout_attempt < 2u) {
             mapping_overrides.symbol_placement_seed = requested_symbol_placement_seed;
+            mapping_overrides.symbol_placement_password_context = have_password
+                ? &palette_password_context
+                : 0;
         }
         return true;
     };
@@ -417,11 +424,11 @@ retry_decode:
                 single_state,
                 recovered_values);
             if (!recovered && have_password &&
-                mapping_overrides.symbol_placement_seed !=
-                    makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED) {
+                mapping_overrides.symbol_placement_password_context) {
                 ImageMappingConfig public_placement_mapping = mapping_overrides;
                 public_placement_mapping.symbol_placement_seed =
                     makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                public_placement_mapping.symbol_placement_password_context = 0;
                 recovered = recover_metadata_free_single_page(
                     ppm_stream,
                     public_placement_mapping,
@@ -909,11 +916,11 @@ retry_decode:
                                                           page_state,
                                                           recovered_values);
                     if (!recovered && allow_metadata_free_recovery && have_password &&
-                        mapping_overrides.symbol_placement_seed !=
-                            makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED) {
+                        mapping_overrides.symbol_placement_password_context) {
                         ImageMappingConfig public_placement_mapping = mapping_overrides;
                         public_placement_mapping.symbol_placement_seed =
                             makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                        public_placement_mapping.symbol_placement_password_context = 0;
                         recovered = recover_metadata_free_single_page(
                             ppm_stream,
                             public_placement_mapping,
@@ -1606,8 +1613,10 @@ retry_decode:
                 retried_public_symbol_placement = true;
                 mapping.symbol_placement_seed =
                     makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                mapping.symbol_placement_password_context = 0;
                 mapping_overrides.symbol_placement_seed =
                     makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
+                mapping_overrides.symbol_placement_password_context = 0;
                 goto retry_decode;
             }
             if (decoder.password_auth_failed()) {

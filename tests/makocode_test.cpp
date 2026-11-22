@@ -4423,6 +4423,41 @@ static void palette_symbol_codec_case(){
         require(ranked_pixels == shuffled_count && layout_changed,
                 id + ": interleaver did not permute the complete payload rank set");
 
+        makocode::PaletteSymbolPasswordContext placement_key_a,placement_key_b;
+        makocode::ByteBuffer password_ranks_a,password_ranks_b;
+        u64 password_count_a=0u,password_count_b=0u;
+        require(placement_key_a.derive("first-password",14u)&&
+                    placement_key_b.derive("second-password",15u)&&
+                    MetadataTile::build_payload_rank_map(
+                        96u,96u,placement,tile,0,0u,password_ranks_a,
+                        password_count_a,false,
+                        makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED,0,false,
+                        placement_key_a.shuffle_key())&&
+                    MetadataTile::build_payload_rank_map(
+                        96u,96u,placement,tile,0,0u,password_ranks_b,
+                        password_count_b,false,
+                        makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED,0,false,
+                        placement_key_b.shuffle_key())&&
+                    password_count_a==password_count_b&&
+                    password_ranks_a.size==password_ranks_b.size,
+                id+": password-keyed spatial placement failed");
+        const u64* password_map_a=(const u64*)password_ranks_a.data;
+        const u64* password_map_b=(const u64*)password_ranks_b.data;
+        bool bootstrap_layout_changed=false;
+        for(usize pixel=0u;pixel<password_ranks_a.size/sizeof(u64);++pixel){
+            bool in_bootstrap_a=password_map_a[pixel]<
+                (u64)makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS*8u;
+            bool in_bootstrap_b=password_map_b[pixel]<
+                (u64)makocode::PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS*8u;
+            if(in_bootstrap_a!=in_bootstrap_b ||
+               (in_bootstrap_a && password_map_a[pixel]!=password_map_b[pixel])){
+                bootstrap_layout_changed=true;
+                break;
+            }
+        }
+        require(bootstrap_layout_changed,
+                id+": bootstrap symbol placement did not depend on password");
+
         u8 frame_data[4] = {1u, 2u, 3u, 4u};
         u8 symbol_erasure[1] = {1u};
         PpmParserState no_metadata;
@@ -4440,8 +4475,34 @@ static void palette_symbol_codec_case(){
     require(secret_symbols.ensure(16u)&&original_symbols.ensure(16u)&&other_symbols.ensure(16u),id+": mask buffers allocation failed");
     secret_symbols.size=original_symbols.size=other_symbols.size=16u;
     for(u32 i=0u;i<4u;++i){u32 value=(i*100003u+17u)%password_profile.field_order;write_le_u32(secret_symbols.data+i*4u,value);write_le_u32(original_symbols.data+i*4u,value);write_le_u32(other_symbols.data+i*4u,value);}
-    u64 selector_a=0u,selector_b=0u;
-    require(makocode::palette_symbol_password_selector_seed("secret",6u,selector_a)&&makocode::palette_symbol_password_selector_seed("secret",6u,selector_b)&&selector_a==selector_b,id+": selector seed is not deterministic");
+    makocode::PaletteSymbolPasswordContext shuffle_a,shuffle_b,shuffle_other;
+    require(shuffle_a.derive("secret",6u)&&shuffle_b.derive("secret",6u)&&
+            shuffle_other.derive("other",5u)&&
+            memcmp(shuffle_a.shuffle_key(),shuffle_b.shuffle_key(),32u)==0&&
+            memcmp(shuffle_a.shuffle_key(),shuffle_other.shuffle_key(),32u)!=0,
+            id+": 256-bit shuffle key is not deterministic or password-specific");
+    u8 selector_a[255u]={},selector_b[255u]={},selector_other[255u]={};
+    require(makocode::palette_symbol_selector_mask(0u,0u,255u,64u,selector_a,
+                                                   shuffle_a.shuffle_key())&&
+            makocode::palette_symbol_selector_mask(0u,0u,255u,64u,selector_b,
+                                                   shuffle_b.shuffle_key())&&
+            makocode::palette_symbol_selector_mask(0u,0u,255u,64u,selector_other,
+                                                   shuffle_other.shuffle_key())&&
+            memcmp(selector_a,selector_b,sizeof(selector_a))==0&&
+            memcmp(selector_a,selector_other,sizeof(selector_a))!=0,
+            id+": password-keyed selector ordering is not stable and distinct");
+    const char unicode_password[] = u8"pāss🔐";
+    const char unicode_composed[] = u8"café";
+    const char unicode_decomposed[] = u8"café";
+    makocode::PaletteSymbolPasswordContext unicode_key,unicode_repeat,
+        composed_key,decomposed_key;
+    require(unicode_key.derive(unicode_password,sizeof(unicode_password)-1u)&&
+            unicode_repeat.derive(unicode_password,sizeof(unicode_password)-1u)&&
+            memcmp(unicode_key.shuffle_key(),unicode_repeat.shuffle_key(),32u)==0&&
+            composed_key.derive(unicode_composed,sizeof(unicode_composed)-1u)&&
+            decomposed_key.derive(unicode_decomposed,sizeof(unicode_decomposed)-1u)&&
+            memcmp(composed_key.shuffle_key(),decomposed_key.shuffle_key(),32u)!=0,
+            id+": UTF-8 password bytes were not handled deterministically and exactly");
     require(makocode::palette_symbol_password_mask(password_profile,secret_symbols,"secret",6u,false),id+": symbol mask failed");
     require(memcmp(secret_symbols.data,original_symbols.data,secret_symbols.size)!=0,id+": password mask left symbols unchanged");
     require(makocode::palette_symbol_password_mask(password_profile,secret_symbols,"secret",6u,true),id+": symbol unmask failed");
@@ -4455,7 +4516,8 @@ static void palette_symbol_codec_case(){
     require(makocode::palette_symbol_password_mask(password_profile,range_mask_symbols,"secret",6u,true,5u),id+": partial range unmask failed");
     for(u32 i=0u;i<25u;++i)require(read_le_u32(range_mask_symbols.data+i*4u)==((i+5u)*17011u+29u)%password_profile.field_order,id+": partial range mask offset mismatch");
     require(makocode::palette_symbol_password_mask(password_profile,other_symbols,"other",5u,false),id+": alternate password mask failed");
-    require(makocode::palette_symbol_password_selector_seed("other",5u,selector_b)&&selector_a!=selector_b,id+": selector does not depend on password");
+    require(memcmp(shuffle_a.shuffle_key(),shuffle_other.shuffle_key(),32u)!=0,
+            id+": selector key does not depend on password");
 
     std::vector<u8> stream_source(333u);
     for(usize i=0u;i<stream_source.size();++i)stream_source[i]=(u8)((i*47u+19u)&255u);
@@ -4927,6 +4989,7 @@ static std::vector<TestCase> build_cases() {
     cases.push_back({"0132_palette_q2_center_specks","Five center-pixel specks are erased from area-vote disagreements",[](const fs::path&){palette_q2_center_speck_case();}});
     r.size=4096; r.encode_args={"--scatter"}; r.scatter_metadata_check=true; rt("0133_scatter_plain_roundtrip","Plain unencrypted payload round-trip with scattered layout inferred from metadata",r); r={};
     r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black","--password=unused"}; r.marker_free_compact=true; rt("0134_scatter_public_seed_fallback","Metadata-free scatter autodetection retries both layouts with public placement when a decode password was supplied",r); r={};
+    r.size=4096; r.encode_args={"--scatter","--no-metadata","--no-fiducials","--palette","White Black",u8"--password=pāss🔐","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--no-metadata","--no-fiducials","--palette","White Black",u8"--password=pāss🔐"}; r.marker_free_compact=true; rt("0135_scatter_utf8_password","Metadata-free scatter round-trip uses the full password-derived key, including for bootstrap placement",r); r={};
     return cases;
 }
 

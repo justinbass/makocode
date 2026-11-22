@@ -59,6 +59,8 @@ struct EncodeOverlay {
 struct OverlaySelector {
     u64 seed;
     u64 placement_seed;
+    u8 password_shuffle_key[32];
+    bool has_password_shuffle_key;
     u16 overlay_erasure_budget;
     u16 block_total;
     u64 block_count;
@@ -71,6 +73,8 @@ struct OverlaySelector {
     OverlaySelector()
         : seed(0u),
           placement_seed(makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),
+          password_shuffle_key{},
+          has_password_shuffle_key(false),
           overlay_erasure_budget(0u),
           block_total(0u),
           block_count(0u),
@@ -79,6 +83,11 @@ struct OverlaySelector {
           masks(),
           encode_rank_map_cache(),
           overlay_rank_map_cache() {}
+
+    ~OverlaySelector() {
+        memset(password_shuffle_key, 0, sizeof(password_shuffle_key));
+        has_password_shuffle_key = false;
+    }
 };
 
 static bool load_overlay_page(const char* path, OverlayPage& page);
@@ -102,6 +111,7 @@ int command_encode(int arg_count, char** args) {
     g_fiducial_defaults.spacing_pixels = 24u;
     g_encode_metadata_disabled = false;
     ImageMappingConfig mapping;
+    makocode::PaletteSymbolPasswordContext password_shuffle_context;
     OverlaySelector overlay_selector;
     PageFooterConfig footer_config;
     enum EccMode { ECC_AUTO_MINIMUM, ECC_EXPLICIT_RATIO, ECC_FILL };
@@ -941,11 +951,13 @@ int command_encode(int arg_count, char** args) {
     }
     bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
     if (have_password && !hidden_mode_enabled &&
-        !makocode::palette_symbol_password_selector_seed(
-            (const char*)password_buffer.data, password_buffer.size,
-            mapping.symbol_placement_seed)) {
+        !password_shuffle_context.derive((const char*)password_buffer.data,
+                                         password_buffer.size)) {
         console_line(2, "encode: failed to derive password-keyed symbol placement");
         return 1;
+    }
+    if (have_password && !hidden_mode_enabled) {
+        mapping.symbol_placement_password_context = &password_shuffle_context;
     }
     if ((hidden_input_count > 0u) != have_hidden_password) {
         console_line(2, "encode: --hidden-input and --hidden-password must be supplied together");
@@ -2982,7 +2994,10 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                               false,
                                               overlay_selector.placement_seed,
                                               &overlay_selector.overlay_rank_map_cache,
-                                              tile.scatter_payload) ||
+                                              tile.scatter_payload,
+                                              overlay_selector.has_password_shuffle_key
+                                                  ? overlay_selector.password_shuffle_key
+                                                  : 0) ||
         payload_pixel_count < 8u || payload_pixel_count > (u64)USIZE_MAX_VALUE / 8u) {
         return false;
     }
@@ -3057,7 +3072,10 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                         overlay_selector.seed, block, actual_block_length,
                         overlay_selector.overlay_erasure_budget,
                         overlay_selector.masks.data +
-                            (usize)block * overlay_selector.block_total)) {
+                            (usize)block * overlay_selector.block_total,
+                        overlay_selector.has_password_shuffle_key
+                            ? overlay_selector.password_shuffle_key
+                            : 0)) {
                     masks_valid = false;
                     break;
                 }
@@ -3084,7 +3102,10 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
                                  (usize)block * overlay_selector.block_total;
         } else if (!makocode::palette_symbol_selector_mask(
                        overlay_selector.seed, block, actual_block_length,
-                       overlay_selector.overlay_erasure_budget, selector_mask)) {
+                       overlay_selector.overlay_erasure_budget, selector_mask,
+                       overlay_selector.has_password_shuffle_key
+                           ? overlay_selector.password_shuffle_key
+                           : 0)) {
             return false;
         }
         for (u32 segment = 0u; segment < 2u; ++segment) {
@@ -3274,15 +3295,19 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
         overlay_selector.placement_seed = mapping_override
             ? mapping_override->symbol_placement_seed
             : makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
-        if (selector_password_length &&
-            !makocode::palette_symbol_password_selector_seed(selector_password,
-                                                             selector_password_length,
-                                                             overlay_selector.seed)) {
-            console_line(2, "encode: failed to derive password-keyed overlay selector");
-            return false;
-        }
         if (selector_password_length) {
-            overlay_selector.placement_seed = overlay_selector.seed;
+            makocode::PaletteSymbolPasswordContext password_context;
+            const u8* shuffle_key = 0;
+            if (!password_context.derive(selector_password, selector_password_length) ||
+                !(shuffle_key = password_context.shuffle_key())) {
+                console_line(2, "encode: failed to derive password-keyed overlay selector");
+                return false;
+            }
+            memcpy(overlay_selector.password_shuffle_key, shuffle_key,
+                   sizeof(overlay_selector.password_shuffle_key));
+            overlay_selector.has_password_shuffle_key = true;
+            overlay_selector.placement_seed =
+                makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED;
         }
         overlay_selector.overlay_erasure_budget = tile.overlay_erasure_budget;
         overlay_selector.block_total = (u16)profile.block_length;

@@ -608,7 +608,6 @@ struct EccSummary {
     u16 overlay_erasure_budget;
     u16 unknown_error_budget;
     bool palette_symbol_stream;
-    u64 overlay_selector_seed;
     u32 metadata_ecc_minimum_parity_bytes;
 
     EccSummary()
@@ -621,7 +620,6 @@ struct EccSummary {
           overlay_erasure_budget(0u),
           unknown_error_budget(0u),
           palette_symbol_stream(false),
-          overlay_selector_seed(0u),
           metadata_ecc_minimum_parity_bytes(2u) {}
 };
 } // namespace makocode
@@ -681,7 +679,7 @@ public:
     PaletteSymbolPasswordContext& operator=(const PaletteSymbolPasswordContext&) = delete;
 
     bool derive(const char* password, usize password_length);
-    bool selector_seed(u64& seed) const;
+    const u8* shuffle_key() const;
     bool mask(const PaletteSymbolProfile& profile,
               ByteBuffer& symbols,
               bool unmask,
@@ -752,14 +750,12 @@ bool palette_symbol_password_mask(const PaletteSymbolProfile& profile,
                                   usize password_length,
                                   bool unmask,
                                   u64 first_symbol_index = 0u);
-bool palette_symbol_password_selector_seed(const char* password,
-                                           usize password_length,
-                                           u64& seed);
 bool palette_symbol_selector_mask(u64 seed,
                                  u64 block_index,
                                  u32 block_length,
                                  u32 selected_count,
-                                 u8* mask_out);
+                                 u8* mask_out,
+                                 const u8* password_shuffle_key = 0);
 u64 palette_symbol_interleaved_offset(u64 block_index,
                                       u32 position,
                                       u64 block_count,
@@ -1032,6 +1028,7 @@ struct ImageMappingConfig {
     u32 custom_palette_base;
     bool custom_palette_valid;
     u64 symbol_placement_seed;
+    const makocode::PaletteSymbolPasswordContext* symbol_placement_password_context;
     bool scatter_payload;
     bool recover_palette;
     const char* recover_limit_text;
@@ -1049,6 +1046,7 @@ struct ImageMappingConfig {
           custom_palette_base(0u),
           custom_palette_valid(false),
           symbol_placement_seed(makocode::PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED),
+          symbol_placement_password_context(0),
           scatter_payload(false),
           recover_palette(false),
           recover_limit_text("4"),
@@ -1814,13 +1812,15 @@ bool build_payload_rank_map(u32 width_pixels,
                                        bool include_metadata_overwrites = false,
                                        u64 symbol_placement_seed = 0u,
                                        PayloadRankMapCache* cache = 0,
-                                       bool scatter_payload = false);
+                                       bool scatter_payload = false,
+                                       const u8* password_shuffle_key = 0);
 bool permute_payload_rank_map(u64 pixel_count,
                               const Values& values,
                               u64 symbol_placement_seed,
                               ByteBuffer& rank_map,
                               u64 payload_pixel_count,
-                              bool scatter_payload = false);
+                              bool scatter_payload = false,
+                              const u8* password_shuffle_key = 0);
 } // namespace MetadataTile
 
 bool arguments_request_help(int arg_count, char** args);
