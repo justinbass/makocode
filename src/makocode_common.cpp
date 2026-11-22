@@ -11251,17 +11251,17 @@ namespace MetadataTile {
                         u32 neighbor_y = y + (direction == 1u ? 1u : 0u);
                         if (neighbor_x >= width_pixels || neighbor_y >= height_pixels) continue;
                         usize neighbor_index = ((usize)neighbor_y * width_pixels + neighbor_x) * 3u;
-                        u32 max_channel_difference = 0u;
+                        bool similar_neighbor = true;
                         for (u32 channel = 0u; channel < 3u; ++channel) {
                             int difference = (int)pixel_data_rgb[index + channel] -
                                              (int)pixel_data_rgb[neighbor_index + channel];
-                            u32 magnitude = (u32)(difference < 0 ? -difference : difference);
-                            if (magnitude > max_channel_difference) {
-                                max_channel_difference = magnitude;
+                            if (difference < -24 || difference > 24) {
+                                similar_neighbor = false;
+                                break;
                             }
                         }
                         ++neighbor_count;
-                        if (max_channel_difference <= 24u) ++similar_neighbor_count;
+                        if (similar_neighbor) ++similar_neighbor_count;
                     }
                 }
             }

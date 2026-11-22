@@ -5179,6 +5179,23 @@ static std::vector<TestCase> build_cases() {
         cases.push_back({id, description, [test](const fs::path&) { run_roundtrip(test); }});
     };
     RoundTrip r;
+    cases.push_back({"0139_byte_buffer_append",
+                     "ByteBuffer append handles aliasing and size overflow",
+                     [](const fs::path&) {
+                         makocode::ByteBuffer buffer;
+                         for (u8 value = 0u; value < 64u; ++value) {
+                             require(buffer.push(value), "ByteBuffer setup allocation failed");
+                         }
+                         require(buffer.append_bytes(buffer.data + 8u, 56u),
+                                 "ByteBuffer self-append failed");
+                         require(buffer.size == 120u, "ByteBuffer self-append size changed");
+                         for (usize i = 0u; i < 56u; ++i) {
+                             require(buffer.data[64u + i] == (u8)(i + 8u),
+                                     "ByteBuffer self-append contents changed");
+                         }
+                         require(!buffer.append_bytes(buffer.data, USIZE_MAX_VALUE),
+                                 "ByteBuffer accepted an overflowing append length");
+                     }});
     cases.push_back({"0136_chacha20_poly1305_vectors",
                      "RFC 8439 authenticated encryption vectors",
                      [](const fs::path&) { chacha20_poly1305_vector_case(); }});

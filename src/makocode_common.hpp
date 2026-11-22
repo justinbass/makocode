@@ -7,6 +7,7 @@
 #ifndef MAKOCODE_COMMON_HPP
 #define MAKOCODE_COMMON_HPP
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <math.h>
 #include "makocode_platform.hpp"
@@ -157,8 +158,10 @@ struct ByteBuffer {
     u8*   data;
     usize size;
     usize capacity;
+    bool  clear_on_release;
 
-    ByteBuffer() : data(0), size(0), capacity(0) {}
+    explicit ByteBuffer(bool clear_contents = false)
+        : data(0), size(0), capacity(0), clear_on_release(clear_contents) {}
 
     ~ByteBuffer() {
         release();
@@ -166,6 +169,12 @@ struct ByteBuffer {
 
     void release() {
         if (data) {
+            if (clear_on_release) {
+                volatile u8* clear = data;
+                for (usize i = 0u; i < capacity; ++i) {
+                    clear[i] = 0u;
+                }
+            }
             makocode_platform_free(data);
             data = 0;
         }
@@ -183,6 +192,12 @@ struct ByteBuffer {
         }
         for (usize i = 0; i < size; ++i) {
             new_data[i] = data[i];
+        }
+        if (data && clear_on_release) {
+            volatile u8* clear = data;
+            for (usize i = 0u; i < capacity; ++i) {
+                clear[i] = 0u;
+            }
         }
         makocode_platform_free(data);
         data = new_data;
@@ -217,12 +232,31 @@ struct ByteBuffer {
         if (!source || length == 0u) {
             return true;
         }
+        if (length > USIZE_MAX_VALUE - size) {
+            return false;
+        }
+
+        bool source_is_internal = false;
+        usize source_offset = 0u;
+        if (data) {
+            const uintptr_t source_address = (uintptr_t)source;
+            const uintptr_t data_address = (uintptr_t)data;
+            if (source_address >= data_address && source_address - data_address <= capacity) {
+                source_offset = (usize)(source_address - data_address);
+                if (source_offset > size || length > size - source_offset) {
+                    return false;
+                }
+                source_is_internal = true;
+            }
+        }
+
         if (!ensure(size + length)) {
             return false;
         }
-        for (usize i = 0; i < length; ++i) {
-            data[size + i] = source[i];
+        if (source_is_internal) {
+            source = data + source_offset;
         }
+        memcpy(data + size, source, length);
         size += length;
         return true;
     }
@@ -237,10 +271,7 @@ struct ByteBuffer {
 };
 
 struct SecretBuffer : ByteBuffer {
-    ~SecretBuffer() {
-        volatile u8* clear = data;
-        for (usize i = 0u; i < capacity; ++i) clear[i] = 0u;
-    }
+    SecretBuffer() : ByteBuffer(true) {}
 };
 } // namespace makocode
 
