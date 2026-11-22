@@ -41,6 +41,8 @@ int makocode_platform_create_file(const char* path, int mode);
 int makocode_platform_close(int fd);
 int makocode_platform_unlink(const char* path);
 int makocode_platform_stat(const char* path, MakoPlatformFileInfo* info);
+// Returns 1 for a symlink, 0 for another existing path, -1 if missing, -2 on error.
+int makocode_platform_is_symlink(const char* path);
 int makocode_platform_create_directory(const char* path);
 MakoPlatformDirectory* makocode_platform_open_directory(const char* path);
 int makocode_platform_read_directory(MakoPlatformDirectory* directory,

@@ -1,3 +1,9 @@
+/*
+ * CLI command dispatch.
+ * Copyright (C) 2026 Justin Alan Bass.
+ * SPDX-License-Identifier: AGPL-3.0-or-later; see LICENSE.
+ * No warranty; see LICENSE.
+ */
 #include "makocode_common.hpp"
 int command_encode(int arg_count, char** args);
 int command_decode(int arg_count, char** args);

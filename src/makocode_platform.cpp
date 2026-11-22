@@ -70,11 +70,19 @@ extern "C" void makocode_platform_free(void* ptr) {
 }
 
 extern "C" long makocode_platform_read(int fd, void* buffer, unsigned long count) {
-    return (long)::read(fd, buffer, (size_t)count);
+    ssize_t result;
+    do {
+        result = ::read(fd, buffer, (size_t)count);
+    } while (result < 0 && errno == EINTR);
+    return (long)result;
 }
 
 extern "C" long makocode_platform_write(int fd, const void* buffer, unsigned long count) {
-    return (long)::write(fd, buffer, (size_t)count);
+    ssize_t result;
+    do {
+        result = ::write(fd, buffer, (size_t)count);
+    } while (result < 0 && errno == EINTR);
+    return (long)result;
 }
 
 extern "C" int makocode_platform_open(const char* path, int flags, ...) {
@@ -115,6 +123,15 @@ extern "C" int makocode_platform_stat(const char* path, MakoPlatformFileInfo* in
     return 0;
 }
 
+extern "C" int makocode_platform_is_symlink(const char* path) {
+    if (!path) return -2;
+    struct stat native_info;
+    if (::lstat(path, &native_info) != 0) {
+        return errno == ENOENT || errno == ENOTDIR ? -1 : -2;
+    }
+    return S_ISLNK(native_info.st_mode) ? 1 : 0;
+}
+
 extern "C" int makocode_platform_create_directory(const char* path) {
     if (::mkdir(path, 0755) == 0) return 0;
     return errno == EEXIST ? 1 : -1;
@@ -136,8 +153,9 @@ extern "C" MakoPlatformDirectory* makocode_platform_open_directory(const char* p
 extern "C" int makocode_platform_read_directory(MakoPlatformDirectory* directory,
                                                  MakoPlatformDirectoryEntry* entry) {
     if (!directory || !entry) return -1;
+    errno = 0;
     struct dirent* native_entry = ::readdir(directory->handle);
-    if (!native_entry) return 0;
+    if (!native_entry) return errno ? -1 : 0;
     size_t length = strlen(native_entry->d_name);
     if (length >= sizeof(entry->name)) return -1;
     memcpy(entry->name, native_entry->d_name, length + 1u);

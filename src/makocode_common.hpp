@@ -183,6 +183,12 @@ struct ByteBuffer {
     }
 
     bool reserve(usize new_capacity) {
+        if (new_capacity < size) {
+            return false;
+        }
+        if (new_capacity <= capacity) {
+            return true;
+        }
         if (new_capacity > (USIZE_MAX_VALUE / 2u)) {
             return false;
         }
@@ -190,9 +196,7 @@ struct ByteBuffer {
         if (!new_data) {
             return false;
         }
-        for (usize i = 0; i < size; ++i) {
-            new_data[i] = data[i];
-        }
+        if (size) memcpy(new_data, data, size);
         if (data && clear_on_release) {
             volatile u8* clear = data;
             for (usize i = 0u; i < capacity; ++i) {
@@ -221,7 +225,7 @@ struct ByteBuffer {
     }
 
     bool push(u8 value) {
-        if (!ensure(size + 1u)) {
+        if (size == USIZE_MAX_VALUE || !ensure(size + 1u)) {
             return false;
         }
         data[size++] = value;
@@ -229,9 +233,10 @@ struct ByteBuffer {
     }
 
     bool append_bytes(const u8* source, usize length) {
-        if (!source || length == 0u) {
+        if (length == 0u) {
             return true;
         }
+        if (!source) return false;
         if (length > USIZE_MAX_VALUE - size) {
             return false;
         }

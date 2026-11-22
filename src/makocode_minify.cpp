@@ -13,8 +13,8 @@ static bool read_file_into_buffer(const char* path, makocode::ByteBuffer& buffer
     }
     u8 chunk[4096];
     while (1) {
-        int read_result = makocode_platform_read(fd, chunk, sizeof(chunk));
-        if (read_result < 0) {
+        long read_result = makocode_platform_read(fd, chunk, sizeof(chunk));
+        if (read_result < 0 || (unsigned long)read_result > sizeof(chunk)) {
             makocode_platform_close(fd);
             buffer.release();
             return false;
@@ -28,7 +28,10 @@ static bool read_file_into_buffer(const char* path, makocode::ByteBuffer& buffer
             return false;
         }
     }
-    makocode_platform_close(fd);
+    if (makocode_platform_close(fd) != 0) {
+        buffer.release();
+        return false;
+    }
     return true;
 }
 
@@ -487,9 +490,7 @@ int command_minify(int arg_count, char** args) {
                  write_all_fd(ppm_fd, (const u8*)ppm_header, (usize)ppm_header_length);
         u64 page_start = page_index * page_capacity;
         for (u64 y = 0u; ppm_ok && y < image_height; ++y) {
-            for (usize i = 0u; i < scanline_size; ++i) {
-                scanline[i] = 255u;
-            }
+            memset(scanline, 255, scanline_size);
             if (y < rows * cell_height) {
                 u64 glyph_row = y % cell_height;
                 u64 text_row = y / cell_height;

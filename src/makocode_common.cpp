@@ -1369,6 +1369,7 @@ static bool ascii_equals_token_ignore_case(const char* text,
 }
 
 bool ascii_to_u64(const char* text, usize length, u64* out_value) {
+    if (!text || !out_value || !length) return false;
     u64 value = 0u;
     for (usize i = 0u; i < length; ++i) {
         char c = text[i];
@@ -1376,11 +1377,8 @@ bool ascii_to_u64(const char* text, usize length, u64* out_value) {
             return false;
         }
         u64 digit = (u64)(c - '0');
-        u64 next = value * 10u + digit;
-        if (next < value) {
-            return false;
-        }
-        value = next;
+        if (value > (U64_MAX_VALUE - digit) / 10u) return false;
+        value = value * 10u + digit;
     }
     *out_value = value;
     return true;
@@ -1521,22 +1519,16 @@ namespace makocode {
 namespace image {
 
 
-;
 
 
-;
 
 
-;
 
 
-;
 
 
-;
 
 
-;
 
 static void set_diag_message(LoadDiagnostics* diag, const char* text)
 {
@@ -1599,8 +1591,8 @@ static bool read_entire_file(const char* path,
         }
         unsigned long request = (unsigned long)(capacity - total);
         if (request > 65536ul) request = 65536ul;
-        int read_result = makocode_platform_read(fd, data + total, request);
-        if (read_result < 0) {
+        long read_result = makocode_platform_read(fd, data + total, request);
+        if (read_result < 0 || (unsigned long)read_result > request) {
             makocode_platform_free(data);
             makocode_platform_close(fd);
             set_diag_message(diag, "read failure");
@@ -1611,11 +1603,16 @@ static bool read_entire_file(const char* path,
         }
         total += (usize)read_result;
     }
-    makocode_platform_close(fd);
+    int close_result = makocode_platform_close(fd);
 
     if (!total) {
         makocode_platform_free(data);
         set_diag_message(diag, "empty file");
+        return false;
+    }
+    if (close_result != 0) {
+        makocode_platform_free(data);
+        set_diag_message(diag, "failed to close file");
         return false;
     }
 
@@ -1873,10 +1870,8 @@ bool analyze_cut_levels(const Histogram& histogram,
 }
 
 
-;
 
 
-;
 
 static unsigned char sample_pixel(const ImageBuffer& image, int x, int y)
 {
@@ -2051,7 +2046,6 @@ bool find_corners(const ImageBuffer& image,
 } /* namespace image */
 
 
-;
 
 static bool append_fiducial_csv_row(makocode::ByteBuffer& csv,
                                     u64 page,
@@ -6023,7 +6017,6 @@ MY_STDAPI LzmaUncompress(unsigned char *dest, size_t  *destLen, const unsigned c
 /* ===== End Embedded LZMA SDK ===== */
 
 
-;
 
 bool remove_border_dirt(image::ImageBuffer& image,
                         unsigned char fill_threshold,
@@ -6161,32 +6154,20 @@ static inline u32 rotr32(u32 value, u32 amount) {
 }
 
 
-;
-
-;
-
-;
-
-;
-
-;
-
-;
-
-;
-
-;
-
-;
 
 
-;
 
 
-;
 
 
-;
+
+
+
+
+
+
+
+
 
 static void sha256_process_block(Sha256State& state, const u8* block) {
     u32 w[16];
@@ -6526,16 +6507,11 @@ static bool chacha20_xor(const u8 key[32],
 }
 
 __extension__ 
-;
-
-;
-
-;
-
-;
 
 
-;
+
+
+
 
 static void poly1305_init_state(Poly1305State& state, const u8 key[32]) {
     u128 r = (u128)read_le_u64(key) |
@@ -6822,7 +6798,6 @@ static bool chacha20_poly1305_decrypt(const u8* key,
 }
 
 
-;
 
 static bool stealth_derive_key_nonce(const u8 base_key[32],
                                      const u8 nonce_seed[12],
@@ -8116,21 +8091,16 @@ void byte_buffer_move(makocode::ByteBuffer& dest, makocode::ByteBuffer& src) {
 }
 
 
-;
 
 bool palette_colors_equal(const PaletteColor& a, const PaletteColor& b) {
     return a.r == b.r && a.g == b.g && a.b == b.b;
 }
 
 
-;
-
-;
-
-;
 
 
-;
+
+
 
 static u64 estimate_square_page_from_image(u64 image_width, u64 image_height) {
     double best_score = 1e9;
@@ -8170,21 +8140,16 @@ static u64 estimate_square_page_from_image(u64 image_width, u64 image_height) {
 }
 
 
-;
-
-;
 
 
-;
 
 
-;
+
 
 FiducialGridDefaults g_fiducial_defaults;
 bool g_encode_metadata_disabled = false;
 
 
-;
 
 static u32 compute_fiducial_grid_count(u32 extent_pixels, u32 spacing_pixels) {
     if (extent_pixels < FIDUCIAL_MARKER_SIZE_PIXELS || spacing_pixels == 0u) return 0u;
@@ -8215,7 +8180,6 @@ static double fiducial_lattice_center(u32 index,
 }
 
 
-;
 
 bool metadata_schema_is_current(u32 schema_version) {
     return schema_version == CURRENT_TILE_SCHEMA_VERSION;
@@ -8246,13 +8210,10 @@ bool compute_fiducial_marker_mask(u32 width_pixels,
                                          u32 spacing_override);
 
 
-;
 
 
-;
 
 
-;
 
 namespace makocode {
 static const ReedSolomonTables& rs_tables() {
@@ -8840,29 +8801,19 @@ namespace MetadataTile {
     using namespace makocode;
 
     
-;
     static thread_local u32 g_decode_palette_override_count = 0u;
 
     // Scratch sampling window. The encoded metadata footprint is derived from
     // its content; this size is only used by the existing scan samplers.
     
-;
     
-;
     
-;
     
-;
     
-;
     
-;
     
-;
     
-;
     
-;
 
     u32 palette_tag_x0(u32 palette_count) {
         return (TILE_SIDE - (palette_count + 1u)) / 2u;
@@ -8872,7 +8823,6 @@ namespace MetadataTile {
         return (TILE_SIDE - 8u) / 2u;
     }
     
-;
 
     static bool write_compact_u16(BitWriter& writer, u32 value, bool zero_short = false) {
         if (value > 0xFFFFu) return false;
@@ -9046,7 +8996,6 @@ namespace MetadataTile {
     }
 
     
-;
 
     static bool makocode_tag_bit(u32 index) {
         if (index >= 32u) return false;
@@ -9247,7 +9196,6 @@ namespace MetadataTile {
     }
 
     
-;
 
     static bool derive_schema_payload_layout(Values& values) {
         if (values.schema_version != TILE_SCHEMA_VERSION ||
@@ -9546,7 +9494,6 @@ namespace MetadataTile {
     }
 
     
-;
 
     Placement compute_center_tile_placement(u32 width_pixels,
                                                    u32 data_height_pixels) {
@@ -10754,7 +10701,6 @@ namespace MetadataTile {
     }
 
     
-;
 
     static u32 infer_footer_rows_from_affine(const Values& values,
                                              const AffineParams& affine,
@@ -13635,7 +13581,6 @@ namespace MetadataTile {
 } // namespace MetadataTile
 
 
-;
 
 #define FOOTER_GLYPH_BLANK_ROW "00000"
 #define FOOTER_GLYPH_SIMPLE(symbol, r0, r1, r2, r3, r4, r5, r6) \
@@ -13644,14 +13589,12 @@ namespace MetadataTile {
     {symbol, {r0, r1, r2, r3, r4, r5, r6, r7}}
 
 
-;
 
 #undef FOOTER_GLYPH_CUSTOM
 #undef FOOTER_GLYPH_SIMPLE
 #undef FOOTER_GLYPH_BLANK_ROW
 
 
-;
 
 const GlyphPattern* footer_lookup_glyph(char c) {
     for (usize i = 0u; i < FOOTER_GLYPH_COUNT; ++i) {
@@ -13770,13 +13713,10 @@ u8 color_mode_samples_per_pixel(u8 mode) {
 }
 
 
-;
 
 
-;
 
 
-;
 
 static bool palette_for_mode(u8 mode, const PaletteColor*& colors, u32& count) {
     if (mode == 1u) {
@@ -13800,16 +13740,12 @@ static bool palette_for_mode(u8 mode, const PaletteColor*& colors, u32& count) {
 }
 
 
-;
 
 
-;
 
 
-;
 
 
-;
 
 static bool palette_recovery_candidates_equal(const PaletteRecoveryCandidate& left,
                                               const PaletteRecoveryCandidate& right) {
@@ -14296,14 +14232,14 @@ u8 rotate_right_u8(u8 value, u8 amount) {
 }
 
 bool write_all_fd(int fd, const u8* data, usize length) {
-    if (!data) {
+    if (!data && length) {
         return false;
     }
     usize written = 0u;
     while (written < length) {
         unsigned long slice = (unsigned long)(length - written);
-        int result = makocode_platform_write(fd, data + written, slice);
-        if (result <= 0) {
+        long result = makocode_platform_write(fd, data + written, slice);
+        if (result <= 0 || (unsigned long)result > slice) {
             return false;
         }
         written += (usize)result;
@@ -14320,8 +14256,7 @@ bool write_bytes_to_file(const char* path, const u8* data, usize length) {
     if (length) {
         ok = write_all_fd(fd, data, length);
     }
-    makocode_platform_close(fd);
-    return ok;
+    return makocode_platform_close(fd) == 0 && ok;
 }
 
 static bool write_ppm_with_fiducials_to_file(const char* path,
@@ -14382,10 +14317,8 @@ bool write_buffer_to_file(const char* path,
 
 
 
-;
 
 
-;
 
 static bool compute_centered_data_rectangle(u32 page_width,
                                             u32 page_height,
@@ -28997,7 +28930,6 @@ bool compute_bits_per_page(const ImageMappingConfig& mapping,
 }
 
 
-;
 
 bool build_page_filename(makocode::ByteBuffer& buffer,
                                 const char* timestamp,
@@ -30081,8 +30013,8 @@ bool read_entire_stdin(makocode::ByteBuffer& buffer) {
         if (!buffer.ensure(total + chunk)) {
             return false;
         }
-        int read_result = makocode_platform_read(0, buffer.data + total, chunk);
-        if (read_result < 0) {
+        long read_result = makocode_platform_read(0, buffer.data + total, chunk);
+        if (read_result < 0 || (unsigned long)read_result > chunk) {
             return false;
         }
         if (read_result == 0) {
@@ -30108,8 +30040,8 @@ bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
             makocode_platform_close(fd);
             return false;
         }
-        int read_result = makocode_platform_read(fd, buffer.data + total, chunk);
-        if (read_result < 0) {
+        long read_result = makocode_platform_read(fd, buffer.data + total, chunk);
+        if (read_result < 0 || (unsigned long)read_result > chunk) {
             makocode_platform_close(fd);
             return false;
         }
@@ -30121,16 +30053,12 @@ bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
         buffer.size = total;
     }
     buffer.size = total;
-    makocode_platform_close(fd);
-    
-    return true;
+    return makocode_platform_close(fd) == 0;
 }
 
 
-;
 
 
-;
 
 bool archive_init(ArchiveBuildContext& ctx) {
     ctx.buffer.release();
@@ -30576,7 +30504,6 @@ bool is_safe_archive_path(const char* path, usize length) {
 }
 
 
-;
 
 bool archive_parse(const makocode::ByteBuffer& archive,
                           ArchiveEntryCallback callback,
@@ -30827,6 +30754,24 @@ bool join_output_path(const char* base_dir,
     return true;
 }
 
+static bool output_path_has_no_symlink_components(const char* path) {
+    usize length = ascii_length(path);
+    if (!length) return false;
+    makocode::ByteBuffer component;
+    if (!component.ensure(length + 1u)) return false;
+    memcpy(component.data, path, length);
+    component.data[length] = 0u;
+    for (usize i = 1u; i <= length; ++i) {
+        if (component.data[i] != '/' && component.data[i] != 0u) continue;
+        u8 saved = component.data[i];
+        component.data[i] = 0u;
+        int symlink = makocode_platform_is_symlink((const char*)component.data);
+        component.data[i] = saved;
+        if (symlink == 1 || symlink < -1) return false;
+    }
+    return true;
+}
+
 bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
                                         const char* output_dir,
                                         bool allow_partial) {
@@ -30841,7 +30786,9 @@ bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
         makocode::ByteBuffer output_path;
         if (entry_type == 2u) {
             if (!join_output_path(destination, "payload.bin", output_path) ||
+                !output_path_has_no_symlink_components((const char*)output_path.data) ||
                 !ensure_parent_directories((const char*)output_path.data) ||
+                !output_path_has_no_symlink_components((const char*)output_path.data) ||
                 !write_bytes_to_file((const char*)output_path.data, file_data, file_size)) {
                 console_line(2, "decode: failed to write anonymous payload.bin");
                 return false;
@@ -30849,17 +30796,25 @@ bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
             return true;
         }
         if (!join_output_path(destination, entry_path, output_path)) return false;
+        if (!output_path_has_no_symlink_components((const char*)output_path.data)) {
+            console_line(2, "decode: refusing an archive output path with symlink components");
+            return false;
+        }
         if (entry_type == 1u) {
             if (!ensure_directory_tree((const char*)output_path.data)) {
                 console_write(2, "decode: failed to create directory ");
                 console_line(2, (const char*)output_path.data);
                 return false;
             }
-            return true;
+            return output_path_has_no_symlink_components((const char*)output_path.data);
         }
         if (!ensure_parent_directories((const char*)output_path.data)) {
             console_write(2, "decode: failed to prepare directories for ");
             console_line(2, (const char*)output_path.data);
+            return false;
+        }
+        if (!output_path_has_no_symlink_components((const char*)output_path.data)) {
+            console_line(2, "decode: refusing an archive output path with symlink components");
             return false;
         }
         if (!write_bytes_to_file((const char*)output_path.data,

@@ -1,10 +1,8 @@
 # MakoCode🐾
 
-A standard for color barcode printing with high density, designed for long-term archiving on paper or film. Self-contained clean-room implementation with no external codec dependencies.
+A standard for dense color barcodes, designed for long-term archiving on paper or film. The C++17 implementation is self-contained and links no external codec libraries; its LZMA codec sources are included in the repository.
 
 Stubborn and dense as a Shiba, with no fluff. Lovingly named after my Shiba Inu, Mako 🐕, and about as silly as him.
-
-Written entirely with gpt (totally not vibecoded).
 
 ## License
 
@@ -14,7 +12,7 @@ complete license text.
 
 ## Dependencies
 
-The application is a standalone C++17 program. Building and running the CLI tests requires a C++17 compiler and GNU Make. The test runner uses POSIX process APIs to invoke the CLI.
+The application is a standalone C++17 program. Building and running the CLI tests requires a C++17 compiler and GNU Make. The host adapter and test runner use POSIX APIs; codec and archive processing do not depend on third-party libraries.
 
 ### Freestanding integration
 
@@ -72,7 +70,7 @@ Restore uses every matching chunk it can find in the bundle and supplied bases. 
 
 Prefer simple, well-documented formats: UTF-8 `.txt` for text, binary P6 `.ppm` for still images, and YUV4MPEG2 `.y4m` for video. PPM and YUV4MPEG2 store uncompressed samples; MakoCode compresses the archive payload with LZMA. Keep a short note with encoding, dimensions, frame rate, and color/chroma settings, and retain checksums separately. Assume archivists can interpret the C++ source and build notes without preserving the compiler's source. Avoid nonstandard file formats unless their complete decoder/codec source or format specification is archived with the data. These choices favor straightforward decoding, though uncompressed media can require substantial space. See the [PPM specification](https://netpbm.sourceforge.net/doc/ppm.html) and [YUV4MPEG2 format notes](https://manpages.debian.org/unstable/mjpegtools/yuv4mpeg.5.en.html).
 
-Decode restores the original file tree by default. `--decoded-file` writes a timestamped `makocode_decoded_YYYYMMDDHHMMSS.txt` containing page and payload metadata and escaped archive entries. `--decoded-stdout` prints the same content without creating files; it cannot be combined with `--decoded-file` or `--debug`. Archive paths cannot be absolute or contain `..`. Extraction may follow symlinks in the output directory; use a fresh, trusted directory for untrusted input.
+Decode restores the original file tree by default. `--decoded-file` writes a timestamped `makocode_decoded_YYYYMMDDHHMMSS.txt` containing page and payload metadata and escaped archive entries. `--decoded-stdout` prints the same content without creating files; it cannot be combined with `--decoded-file` or `--debug`. Archive paths cannot be absolute or contain `..`; extraction also rejects paths with existing symlink components. Use a fresh, trusted directory when extracting untrusted input because filesystem paths can change during extraction.
 
 ### Encryption randomness
 

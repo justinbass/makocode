@@ -3783,6 +3783,42 @@ static void cli_decoder_paths_case(){
     ArchiveBuildContext traversal;require(archive_init(traversal)&&archive_add_directory(traversal,"../traversal_escape")&&archive_finalize(traversal),"traversal archive setup failed");
     require(!unpack_archive_to_directory(traversal.buffer,archive_out.c_str()),"archive directory traversal accepted");
     struct stat outside={};require(stat((archive_out.string()+"/../traversal_escape").c_str(),&outside)!=0,"traversal path escaped output");
+    fs::path symlink_target=work/"symlink_target";
+    fs::create_directories(symlink_target);
+    fs::create_symlink(symlink_target,archive_out/"linked");
+    ArchiveBuildContext symlink_escape;
+    const u8 secret_contents[]={'n','o','t','-','o','u','t','s','i','d','e'};
+    require(archive_init(symlink_escape)&&
+                archive_add_file(symlink_escape,"linked/escape.txt",secret_contents,sizeof(secret_contents))&&
+                archive_finalize(symlink_escape),
+            "symlink archive setup failed");
+    require(!unpack_archive_to_directory(symlink_escape.buffer,archive_out.c_str()),
+            "archive extraction followed an output-directory symlink");
+    require(!fs::exists(symlink_target/"escape.txt"),
+            "archive extraction wrote through an output-directory symlink");
+    fs::path linked_output=work/"linked_output";
+    fs::create_symlink(symlink_target,linked_output);
+    ArchiveBuildContext root_symlink_archive;
+    require(archive_init(root_symlink_archive)&&
+                archive_add_file(root_symlink_archive,"root.txt",secret_contents,sizeof(secret_contents))&&
+                archive_finalize(root_symlink_archive),
+            "root-symlink archive setup failed");
+    require(!unpack_archive_to_directory(root_symlink_archive.buffer,linked_output.c_str()),
+            "archive extraction accepted a symlink output root");
+    require(!fs::exists(symlink_target/"root.txt"),
+            "archive extraction wrote through a symlink output root");
+    fs::path existing_target=symlink_target/"existing.txt";
+    write_file(existing_target,"original contents");
+    fs::create_symlink(existing_target,archive_out/"final.txt");
+    ArchiveBuildContext final_symlink_archive;
+    require(archive_init(final_symlink_archive)&&
+                archive_add_file(final_symlink_archive,"final.txt",secret_contents,sizeof(secret_contents))&&
+                archive_finalize(final_symlink_archive),
+            "final-symlink archive setup failed");
+    require(!unpack_archive_to_directory(final_symlink_archive.buffer,archive_out.c_str()),
+            "archive extraction accepted a symlink final path");
+    require(read_file(existing_target)=="original contents",
+            "archive extraction overwrote a symlink target");
     makocode::image::ImageBuffer border={};border.width=border.height=7;border.pixels=static_cast<unsigned char*>(std::malloc(49));require(border.pixels!=nullptr,"border fixture allocation failed");std::memset(border.pixels,255,49);border.pixels[21]=0;border.pixels[24]=0;makocode::ByteBuffer mask;
     bool border_ok=makocode::remove_border_dirt(border,200,&mask,1);require(border_ok&&mask.size==49&&border.pixels[21]==255&&mask.data[21]==255&&border.pixels[24]==0&&mask.data[24]==0,"border dirt cleanup mismatch");mask.release();makocode::image::release(border);
     std::array<unsigned char,4096> source{};for(usize i=0;i<source.size();++i){usize n=i%1024;source[i]=static_cast<unsigned char>(n*73u+n/17u);}std::array<unsigned char,8192> compressed{};unsigned char properties[LZMA_PROPS_SIZE];size_t compressed_size=compressed.size(),properties_size=sizeof(properties);
@@ -5180,7 +5216,7 @@ static std::vector<TestCase> build_cases() {
     };
     RoundTrip r;
     cases.push_back({"0139_byte_buffer_append",
-                     "ByteBuffer append handles aliasing and size overflow",
+                     "ByteBuffer append validates aliases, capacity, and null input",
                      [](const fs::path&) {
                          makocode::ByteBuffer buffer;
                          for (u8 value = 0u; value < 64u; ++value) {
@@ -5195,6 +5231,29 @@ static std::vector<TestCase> build_cases() {
                          }
                          require(!buffer.append_bytes(buffer.data, USIZE_MAX_VALUE),
                                  "ByteBuffer accepted an overflowing append length");
+                         require(!buffer.append_bytes(nullptr, 1u),
+                                 "ByteBuffer accepted a null non-empty append");
+                         require(!buffer.reserve(buffer.size - 1u),
+                                 "ByteBuffer accepted capacity below its current size");
+                         require(buffer.reserve(buffer.capacity),
+                                 "ByteBuffer rejected an existing capacity");
+                     }});
+    cases.push_back({"0140_ascii_u64_boundaries",
+                     "Unsigned decimal parsing rejects overflow",
+                     [](const fs::path&) {
+                         u64 value = 0u;
+                         const char maximum[] = "18446744073709551615";
+                         const char overflow[] = "18446744073709551616";
+                         const char wrapped[] = "36893488147419103231";
+                         require(ascii_to_u64(maximum, sizeof(maximum) - 1u, &value) &&
+                                     value == U64_MAX_VALUE,
+                                 "Unsigned decimal parser rejected UINT64_MAX");
+                         require(!ascii_to_u64(overflow, sizeof(overflow) - 1u, &value),
+                                 "Unsigned decimal parser accepted UINT64_MAX + 1");
+                         require(!ascii_to_u64(wrapped, sizeof(wrapped) - 1u, &value),
+                                 "Unsigned decimal parser accepted a wrapped value");
+                         require(!ascii_to_u64("", 0u, &value),
+                                 "Unsigned decimal parser accepted an empty token");
                      }});
     cases.push_back({"0136_chacha20_poly1305_vectors",
                      "RFC 8439 authenticated encryption vectors",
