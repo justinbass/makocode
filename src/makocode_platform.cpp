@@ -138,6 +138,10 @@ extern "C" int makocode_platform_create_directory(const char* path) {
 }
 
 extern "C" MakoPlatformDirectory* makocode_platform_open_directory(const char* path) {
+#ifdef MAKOCODE_TEST_BUILD
+    const char* failed_path = ::getenv("MAKOCODE_TEST_FAIL_OPEN_DIRECTORY");
+    if (failed_path && path && ::strcmp(failed_path, path) == 0) return 0;
+#endif
     DIR* handle = ::opendir(path);
     if (!handle) return 0;
     MakoPlatformDirectory* directory =

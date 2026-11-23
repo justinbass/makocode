@@ -69,11 +69,10 @@ struct CheckpointChunkIndex {
     usize find_slot(const u8 id[32]) const {
         if (!capacity) return USIZE_MAX_VALUE;
         usize slot = (usize)(hash_id(id) & (u64)(capacity - 1u));
-        for (usize probes = 0u; probes < capacity; ++probes) {
+        for (;;) {
             if (!entries[slot].used || memcmp(entries[slot].id, id, 32u) == 0) return slot;
             slot = (slot + 1u) & (capacity - 1u);
         }
-        return USIZE_MAX_VALUE;
     }
 
     bool grow() {
