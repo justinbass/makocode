@@ -2816,9 +2816,13 @@ static void checkpoint_restore_case(){
     expect_failure(duplicate_output,id+" duplicate output");require(duplicate_output.err.find("--output may be supplied once")!=std::string::npos,id+": duplicate-output diagnostic changed");
     auto unknown_checkpoint_option=run_cli(work,{"checkpoint","restore","--unknown"},"unknown_checkpoint_option");
     expect_failure(unknown_checkpoint_option,id+" unknown option");require(unknown_checkpoint_option.err.find("unknown option --unknown")!=std::string::npos,id+": unknown-checkpoint-option diagnostic changed");
+    auto unknown_checkpoint_command=run_cli(work,{"checkpoint","invalid"},"unknown_checkpoint_command");
+    expect_failure(unknown_checkpoint_command,id+" unknown command");require(unknown_checkpoint_command.err.find("expected create or restore")!=std::string::npos,id+": unknown-checkpoint-command diagnostic changed");
     fs::create_directories(work/"bundle_output_is_directory");
     auto bundle_write_error=run_cli(work,{"checkpoint","create","--input","current_a","--output","bundle_output_is_directory","--chunk-size","256"},"bundle_write_error");
     expect_failure(bundle_write_error,id+" bundle write failure");require(bundle_write_error.err.find("failed to write bundle")!=std::string::npos,id+": bundle-write diagnostic changed");
+    auto allocation_failure=run_process({test_executable().string(),"--checkpoint-allocation-failure"},work,{},work/"checkpoint_alloc.out",work/"checkpoint_alloc.err");
+    expect_success(allocation_failure,id+" checkpoint allocation failure mode");require(read_file(work/"checkpoint_alloc.err").find("failed to initialize bundle")!=std::string::npos,id+": checkpoint initialization allocation diagnostic changed");
     auto missing_bundle=run_cli(work,{"checkpoint","restore","--input","missing.mcp","--output","missing_bundle_out"},"missing_bundle");
     expect_failure(missing_bundle,id+" missing bundle");require(missing_bundle.err.find("failed to read bundle")!=std::string::npos,id+": missing-bundle read diagnostic changed");
     std::string raw_bundle=read_file(work/"update.mcp");raw_bundle.resize(8u);write_file(work/"truncated_header.mcp",raw_bundle);
@@ -2837,6 +2841,42 @@ static void checkpoint_restore_case(){
     fs::path restored=work/"restored";auto restore=run_cli(work,{"checkpoint","restore","--input", (decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--base",(work/"base_b").string(),"--output",restored.string()},"restore");expect_success(restore,id+" restore");
     for(const auto& name:{"alpha.bin","renamed.bin"})compare_files(work/"current_a"/name,restored/"current_a"/name,id);
     for(const auto& name:{"beta.bin","new.txt"})compare_files(work/"current_b"/name,restored/"current_b"/name,id);
+    std::string valid_bundle=read_file(work/"full.mcp");
+    usize bundle_cursor=sizeof(CHECKPOINT_MAGIC)+16u,path_offset=0u,file_size_offset=0u,chunk_count_offset=0u,first_ref_offset=0u;
+    std::string first_file_path;
+    u64 bundle_entries=read_le_u64((const u8*)valid_bundle.data()+sizeof(CHECKPOINT_MAGIC)+8u);
+    for(u64 entry_index=0u;entry_index<bundle_entries&&bundle_cursor<valid_bundle.size();++entry_index){
+        u8 entry_type=(u8)valid_bundle[bundle_cursor++];u64 entry_path_length=read_le_u64((const u8*)valid_bundle.data()+bundle_cursor);bundle_cursor+=8u;
+        path_offset=bundle_cursor;bundle_cursor+=(usize)entry_path_length;
+        if(entry_type==0u){first_file_path.assign(valid_bundle.data()+path_offset,(usize)entry_path_length);file_size_offset=bundle_cursor;chunk_count_offset=file_size_offset+8u;first_ref_offset=chunk_count_offset+8u;break;}
+    }
+    require(!first_file_path.empty()&&first_ref_offset+41u<=valid_bundle.size(),id+": full checkpoint file record is missing");
+    usize first_data_offset=first_ref_offset+41u;u64 first_ref_length=read_le_u64((const u8*)valid_bundle.data()+first_ref_offset+32u);
+    require((u8)valid_bundle[first_ref_offset+40u]==1u&&first_data_offset+first_ref_length<=valid_bundle.size(),id+": expected embedded first checkpoint chunk");
+    std::vector<std::pair<std::string,std::string>> damaged_bundles;
+    damaged_bundles.push_back({"manifest_file_size",valid_bundle.substr(0u,file_size_offset+4u)});
+    damaged_bundles.push_back({"manifest_chunk_count",valid_bundle.substr(0u,chunk_count_offset+4u)});
+    damaged_bundles.push_back({"chunk_record",valid_bundle.substr(0u,first_ref_offset+40u)});
+    std::string zero_length_bundle=valid_bundle;write_le_u64((u8*)zero_length_bundle.data()+first_ref_offset+32u,0u);damaged_bundles.push_back({"zero_chunk",zero_length_bundle});
+    std::string invalid_kind_bundle=valid_bundle;invalid_kind_bundle[first_ref_offset+40u]=3;damaged_bundles.push_back({"invalid_kind",invalid_kind_bundle});
+    std::string truncated_chunk_bundle=valid_bundle;truncated_chunk_bundle.resize(first_data_offset+(usize)(first_ref_length/2u));damaged_bundles.push_back({"embedded_chunk",truncated_chunk_bundle});
+    std::string manifest_tail_bundle=valid_bundle;write_le_u64((u8*)manifest_tail_bundle.data()+file_size_offset,read_le_u64((const u8*)manifest_tail_bundle.data()+file_size_offset)+1u);damaged_bundles.push_back({"manifest_tail",manifest_tail_bundle});
+    std::string overflow_bundle=valid_bundle;u64 huge_ref=(u64)USIZE_MAX_VALUE/2u+1u;
+    write_le_u64((u8*)overflow_bundle.data()+chunk_count_offset,2u);write_le_u64((u8*)overflow_bundle.data()+first_ref_offset+32u,huge_ref);overflow_bundle[first_ref_offset+40u]=0;
+    usize second_ref_offset=first_data_offset;overflow_bundle.insert(second_ref_offset,41u,'\0');memcpy(overflow_bundle.data()+second_ref_offset,valid_bundle.data()+first_ref_offset,32u);write_le_u64((u8*)overflow_bundle.data()+second_ref_offset+32u,huge_ref);overflow_bundle[second_ref_offset+40u]=0;
+    damaged_bundles.push_back({"overflow_chunks",overflow_bundle});
+    if (USIZE_MAX_VALUE < U64_MAX_VALUE) {
+        std::string usize_overflow_bundle=valid_bundle;u64 near_usize_max=(u64)USIZE_MAX_VALUE-15u;
+        write_le_u64((u8*)usize_overflow_bundle.data()+chunk_count_offset,2u);write_le_u64((u8*)usize_overflow_bundle.data()+first_ref_offset+32u,near_usize_max);usize_overflow_bundle[first_ref_offset+40u]=0;
+        usize_overflow_bundle.insert(first_data_offset,41u,'\0');memcpy(usize_overflow_bundle.data()+first_data_offset,valid_bundle.data()+first_ref_offset,32u);write_le_u64((u8*)usize_overflow_bundle.data()+first_data_offset+32u,32u);usize_overflow_bundle[first_data_offset+40u]=0;
+        damaged_bundles.push_back({"usize_overflow",usize_overflow_bundle});
+    }
+    for(const auto& damaged_bundle:damaged_bundles){
+        fs::path malformed_input=work/(damaged_bundle.first+".mcp"),malformed_output=work/(damaged_bundle.first+"_out");write_file(malformed_input,damaged_bundle.second);
+        auto malformed_restore=run_cli(work,{"checkpoint","restore","--input",malformed_input.string(),"--output",malformed_output.string()},damaged_bundle.first+"_restore");expect_success(malformed_restore,id+" "+damaged_bundle.first+" recovery");
+        require(fs::exists(malformed_output/(first_file_path+".partial"))&&fs::exists(malformed_output/"checkpoint_recovery.txt"),id+": "+damaged_bundle.first+" did not produce partial recovery");
+    }
+    std::string tail_report=read_file(work/"manifest_tail_out/checkpoint_recovery.txt");require(tail_report.find("manifest-tail")!=std::string::npos,id+": manifest tail was not reported");
     fs::path write_failure=work/"write_failure";fs::create_directories(write_failure/"current_a/alpha.bin");
     auto failed_write=run_cli(work,{"checkpoint","restore","--input",(decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--base",(work/"base_b").string(),"--output",write_failure.string()},"failed_write_restore");
     expect_failure(failed_write,id+" restored file write failure");require(failed_write.err.find("failed to write restored file")!=std::string::npos,id+": restored-file write diagnostic changed");
@@ -5508,6 +5548,12 @@ static int jobs_from_makeflags() {
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--ppm-transform") == 0) return ppm_transform_cli_main(argc - 1, argv + 1);
+    if (argc >= 2 && std::strcmp(argv[1], "--checkpoint-allocation-failure") == 0) {
+        minify_allocation_count=0;minify_allocation_failure_at=1ul;
+        char create[]="create",input_option[]="--input",input_value[]="current_a",output_option[]="--output",output_value[]="allocation_failure.mcp";
+        char* args[]={create,input_option,input_value,output_option,output_value};
+        return command_checkpoint(5,args)==1?0:1;
+    }
     if (argc >= 2 && std::strcmp(argv[1], "--minify-allocation-failure") == 0) {
         minify_allocation_count=0;minify_allocation_failure_at=argc>2?std::strtoul(argv[2],nullptr,10):3ul;
         char source_path[]="makocode.cpp",width_option[]="--width",width_value[]="240",height_option[]="--height",height_value[]="80";

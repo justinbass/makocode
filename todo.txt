@@ -1,6 +1,7 @@
 TODO
 
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
+- 64-bit vs 32-bit build?
 - Run physical tests, against calibration script.
   - Improve calibration script until max data density is found. Convert to cpp, ./makocode calibration?
   - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
@@ -42,12 +43,14 @@ Let's improve the code quality in this project across all source and test code:
   - DO NOT Remove any features, keep parity.
   Deep dive into the code. Use a checklist to scan each source code file, each function in each file, make any improvements as you see fit. When complete list them to me in terse summary form. If you cannot think of any improvements, tell me the code is totally flawless and has literally none of these issues. Use an adversary agent to be skeptical of that claim.
 - CC
+  - N = 10
   - Run 'make clean ; make -j4 coverage' and note the coverage numbers before.
-  - Spin off 10 subagents to review the last 10 uncovered blocks of code in makocode_checkpoint.cpp. (If it's fully covered already, ignore this and return success immediately). Create 10 subagents, 1 at a time, to go through each uncovered block in reverse order. Only where there is high confidence, do one of the following:
-    1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. So remove it.
-    2. It's active code but we don't have a test against it. Suggest and implement a test.
-    3. Ambiguous, not enough information to determine without human input. Ignore it and move on. Then when done:
+  - Spin off N subagents to review the last N uncovered blocks of code in makocode_checkpoint.cpp. (If it's fully covered already, ignore this and return success immediately). Create 10 subagents, 1 at a time, to go through each uncovered block in reverse order. Only where there is high confidence, do one of the following:
+    1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. So remove it. (I assume most of the time it's dead code, as I have good test coverage to begin)
+    2. It's active code but we don't have a test against it. Suggest and implement a test. (Requires a higher burden of proof.)
+    3. Ambiguous, not enough information to determine without human input. Ignore it and move on.
+  - Then when done:
   - <Implement prompt>
-  - At the very end, note the coverage numbers after. Then give a list from 1 to 10, one for each of the 10 blocks, and DEAD|TEST|AMBIGUOUS, with a terse single sentence summary.
+  - At the very end, note the coverage numbers after. Then give a list from 1 to N, one for each of the N blocks, and DEAD|TEST|AMBIGUOUS, with a terse single sentence summary.
 - Implement
   - ~ADV, feedback loop until the criteria is met, 'make clean ; make -j4 test' passes 3 times in a row. If tests take > 2 min then focus on performance improvement so there's no regression. Do NOT relax tests or the idea behind them, avoid touching existing tests unless absolutely necessary, but you will add tests if there is new functionality. DO NOT increment version, version is always 0, we do not support backwards compatibility for any changes (yet) delete all old code pathways.
