@@ -29,7 +29,6 @@ int command_decode(int arg_count, char** args) {
     makocode::ByteBuffer output_dir_buffer;
     const char* output_dir = ".";
     bool have_output_dir = false;
-    bool debug_requested = false;
     bool recover_limit_specified = false;
     bool no_fiducials = false;
     bool no_metadata = false;
@@ -63,10 +62,6 @@ int command_decode(int arg_count, char** args) {
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--decoded-stdout")) {
             decoded_stdout_requested = true;
-            continue;
-        }
-        if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
-            debug_requested = true;
             continue;
         }
         if (ascii_equals_token(arg, ascii_length(arg), "--recover-palette")) {
@@ -203,8 +198,8 @@ int command_decode(int arg_count, char** args) {
         }
     input_files[file_count++] = arg;
 }
-    if (decoded_stdout_requested && (decoded_file_requested || debug_requested)) {
-        console_line(2, "decode: --decoded-stdout cannot be combined with --decoded-file or --debug");
+    if (decoded_stdout_requested && decoded_file_requested) {
+        console_line(2, "decode: --decoded-stdout cannot be combined with --decoded-file");
         return 1;
     }
     if (!mapping.recover_palette && recover_limit_specified) {
@@ -316,31 +311,8 @@ int command_decode(int arg_count, char** args) {
     u64 center_probe_page_capacity[MAX_INPUT_FILES] = {};
     bool center_probe_attempted = false;
     u32 small_scan_geometry_variant = 0u;
-    makocode::ByteBuffer debug_fiducial_csv;
-    makocode::ByteBuffer debug_fiducial_path;
-    const usize debug_fiducial_header_size = (usize)sizeof("page,row,column,x,y,logical_x,logical_y\n") - 1u;
-    makocode::ByteBuffer debug_affine_csv;
-    makocode::ByteBuffer debug_affine_path;
     makocode::ByteBuffer stdin_ppm_stream;
     bool stdin_ppm_buffered = false;
-    const usize debug_affine_header_size = (usize)sizeof("page,has_affine,scale,rotation_degrees,a00,a01,a10,a11,tx,ty\n") - 1u;
-    if (debug_requested) {
-        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y,logical_x,logical_y\n") ||
-            !join_output_path(output_dir, "decode_fiducials.csv", debug_fiducial_path) ||
-            !ensure_parent_directories((const char*)debug_fiducial_path.data) ||
-            !write_bytes_to_file((const char*)debug_fiducial_path.data,
-                                 debug_fiducial_csv.data,
-                                 debug_fiducial_csv.size) ||
-            !debug_affine_csv.append_ascii("page,has_affine,scale,rotation_degrees,a00,a01,a10,a11,tx,ty\n") ||
-            !join_output_path(output_dir, "decode_affine.csv", debug_affine_path) ||
-            !ensure_parent_directories((const char*)debug_affine_path.data) ||
-            !write_bytes_to_file((const char*)debug_affine_path.data,
-                                 debug_affine_csv.data,
-                                 debug_affine_csv.size)) {
-            console_line(2, "decode: failed to prepare fiducial CSV");
-            return 1;
-        }
-    }
 retry_decode:
     archive_page_salt = makocode::PaletteSymbolPageSalt();
     archive_page_salt_initialized = false;
@@ -357,24 +329,6 @@ retry_decode:
     overlay_selector_seed = 0u;
     overlay_unknown_parity_budget = 0u;
     overlay_erasure_budget = 0u;
-    if (debug_requested && debug_fiducial_csv.size > debug_fiducial_header_size) {
-        debug_fiducial_csv.size = debug_fiducial_header_size;
-        if (!write_bytes_to_file((const char*)debug_fiducial_path.data,
-                                 debug_fiducial_csv.data,
-                                 debug_fiducial_csv.size)) {
-            console_line(2, "decode: failed to reset fiducial CSV");
-            return 1;
-        }
-    }
-    if (debug_requested && debug_affine_csv.size > debug_affine_header_size) {
-        debug_affine_csv.size = debug_affine_header_size;
-        if (!write_bytes_to_file((const char*)debug_affine_path.data,
-                                 debug_affine_csv.data,
-                                 debug_affine_csv.size)) {
-            console_line(2, "decode: failed to reset affine CSV");
-            return 1;
-        }
-    }
     bitstream.release();
     bit_count = 0u;
     aggregate_state = PpmParserState();
@@ -401,7 +355,6 @@ retry_decode:
                                                       single_state,
                                                       force_disable_subgrid,
                                                       &retry_without_subgrid_allowed,
-                                                      debug_requested ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
                                                       1u,
                                                       &frame_erasure_bits,
                                                       &overlay_selector_seed,
@@ -475,28 +428,6 @@ retry_decode:
             metadata_free_layout_autodetect = true;
             frame_extracted = true;
             single_color_rotation = false;
-        }
-        if (debug_requested &&
-            !append_affine_csv_row(debug_affine_csv, 1u, single_state.has_affine_transform,
-                                   single_state.affine_transform.a00, single_state.affine_transform.a01,
-                                   single_state.affine_transform.a10, single_state.affine_transform.a11,
-                                   single_state.affine_transform.tx, single_state.affine_transform.ty)) {
-            console_line(2, "decode: failed to append affine CSV");
-            return 1;
-        }
-        if (debug_requested &&
-            !write_bytes_to_file((const char*)debug_affine_path.data,
-                                 debug_affine_csv.data,
-                                 debug_affine_csv.size)) {
-            console_line(2, "decode: failed to write affine CSV");
-            return 1;
-        }
-        if (debug_requested &&
-            !write_bytes_to_file((const char*)debug_fiducial_path.data,
-                                 debug_fiducial_csv.data,
-                                 debug_fiducial_csv.size)) {
-            console_line(2, "decode: failed to write fiducial CSV");
-            return 1;
         }
         if (single_state.has_encoded_tile &&
             metadata_schema_is_current(single_state.encoded_tile.schema_version) &&
@@ -703,7 +634,7 @@ retry_decode:
                 PpmParserState probe_state;
                 bool probe_found = ppm_extract_frame_bits(
                     probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
-                    false, 0, 0, (u64)probe_index + 1u, &probe_erasures,
+                    false, 0, (u64)probe_index + 1u, &probe_erasures,
                     0, 0, 0, 0, 0, 0, false, &probe_page_capacity_bits,
                     0, 0, 0, 0, 0, false, true, false, true);
                 if (!probe_found) {
@@ -714,7 +645,7 @@ retry_decode:
                     probe_page_capacity_bits = 0u;
                     probe_found = ppm_extract_frame_bits(
                         probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
-                        false, 0, 0, (u64)probe_index + 1u, &probe_erasures,
+                        false, 0, (u64)probe_index + 1u, &probe_erasures,
                         0, 0, 0, 0, 0, 0, false, &probe_page_capacity_bits,
                         0, 0, 0, 0, 0, false, true, true, false);
                 }
@@ -778,7 +709,7 @@ retry_decode:
                         PpmParserState capacity_state;
                         bool capacity_found = ppm_extract_frame_bits(
                             capacity_stream, mapping, capacity_bits, capacity_bit_count,
-                            capacity_state, false, 0, 0, (u64)page + 1u,
+                            capacity_state, false, 0, (u64)page + 1u,
                             &capacity_erasures, 0, 0, 0, 0, 0, 0, false,
                             &page_capacity_bits, 0, 0, 0, 0, 0, false, true,
                             false, true);
@@ -886,7 +817,6 @@ retry_decode:
                                                           page_state,
                                                           force_disable_subgrid,
                                                           &retry_without_subgrid_allowed,
-                                                          debug_requested ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
                                                           (u64)file_index + 1u,
                                                           &page_erasure_bits,
                                                           &page_overlay_selector_seed,
@@ -1123,29 +1053,6 @@ retry_decode:
                         }
                     }
                 }
-            }
-            if (debug_requested &&
-                !append_affine_csv_row(debug_affine_csv, (u64)file_index + 1u,
-                                       page_state.has_affine_transform,
-                                       page_state.affine_transform.a00, page_state.affine_transform.a01,
-                                       page_state.affine_transform.a10, page_state.affine_transform.a11,
-                                       page_state.affine_transform.tx, page_state.affine_transform.ty)) {
-                console_line(2, "decode: failed to append affine CSV");
-                return 1;
-            }
-            if (debug_requested &&
-                !write_bytes_to_file((const char*)debug_affine_path.data,
-                                     debug_affine_csv.data,
-                                     debug_affine_csv.size)) {
-                console_line(2, "decode: failed to write affine CSV");
-                return 1;
-            }
-            if (debug_requested &&
-                !write_bytes_to_file((const char*)debug_fiducial_path.data,
-                                     debug_fiducial_csv.data,
-                                     debug_fiducial_csv.size)) {
-                console_line(2, "decode: failed to write fiducial CSV");
-                return 1;
             }
             if (!aggregate_initialized) {
                 merge_parser_state(aggregate_state, page_state);
@@ -1620,36 +1527,6 @@ retry_decode:
         decoder.ecc_stats = symbol_stats;
         decoder.ecc_failed = !decoder_parse_succeeded;
         if (!decoder_parse_succeeded) {
-            if (debug_requested) {
-                char corrected[32];
-                char failed[32];
-                char failed_errors[32];
-                char failed_erasures[32];
-                char failed_stage[32];
-                char failed_index[32];
-                char decoded_blocks[32];
-                u64_to_ascii(symbol_stats.corrected_symbols, corrected, sizeof(corrected));
-                u64_to_ascii(symbol_stats.unrecoverable_blocks, failed, sizeof(failed));
-                u64_to_ascii(symbol_stats.failed_block_errors, failed_errors, sizeof(failed_errors));
-                u64_to_ascii(symbol_stats.failed_block_erasures, failed_erasures, sizeof(failed_erasures));
-                u64_to_ascii(symbol_stats.failed_block_stage, failed_stage, sizeof(failed_stage));
-                u64_to_ascii(symbol_stats.failed_block_index, failed_index, sizeof(failed_index));
-                u64_to_ascii(symbol_stats.total_blocks, decoded_blocks, sizeof(decoded_blocks));
-                console_write(2, "decode: field-symbol ECC corrected=");
-                console_write(2, corrected);
-                console_write(2, " unrecoverable_blocks=");
-                console_write(2, failed);
-                console_write(2, " failed_block_errors=");
-                console_write(2, failed_errors);
-                console_write(2, " failed_block_erasures=");
-                console_write(2, failed_erasures);
-                console_write(2, " stage=");
-                console_write(2, failed_stage);
-                console_write(2, " failed_block_index=");
-                console_write(2, failed_index);
-                console_write(2, " completed_blocks=");
-                console_line(2, decoded_blocks);
-            }
             if (have_password && !field_symbols_decoded) {
                 decoder.password_attempted = true;
                 decoder.password_failed = true;
@@ -1999,7 +1876,7 @@ retry_decode:
                     path_buffer[cursor++] = filename[i];
                 }
                 path_buffer[cursor] = '\0';
-                write_buffer_to_file(path_buffer, decoder.payload);
+                write_bytes_to_file(path_buffer, decoder.payload.data, decoder.payload.size);
             }
             console_line(1, "decode: wrote raw payload.bin (MAKOCODE_DECODE_RAW_FALLBACK enabled)");
             return 0;

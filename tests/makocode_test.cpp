@@ -2208,42 +2208,6 @@ static std::vector<std::string> ppm_paths(const fs::path& dir, const std::string
     return [&] { std::vector<std::string> out; for (const auto& p : matching_files(dir, prefix, ".ppm")) out.push_back(p.string()); return out; }();
 }
 
-static std::vector<std::string> split_csv(const std::string& line) {
-    std::vector<std::string> fields;
-    std::stringstream input(line);
-    std::string field;
-    while (std::getline(input, field, ',')) fields.push_back(field);
-    return fields;
-}
-
-static void check_fiducials(const fs::path& encoded_csv, const fs::path& decoded_csv, const std::string& label) {
-    std::ifstream encoded(encoded_csv), decoded(decoded_csv);
-    require(encoded.good() && decoded.good(), label + ": missing fiducial CSV");
-    std::string line;
-    std::getline(encoded, line); std::getline(decoded, line);
-    size_t matched = 0, expected = 0;
-    std::map<std::string, std::pair<double,double>> positions;
-    while (std::getline(encoded, line)) {
-        auto f = split_csv(line);
-        if (f.size() < 5) continue;
-        std::string key = f[0] + "," + f[1] + "," + f[2];
-        positions[key] = {std::strtod(f[3].c_str(), nullptr), std::strtod(f[4].c_str(), nullptr)};
-        ++expected;
-    }
-    while (std::getline(decoded, line)) {
-        auto f = split_csv(line);
-        if (f.size() < 7) continue;
-        std::string key = f[0] + "," + f[1] + "," + f[2];
-        auto found = positions.find(key);
-        if (found == positions.end()) continue;
-        double x = std::strtod(f[5].c_str(), nullptr), y = std::strtod(f[6].c_str(), nullptr);
-        require(std::fabs(found->second.first - x) <= 4.0 && std::fabs(found->second.second - y) <= 4.0,
-                label + ": fiducial position error exceeds 4 px");
-        ++matched;
-    }
-    require(matched == expected, label + ": not all encoded fiducials were recovered");
-}
-
 static void compare_files(const fs::path& expected, const fs::path& actual, const std::string& label) {
     require(read_file(expected) == read_file(actual), label + ": file contents differ");
 }
@@ -2290,7 +2254,7 @@ static void decode_failure_case(const std::string& id, const std::string& kind) 
         std::string prefix = id + "_" + kind;
         unsigned crypto = case_seed("crypto/" + id + "/" + kind);
         auto encode = encode_file_args(input, work, prefix,
-            kind == "footer_data_destroyed" ? std::vector<std::string>{"--page-width=500", "--page-height=500", "--debug"} : std::vector<std::string>{"--page-width=1000", "--page-height=1000", "--debug"});
+            kind == "footer_data_destroyed" ? std::vector<std::string>{"--page-width=500", "--page-height=500"} : std::vector<std::string>{"--page-width=1000", "--page-height=1000"});
         ProcessResult encoded = run_cli(work, encode, "encode", {}, {{"MAKOCODE_TEST_SEED", std::to_string(crypto)}});
         expect_success(encoded, id + " encode");
         auto pages = ppm_paths(work, prefix);
@@ -2300,12 +2264,11 @@ static void decode_failure_case(const std::string& id, const std::string& kind) 
         if (kind == "footer_valid_data_too_corrupt") corrupt[0] = "corrupt-footer-valid-data-too-corrupt";
         ProcessResult changed = run_transform(work, corrupt, "corrupt"); expect_success(changed, "footer corruption");
         fs::path decoded = work / "decoded";
-        ProcessResult result = run_cli(work, {"decode", damaged.string(), "--debug", "--output-dir=" + decoded.string()}, "decode");
+        ProcessResult result = run_cli(work, {"decode", damaged.string(), "--output-dir=" + decoded.string()}, "decode");
         expect_failure(result, id + " decode");
-        require(fs::exists(decoded / "decode_fiducials.csv"), id + ": decode did not emit fiducial CSV");
         if (kind == "footer_data_destroyed") require(result.out.find("decode: ECC could not repair the payload") != std::string::npos || result.err.find("decode: ECC could not repair the payload") != std::string::npos,
             id + ": expected ECC failure was not reported");
-        check_fiducials(work / (prefix + "_encode_fiducials.csv"), decoded / "decode_fiducials.csv", id);
+
         return;
     }
     fs::path decoded = work / "decoded";
@@ -2318,14 +2281,14 @@ static void cli_output_dir_case() {
     fs::path work = make_work_dir(id);
     fs::path payload = work / "cli_payload.bin";
     write_file(payload, "encode-decode-cli test payload");
-    auto encoded = run_cli(work, encode_file_args(payload, work, "cli_payload", {"--debug"}), "encode");
+    auto encoded = run_cli(work, encode_file_args(payload, work, "cli_payload", {}), "encode");
     expect_success(encoded, id + " encode");
     auto pages = ppm_paths(work, "cli_payload");
-    require(!pages.empty() && fs::exists(work / "cli_payload_encode_fiducials.csv"), id + ": encode output missing");
+    require(!pages.empty(), id + ": encode output missing");
     fs::path decoded = work / "decoded";
-    auto result = run_cli(work, decode_file_args(pages, decoded, {"--debug"}), "decode");
+    auto result = run_cli(work, decode_file_args(pages, decoded, {}), "decode");
     expect_success(result, id + " decode");
-    check_fiducials(work / "cli_payload_encode_fiducials.csv", decoded / "decode_fiducials.csv", id);
+
     compare_files(payload, decoded / "cli_payload.bin", id);
 }
 
@@ -2335,18 +2298,17 @@ static void palette_metadata_case(bool wrong_palette) {
     fs::path payload = work / "payload.bin";
     generate_bytes(work, payload, 16384, case_seed("payload/" + id + (wrong_palette ? "/wrong" : "/auto")), "payload");
     std::string prefix = id + "_page";
-    auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--palette", "White Cyan Magenta Yellow", "--debug"}), "encode",
+    auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--palette", "White Cyan Magenta Yellow"}), "encode",
                            {}, {{"MAKOCODE_TEST_SEED", std::to_string(case_seed("crypto/" + id + (wrong_palette ? "/wrong" : "/auto")))}});
     expect_success(encoded, id + " encode");
     auto pages = ppm_paths(work, prefix); require(!pages.empty(), id + ": no encoded PPM");
     fs::path decoded = work / "decoded";
-    std::vector<std::string> args{"decode", pages.front(), "--output-dir=" + decoded.string(), "--debug"};
+    std::vector<std::string> args{"decode", pages.front(), "--output-dir=" + decoded.string()};
     if (wrong_palette) args.insert(args.end(), {"--palette", "White Black"});
     auto result = run_cli(work, args, "decode");
     if (wrong_palette) expect_failure(result, id + " decode"); else expect_success(result, id + " decode");
-    require(fs::exists(decoded / "decode_fiducials.csv"), id + ": missing decode fiducial CSV");
     if (!wrong_palette) {
-        check_fiducials(work / (prefix + "_encode_fiducials.csv"), decoded / "decode_fiducials.csv", id);
+
         compare_files(payload, decoded / "payload.bin", id);
     }
 }
@@ -2357,17 +2319,17 @@ static void password_failure_case() {
     generate_bytes(work, payload, 32768, case_seed("payload/" + id), "payload");
     const std::string password = "suite-password", prefix = id + "_page";
     auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--page-width=1000", "--page-height=1000", "--password-cli=" + password,
-        "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb", "--debug"}), "encode", {},
+        "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}), "encode", {},
         {{"MAKOCODE_TEST_SEED", std::to_string(case_seed("crypto/" + id))}});
     expect_success(encoded, id + " encode");
     auto pages = ppm_paths(work, prefix); require(pages.size() == 1, id + ": expected one encrypted page");
     for (const auto& credentials : {std::vector<std::string>{}, std::vector<std::string>{"--password-cli=bad-password"}}) {
         fs::path decoded = work / (credentials.empty() ? "no_password" : "wrong_password");
-        std::vector<std::string> args{"decode", pages.front(), "--output-dir=" + decoded.string(), "--debug"};
+        std::vector<std::string> args{"decode", pages.front(), "--output-dir=" + decoded.string()};
         args.insert(args.end(), credentials.begin(), credentials.end());
         auto result = run_cli(work, args, "decode_" + decoded.filename().string());
         expect_failure(result, id + " decode");
-        check_fiducials(work / (prefix + "_encode_fiducials.csv"), decoded / "decode_fiducials.csv", id);
+
     }
 }
 
@@ -2558,7 +2520,7 @@ static void header_copy_corruption_case() {
     fs::path work = make_work_dir(id), payload = work / "random.bin";
     generate_bytes(work, payload, 4096, case_seed("payload/" + id), "payload");
     const std::string prefix = id + "_page";
-    auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--ecc=fill", "--page-width=600", "--page-height=600", "--debug"}), "encode",
+    auto encoded = run_cli(work, encode_file_args(payload, work, prefix, {"--ecc=fill", "--page-width=600", "--page-height=600"}), "encode",
         {}, {{"MAKOCODE_TEST_SEED", std::to_string(case_seed("crypto/" + id))}});
     expect_success(encoded, id + " encode");
     auto pages = ppm_paths(work, prefix); require(!pages.empty(), id + ": no page output");
@@ -2566,9 +2528,9 @@ static void header_copy_corruption_case() {
         fs::path damaged=work/("corrupt_"+std::to_string(count)+".ppm"), decoded=work/("decoded_"+std::to_string(count));
         auto changed=run_transform(work,{"transform","--input",pages.front(),"--output",damaged.string(),"--corrupt-former-header-slots",std::to_string(count)},"transform");
         expect_success(changed,id+" transform");
-        auto result=run_cli(work,{"decode",damaged.string(),"--output-dir="+decoded.string(),"--debug"},"decode_"+std::to_string(count));
+        auto result=run_cli(work,{"decode",damaged.string(),"--output-dir="+decoded.string()},"decode_"+std::to_string(count));
         expect_success(result,id+" decode");
-        check_fiducials(work/(prefix+"_encode_fiducials.csv"),decoded/"decode_fiducials.csv",id);
+
         compare_files(payload,decoded/"random.bin",id);
     }
 }
@@ -2578,11 +2540,11 @@ static void decode_stdin_case() {
     fs::path work=make_work_dir(id),payload=work/"payload.bin";
     std::string contents("\0stdin coverage payload\xff\n",26); write_file(payload,contents);
     const std::string prefix=id+"_stdin";
-    auto encoded=run_cli(work,encode_file_args(payload,work,prefix,{"--debug"}),"encode"); expect_success(encoded,id+" encode");
+    auto encoded=run_cli(work,encode_file_args(payload,work,prefix,{}),"encode"); expect_success(encoded,id+" encode");
     auto pages=ppm_paths(work,prefix);require(pages.size()==1,id+": expected one page");
     fs::path decoded=work/"decoded";
-    auto result=run_cli(work,{"decode","--output-dir="+decoded.string(),"--debug"},"decode",pages.front());expect_success(result,id+" decode stdin");
-    check_fiducials(work/(prefix+"_encode_fiducials.csv"),decoded/"decode_fiducials.csv",id);
+    auto result=run_cli(work,{"decode","--output-dir="+decoded.string()},"decode",pages.front());expect_success(result,id+" decode stdin");
+
     compare_files(payload,decoded/"payload.bin",id);
 }
 
@@ -2592,11 +2554,11 @@ static void archive_tree_case() {
     fs::create_directories(source/"tree/empty");fs::create_directories(source/"tree/nested/deep_empty");
     fs::create_directories(source/"empty_only/nested/leaf_empty");fs::create_directories(pages_dir);
     write_file(source/"tree/root.txt","x");write_file(source/"tree/nested/leaf.txt","y");write_file(source/"tree/zero.bin","");
-    auto encoded=run_cli(source,{"encode","--input=tree","--input=empty_only","--prefix=archive_tree","--debug","--output-dir="+pages_dir.string()},"encode");
+    auto encoded=run_cli(source,{"encode","--input=tree","--input=empty_only","--prefix=archive_tree","--output-dir="+pages_dir.string()},"encode");
     expect_success(encoded,id+" encode");
     auto pages=ppm_paths(pages_dir,"");require(!pages.empty(),id+": no pages");
-    auto result=run_cli(work,decode_file_args(pages,decoded,{"--debug"}),"decode");expect_success(result,id+" decode");
-    check_fiducials(pages_dir/"archive_tree_encode_fiducials.csv",decoded/"decode_fiducials.csv",id);
+    auto result=run_cli(work,decode_file_args(pages,decoded,{}),"decode");expect_success(result,id+" decode");
+
     for(const auto& name:{std::string("tree"),std::string("empty_only")}){
         fs::path a=source/name,b=decoded/name;require(fs::is_directory(b),id+": missing directory "+name);
         std::vector<std::string> aa,bb;
@@ -2631,20 +2593,18 @@ static void default_naming_case() {
     const std::string id="0067_default_encode_naming";
     fs::path work=make_work_dir(id),pages_dir=work/"pages",payload=work/"payload.bin";fs::create_directories(pages_dir);
     write_file(payload,std::string("\0default timestamp naming payload\xff\n",35));
-    auto result=run_cli(work,{"encode","--input=payload.bin","--palette=Cyan Black","--output-dir="+pages_dir.string(),"--debug"},"encode");expect_success(result,id+" encode");
-    auto pages=matching_files(pages_dir,"", ".ppm"),csvs=matching_files(pages_dir,"", "_encode_fiducials.csv");
-    require(pages.size()==1&&csvs.size()==1,id+": expected one timestamped PPM and CSV");
+    auto result=run_cli(work,{"encode","--input=payload.bin","--palette=Cyan Black","--output-dir="+pages_dir.string()},"encode");expect_success(result,id+" encode");
+    auto pages=matching_files(pages_dir,"", ".ppm");
+    require(pages.size()==1,id+": expected one timestamped PPM");
     std::regex pattern("^[0-9]{8}T[0-9]{6}Z\\.ppm$");
     auto name=pages.front().filename().string();require(std::regex_match(name,pattern),id+": unexpected default PPM filename "+name);
-    require(csvs.front().filename().string()==name.substr(0,name.size()-4)+"_encode_fiducials.csv",id+": timestamp CSV name does not match PPM");
 }
 
 static void fiducials_case() {
     const std::string id="0066_fiducials",prefix=id+"_fiducials";
     fs::path work=make_work_dir(id),pages_dir=work/"pages",decoded=work/"decoded",payload=work/"payload.bin";fs::create_directories(pages_dir);
     write_file(payload,std::string("\0fiducials custom grid payload\xff\n",31));
-    auto encoded=run_cli(work,{"encode","--input=payload.bin","--page-width=240","--page-height=240","--fiducial-spacing=30","--prefix="+prefix,"--output-dir="+pages_dir.string(),"--debug"},"encode");expect_success(encoded,id+" encode");
-    require(fs::exists(pages_dir/(prefix+"_encode_fiducials.csv")),id+": encode debug CSV missing");
+    auto encoded=run_cli(work,{"encode","--input=payload.bin","--page-width=240","--page-height=240","--fiducial-spacing=30","--prefix="+prefix,"--output-dir="+pages_dir.string()},"encode");expect_success(encoded,id+" encode");
     auto pages=ppm_paths(pages_dir,prefix);require(pages.size()==1,id+": expected one output page");
     auto image=read_ppm(pages.front());size_t white=0;
     for(unsigned y=29;y<31;++y)for(unsigned x=29;x<31;++x){size_t i=(static_cast<size_t>(y)*image.width+x)*3;white+=static_cast<unsigned char>(image.pixels[i])==255&&static_cast<unsigned char>(image.pixels[i+1])==255&&static_cast<unsigned char>(image.pixels[i+2])==255;}
@@ -2668,11 +2628,16 @@ static void cli_help_case() {
     const std::string id="0058_cli_help";fs::path work=make_work_dir(id);
     struct HelpCheck{std::vector<std::string> args;const char* first;const char* second;};
     std::vector<HelpCheck> help={{{},"Usage:","makocode encode [options]"},{{"--help"},"Usage:","makocode encode [options]"},{{"-h"},"Usage:","makocode encode [options]"},{{"encode","--help"},"Usage: makocode encode","--input PATH"},{{"decode","--help"},"Usage: makocode decode","stdin"},{{"checkpoint","--help"},"makocode checkpoint","checkpoint restore"},{{"overlay","--help"},"Usage:","makocode encode [options]"},{{"minify","--help"},"Usage: makocode minify","Strips comments/whitespace"}};
-    for(size_t i=0;i<help.size();++i){auto result=run_cli(work,help[i].args,"help_"+std::to_string(i));require(result.status==0,id+": help command failed");std::string all=result.out+result.err;require(all.find(help[i].first)!=std::string::npos&&all.find(help[i].second)!=std::string::npos,id+": missing expected help text");}
+    for(size_t i=0;i<help.size();++i){auto result=run_cli(work,help[i].args,"help_"+std::to_string(i));require(result.status==0,id+": help command failed");std::string all=result.out+result.err;require(all.find(help[i].first)!=std::string::npos&&all.find(help[i].second)!=std::string::npos,id+": missing expected help text");require(all.find("--debug")==std::string::npos,id+": removed option remains in help text");}
     auto unknown_command=run_cli(work,{"unknown-command"},"unknown_command");
     require(unknown_command.status==2&&unknown_command.err.find("makocode: unknown command: unknown-command")!=std::string::npos,
             id+": unknown commands must report an error and return status 2");
+    auto removed_decode_debug=run_cli(work,{"decode","--debug"},"removed_decode_debug");
+    expect_failure(removed_decode_debug,id+" removed decode debug option");
+    require(!fs::exists(work/"decode_fiducials.csv")&&!fs::exists(work/"decode_affine.csv"),
+            id+": removed decode debug reports were created");
     for(const auto& pair:std::vector<std::pair<std::vector<std::string>,std::string>>{
+        {{"encode","--debug"},"unknown option"},
         {{"encode","--ecc=1023.01"},"--ecc ratio must be between 0 and 1023"},
         {{"encode","--overlay-fraction=1.01"},"--overlay-fraction must be between 0.0 and less than 1.0"},
         {{"encode","--overlay-fraction=0.5"},"--overlay-fraction and overlay images must be used together"},
@@ -2731,14 +2696,13 @@ static void prefix_ends_encoded_case(){
     const std::string id="0062_prefix_ends_encoded",prefix=id+"_payload_encoded";
     fs::path work=make_work_dir(id),pages_dir=work/"pages",decoded=work/"decoded",payload=work/"payload.bin";fs::create_directories(pages_dir);
     std::string data("\0prefix-encoded roundtrip payload\xff\n",35);write_file(payload,data);
-    auto encoded=run_cli(work,{"encode","--input=payload.bin","--page-width=96","--page-height=96","--palette=Cyan Black","--fiducial-spacing=32","--prefix="+prefix,"--output-dir="+pages_dir.string(),"--debug"},"encode");expect_success(encoded,id+" encode");
+    auto encoded=run_cli(work,{"encode","--input=payload.bin","--page-width=96","--page-height=96","--palette=Cyan Black","--fiducial-spacing=32","--prefix="+prefix,"--output-dir="+pages_dir.string()},"encode");expect_success(encoded,id+" encode");
     auto pages=ppm_paths(pages_dir,"");require(pages.size()==1&&fs::path(pages[0]).filename()==prefix+".ppm",id+": prefix filename changed");
-    require(fs::exists(pages_dir/(prefix+"_encode_fiducials.csv")),id+": missing fiducial CSV");
     PpmImage image=read_ppm(pages.front());size_t cyan=0;
     for(unsigned y=15;y<17;++y)for(unsigned x=15;x<17;++x){size_t i=(static_cast<size_t>(y)*image.width+x)*3;cyan+=static_cast<unsigned char>(image.pixels[i])==0&&static_cast<unsigned char>(image.pixels[i+1])==255&&static_cast<unsigned char>(image.pixels[i+2])==255;}
     require(cyan==4,id+": top-left marker did not use cyan palette endpoint");
-    auto result=run_cli(work,decode_file_args(pages,decoded,{"--debug"}),"decode");expect_success(result,id+" decode");
-    check_fiducials(pages_dir/(prefix+"_encode_fiducials.csv"),decoded/"decode_fiducials.csv",id);compare_files(payload,decoded/"payload.bin",id);
+    auto result=run_cli(work,decode_file_args(pages,decoded,{}),"decode");expect_success(result,id+" decode");
+    compare_files(payload,decoded/"payload.bin",id);
 }
 
 static void metadata_pages_case(){
@@ -2780,7 +2744,7 @@ static void decoded_file_case(){
     expect_success(stdin_decode,id+" stdin decoded-file");auto stdin_reports=matching_files(stdin_out,"makocode_decoded_",".txt");require(stdin_reports.size()==1,id+": stdin decoded-file output missing");compare_files(text_files[0],stdin_reports[0],id+" stdin");
     auto stdout_decode=run_cli(work,{"decode","--decoded-stdout","--password-cli=secret","--output-dir="+(work/"not_created").string(),pages.front()},"decode_stdout");
     expect_success(stdout_decode,id+" stdout");require(stdout_decode.out==report,id+": stdout output differs from decoded file");require(!fs::exists(work/"not_created"),id+": decoded-stdout created output directory");
-    for(const std::string& flag:{"--decoded-file","--debug"}){
+    for(const std::string& flag:{"--decoded-file"}){
         auto conflict=run_cli(work,{"decode","--decoded-stdout",flag,pages.front()},"conflict");expect_failure(conflict,id+" conflicting mode");require(conflict.out.empty(),id+": conflicting mode wrote output");
     }
     fs::path plain=work/"plain.bin",plain_pages=work/"plain_pages",plain_out=work/"plain_out";std::vector<unsigned char> deterministic(3000);
@@ -3076,7 +3040,7 @@ static TileSummary read_tile_summary(const fs::path& path,unsigned expected_widt
     ImageMappingConfig mapping;makocode::ByteBuffer frame,erasures,selector_counts;
     u64 frame_bits=0,selector_seed=0;u16 unknown=0,overlay=0;PpmParserState summary_state;
     require(ppm_extract_frame_bits(input,mapping,frame,frame_bits,summary_state,false,(bool*)0,
-        (makocode::ByteBuffer*)0,1u,&erasures,&selector_seed,&selector_counts,&unknown,&overlay,
+        1u,&erasures,&selector_seed,&selector_counts,&unknown,&overlay,
         (bool*)0,(const AffineTransform*)0,false,(u64*)0,(const MetadataTile::Values*)0,
         (const u8*)0,0u,0u,0u,true,true,false,true),
         "cannot extract tile metadata "+path.string());
@@ -3118,7 +3082,7 @@ static void overlay_case(const OverlayConfig& cfg){
     expect_success(made,cfg.id+" overlay mask");
     std::vector<std::string> encode={"encode","--input=payload.bin","--overlay-fraction="+cfg.fraction,
         "--overlay-ppm="+mask.string(),"--overlay-pages=all","--page-width="+std::to_string(cfg.width),
-        "--page-height="+std::to_string(cfg.height),"--output-dir="+pages_dir.string(),"--prefix="+cfg.id,"--debug"};
+        "--page-height="+std::to_string(cfg.height),"--output-dir="+pages_dir.string(),"--prefix="+cfg.id};
     if(!cfg.ecc.empty())encode.push_back("--ecc="+cfg.ecc);
     if(!cfg.palette.empty()){encode.push_back("--palette");encode.push_back(cfg.palette);}
     if(!cfg.ignore_colors.empty()){encode.push_back("--overlay-ignore-colors");encode.push_back(cfg.ignore_colors);}
@@ -3134,21 +3098,7 @@ static void overlay_case(const OverlayConfig& cfg){
     encode.insert(encode.end(),cfg.encode_options.begin(),cfg.encode_options.end());
     auto encoded=run_cli(work,encode,"encode",payload,{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("crypto/"+cfg.id))}});
     expect_success(encoded,cfg.id+" encode");
-    std::string log=encoded.out+encoded.err;
-    require(log.find("debug: overlay erasure budget per block=")!=std::string::npos,cfg.id+": overlay selector budget was not logged");
-    if(cfg.without_metadata){
-        const unsigned palette_size=cfg.palette=="White Black"?2u:
-            cfg.palette=="White Cyan Magenta Yellow"?4u:
-            cfg.palette=="White Cyan Magenta Yellow Black"?5u:
-            cfg.palette=="White #FF0000 #00FF00 #0000FF Cyan Black"?6u:8u;
-        const unsigned block_length=palette_size==2u?255u:1024u;
-        const unsigned expected_budget=block_length-1u;
-        require(log.find("debug: overlay erasure budget per block="+
-                         std::to_string(expected_budget)+" actual fraction="+
-                         std::to_string(expected_budget)+"/"+
-                         std::to_string(block_length))!=std::string::npos,
-                cfg.id+": reported overlay quantization is wrong");
-    }
+
     auto unordered=ppm_paths(pages_dir,cfg.id);require(!unordered.empty(),cfg.id+": encode produced no PPM pages");if(cfg.expected_pages>0)require(static_cast<int>(unordered.size())==cfg.expected_pages,cfg.id+": page count mismatch");
     if(cfg.without_metadata){
         PpmImage overlay_image=read_ppm(mask),encoded_image=read_ppm(unordered.front());
@@ -3217,15 +3167,12 @@ static void overlay_case(const OverlayConfig& cfg){
     }
     std::sort(indexed.begin(),indexed.end(),[](const auto& a,const auto& b){return a.first<b.first;});
     std::vector<std::string> ordered;for(size_t i=0;i<indexed.size();++i){require(indexed[i].first==i+1,cfg.id+": serialized page index gap");ordered.push_back(indexed[i].second);}
-    fs::path csv=pages_dir/(cfg.id+"_encode_fiducials.csv");
-    require(fs::exists(csv),cfg.id+": missing encode fiducial report");
-    std::vector<std::string> decode_extra={"--debug"};
+    std::vector<std::string> decode_extra={};
     if(cfg.without_metadata){decode_extra.insert(decode_extra.end(),{"--no-metadata","--no-fiducials","--page-width="+std::to_string(cfg.width),"--page-height="+std::to_string(cfg.height),"--palette",cfg.palette});}
     if(cfg.encrypted)decode_extra.push_back("--password-cli=scatter-suite-password");
     std::vector<std::string> decode_args=decode_file_args(ordered,decoded,decode_extra);
     auto result=run_cli(work,decode_args,"decode");expect_success(result,cfg.id+" decode");
-    require(fs::exists(decoded/"decode_fiducials.csv"),cfg.id+": missing decode fiducial report");
-    check_fiducials(csv,decoded/"decode_fiducials.csv",cfg.id);
+
     compare_files(payload,decoded/"payload.bin",cfg.id);
     if(cfg.encrypted){
         fs::path wrong_password_output=work/"wrong_password";
@@ -3248,7 +3195,6 @@ static void overlay_case(const OverlayConfig& cfg){
         expect_failure(wrong_grid,cfg.id+" wrong grid dimensions");
     }
     if(cfg.without_fiducials){
-        require(read_file(csv)=="page,row,column,x,y,logical_x,logical_y\n",cfg.id+": --no-fiducials still emitted markers");
         PpmImage image=read_ppm(ordered.front());size_t matching=0;
         for(size_t i=0;i<image.pixels.size();i+=3)matching+=static_cast<unsigned char>(image.pixels[i])==128&&static_cast<unsigned char>(image.pixels[i+1])==64&&static_cast<unsigned char>(image.pixels[i+2])==0;
         require(matching>=1000,cfg.id+": overlay pixels were not applied");
@@ -3336,7 +3282,7 @@ static MetadataTile::Values extract_tile_values(const fs::path& path){
     makocode::ByteBuffer input,frame,erasures,selectors;u64 bits=0,seed=0;u16 unknown=0,overlay=0;
     require(read_entire_file(path.c_str(),input)&&input.size>0,"cannot read metadata source "+path.string());
     ImageMappingConfig mapping;PpmParserState state;
-    require(ppm_extract_frame_bits(input,mapping,frame,bits,state,false,(bool*)0,(makocode::ByteBuffer*)0,1u,
+    require(ppm_extract_frame_bits(input,mapping,frame,bits,state,false,(bool*)0,1u,
         &erasures,&seed,&selectors,&unknown,&overlay,(bool*)0,(const AffineTransform*)0,false,(u64*)0,
         (const MetadataTile::Values*)0,(const u8*)0,0u,0u,0u,true,true,false,true),
         "cannot extract metadata tile "+path.string());
@@ -3374,8 +3320,7 @@ static void small_scan_case(){
         if(!five){std::vector<unsigned char> hard(static_cast<size_t>(cw)*ch,230),soft=canvas;
             for(unsigned y=0;y<image.height;++y)for(unsigned x=0;x<image.width;++x){size_t src=(static_cast<size_t>(y)*image.width+x)*3,dst=static_cast<size_t>(y+oy)*cw+x+ox;hard[dst]=static_cast<unsigned char>((static_cast<unsigned char>(image.pixels[src])+static_cast<unsigned char>(image.pixels[src+1])+static_cast<unsigned char>(image.pixels[src+2]))<384?40:230);}
             fs::path hard_path=work/"4_5x_hard_scan.ppm",soft_path=work/"4_5x_soft_scan.ppm";write_gray_ppm(hard_path,cw,ch,hard);write_gray_ppm(soft_path,cw,ch,soft);
-            for(const auto& variant:std::vector<std::pair<std::string,fs::path>>{{"hard",hard_path},{"soft",soft_path}}){fs::path out=work/("out_"+variant.first);auto d=run_cli(work,decode_file_args({variant.second.string()},out,{"--debug"}),variant.first);expect_success(d,id+" "+variant.first);compare_files(payload,out/"makocode.bin",id+" "+variant.first);}
-            std::ifstream affine(work/"out_soft/decode_affine.csv");std::string header,line;std::getline(affine,header);std::getline(affine,line);auto f=split_csv(line);require(f.size()>=10&&f[1]=="1"&&std::fabs(std::strtod(f[2].c_str(),nullptr)-2.239)<=.01&&std::fabs(std::strtod(f[8].c_str(),nullptr)-1.5)<=.75&&std::fabs(std::strtod(f[9].c_str(),nullptr)-3.5)<=.75&&std::fabs(std::strtod(f[3].c_str(),nullptr))<=.25,id+": affine estimate out of tolerance");
+            for(const auto& variant:std::vector<std::pair<std::string,fs::path>>{{"hard",hard_path},{"soft",soft_path}}){fs::path out=work/("out_"+variant.first);auto d=run_cli(work,decode_file_args({variant.second.string()},out,{}),variant.first);expect_success(d,id+" "+variant.first);compare_files(payload,out/"makocode.bin",id+" "+variant.first);}
         }else{fs::path scan=work/"5x_scan.ppm",out=work/"out5";write_gray_ppm(scan,cw,ch,canvas);auto d=run_cli(work,decode_file_args({scan.string()},out),"decode5");expect_success(d,id+" 5x");compare_files(payload,out/"makocode.bin",id+" 5x");}
     }
 }
@@ -3521,7 +3466,7 @@ static void synthetic_scan_case(const std::string& id,bool margin_noise,bool off
     PpmImage encoded=read_ppm(pages[0]);std::vector<unsigned char> recovered(80u*80u);for(unsigned y=0;y<80;++y)for(unsigned x=0;x<80;++x){unsigned sx=static_cast<unsigned>(std::floor((x+.5)*pitch+ox)),sy=static_cast<unsigned>(std::floor((y+.5)*pitch+oy));size_t at=(static_cast<size_t>(sy)*scan.width+sx)*3;bool dark=static_cast<unsigned char>(scan.pixels[at])<128;bool original=static_cast<unsigned char>(encoded.pixels[(static_cast<size_t>(y)*80+x)*3])<128;require(dark==original,id+": a generated cell center is corrupted");recovered[static_cast<size_t>(y)*80+x]=dark?0:255;}
     fs::path recovered_ppm=work/"recovered.ppm";write_gray_ppm(recovered_ppm,80,80,recovered);
     for(const auto& page:std::vector<std::pair<std::string,fs::path>>{{"recovered",recovered_ppm},{"soft",soft}}){fs::path out=work/(page.first+"_out");auto dec=run_cli(work,decode_file_args({page.second.string()},out),page.first);expect_success(dec,id+" "+page.first);compare_files(payload,out/payload_name,id+" "+page.first);}
-    fs::path output=work/"damaged_out";std::vector<std::string> args={"decode","--output-dir="+output.string()};if(!off_center)args.push_back("--debug");args.push_back(damaged.string());auto dec=run_cli(work,args,"damaged_decode");expect_success(dec,id+" damaged scan");compare_files(payload,output/payload_name,id+" damaged scan");
+    fs::path output=work/"damaged_out";std::vector<std::string> args={"decode","--output-dir="+output.string()};args.push_back(damaged.string());auto dec=run_cli(work,args,"damaged_decode");expect_success(dec,id+" damaged scan");compare_files(payload,output/payload_name,id+" damaged scan");
 }
 
 static void lowres_rotated_scan_case(){
@@ -3559,7 +3504,7 @@ static void palette_q2_center_speck_case(){
     std::vector<usize> selected_pixels;std::vector<u32> selected_positions;const u64* ranks=(const u64*)rank_map.data;for(usize pixel=0u;pixel<pixel_count&&selected_pixels.size()<5u;++pixel){u64 rank=ranks[pixel];if(rank==U64_MAX_VALUE||(rank&7u)!=0u)continue;u64 symbol=rank/8u;if(symbol<bootstrap_symbols)continue;u64 interleaved_offset=symbol-bootstrap_symbols;if(interleaved_offset>=actual_last_block_length*rank_values.ecc_block_count||interleaved_offset%rank_values.ecc_block_count!=0u)continue;u64 position=interleaved_offset/rank_values.ecc_block_count;if(position>=block_length||selector_mask[position])continue;usize at=pixel*3u;if((u8)original.pixels[at]==255u&&(u8)original.pixels[at+1u]==255u&&(u8)original.pixels[at+2u]==255u){selected_pixels.push_back(pixel);selected_positions.push_back((u32)position);}}require(selected_pixels.size()==5u&&std::set<u32>(selected_positions.begin(),selected_positions.end()).size()==5u,id+": did not find five non-selector white dots in distinct symbols of one deinterleaved RS block");
     PpmImage image;image.width=450u;image.height=450u;image.pixels.resize((usize)image.width*image.height*3u);for(unsigned y=0u;y<image.height;++y)for(unsigned x=0u;x<image.width;++x){unsigned source_x=(unsigned)((u64)x*2u/5u),source_y=(unsigned)((u64)y*2u/5u);usize source_at=((usize)source_y*width+source_x)*3u,dest_at=((usize)y*image.width+x)*3u;memcpy(image.pixels.data()+dest_at,original.pixels.data()+source_at,3u);}
     for(usize pixel:selected_pixels){unsigned x=(unsigned)(pixel%width),y=(unsigned)(pixel/width);unsigned scan_x=(unsigned)floor(scale*((double)x+.5)),scan_y=(unsigned)floor(scale*((double)y+.5));usize at=((usize)scan_y*image.width+scan_x)*3u;require((u8)image.pixels[at]==255u,id+": chosen center was not white after scaling");image.pixels[at]=image.pixels[at+1u]=image.pixels[at+2u]=0;}
-    write_file(scan,"P6\n450 450\n255\n"+image.pixels);auto dec=run_cli(work,decode_file_args({scan},decoded,{"--palette","Black White","--debug"}),"decode");expect_success(dec,id+": five center specks plus O=3 exceeded the parity budget; decoding requires all five center disagreements to be erased");std::smatch corrected_match;std::string decode_log=dec.out+dec.err;u64 expected_corrections=(u64)rank_values.overlay_erasure_budget*rank_values.ecc_block_count+5u;require(std::regex_search(decode_log,corrected_match,std::regex("ECC detected ([0-9]+) symbol errors"))&&std::stoull(corrected_match[1].str())==expected_corrections,id+": corrected-symbol count does not include all five center-speck erasures");compare_files(payload,decoded/"payload.bin",id+" erasure recovery");
+    write_file(scan,"P6\n450 450\n255\n"+image.pixels);auto dec=run_cli(work,decode_file_args({scan},decoded,{"--palette","Black White"}),"decode");expect_success(dec,id+": five center specks plus O=3 exceeded the parity budget; decoding requires all five center disagreements to be erased");std::smatch corrected_match;std::string decode_log=dec.out+dec.err;u64 expected_corrections=(u64)rank_values.overlay_erasure_budget*rank_values.ecc_block_count+5u;require(std::regex_search(decode_log,corrected_match,std::regex("ECC detected ([0-9]+) symbol errors"))&&std::stoull(corrected_match[1].str())==expected_corrections,id+": corrected-symbol count does not include all five center-speck erasures");compare_files(payload,decoded/"payload.bin",id+" erasure recovery");
 }
 
 static void erased_metadata_scan_case(const std::string& id,int kind){
@@ -3583,8 +3528,7 @@ static void erased_metadata_scan_case(const std::string& id,int kind){
         unsigned changed=0;for(unsigned col=0;col<outer;++col){size_t at=(static_cast<size_t>(y)*source.width+x0+col)*3;if(static_cast<unsigned char>(source.pixels[at])!=255)++changed;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}require(changed>0,id+": length row fixture changed no cells");}
     const std::vector<std::array<double,3>> variants=kind==0?std::vector<std::array<double,3>>{{{0,0,0}}}:kind==1?std::vector<std::array<double,3>>{{{90,0,0},{180,0,0},{270,0,0},{0,1,0},{0,0,1}}}:std::vector<std::array<double,3>>{{{0,0,0},{90,0,0},{180,0,0},{270,0,0},{0,1,0},{0,0,1}}};
     for(size_t i=0;i<variants.size();++i){PpmImage variant=source;fs::path scan=work/("scan_"+std::to_string(i)+".ppm");write_file(work/"mutated_source.ppm","P6\n80 80\n255\n"+variant.pixels);variant=read_ppm(work/"mutated_source.ppm");make_oriented_scan(variant,scan,variants[i][0],variants[i][1]!=0,variants[i][2]!=0);
-        fs::path out=work/("decoded_"+std::to_string(i));auto dec=run_cli(work,decode_file_args({scan.string()},out,{"--debug"}),"decode_"+std::to_string(i));expect_success(dec,id+" scan "+std::to_string(i));std::string log=dec.out+dec.err;
-        const std::string diagnostic=kind<2?"metadata ECC recovered from header length row":"metadata ECC recovered from guessed header size";require(log.find(diagnostic)!=std::string::npos,id+": expected recovery diagnostic missing");compare_files(payload,out/"payload.bin",id+" "+std::to_string(i));}
+        fs::path out=work/("decoded_"+std::to_string(i));auto dec=run_cli(work,decode_file_args({scan.string()},out,{}),"decode_"+std::to_string(i));expect_success(dec,id+" scan "+std::to_string(i));compare_files(payload,out/"payload.bin",id+" "+std::to_string(i));}
 }
 
 static void minify_literals_case(){
@@ -3841,8 +3785,8 @@ static void cli_decoder_paths_case(){
     require(normalized.pos==0xffffffffu-subtract&&normalized.streamPos==0xffffffffu-subtract&&normalized.posLimit==0xfffffffeu-subtract&&hashes[0]==0&&hashes[1]==0&&hashes[2]==1&&hashes[3]==0xffffffffu-subtract,"match finder normalization mismatch");
     fs::path input_dir=work/"auto/input",ppm_dir=work/"auto/ppm",decoded_dir=work/"auto/decoded";fs::create_directories(input_dir);fs::create_directories(ppm_dir);fs::create_directories(decoded_dir);std::string repeated;
     for(unsigned i=0;i<256;++i){char line[100];std::snprintf(line,sizeof(line),"LZMA CLI decoder path regression payload; repetition=%03u\n",i);repeated+=line;}fs::path payload=input_dir/"payload.bin";write_file(payload,repeated);
-    const std::string prefix="cli_decoder_paths_auto";auto enc=run_cli(input_dir,{"encode","--input=payload.bin","--page-width=500","--page-height=500","--output-dir="+ppm_dir.string(),"--prefix="+prefix,"--debug"},"cli_encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(ppm_dir,prefix);require(!ppms.empty()&&fs::exists(ppm_dir/(prefix+"_encode_fiducials.csv")),id+": encode fiducial report/pages missing");
-    auto dec=run_cli(work,decode_file_args(ppms,decoded_dir,{"--debug"}),"cli_decode");expect_success(dec,id+" decode");compare_files(payload,decoded_dir/"payload.bin",id);check_fiducials(ppm_dir/(prefix+"_encode_fiducials.csv"),decoded_dir/"decode_fiducials.csv",id);
+    const std::string prefix="cli_decoder_paths_auto";auto enc=run_cli(input_dir,{"encode","--input=payload.bin","--page-width=500","--page-height=500","--output-dir="+ppm_dir.string(),"--prefix="+prefix},"cli_encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(ppm_dir,prefix);require(!ppms.empty(),id+": encode emitted no PPM pages");
+    auto dec=run_cli(work,decode_file_args(ppms,decoded_dir,{}),"cli_decode");expect_success(dec,id+" decode");compare_files(payload,decoded_dir/"payload.bin",id);
     fs::path pass_out=work/"decoded_with_ignored_password";auto pass=run_cli(work,decode_file_args(ppms,pass_out,{"--password-cli=unused-password"}),"ignored_password");expect_success(pass,id+" ignored password");require((pass.out+pass.err).find("decode: warning: payload was not encrypted; password ignored")!=std::string::npos,id+": ignored-password warning missing");compare_files(payload,pass_out/"payload.bin",id+" ignored password");
 }
 
@@ -3861,7 +3805,6 @@ static void footer_features_case(){
     fs::path mask=work/"footer_mask.ppm";std::vector<char> pixels(180u*180u*3u,static_cast<char>(255));pixels[pixels.size()-3]=static_cast<char>(255);pixels[pixels.size()-2]=0;pixels[pixels.size()-1]=static_cast<char>(255);write_file(mask,"P6\n180 180\n255\n"+std::string(pixels.begin(),pixels.end()));
     fs::path overlay=work/"overlay";auto over_enc=encode(overlay,"overlay",{"--page-width=180","--page-height=180","--footer=MARK","--overlay-fraction=0.1","--overlay-ppm="+mask.string(),"--overlay-pages=all","--ecc=fill"});expect_success(over_enc,id+" overlay footer");auto overlay_pages=ppm_paths(overlay,"overlay");require(!overlay_pages.empty(),id+": footer overlay emitted no page");PpmImage over=read_ppm(overlay_pages.front());size_t last=over.pixels.size()-3;require(static_cast<unsigned char>(over.pixels[last])==255&&static_cast<unsigned char>(over.pixels[last+1])==255&&static_cast<unsigned char>(over.pixels[last+2])==255,id+": overlay modified footer region");
     fs::path over_dir=work/"over_barcode";auto ob=encode(over_dir,"over",{"--page-width=500","--page-height=500","--footer=OVER","--footer-over-barcode","--ecc=fill"});expect_success(ob,id+" over-barcode footer encode");auto ob_pages=ppm_paths(over_dir,"over");require(!ob_pages.empty(),id+": over-barcode footer emitted no page");args={"decode","--decoded-stdout"};args.insert(args.end(),ob_pages.begin(),ob_pages.end());auto ob_stdout=run_cli(work,args,"over_stdout");expect_success(ob_stdout,id+" over-barcode footer decode");check_decoded(ob_stdout.out,std::vector<unsigned char>(payload_bytes.begin(),payload_bytes.end()),0,id+" over-barcode footer");
-    auto ob_debug=run_cli(work,decode_file_args(ob_pages,work/"over_debug",{"--debug","--decoded-file"}),"over_debug");expect_success(ob_debug,id+" over-barcode debug decode");require(std::regex_search(ob_debug.out+ob_debug.err,std::regex("ECC detected [1-9][0-9]* symbol errors")),id+": over-barcode footer did not damage protected symbols");
     fs::path weak_dir=work/"weak";fs::path footer_payload=work/"footer.bin";write_file(footer_payload,"footer");auto weak=encode(weak_dir,"weak",{"--page-width=500","--page-height=500","--footer=OVER","--footer-over-barcode","--ecc=0.01"},footer_payload);expect_failure(weak,id+" insufficient ECC");std::string why=weak.out+weak.err;require(why.find("ECC cannot cover")!=std::string::npos||why.find("footer")!=std::string::npos||why.find("ECC")!=std::string::npos,id+": insufficient ECC diagnostic missing");
 }
 
@@ -3881,18 +3824,24 @@ static void scan_registration_case(const std::string& id,double pitch,double ox,
                      low_contrast?120:60,low_contrast?114:174,blur,streaks);
     auto control_result=run_cli(work,decode_file_args(pages,control),"control_decode");expect_success(control_result,id+" control decode");
     compare_files(payload,control/"payload.bin",id+" control");
-    auto scan_result=run_cli(work,decode_file_args({scan.string()},decoded,expected_scale>0.0?std::vector<std::string>{"--debug"}:std::vector<std::string>{}),"scan_decode");expect_success(scan_result,id+" scan decode");
+    auto scan_result=run_cli(work,decode_file_args({scan.string()},decoded),"scan_decode");expect_success(scan_result,id+" scan decode");
     compare_files(payload,decoded/"payload.bin",id+" scan");
     auto control_stdout=run_cli(work,{"decode","--decoded-stdout",pages.front()},"control_stdout");
     auto scan_stdout=run_cli(work,{"decode","--decoded-stdout",scan.string()},"scan_stdout");
     expect_success(control_stdout,id+" stdout control");expect_success(scan_stdout,id+" stdout scan");
     std::string expected_report=read_file(payload);std::vector<unsigned char> expected_report_bytes(expected_report.begin(),expected_report.end());check_decoded(scan_stdout.out,expected_report_bytes,0.0,id+" scan stdout");
     if(expected_scale>0.0){
-        std::ifstream affine(decoded/"decode_affine.csv");std::string header,line;std::getline(affine,header);std::getline(affine,line);
-        auto fields=split_csv(line);require(fields.size()>=10&&fields[1]=="1",id+": missing affine estimate");
-        double scale=std::strtod(fields[2].c_str(),nullptr),rotation=std::strtod(fields[3].c_str(),nullptr);
-        double tx=std::strtod(fields[8].c_str(),nullptr),ty=std::strtod(fields[9].c_str(),nullptr);
-        require(std::fabs(scale-expected_scale)<=0.01&&std::fabs(tx-expected_tx)<=0.75&&std::fabs(ty-expected_ty)<=0.75&&std::fabs(rotation)<=0.25,id+": affine registration outside tolerance");
+        makocode::ByteBuffer scan_input,frame_bits;u64 frame_bit_count=0;PpmParserState state;ImageMappingConfig mapping;
+        require(read_entire_file(scan.c_str(),scan_input)&&
+                    ppm_extract_frame_bits(scan_input,mapping,frame_bits,frame_bit_count,state,false),
+                id+": could not inspect affine fit");
+        const AffineTransform& affine=state.affine_transform;
+        double scale=std::sqrt(affine.a00*affine.a00+affine.a10*affine.a10);
+        double rotation=std::atan2(affine.a10,affine.a00)*(180.0/3.14159265358979323846);
+        require(state.has_affine_transform&&std::fabs(scale-expected_scale)<=0.01&&
+                    std::fabs(affine.tx-expected_tx)<=0.75&&std::fabs(affine.ty-expected_ty)<=0.75&&
+                    std::fabs(rotation)<=0.25,
+                id+": affine registration outside tolerance");
     }
 }
 
@@ -3903,7 +3852,7 @@ static void canonical_tile_case(){
     auto enc=run_cli(work,encode_file_args(payload,pages,"page",{"--page-width=1000","--page-height=1000","--ecc=0.5"}),"encode");expect_success(enc,id+" encode");auto ppms=ppm_paths(pages,"page");require(ppms.size()==1,id+": expected a single canonical page");TileSummary summary=read_tile_summary(ppms.front(),1000,1000);require(summary.block_count>0&&summary.parity>0,id+": missing canonical ECC");
     auto dec=run_cli(work,decode_file_args(ppms,decoded),"decode");expect_success(dec,id+" decode");compare_files(payload,decoded/"payload.bin",id);
     fs::path overlay=work/"overlay.ppm",budget_dir=work/"budget_pages";expect_success(run_transform(work,{"overlay-mask","--output",overlay.string(),"--circle-color","0 0 0","--background-color","255 255 255","--width","1700","--height","1700"},"mask"),id+" mask");
-    auto budget=run_cli(work,encode_file_args(payload,budget_dir,"budget",{"--page-width=1700","--page-height=1700","--overlay-fraction=0.10","--overlay-ppm="+overlay.string(),"--overlay-pages=all","--debug"}),"budget");expect_success(budget,id+" ECC overlay budget");auto budget_pages=ppm_paths(budget_dir,"budget");require(budget_pages.size()==1,id+": expected one overlay budget page");TileSummary bs=read_tile_summary(budget_pages[0],1700,1700);require(bs.overlay_budget>0&&bs.selector_present,id+": automatic ECC omitted selector budget");
+    auto budget=run_cli(work,encode_file_args(payload,budget_dir,"budget",{"--page-width=1700","--page-height=1700","--overlay-fraction=0.10","--overlay-ppm="+overlay.string(),"--overlay-pages=all"}),"budget");expect_success(budget,id+" ECC overlay budget");auto budget_pages=ppm_paths(budget_dir,"budget");require(budget_pages.size()==1,id+": expected one overlay budget page");TileSummary bs=read_tile_summary(budget_pages[0],1700,1700);require(bs.overlay_budget>0&&bs.selector_present,id+": automatic ECC omitted selector budget");
     fs::path invalid=work/"no_overlay_attempt";auto rejected=run_cli(work,encode_file_args(payload,invalid,"bad",{"--ecc=0","--overlay-fraction=0.10","--overlay-ppm="+overlay.string(),"--overlay-pages=all","--page-width=1000","--page-height=1000"}),"overlay_without_ecc");expect_failure(rejected,id+" zero-ECC overlay");require((rejected.out+rejected.err).find("overlay requires ECC")!=std::string::npos,id+": zero-ECC overlay diagnostic changed");
     fs::path custom_dir=work/"custom_pages",custom_out=work/"custom_out";auto custom=run_cli(work,encode_file_args(payload,custom_dir,"custom",{"--page-width=1700","--page-height=1700","--fiducial-spacing=30"}),"custom_encode");expect_success(custom,id+" custom fiducials");auto custom_pages=ppm_paths(custom_dir,"custom");require(custom_pages.size()==1,id+": custom-fiducial page missing");read_tile_summary(custom_pages[0],1700,1700);auto custom_dec=run_cli(work,decode_file_args(custom_pages,custom_out),"custom_decode");expect_success(custom_dec,id+" custom decode");compare_files(payload,custom_out/"payload.bin",id+" custom");
     fs::path tiny=work/"tiny.txt",tiny_dir=work/"tiny_pages",tiny_out=work/"tiny_out";write_file(tiny,"small canonical roundtrip\n");auto tiny_enc=run_cli(work,encode_file_args(tiny,tiny_dir,"tiny",{"--page-width=80","--page-height=80"}),"tiny_encode");expect_success(tiny_enc,id+" tiny encode");auto tiny_pages=ppm_paths(tiny_dir,"tiny");require(tiny_pages.size()==1,id+": tiny page missing");read_tile_summary(tiny_pages[0],80,80);auto tiny_dec=run_cli(work,decode_file_args(tiny_pages,tiny_out),"tiny_decode");expect_success(tiny_dec,id+" tiny decode");compare_files(tiny,tiny_out/"tiny.txt",id+" tiny");
@@ -3921,7 +3870,7 @@ static void palette_base5_capacity_case(){
 static void canonical_overlay_multipage_case(){
     const std::string id="0105_canonical_overlay_multipage";fs::path work=make_work_dir(id),payload=work/"payload.bin",pages_dir=work/"pages";generate_bytes(work,payload,4096,103,"payload");
     fs::path black=work/"overlay.ppm",cyan=work/"overlay_second.ppm";expect_success(run_transform(work,{"overlay-mask","--output",black.string(),"--circle-color","0 0 0","--background-color","255 255 255","--width","1000","--height","1000"},"mask"),id+" black mask");expect_success(run_transform(work,{"overlay-mask","--output",cyan.string(),"--circle-color","0 255 255","--background-color","255 255 255","--width","1000","--height","1000"},"cyan"),id+" cyan mask");
-    std::vector<std::string> args={"encode","--input=payload.bin","--overlay-fraction=0.992156862745098","--overlay-ppm="+black.string(),"--overlay-pages=1-1,1","--overlay-ppm="+cyan.string(),"--overlay-pages=2-2","--page-width=1000","--page-height=1000","--prefix=page","--output-dir="+pages_dir.string(),"--debug"};auto enc=run_cli(work,args,"encode");expect_success(enc,id+" encode");std::string log=enc.out+enc.err;size_t occurrences=0,offset=0;while((offset=log.find("debug: overlay erasure budget per block=",offset))!=std::string::npos){++occurrences;++offset;}require(occurrences==2,id+": expected two page overlay reservations");
+    std::vector<std::string> args={"encode","--input=payload.bin","--overlay-fraction=0.992156862745098","--overlay-ppm="+black.string(),"--overlay-pages=1-1,1","--overlay-ppm="+cyan.string(),"--overlay-pages=2-2","--page-width=1000","--page-height=1000","--prefix=page","--output-dir="+pages_dir.string()};auto enc=run_cli(work,args,"encode");expect_success(enc,id+" encode");
     auto pages=ppm_paths(pages_dir,"page");require(pages.size()>=2&&pages.size()<=16,id+": unexpected multipage output count");std::vector<std::pair<u64,std::string>> indexed;TileSummary baseline;
     for(size_t i=0;i<pages.size();++i){TileSummary t=read_tile_summary(pages[i],1000,1000);require(t.page_count==pages.size()&&t.selector_present&&t.overlay_budget>0,id+": invalid overlay tile metadata");if(i==0)baseline=t;else require(t.block_count==baseline.block_count&&t.parity==baseline.parity&&t.overlay_budget==baseline.overlay_budget&&t.selector_seed==baseline.selector_seed,id+": page selector settings disagree");indexed.push_back({t.page_index,pages[i]});}
     std::sort(indexed.begin(),indexed.end(),[](auto a,auto b){return a.first<b.first;});pages.clear();for(size_t i=0;i<indexed.size();++i){require(indexed[i].first==i+1,id+": page metadata index gap");pages.push_back(indexed[i].second);}
@@ -3944,7 +3893,7 @@ static bool test_uniform_region_detector(){
 
 static bool decode_blob_fixture(const fs::path& path,bool detect,BlobDecodeResult& result){
     result={};makocode::ByteBuffer ppm;if(!read_entire_file(path.c_str(),ppm))return false;ImageMappingConfig mapping;const char* palette="White Black";image_mapping_set_palette_text(mapping,palette,strlen(palette),"test");if(!image_mapping_build_custom_palette(mapping,"test"))return false;makocode::ByteBuffer frame,frame_erasures;u64 frame_bits=0;PpmParserState state;bool retry=false,rotation=false;
-    if(!ppm_extract_frame_bits(ppm,mapping,frame,frame_bits,state,false,&retry,nullptr,1,&frame_erasures,nullptr,nullptr,nullptr,nullptr,&rotation,nullptr,false,nullptr,nullptr,nullptr,0,0,0,detect,true)||!state.has_encoded_tile||!metadata_schema_is_current(state.encoded_tile.schema_version))return false;
+    if(!ppm_extract_frame_bits(ppm,mapping,frame,frame_bits,state,false,&retry,1,&frame_erasures,nullptr,nullptr,nullptr,nullptr,&rotation,nullptr,false,nullptr,nullptr,nullptr,0,0,0,detect,true)||!state.has_encoded_tile||!metadata_schema_is_current(state.encoded_tile.schema_version))return false;
     makocode::ByteBuffer payload_stream,payload_erasures;u64 payload_bits=0;if(!frame_bits_to_payload(frame.data,frame_bits,state,payload_stream,payload_bits,nullptr,frame_erasures.data,frame_bits,&payload_erasures))return false;for(usize i=0;i<payload_erasures.size;++i)result.erased+=payload_erasures.data[i]!=0;
     const MetadataTile::Values& tile=state.encoded_tile;makocode::PaletteSymbolProfile profile;
     if(!tile.ecc_enabled||!tile.ecc_block_data||!tile.ecc_parity||!tile.ecc_block_count||
@@ -3986,7 +3935,7 @@ static void raw_fallback_case(){
     makocode::EncoderContext encoder;encoder.config.palette_size=2;encoder.config.ecc_redundancy=.5;encoder.config.overlay_erasure_budget=0;require(encoder.set_payload(payload.data,payload.size)&&encoder.build(),id+": raw fallback fixture encode failed");
     ImageMappingConfig mapping;const u32 width=500,height=500;PageFooterConfig footer_config;makocode::ByteBuffer frame;u64 frame_bits=0;FooterLayout footer;u32 data_height=height;u64 bits_per_page=0,page_count=0;
     require(build_frame_bits(encoder,mapping,frame,frame_bits)&&compute_page_layout(mapping,footer_config,frame_bits,width,height,footer,data_height,bits_per_page,page_count,&encoder.ecc_info(),0.0,encoder.ecc_info().unknown_error_budget,encoder.ecc_info().overlay_erasure_budget)&&page_count==1,id+": raw fallback fixture page layout failed");
-    makocode::ByteBuffer page;require(encode_page_to_ppm(mapping,frame,frame_bits,0,width,height,1,bits_per_page,&encoder.ecc_info(),0.0,nullptr,0,footer,page),id+": raw fallback fixture page render failed");makocode::ByteBuffer fiducials;const u8 white[3]={255,255,255};require(apply_default_fiducial_grid(page,fiducials,data_height,white,nullptr,1),id+": raw fallback fiducials failed");write_file(ppm_path,std::string(reinterpret_cast<const char*>(fiducials.data),fiducials.size));
+    makocode::ByteBuffer page;require(encode_page_to_ppm(mapping,frame,frame_bits,0,width,height,1,bits_per_page,&encoder.ecc_info(),0.0,nullptr,0,footer,page),id+": raw fallback fixture page render failed");makocode::ByteBuffer fiducials;const u8 white[3]={255,255,255};require(apply_default_fiducial_grid(page,fiducials,data_height,white),id+": raw fallback fiducials failed");write_file(ppm_path,std::string(reinterpret_cast<const char*>(fiducials.data),fiducials.size));
     fs::path disabled=work/"disabled",enabled=work/"enabled";fs::create_directories(disabled);fs::create_directories(enabled);auto off=run_cli(work,decode_file_args({ppm_path.string()},disabled),"disabled",{},{{"MAKOCODE_DECODE_RAW_FALLBACK","0"}});expect_failure(off,id+" disabled fallback");require(!fs::exists(disabled/"payload.bin"),id+": disabled fallback wrote a raw payload");
     auto on=run_cli(work,decode_file_args({ppm_path.string()},enabled),"enabled",{},{{"MAKOCODE_DECODE_RAW_FALLBACK","1"}});expect_success(on,id+" enabled fallback");compare_files(payload_path,enabled/"payload.bin",id);
 }

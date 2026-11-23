@@ -1483,31 +1483,25 @@ void u64_to_ascii(u64 value, char* buffer, usize capacity) {
 }
 
 void format_fixed_3(double value, char* buffer, usize capacity) {
-    if (!buffer || capacity < 6u) {
-        return;
-    }
+    if (!buffer || capacity < 6u) return;
     if (value < 0.0) {
         buffer[0] = '-';
-        format_fixed_3(-value, buffer + 1, capacity - 1);
+        format_fixed_3(-value, buffer + 1u, capacity - 1u);
         return;
     }
     u64 scaled = (u64)(value * 1000.0 + 0.5);
     u64 whole = scaled / 1000u;
-    u64 frac = scaled % 1000u;
-    char whole_buf[32];
-    u64_to_ascii(whole, whole_buf, sizeof(whole_buf));
-    usize whole_len = ascii_length(whole_buf);
-    if (whole_len + 4u >= capacity) {
-        whole_len = capacity > 5u ? capacity - 5u : 0u;
-    }
-    for (usize i = 0; i < whole_len; ++i) {
-        buffer[i] = whole_buf[i];
-    }
-    buffer[whole_len] = '.';
-    buffer[whole_len + 1u] = (char)('0' + (frac / 100u) % 10u);
-    buffer[whole_len + 2u] = (char)('0' + (frac / 10u) % 10u);
-    buffer[whole_len + 3u] = (char)('0' + frac % 10u);
-    buffer[whole_len + 4u] = '\0';
+    u64 fraction = scaled % 1000u;
+    char whole_buffer[32];
+    u64_to_ascii(whole, whole_buffer, sizeof(whole_buffer));
+    usize whole_length = ascii_length(whole_buffer);
+    if (whole_length + 4u >= capacity) whole_length = capacity - 5u;
+    for (usize i = 0u; i < whole_length; ++i) buffer[i] = whole_buffer[i];
+    buffer[whole_length] = '.';
+    buffer[whole_length + 1u] = (char)('0' + (fraction / 100u) % 10u);
+    buffer[whole_length + 2u] = (char)('0' + (fraction / 10u) % 10u);
+    buffer[whole_length + 3u] = (char)('0' + fraction % 10u);
+    buffer[whole_length + 4u] = '\0';
 }
 
 bool utc_timestamp_string(char* buffer, usize capacity) {
@@ -2046,78 +2040,6 @@ bool find_corners(const ImageBuffer& image,
 } /* namespace image */
 
 
-
-static bool append_fiducial_csv_row(makocode::ByteBuffer& csv,
-                                    u64 page,
-                                    u32 row,
-                                    u32 column,
-                                    double x,
-                                    double y,
-                                    double logical_x,
-                                    double logical_y) {
-    char x_text[32];
-    char y_text[32];
-    char logical_x_text[32];
-    char logical_y_text[32];
-    char page_text[32];
-    char row_text[32];
-    char column_text[32];
-    format_fixed_3(x, x_text, sizeof(x_text));
-    format_fixed_3(y, y_text, sizeof(y_text));
-    format_fixed_3(logical_x, logical_x_text, sizeof(logical_x_text));
-    format_fixed_3(logical_y, logical_y_text, sizeof(logical_y_text));
-    u64_to_ascii(page, page_text, sizeof(page_text));
-    u64_to_ascii(row, row_text, sizeof(row_text));
-    u64_to_ascii(column, column_text, sizeof(column_text));
-    return csv.append_ascii(page_text) && csv.append_char(',') &&
-           csv.append_ascii(row_text) && csv.append_char(',') &&
-           csv.append_ascii(column_text) && csv.append_char(',') &&
-           csv.append_ascii(x_text) && csv.append_char(',') &&
-           csv.append_ascii(y_text) && csv.append_char(',') &&
-           csv.append_ascii(logical_x_text) && csv.append_char(',') &&
-           csv.append_ascii(logical_y_text) && csv.append_char('\n');
-}
-
-bool append_affine_csv_row(makocode::ByteBuffer& csv,
-                                  u64 page,
-                                  bool has_affine,
-                                  double a00,
-                                  double a01,
-                                  double a10,
-                                  double a11,
-                                  double tx,
-                                  double ty) {
-    char page_text[32];
-    char scale_text[32];
-    char rotation_text[32];
-    char a00_text[32];
-    char a01_text[32];
-    char a10_text[32];
-    char a11_text[32];
-    char tx_text[32];
-    char ty_text[32];
-    double scale = sqrt(a00 * a00 + a10 * a10);
-    double rotation = atan2(a10, a00) * (180.0 / 3.14159265358979323846);
-    u64_to_ascii(page, page_text, sizeof(page_text));
-    format_fixed_3(scale, scale_text, sizeof(scale_text));
-    format_fixed_3(rotation, rotation_text, sizeof(rotation_text));
-    format_fixed_3(a00, a00_text, sizeof(a00_text));
-    format_fixed_3(a01, a01_text, sizeof(a01_text));
-    format_fixed_3(a10, a10_text, sizeof(a10_text));
-    format_fixed_3(a11, a11_text, sizeof(a11_text));
-    format_fixed_3(tx, tx_text, sizeof(tx_text));
-    format_fixed_3(ty, ty_text, sizeof(ty_text));
-    return csv.append_ascii(page_text) && csv.append_char(',') &&
-           csv.append_ascii(has_affine ? "1" : "0") && csv.append_char(',') &&
-           csv.append_ascii(scale_text) && csv.append_char(',') &&
-           csv.append_ascii(rotation_text) && csv.append_char(',') &&
-           csv.append_ascii(a00_text) && csv.append_char(',') &&
-           csv.append_ascii(a01_text) && csv.append_char(',') &&
-           csv.append_ascii(a10_text) && csv.append_char(',') &&
-           csv.append_ascii(a11_text) && csv.append_char(',') &&
-           csv.append_ascii(tx_text) && csv.append_char(',') &&
-           csv.append_ascii(ty_text) && csv.append_char('\n');
-}
 
 /* ===== Begin Embedded LZMA SDK (Public Domain, Igor Pavlov) ===== */
 
@@ -14259,67 +14181,6 @@ bool write_bytes_to_file(const char* path, const u8* data, usize length) {
     return makocode_platform_close(fd) == 0 && ok;
 }
 
-static bool write_ppm_with_fiducials_to_file(const char* path,
-                                             const makocode::ByteBuffer& buffer,
-                                             const u8* fiducial_rgb,
-                                             makocode::ByteBuffer* debug_csv = 0,
-                                             u64 debug_page = 1u,
-                                             u32 data_height_pixels = 0u);
-
-bool path_contains_substring(const char* path, const char* needle) {
-    for (const char* cursor = path; *cursor; ++cursor) {
-        const char* a = cursor;
-        const char* b = needle;
-        while (*a && *b && (*a == *b)) {
-            ++a;
-            ++b;
-        }
-        if (*b == '\0') {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool should_embed_fiducials_for_path(const char* path) {
-    usize path_length = ascii_length(path);
-    if (path_length < 4u) {
-        return false;
-    }
-    const char* suffix = path + (path_length - 4u);
-    if (suffix[0] != '.' || suffix[1] != 'p' || suffix[2] != 'p' || suffix[3] != 'm') {
-        return false;
-    }
-    if (!path_contains_substring(path, "_encoded")) {
-        return false;
-    }
-    return true;
-}
-
-bool write_buffer_to_file(const char* path,
-                                 const makocode::ByteBuffer& buffer,
-                                 makocode::ByteBuffer* debug_csv,
-                                 u64 debug_page,
-                                 u32 data_height_pixels,
-                                 const u8* fiducial_rgb,
-                                 bool embed_fiducials) {
-    if (embed_fiducials && should_embed_fiducials_for_path(path)) {
-        return write_ppm_with_fiducials_to_file(path,
-                                                buffer,
-                                                fiducial_rgb,
-                                                debug_csv,
-                                                debug_page,
-                                                data_height_pixels);
-    }
-    return write_bytes_to_file(path, buffer.data, buffer.size);
-}
-
-
-
-
-
-
-
 static bool compute_centered_data_rectangle(u32 page_width,
                                             u32 page_height,
                                             u64 payload_pixels,
@@ -16702,8 +16563,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    PpmParserState& metadata_out,
                                    bool force_disable_fiducial_subgrid,
                                    bool* retry_without_subgrid_out,
-                                   makocode::ByteBuffer* debug_fiducial_csv,
-                                   u64 debug_page,
+                                   u64 page_index_hint,
                                    makocode::ByteBuffer* frame_erasure_bits,
                                    u64* overlay_selector_seed_out,
                                    makocode::ByteBuffer* overlay_selector_counts_out,
@@ -17514,11 +17374,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                         tile_affine_hint_available = true;
                                         tile_available = true;
                                         apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
-                                        if (debug_fiducial_csv) {
-                                            console_line(2, ignore_marker
-                                                ? "decode: metadata ECC recovered from header length row"
-                                                : "decode: metadata ECC recovered from marker-constrained search");
-                                        }
+
                                         return true;
                                     }
                                 }
@@ -17527,18 +17383,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 }
             }
         }
-        if (debug_fiducial_csv) {
-            char checks[32];
-            char attempts[32];
-            u64_to_ascii(candidate_checks, checks, sizeof(checks));
-            u64_to_ascii(ecc_attempts, attempts, sizeof(attempts));
-            console_write(2, ignore_marker
-                ? "decode: metadata length-row probe failed checks="
-                : "decode: metadata marker-constrained probe failed checks=");
-            console_write(2, checks);
-            console_write(2, " ECC attempts=");
-            console_line(2, attempts);
-        }
+
         return false;
     };
     if (!tile_available && !marker_orientation_detected) {
@@ -17818,17 +17663,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                 tile_affine_hint_available = true;
                                 tile_available = true;
                                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
-                                if (debug_fiducial_csv) {
-                                    char recovery_description[192];
-                                    makocode_platform_snprintf(recovery_description, sizeof(recovery_description),
-                                             "decode: guessed size=%u pitch=%.2f center=%.2f,%.2f tag_y=%u",
-                                             candidate_cells, candidate_affine.pitch_pixels,
-                                             candidate_affine.center_x, candidate_affine.center_y,
-                                             candidate_tag_y);
-                                    console_line(2, recovery_description);
-                                    console_line(2,
-                                        "decode: metadata ECC recovered from guessed header size");
-                                }
+
                             }
                         }
                     }
@@ -17954,7 +17789,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
     }
     if (known_tile_override) {
         tile_values = *known_tile_override;
-        tile_values.page_index = debug_page;
+        tile_values.page_index = page_index_hint;
         if (!MetadataTile::build_palette_text_from_colors(tile_values.palette,
                                                            tile_values.palette_count,
                                                            tile_palette_text)) {
@@ -20100,21 +19935,7 @@ struct RotationEstimateCandidate {
                                                                             &fiducial_affine,
                                                                             &fiducial_affine_valid,
                                                                             0);
-                if (debug_fiducial_csv) {
-                    char estimate_text[32];
-                    char affine_text[32];
-                    double affine_angle = fiducial_affine_valid
-                        ? atan2(fiducial_affine.a10 - fiducial_affine.a01,
-                                fiducial_affine.a00 + fiducial_affine.a11) *
-                              (180.0 / 3.14159265358979323846)
-                        : 0.0;
-                    format_fixed_3(rotation_degrees_est, estimate_text, sizeof(estimate_text));
-                    format_fixed_3(affine_angle, affine_text, sizeof(affine_text));
-                    console_write(2, "decode: fiducial angle estimate=");
-                    console_write(2, estimate_text);
-                    console_write(2, " affine=");
-                    console_line(2, affine_text);
-                }
+
                 bool fiducial_fit_covers_page = centers_visible == 0;
                 if (centers_visible) {
                     u32 min_row = fiducial_rows;
@@ -20169,12 +19990,7 @@ struct RotationEstimateCandidate {
                         initial_fiducial_affine_hint_available = true;
                     }
                 }
-                if (debug_fiducial_csv) {
-                    console_write(2, "decode: fiducial fit covers page=");
-                    console_write(2, fiducial_fit_covers_page ? "yes" : "no");
-                    console_write(2, " affine hint=");
-                    console_line(2, initial_fiducial_affine_hint_available ? "yes" : "no");
-                }
+
                 double fiducial_grid_angle_est = rotation_degrees_est;
                 if (rotation_success && fiducial_affine_valid && tile_affine_hint_trusted &&
                     expected_width <= 0xFFFFFFFFull && expected_height_eff <= 0xFFFFFFFFull) {
@@ -22292,7 +22108,7 @@ struct RotationEstimateCandidate {
             grouped_bit_target = capacity_with_reserve;
             if (state.has_page_bits && state.page_bits_value > 0u) {
                 u64 page_index = state.encoded_tile.page_index
-                                     ? state.encoded_tile.page_index : debug_page;
+                                     ? state.encoded_tile.page_index : page_index_hint;
                 if (!page_index || page_index - 1u > U64_MAX_VALUE / capacity_with_reserve) {
                     return false;
                 }
@@ -22321,7 +22137,7 @@ struct RotationEstimateCandidate {
             if (capacity_with_reserve == 0u || custom_palette_base < 2u) return false;
             u64 page_index = state.encoded_tile.page_index
                                  ? state.encoded_tile.page_index
-                                 : debug_page;
+                                 : page_index_hint;
             if (page_index == 0u ||
                 page_index - 1u > U64_MAX_VALUE / capacity_with_reserve) return false;
             u64 page_bit_offset = (page_index - 1u) * capacity_with_reserve;
@@ -22465,8 +22281,8 @@ struct RotationEstimateCandidate {
     struct FiducialGridStorage {
         double* centers_x;
         double* centers_y;
-        double* debug_centers_x;
-        double* debug_centers_y;
+        double* affine_hint_centers_x;
+        double* affine_hint_centers_y;
         u8* visible;
         double* column_weights;
         double* row_weights;
@@ -22479,8 +22295,8 @@ struct RotationEstimateCandidate {
         FiducialGridStorage()
             : centers_x(0),
               centers_y(0),
-              debug_centers_x(0),
-              debug_centers_y(0),
+              affine_hint_centers_x(0),
+              affine_hint_centers_y(0),
               visible(0),
               column_weights(0),
               row_weights(0),
@@ -22493,8 +22309,8 @@ struct RotationEstimateCandidate {
         ~FiducialGridStorage() {
             if (centers_x) makocode_platform_free(centers_x);
             if (centers_y) makocode_platform_free(centers_y);
-            if (debug_centers_x) makocode_platform_free(debug_centers_x);
-            if (debug_centers_y) makocode_platform_free(debug_centers_y);
+            if (affine_hint_centers_x) makocode_platform_free(affine_hint_centers_x);
+            if (affine_hint_centers_y) makocode_platform_free(affine_hint_centers_y);
             if (visible) makocode_platform_free(visible);
             if (column_weights) makocode_platform_free(column_weights);
             if (row_weights) makocode_platform_free(row_weights);
@@ -22516,106 +22332,6 @@ struct RotationEstimateCandidate {
     u32 fiducial_row_count = 0u;
     bool fiducial_displacement_active = false;
     bool dimension_scale_overrides_sparse_skew = false;
-    AffineTransform debug_fiducial_affine_override;
-    bool debug_fiducial_affine_override_available = false;
-    auto append_debug_fiducials = [&]() -> bool {
-        if (!debug_fiducial_csv ||
-            !fiducial_storage.centers_x ||
-            !fiducial_storage.centers_y ||
-            fiducial_column_count == 0u ||
-            fiducial_row_count == 0u) {
-            return true;
-        }
-        bool unit_screen_affine = state.has_affine_transform &&
-            fabs(state.affine_transform.a00 - 1.0) < 0.01 &&
-            fabs(state.affine_transform.a11 - 1.0) < 0.01 &&
-            fabs(state.affine_transform.a01) < 0.01 &&
-            fabs(state.affine_transform.a10) < 0.01;
-        if (unit_screen_affine &&
-            logical_width <= 0xFFFFFFFFull && logical_height <= 0xFFFFFFFFull &&
-            data_height <= 0xFFFFFFFFull) {
-            AffineTransform final_screen_transform = state.affine_transform;
-            final_screen_transform.tx +=
-                (final_screen_transform.a00 + final_screen_transform.a01) * 0.5;
-            final_screen_transform.ty +=
-                (final_screen_transform.a10 + final_screen_transform.a11) * 0.5;
-            double* final_centers_x = 0;
-            double* final_centers_y = 0;
-            u8* final_visible = 0;
-            if (sample_fiducial_centers(pixel_data,
-                                        width,
-                                        height,
-                                        fiducial_column_count,
-                                        fiducial_row_count,
-                                        state.has_fiducial_spacing
-                                            ? (double)state.fiducial_spacing_value
-                                            : (double)g_fiducial_defaults.spacing_pixels,
-                                        logical_width,
-                                        logical_height,
-                                        data_height,
-                                        true,
-                                        final_centers_x,
-                                        final_centers_y,
-                                        (const MetadataTile::AffineParams*)0,
-                                        &final_screen_transform,
-                                        &final_visible,
-                                        false,
-                                        &active_mapping)) {
-                makocode_platform_free(fiducial_storage.centers_x);
-                makocode_platform_free(fiducial_storage.centers_y);
-                if (fiducial_storage.visible) makocode_platform_free(fiducial_storage.visible);
-                fiducial_storage.centers_x = final_centers_x;
-                fiducial_storage.centers_y = final_centers_y;
-                fiducial_storage.visible = final_visible;
-            } else {
-                if (final_centers_x) makocode_platform_free(final_centers_x);
-                if (final_centers_y) makocode_platform_free(final_centers_y);
-                if (final_visible) makocode_platform_free(final_visible);
-            }
-        }
-        for (u32 row_index = 0u; row_index < fiducial_row_count; ++row_index) {
-            for (u32 col_index = 0u; col_index < fiducial_column_count; ++col_index) {
-                usize point_index = (usize)row_index * (usize)fiducial_column_count + (usize)col_index;
-                double guessed_x = fiducial_storage.centers_x[point_index];
-                double guessed_y = fiducial_storage.centers_y[point_index];
-                double logical_x = guessed_x;
-                double logical_y = guessed_y;
-                bool affine_coordinates = false;
-                if (state.has_affine_transform) {
-                    const AffineTransform& affine = debug_fiducial_affine_override_available
-                                                        ? debug_fiducial_affine_override
-                                                        : state.affine_transform;
-                    double determinant = affine.a00 * affine.a11 - affine.a01 * affine.a10;
-                    if (!affine_coordinates && fabs(determinant) > 1e-9) {
-                        double offset_x = guessed_x - affine.tx;
-                        double offset_y = guessed_y - affine.ty;
-                        logical_x = (offset_x * affine.a11 - offset_y * affine.a01) / determinant - 0.5;
-                        logical_y = (offset_y * affine.a00 - offset_x * affine.a10) / determinant - 0.5;
-                        affine_coordinates = true;
-                    }
-                }
-                if (!affine_coordinates) {
-                    if (width > 1u && logical_width > 1u) {
-                        logical_x *= (double)(logical_width - 1u) / (double)(width - 1u);
-                    }
-                    if (height > 1u && logical_height > 1u) {
-                        logical_y *= (double)(logical_height - 1u) / (double)(height - 1u);
-                    }
-                }
-                if (!makocode::append_fiducial_csv_row(*debug_fiducial_csv,
-                                             debug_page,
-                                             row_index,
-                                             col_index,
-                                             guessed_x,
-                                             guessed_y,
-                                             logical_x,
-                                             logical_y)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
     if ((!has_rotation || rotation_metadata_present || fiducial_rotation_detected ||
          tile_affine_hint_available) &&
         state.has_fiducial_columns && state.has_fiducial_rows &&
@@ -23146,15 +22862,15 @@ struct RotationEstimateCandidate {
                                     makocode_platform_free(refined_visible);
                                 }
                             }
-                            double debug_scale = (scale_xd + scale_yd) * 0.5;
-                            if (initial_fiducial_affine_hint_available && debug_scale >= 1.5) {
+                            double scan_scale = (scale_xd + scale_yd) * 0.5;
+                            if (initial_fiducial_affine_hint_available && scan_scale >= 1.5) {
                                 AffineTransform screen_transform_hint = initial_fiducial_affine_hint;
                                 screen_transform_hint.tx +=
                                     (screen_transform_hint.a00 + screen_transform_hint.a01) * 0.5;
                                 screen_transform_hint.ty +=
                                     (screen_transform_hint.a10 + screen_transform_hint.a11) * 0.5;
-                                double* debug_centers_x = 0;
-                                double* debug_centers_y = 0;
+                                double* affine_hint_centers_x = 0;
+                                double* affine_hint_centers_y = 0;
                                 if (sample_fiducial_centers(pixel_data,
                                                             width,
                                                             height,
@@ -23165,17 +22881,17 @@ struct RotationEstimateCandidate {
                                                             expected_height,
                                                             data_height,
                                                             true,
-                                                            debug_centers_x,
-                                                            debug_centers_y,
+                                                            affine_hint_centers_x,
+                                                            affine_hint_centers_y,
                                                             (const MetadataTile::AffineParams*)0,
                                                             &screen_transform_hint,
                                                             (u8**)0,
                                                             false,
                                                             &active_mapping)) {
-                                    if (fiducial_storage.debug_centers_x) makocode_platform_free(fiducial_storage.debug_centers_x);
-                                    if (fiducial_storage.debug_centers_y) makocode_platform_free(fiducial_storage.debug_centers_y);
-                                    fiducial_storage.debug_centers_x = debug_centers_x;
-                                    fiducial_storage.debug_centers_y = debug_centers_y;
+                                    if (fiducial_storage.affine_hint_centers_x) makocode_platform_free(fiducial_storage.affine_hint_centers_x);
+                                    if (fiducial_storage.affine_hint_centers_y) makocode_platform_free(fiducial_storage.affine_hint_centers_y);
+                                    fiducial_storage.affine_hint_centers_x = affine_hint_centers_x;
+                                    fiducial_storage.affine_hint_centers_y = affine_hint_centers_y;
                                 }
                             }
                         }
@@ -23288,10 +23004,10 @@ struct RotationEstimateCandidate {
                                         measured_fiducial_affine_hint_available = true;
                                         state.affine_fit_covers_page = true;
                                     }
-                                    double debug_scale = (scale_xd + scale_yd) * 0.5;
+                                    double scan_scale = (scale_xd + scale_yd) * 0.5;
                                     // At low resolution, correct isolated pixel-centroid outliers
                                     // from the robust affine fit of the other detected markers.
-                                    if (debug_scale < 1.5 && !fiducial_storage.debug_centers_x) {
+                                    if (scan_scale < 1.5 && !fiducial_storage.affine_hint_centers_x) {
                                         for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
                                             double logical_center_y = fiducial_lattice_center(
                                                 row_index, fiducial_rows, (u32)data_height, fiducial_spacing);
@@ -24909,8 +24625,6 @@ struct RotationEstimateCandidate {
                     fabs(scale_x - scale_y) <=
                         0.002 * ((scale_x + scale_y) * 0.5);
                 if (tight_full_page_fit) {
-                    debug_fiducial_affine_override = state.affine_transform;
-                    debug_fiducial_affine_override_available = state.has_affine_transform;
                     state.affine_transform.a00 = scale_x * cos(geometry_radians);
                     state.affine_transform.a01 = -scale_y * sin(geometry_radians);
                     state.affine_transform.a10 = scale_x * sin(geometry_radians);
@@ -24947,29 +24661,7 @@ struct RotationEstimateCandidate {
                     }
                     state.has_affine_transform = true;
                     state.affine_from_previous_page = false;
-                    if (debug_fiducial_affine_override_available) {
-                        // Keep diagnostic reprojection close to the bounds fit while
-                        // damping local fit noise from a page with a skew estimate.
-                        const double measured_weight = 0.1;
-                        debug_fiducial_affine_override.a00 =
-                            (1.0 - measured_weight) * state.affine_transform.a00 +
-                            measured_weight * debug_fiducial_affine_override.a00;
-                        debug_fiducial_affine_override.a01 =
-                            (1.0 - measured_weight) * state.affine_transform.a01 +
-                            measured_weight * debug_fiducial_affine_override.a01;
-                        debug_fiducial_affine_override.a10 =
-                            (1.0 - measured_weight) * state.affine_transform.a10 +
-                            measured_weight * debug_fiducial_affine_override.a10;
-                        debug_fiducial_affine_override.a11 =
-                            (1.0 - measured_weight) * state.affine_transform.a11 +
-                            measured_weight * debug_fiducial_affine_override.a11;
-                        debug_fiducial_affine_override.tx =
-                            (1.0 - measured_weight) * state.affine_transform.tx +
-                            measured_weight * debug_fiducial_affine_override.tx;
-                        debug_fiducial_affine_override.ty =
-                            (1.0 - measured_weight) * state.affine_transform.ty +
-                            measured_weight * debug_fiducial_affine_override.ty;
-                    }
+
                     tile_anchored_axis_affine = state.affine_transform;
                     tile_anchored_axis_affine_valid = true;
                     fiducial_displacement_active = false;
@@ -25911,11 +25603,7 @@ struct RotationEstimateCandidate {
                 page_raster_scale_locked = true;
             }
         }
-        if (debug_fiducial_csv) {
-            console_line(2, page_raster_scale_locked
-                                ? "decode: full-page raster scale lock applied"
-                                : "decode: full-page raster scale lock unavailable");
-        }
+
         if (!page_raster_scale_locked && !has_rotation && !has_skew &&
             fabs(sampling_affine.a01) <= 0.0005 * fiducial_scale_y &&
             fabs(sampling_affine.a10) <= 0.0005 * fiducial_scale_x) {
@@ -27007,7 +26695,7 @@ struct RotationEstimateCandidate {
                 if (erased) salt_erasures.data[symbol] = 1u;
             }
             u64 expected_index = state.encoded_tile.page_index
-                                     ? state.encoded_tile.page_index : debug_page;
+                                     ? state.encoded_tile.page_index : page_index_hint;
             u64 expected_count = state.encoded_tile.page_count
                                      ? state.encoded_tile.page_count : 1u;
             return makocode::palette_symbol_decode_page_salt(
@@ -27104,7 +26792,7 @@ struct RotationEstimateCandidate {
             frame_erasure_bits->data) {
             u64 blot_page_capacity_bits = capacity_with_reserve;
             u64 blot_page_index = state.encoded_tile.page_index
-                                      ? state.encoded_tile.page_index : debug_page;
+                                      ? state.encoded_tile.page_index : page_index_hint;
             if (blot_page_capacity_bits > 0u && blot_page_index > 0u &&
                 blot_page_index - 1u <= U64_MAX_VALUE / blot_page_capacity_bits) {
                 u64 page_offset = (blot_page_index - 1u) * blot_page_capacity_bits;
@@ -27140,7 +26828,7 @@ struct RotationEstimateCandidate {
             }
         }
         u64 page_index = state.encoded_tile.page_index
-                             ? state.encoded_tile.page_index : debug_page;
+                             ? state.encoded_tile.page_index : page_index_hint;
         if (!page_index || page_index - 1u > U64_MAX_VALUE / capacity_with_reserve) {
             console_line(2, "decode: invalid symbol stream page index");
             return false;
@@ -27231,10 +26919,7 @@ struct RotationEstimateCandidate {
         if (overlay_selector_counts_out) overlay_selector_counts_out->release();
         if (unknown_parity_budget_out) *unknown_parity_budget_out = 0u;
         if (overlay_erasure_budget_out) *overlay_erasure_budget_out = 0u;
-        if (!append_debug_fiducials()) {
-            console_line(2, "decode: failed to append fiducial report");
-            return false;
-        }
+
         metadata_out = state;
         if (known_tile_override && !known_tile_is_present) {
             metadata_out.has_encoded_tile = false;
@@ -27250,7 +26935,7 @@ struct RotationEstimateCandidate {
     if (record_uniform_palette_symbols && frame_erasure_bits && frame_erasure_bits->data) {
         u64 blot_page_capacity_bits = capacity_with_reserve;
         u64 blot_page_index = state.encoded_tile.page_index
-                                  ? state.encoded_tile.page_index : debug_page;
+                                  ? state.encoded_tile.page_index : page_index_hint;
         if (blot_page_capacity_bits > 0u && blot_page_index > 0u &&
             blot_page_index - 1u <= U64_MAX_VALUE / blot_page_capacity_bits) {
             u64 page_offset = (blot_page_index - 1u) * blot_page_capacity_bits;
@@ -27366,7 +27051,6 @@ struct RotationEstimateCandidate {
             }
             frame_bit_count = grouped_bit_target;
             if (page_capacity_bits_out) *page_capacity_bits_out = capacity_with_reserve;
-            if (!append_debug_fiducials()) return false;
             if (color_rotation_out) *color_rotation_out = color_mode == 3u;
             metadata_out = state;
             if (known_tile_override && !known_tile_is_present) {
@@ -27396,7 +27080,7 @@ struct RotationEstimateCandidate {
             state.has_page_bits && state.page_bits_value > 0u) {
             u64 page_index = state.encoded_tile.page_index
                                  ? state.encoded_tile.page_index
-                                 : debug_page;
+                                 : page_index_hint;
             if (page_index == 0u ||
                 page_index - 1u > U64_MAX_VALUE / capacity_with_reserve) {
                 return false;
@@ -27440,9 +27124,7 @@ struct RotationEstimateCandidate {
         }
         frame_bit_count = frame_bits_effective;
         if (page_capacity_bits_out) *page_capacity_bits_out = capacity_with_reserve;
-        if (!append_debug_fiducials()) {
-            return false;
-        }
+
         if (color_rotation_out) *color_rotation_out = color_mode == 3u;
         metadata_out = state;
         if (known_tile_override && !known_tile_is_present) {
@@ -27589,7 +27271,7 @@ struct RotationEstimateCandidate {
         if (page_capacity_bits == 0u) return false;
         if (page_capacity_bits_out) *page_capacity_bits_out = page_capacity_bits;
         const MetadataTile::Values& tile = state.encoded_tile;
-        u64 page_index = tile.page_index ? tile.page_index : debug_page;
+        u64 page_index = tile.page_index ? tile.page_index : page_index_hint;
         if (page_index == 0u || page_index - 1u > U64_MAX_VALUE / page_capacity_bits) {
             return false;
         }
@@ -27659,9 +27341,7 @@ struct RotationEstimateCandidate {
         frame_bit_count = segment_bits;
     }
 
-    if (!append_debug_fiducials()) {
-        return false;
-    }
+
 
 
     metadata_out = state;
@@ -28540,9 +28220,7 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                                      u32 spacing_pixels,
                                      u32 grid_height_limit,
                                      const u8* fiducial_rgb,
-                                     makocode::ByteBuffer& output,
-                                     makocode::ByteBuffer* debug_csv = 0,
-                                     u64 debug_page = 1u) {
+                                     makocode::ByteBuffer& output) {
     if (!input.data || !fiducial_rgb) {
         return false;
     }
@@ -28604,7 +28282,6 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
             if (overlaps_metadata_tile) {
                 continue;
             }
-            bool marker_visible = false;
             for (u32 dy = 0u; dy < FIDUCIAL_MARKER_SIZE_PIXELS; ++dy) {
                 int pixel_y = start_y + (int)dy;
                 if (pixel_y < 0 || pixel_y >= (int)draw_height) {
@@ -28620,51 +28297,6 @@ static bool ppm_insert_fiducial_grid(const makocode::ByteBuffer& input,
                     pixel_data[index + 1u] = fiducial_rgb[1];
                     pixel_data[index + 2u] = fiducial_rgb[2];
                 }
-            }
-            int visibility_radius = (int)FIDUCIAL_MARKER_SIZE_PIXELS;
-            int ring_x0 = start_x - visibility_radius;
-            int ring_y0 = start_y - visibility_radius;
-            int ring_x1 = start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS + visibility_radius;
-            int ring_y1 = start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS + visibility_radius;
-            if (ring_x0 < 0) ring_x0 = 0;
-            if (ring_y0 < 0) ring_y0 = 0;
-            if (ring_x1 > (int)width_px) ring_x1 = (int)width_px;
-            if (ring_y1 > (int)draw_height) ring_y1 = (int)draw_height;
-            for (int ring_y = ring_y0; ring_y < ring_y1 && !marker_visible; ++ring_y) {
-                for (int ring_x = ring_x0; ring_x < ring_x1; ++ring_x) {
-                    if (ring_x >= start_x && ring_x < start_x + (int)FIDUCIAL_MARKER_SIZE_PIXELS &&
-                        ring_y >= start_y && ring_y < start_y + (int)FIDUCIAL_MARKER_SIZE_PIXELS) {
-                        continue;
-                    }
-                    if (metadata_tile.valid &&
-                        (u32)ring_x >= metadata_tile.x0 &&
-                        (u32)ring_x < metadata_tile.x0 + MetadataTile::TILE_SIDE &&
-                        (u32)ring_y >= metadata_tile.y0 &&
-                        (u32)ring_y < metadata_tile.y0 + MetadataTile::TILE_SIDE) {
-                        continue;
-                    }
-                    usize index = ((usize)ring_y * (usize)width_px + (usize)ring_x) * 3u;
-                    if (pixel_data[index + 0u] != fiducial_rgb[0] ||
-                        pixel_data[index + 1u] != fiducial_rgb[1] ||
-                        pixel_data[index + 2u] != fiducial_rgb[2]) {
-                        marker_visible = true;
-                        break;
-                    }
-                }
-            }
-            if (!marker_visible) {
-                continue;
-            }
-            if (debug_csv && marker_visible &&
-                !makocode::append_fiducial_csv_row(*debug_csv,
-                                         debug_page,
-                                         grid_row,
-                                         grid_col,
-                                         (double)start_x + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5,
-                                         (double)start_y + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5,
-                                         (double)start_x + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5,
-                                         (double)start_y + ((double)FIDUCIAL_MARKER_SIZE_PIXELS - 1.0) * 0.5)) {
-                return false;
             }
         }
     }
@@ -28720,9 +28352,7 @@ static bool ppm_measure_dimensions(const makocode::ByteBuffer& input,
 bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                         makocode::ByteBuffer& output,
                                         u32 data_height_pixels,
-                                        const u8* fiducial_rgb,
-                                        makocode::ByteBuffer* debug_csv,
-                                        u64 debug_page) {
+                                        const u8* fiducial_rgb) {
     u32 width_pixels = 0u;
     u32 height_pixels = 0u;
     if (!ppm_measure_dimensions(input, width_pixels, height_pixels)) {
@@ -28745,27 +28375,7 @@ bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                     g_fiducial_defaults.spacing_pixels,
                                     grid_height,
                                     fiducial_rgb,
-                                    output,
-                                    debug_csv,
-                                    debug_page);
-}
-
-static bool write_ppm_with_fiducials_to_file(const char* path,
-                                             const makocode::ByteBuffer& buffer,
-                                             const u8* fiducial_rgb,
-                                             makocode::ByteBuffer* debug_csv,
-                                             u64 debug_page,
-                                             u32 data_height_pixels) {
-    makocode::ByteBuffer fiducial_buffer;
-    if (!apply_default_fiducial_grid(buffer,
-                                     fiducial_buffer,
-                                     data_height_pixels,
-                                     fiducial_rgb,
-                                     debug_csv,
-                                     debug_page)) {
-        return false;
-    }
-    return write_bytes_to_file(path, fiducial_buffer.data, fiducial_buffer.size);
+                                    output);
 }
 
 // Build a mask that reserves only the fiducial marker pixels (no metadata tile).
@@ -30890,7 +30500,6 @@ void write_encode_help() {
     console_line(1, "  --metadata-pages LIST Pages/ranges carrying the center metadata tile (all, 1,3-5,middle,last). Default: all.");
     console_line(1, "  --no-metadata        Omit metadata tiles; marker-free decode requires exact page dimensions and palette.");
     console_line(1, "  --scatter            Scatter payload dots across the page; decode reads the layout from metadata or detects it on marker-free pages.");
-    console_line(1, "  --debug              Write <prefix>_encode_fiducials.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "ECC & security:");
     console_line(1, "  --ecc RATIO|fill     Parity/data ratio (0-1023); fill maximizes page use.");
@@ -30945,7 +30554,6 @@ void write_decode_help() {
     console_line(1, "  --recover-palette    Usually only needed when the embedded palette row is damaged.");
     console_line(1, "  --recover-limit N    Palette candidates to try (default 4; common 2/4/5/8-color modes first).");
     console_line(1, "  --fiducial-spacing PX Distance between 2x2 markers (default 24).");
-    console_line(1, "  --debug              Write decode_fiducials.csv and decode_affine.csv under --output-dir.");
     console_line(1, "");
     console_line(1, "General:");
     console_line(1, "  --help               Show this message.");

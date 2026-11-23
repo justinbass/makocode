@@ -107,7 +107,6 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                             const OverlayPage& overlay_page,
                                             const char* ignore_colors,
                                             usize ignore_colors_length,
-                                            bool debug_requested,
                                             const char* selector_password,
                                             usize selector_password_length,
                                             OverlaySelector& overlay_selector,
@@ -174,7 +173,6 @@ int command_encode(int arg_count, char** args) {
     bool overlay_ignore_colors_specified = false;
     bool no_metadata = false;
     bool no_fiducials = false;
-    bool debug_requested = false;
     for (int i = 0; i < arg_count; ++i) {
         bool handled = false;
         if (!process_image_mapping_option(arg_count, args, &i, mapping, "encode", &handled)) {
@@ -354,10 +352,6 @@ int command_encode(int arg_count, char** args) {
             prefix_buffer.data[prefix_length] = 0u;
             prefix_buffer.size = prefix_length;
             have_prefix = true;
-            continue;
-        }
-        if (ascii_equals_token(arg, ascii_length(arg), "--debug")) {
-            debug_requested = true;
             continue;
         }
         const char overlay_ignore_prefix[] = "--overlay-ignore-colors=";
@@ -1962,16 +1956,6 @@ int command_encode(int arg_count, char** args) {
               (double)page_ecc_summary.block_data_symbols
         : 0.0;
     if (metadata_ecc_redundancy > 0.25) metadata_ecc_redundancy = 0.25;
-    if (debug_requested) {
-        char data_buffer[32];
-        char parity_buffer[32];
-        u64_to_ascii(encoder.ecc_info().block_data_symbols, data_buffer, sizeof(data_buffer));
-        u64_to_ascii(encoder.ecc_info().parity_symbols, parity_buffer, sizeof(parity_buffer));
-        console_write(1, "debug: ECC data symbols=");
-        console_write(1, data_buffer);
-        console_write(1, " parity symbols=");
-        console_line(1, parity_buffer);
-    }
     makocode::ByteBuffer frame_bits;
     u64 frame_bit_count = 0u;
     if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count)) {
@@ -2345,27 +2329,8 @@ int command_encode(int arg_count, char** args) {
         }
         page_name_prefix = timestamp_name;
     }
-    bool debug_reapplied_by_filename = debug_requested &&
-                                       path_contains_substring(page_name_prefix, "_encoded");
     u8 fiducial_rgb[3] = {0u, 0u, 0u};
     fiducial_select_color(mapping, fiducial_rgb);
-    makocode::ByteBuffer debug_fiducial_csv;
-    makocode::ByteBuffer debug_fiducial_path;
-    if (debug_requested) {
-        if (!debug_fiducial_csv.append_ascii("page,row,column,x,y,logical_x,logical_y\n")) {
-            console_line(2, "encode: failed to prepare fiducial CSV");
-            return 1;
-        }
-        makocode::ByteBuffer debug_fiducial_name;
-        if (!debug_fiducial_name.append_ascii(page_name_prefix) ||
-            !debug_fiducial_name.append_ascii("_encode_fiducials.csv") ||
-            !join_output_path(output_dir,
-                              (const char*)debug_fiducial_name.data,
-                              debug_fiducial_path)) {
-            console_line(2, "encode: failed to prepare fiducial CSV path");
-            return 1;
-        }
-    }
     makocode::ByteBuffer footer_text_buffer;
     const makocode::EccSummary* ecc_summary = &page_ecc_summary;
     if (page_count == 1u) {
@@ -2412,11 +2377,7 @@ int command_encode(int arg_count, char** args) {
             if (!apply_default_fiducial_grid(page_output,
                                              fiducial_page,
                                              output_data_height_pixels,
-                                             fiducial_rgb,
-                                             (debug_requested && !debug_reapplied_by_filename)
-                                                 ? &debug_fiducial_csv
-                                                 : (makocode::ByteBuffer*)0,
-                                             1u)) {
+                                             fiducial_rgb)) {
                 console_line(2, "encode: failed to embed fiducial grid");
                 return 1;
             }
@@ -2436,13 +2397,9 @@ int command_encode(int arg_count, char** args) {
             console_line(2, "encode: failed to prepare output directories");
             return 1;
         }
-        if (!write_buffer_to_file((const char*)output_path.data,
-                                  page_output,
-                                  debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
-                                  1u,
-                                  output_data_height_pixels,
-                                  fiducial_rgb,
-                                  !no_fiducials)) {
+        if (!write_bytes_to_file((const char*)output_path.data,
+                                 page_output.data,
+                                 page_output.size)) {
             console_line(2, "encode: failed to write ppm file");
             return 1;
         }
@@ -2454,7 +2411,6 @@ int command_encode(int arg_count, char** args) {
                                              overlays[(usize)overlay_assignment - 1u].image,
                                              overlay_ignore_colors_text,
                                              overlay_ignore_colors_length,
-                                             debug_requested,
                                              have_password && !hidden_mode_enabled
                                                  ? (const char*)password_buffer.data : (const char*)0,
                                              have_password && !hidden_mode_enabled
@@ -2510,11 +2466,7 @@ int command_encode(int arg_count, char** args) {
                 if (!apply_default_fiducial_grid(page_output,
                                                  fiducial_page,
                                                  footer_layout.data_height_pixels,
-                                                 fiducial_rgb,
-                                                 (debug_requested && !debug_reapplied_by_filename)
-                                                     ? &debug_fiducial_csv
-                                                     : (makocode::ByteBuffer*)0,
-                                                 page + 1u)) {
+                                                 fiducial_rgb)) {
                     console_line(2, "encode: failed to embed fiducial grid");
                     return 1;
                 }
@@ -2532,13 +2484,9 @@ int command_encode(int arg_count, char** args) {
                 console_line(2, "encode: failed to prepare output directories");
                 return 1;
             }
-            if (!write_buffer_to_file((const char*)path_buffer.data,
-                                      page_output,
-                                      debug_reapplied_by_filename ? &debug_fiducial_csv : (makocode::ByteBuffer*)0,
-                                      page + 1u,
-                                      footer_layout.data_height_pixels,
-                                      fiducial_rgb,
-                                      !no_fiducials)) {
+            if (!write_bytes_to_file((const char*)path_buffer.data,
+                                     page_output.data,
+                                     page_output.size)) {
                 console_line(2, "encode: failed to write ppm file");
                 return 1;
             }
@@ -2550,7 +2498,6 @@ int command_encode(int arg_count, char** args) {
                                                  overlays[(usize)overlay_assignment - 1u].image,
                                                  overlay_ignore_colors_text,
                                                  overlay_ignore_colors_length,
-                                                 debug_requested,
                                                  have_password && !hidden_mode_enabled
                                                      ? (const char*)password_buffer.data : (const char*)0,
                                                  have_password && !hidden_mode_enabled
@@ -2577,14 +2524,6 @@ int command_encode(int arg_count, char** args) {
         console_write(1, " pages (");
         console_write(1, summary_name);
         console_line(1, " ...)");
-    }
-    if (debug_requested &&
-        (!ensure_parent_directories((const char*)debug_fiducial_path.data) ||
-         !write_bytes_to_file((const char*)debug_fiducial_path.data,
-                              debug_fiducial_csv.data,
-                              debug_fiducial_csv.size))) {
-        console_line(2, "encode: failed to write fiducial CSV");
-        return 1;
     }
     return 0;
 }
@@ -3325,7 +3264,6 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                             const OverlayPage& overlay_page,
                                             const char* ignore_colors,
                                             usize ignore_colors_length,
-                                            bool debug_requested,
                                             const char* selector_password,
                                             usize selector_password_length,
                                             OverlaySelector& overlay_selector,
@@ -3455,18 +3393,6 @@ static bool merge_overlay_into_encoded_page(const char* page_path,
                                              !tile_override)) {
         console_line(2, "encode: failed to apply overlay PPM");
         return false;
-    }
-    if (debug_requested) {
-        char budget_buffer[32];
-        char block_buffer[32];
-        u64_to_ascii(tile.overlay_erasure_budget, budget_buffer, sizeof(budget_buffer));
-        u64_to_ascii(profile.block_length, block_buffer, sizeof(block_buffer));
-        console_write(2, "debug: overlay erasure budget per block=");
-        console_write(2, budget_buffer);
-        console_write(2, " actual fraction=");
-        console_write(2, budget_buffer);
-        console_write(2, "/");
-        console_line(2, block_buffer);
     }
     makocode::ByteBuffer output;
     if (tile_override) base_page.metadata = output_metadata;

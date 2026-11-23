@@ -246,7 +246,7 @@ struct ByteBuffer {
         if (data) {
             const uintptr_t source_address = (uintptr_t)source;
             const uintptr_t data_address = (uintptr_t)data;
-            if (source_address >= data_address && source_address - data_address <= capacity) {
+            if (source_address >= data_address && source_address - data_address < capacity) {
                 source_offset = (usize)(source_address - data_address);
                 if (source_offset > size || length > size - source_offset) {
                     return false;
@@ -1921,8 +1921,6 @@ using namespace makocode;
 u32 palette_tag_x0(u32 palette_count);
 } // namespace MetadataTile
 
-bool path_contains_substring(const char* path, const char* needle);
-
 bool archive_append_bytes(makocode::BitWriter& writer,
                                  const u8* data,
                                  usize length);
@@ -1980,14 +1978,6 @@ bool decode_named_palette_color(const char* token,
 
 bool is_safe_archive_path(const char* path, usize length);
 
-bool write_buffer_to_file(const char* path,
-                                 const makocode::ByteBuffer& buffer,
-                                 makocode::ByteBuffer* debug_csv = 0,
-                                 u64 debug_page = 1u,
-                                 u32 data_height_pixels = 0u,
-                                 const u8* fiducial_rgb = 0,
-                                 bool embed_fiducials = true);
-
 bool append_bits_from_buffer(makocode::BitWriter& writer,
                                     const u8* data,
                                     u64 bit_count);
@@ -2029,8 +2019,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    PpmParserState& metadata_out,
                                    bool force_disable_fiducial_subgrid,
                                    bool* retry_without_subgrid_out = 0,
-                                   makocode::ByteBuffer* debug_fiducial_csv = 0,
-                                   u64 debug_page = 1u,
+                                   u64 page_index_hint = 1u,
                                    makocode::ByteBuffer* frame_erasure_bits = 0,
                                    u64* overlay_selector_seed_out = 0,
                                    makocode::ByteBuffer* overlay_selector_counts_out = 0,
@@ -2106,6 +2095,7 @@ bool unpack_archive_to_directory(const makocode::ByteBuffer& payload,
                                         bool allow_partial = false);
 
 void u64_to_ascii(u64 value, char* buffer, usize capacity);
+void format_fixed_3(double value, char* buffer, usize capacity);
 
 bool mapping_has_custom_palette(const ImageMappingConfig& mapping);
 
@@ -2127,9 +2117,7 @@ bool process_image_mapping_option(int arg_count,
 bool apply_default_fiducial_grid(const makocode::ByteBuffer& input,
                                         makocode::ByteBuffer& output,
                                         u32 data_height_pixels = 0u,
-                                        const u8* fiducial_rgb = 0,
-                                        makocode::ByteBuffer* debug_csv = 0,
-                                        u64 debug_page = 1u);
+                                        const u8* fiducial_rgb = 0);
 
 namespace makocode {
 bool stealth_fill_random(ByteBuffer& output,
@@ -2167,8 +2155,6 @@ bool footer_build_page_text(const PageFooterConfig& footer,
                                    makocode::ByteBuffer& buffer);
 
 void console_line(int fd, const char* text);
-
-void format_fixed_3(double value, char* buffer, usize capacity);
 
 u8 rotate_right_u8(u8 value, u8 amount);
 
@@ -2210,18 +2196,6 @@ bool write_all_fd(int fd, const u8* data, usize length);
 
 namespace makocode {
 void sha256_init(Sha256State& state);
-} // namespace makocode
-
-namespace makocode {
-bool append_affine_csv_row(makocode::ByteBuffer& csv,
-                                  u64 page,
-                                  bool has_affine,
-                                  double a00,
-                                  double a01,
-                                  double a10,
-                                  double a11,
-                                  double tx,
-                                  double ty);
 } // namespace makocode
 
 bool write_bytes_to_file(const char* path, const u8* data, usize length);
