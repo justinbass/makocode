@@ -2469,6 +2469,17 @@ static void interactive_password_case() {
     require(terminal_restored,
             id + ": password prompt cancellation did not restore terminal settings");
 
+    bool eof_terminal_restored = false;
+    ProcessResult eof_password = run_cli_with_password_prompts(
+        work,
+        {"encode", "--input=visible.bin", "--prefix=eof", "--password",
+         "--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"},
+        {{"Password: ", std::string(1u, '\x04')}}, false, &eof_terminal_restored);
+    expect_failure(eof_password, id + " password EOF");
+    require(eof_password.out.find("password input failed") != std::string::npos &&
+            eof_terminal_restored,
+            id + ": terminal EOF did not abort password entry and restore terminal settings");
+
     ProcessResult overlong = run_cli_with_password_prompts(
         work,
         {"encode", "--input=visible.bin", "--prefix=overlong", "--password",
@@ -2501,11 +2512,23 @@ static void interactive_password_case() {
     require(!pages.empty(), id + ": no encoded pages");
     ProcessResult visible_decoded = run_cli_with_password_prompts(
         work, {"decode", "--output-dir=" + visible_out.string(), "--password",
-               pages.front()}, {{"Password: ", visible_password}});
+               pages.front()},
+        {{"Password: ", visible_password.substr(0u, visible_password.size() - 1u) +
+                              "x\x7f" + visible_password.substr(visible_password.size() - 1u)}});
     expect_success(visible_decoded, id + " visible decode");
     require(visible_decoded.out.find(visible_password) == std::string::npos,
             id + ": terminal echoed the decode password");
     compare_files(visible, visible_out / "visible.bin", id + " visible");
+
+    fs::path hidden_prompt_out = work / "hidden_prompt_out";
+    std::string kill_then_visible = "discard";
+    kill_then_visible.push_back('\x15');
+    kill_then_visible += visible_password;
+    ProcessResult hidden_prompt_decoded = run_cli_with_password_prompts(
+        work, {"decode", "--output-dir=" + hidden_prompt_out.string(), "--password",
+               pages.front()}, {{"Password: ", kill_then_visible}});
+    expect_success(hidden_prompt_decoded, id + " password line kill");
+    compare_files(visible, hidden_prompt_out / "visible.bin", id + " password line kill");
 
     ProcessResult hidden_decoded = run_cli(
         work, {"decode", "--output-dir=" + hidden_out.string(),
@@ -2729,6 +2752,9 @@ static void decoded_file_case(){
     auto enc=run_cli(work,{"encode","--input=input","--password-cli=secret","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb","--prefix=page","--output-dir=pages"},"encode",{},{{"MAKOCODE_TEST_SEED",std::to_string(case_seed("crypto/"+id))}});
     expect_success(enc,id+" encode");auto pages=ppm_paths(pages_dir,"page");require(!pages.empty(),id+": no encoded pages");
     auto decoded=run_cli(work,decode_file_args(pages,out,{"--decoded-file","--password-cli=secret"}),"decoded_file");expect_success(decoded,id+" decode file");
+    fs::path output_not_directory=work/"output_not_directory";write_file(output_not_directory,"not a directory");
+    auto output_path_error=run_cli(work,decode_file_args(pages,output_not_directory,{"--decoded-file","--password-cli=secret"}),"decoded_file_output_error");
+    expect_failure(output_path_error,id+" output path is a file");require(output_path_error.err.find("decode: failed to write decoded file")!=std::string::npos,id+": decoded-file output-path diagnostic changed");
     auto text_files=matching_files(out,"makocode_decoded_",".txt");require(text_files.size()==1,id+": expected one timestamped decoded file");
     std::regex name_re("^makocode_decoded_[0-9]{14}\\.txt$");require(std::regex_match(text_files[0].filename().string(),name_re),id+": invalid decoded filename");
     std::string report=read_file(text_files[0]);
@@ -2771,15 +2797,49 @@ static void checkpoint_restore_case(){
     write_file(work/"base_a"/"old-a.bin",std::string(a.begin(),a.end()));write_file(work/"base_b"/"old-b.bin",std::string(b.begin(),b.end()));
     fs::copy_file(work/"base_a"/"old-a.bin",work/"current_a"/"alpha.bin");fs::copy_file(work/"base_b"/"old-b.bin",work/"current_b"/"beta.bin");
     fs::copy_file(work/"current_a"/"alpha.bin",work/"current_a"/"renamed.bin");write_file(work/"current_b"/"new.txt","new checkpoint content\n");
-    auto delta=run_cli(work,{"checkpoint","create","--input","current_a","--input","current_b","--base","base_a","--base","base_b","--output","update.mcp","--chunk-size","256"},"checkpoint_delta");expect_success(delta,id+" delta checkpoint");
-    auto full=run_cli(work,{"checkpoint","create","--input","current_a","--input","current_b","--output","full.mcp","--chunk-size","256"},"checkpoint_full");expect_success(full,id+" full checkpoint");
+    auto delta=run_cli(work,{"checkpoint","create","--input=current_a","--input=current_b","--base=base_a","--base=base_b","--output=update.mcp","--chunk-size=256"},"checkpoint_delta");expect_success(delta,id+" delta checkpoint");
+    auto full=run_cli(work,{"checkpoint","create","--input=current_a","--input=current_b","--output=full.mcp","--chunk-size=256"},"checkpoint_full");expect_success(full,id+" full checkpoint");
     require(fs::file_size(work/"update.mcp")<fs::file_size(work/"full.mcp"),id+": base chunks did not reduce bundle size");
+    auto missing_snapshot=run_cli(work,{"checkpoint","create","--input","missing_input","--output","missing_snapshot.mcp"},"missing_snapshot");
+    expect_failure(missing_snapshot,id+" missing snapshot input");require(missing_snapshot.err.find("failed to build snapshot")!=std::string::npos,id+": snapshot-build diagnostic changed");
+    auto missing_create_base=run_cli(work,{"checkpoint","create","--input","current_a","--base","missing_base","--output","missing_base.mcp"},"missing_create_base");
+    expect_failure(missing_create_base,id+" missing create base");require(missing_create_base.err.find("failed to scan base data")!=std::string::npos,id+": create-base scan diagnostic changed");
+    auto invalid_chunk_size=run_cli(work,{"checkpoint","create","--input","current_a","--output","invalid_chunk_size.mcp","--chunk-size","0"},"invalid_chunk_size");
+    expect_failure(invalid_chunk_size,id+" invalid chunk size");require(invalid_chunk_size.err.find("invalid --chunk-size")!=std::string::npos,id+": invalid-chunk-size diagnostic changed");
+    auto missing_checkpoint_output=run_cli(work,{"checkpoint","create","--input","current_a"},"missing_checkpoint_output");
+    expect_failure(missing_checkpoint_output,id+" missing checkpoint output");require(missing_checkpoint_output.err.find("required input or output is missing")!=std::string::npos,id+": missing checkpoint output diagnostic changed");
+    auto missing_restore_output=run_cli(work,{"checkpoint","restore","--input","update.mcp"},"missing_restore_output");
+    expect_failure(missing_restore_output,id+" missing restore output");require(missing_restore_output.err.find("required input or output is missing")!=std::string::npos,id+": missing restore output diagnostic changed");
+    auto missing_option_value=run_cli(work,{"checkpoint","create","--input"},"missing_option_value");
+    expect_failure(missing_option_value,id+" missing option value");require(missing_option_value.err.find("option requires a value")!=std::string::npos,id+": missing-option-value diagnostic changed");
+    auto duplicate_output=run_cli(work,{"checkpoint","create","--input","current_a","--output","first.mcp","--output","second.mcp"},"duplicate_output");
+    expect_failure(duplicate_output,id+" duplicate output");require(duplicate_output.err.find("--output may be supplied once")!=std::string::npos,id+": duplicate-output diagnostic changed");
+    auto unknown_checkpoint_option=run_cli(work,{"checkpoint","restore","--unknown"},"unknown_checkpoint_option");
+    expect_failure(unknown_checkpoint_option,id+" unknown option");require(unknown_checkpoint_option.err.find("unknown option --unknown")!=std::string::npos,id+": unknown-checkpoint-option diagnostic changed");
+    fs::create_directories(work/"bundle_output_is_directory");
+    auto bundle_write_error=run_cli(work,{"checkpoint","create","--input","current_a","--output","bundle_output_is_directory","--chunk-size","256"},"bundle_write_error");
+    expect_failure(bundle_write_error,id+" bundle write failure");require(bundle_write_error.err.find("failed to write bundle")!=std::string::npos,id+": bundle-write diagnostic changed");
+    auto missing_bundle=run_cli(work,{"checkpoint","restore","--input","missing.mcp","--output","missing_bundle_out"},"missing_bundle");
+    expect_failure(missing_bundle,id+" missing bundle");require(missing_bundle.err.find("failed to read bundle")!=std::string::npos,id+": missing-bundle read diagnostic changed");
+    std::string raw_bundle=read_file(work/"update.mcp");raw_bundle.resize(8u);write_file(work/"truncated_header.mcp",raw_bundle);
+    fs::path unmapped=work/"unmapped";
+    auto preserved=run_cli(work,{"checkpoint","restore","--input","truncated_header.mcp","--output",unmapped.string()},"preserve_unmapped");expect_success(preserved,id+" preserve unmapped bundle");
+    compare_files(work/"truncated_header.mcp",unmapped/"checkpoint_unmapped.partial",id+" unmapped bundle");
+    require(fs::exists(unmapped/"checkpoint_recovery.txt"),id+": missing unmapped-bundle recovery report");
+    auto missing_base=run_cli(work,{"checkpoint","restore","--input","update.mcp","--base","missing_base","--output","missing_base_out"},"missing_base_restore");
+    expect_failure(missing_base,id+" missing base directory");require(missing_base.err.find("failed to scan base")!=std::string::npos,id+": missing base scan diagnostic changed");
+    write_file(work/"output_is_file","output path conflict");
+    auto output_not_directory=run_cli(work,{"checkpoint","restore","--input","update.mcp","--output","output_is_file"},"output_not_directory");
+    expect_failure(output_not_directory,id+" output path is a file");require(output_not_directory.err.find("failed to create output directory")!=std::string::npos,id+": output-directory diagnostic changed");
     auto encoded=run_cli(work,{"encode","--input=update.mcp","--output-dir=pages","--prefix=checkpoint","--page-width=800","--page-height=800"},"encode");expect_success(encoded,id+" encode checkpoint");
     auto pages=ppm_paths(work/"pages","checkpoint");require(!pages.empty(),id+": no checkpoint pages");
     fs::path decoded=work/"decoded";auto decoded_result=run_cli(work,decode_file_args(pages,decoded),"decode");expect_success(decoded_result,id+" decode checkpoint");
     fs::path restored=work/"restored";auto restore=run_cli(work,{"checkpoint","restore","--input", (decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--base",(work/"base_b").string(),"--output",restored.string()},"restore");expect_success(restore,id+" restore");
     for(const auto& name:{"alpha.bin","renamed.bin"})compare_files(work/"current_a"/name,restored/"current_a"/name,id);
     for(const auto& name:{"beta.bin","new.txt"})compare_files(work/"current_b"/name,restored/"current_b"/name,id);
+    fs::path write_failure=work/"write_failure";fs::create_directories(write_failure/"current_a/alpha.bin");
+    auto failed_write=run_cli(work,{"checkpoint","restore","--input",(decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--base",(work/"base_b").string(),"--output",write_failure.string()},"failed_write_restore");
+    expect_failure(failed_write,id+" restored file write failure");require(failed_write.err.find("failed to write restored file")!=std::string::npos,id+": restored-file write diagnostic changed");
     fs::path partial=work/"partial";auto partial_result=run_cli(work,{"checkpoint","restore","--input",(decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--output",partial.string()},"partial_restore");
     expect_success(partial_result,id+" partial restore");require(fs::exists(partial/"current_b/beta.bin.partial")&&fs::exists(partial/"checkpoint_recovery.txt"),id+": missing base did not create partial file/recovery report");
     std::string partial_bytes=read_file(partial/"current_b/beta.bin.partial");require(std::none_of(partial_bytes.begin(),partial_bytes.end(),[](char ch){return ch!=0;}),id+": missing chunk ranges are not zero-filled");
@@ -3562,8 +3622,19 @@ if(!text_matches(MINIFY_DIRECTIVE_VALUE,"preprocessor directive kept"))return 4;
     fs::path crlf=work/"crlf";fs::create_directories(crlf);std::string crlf_source;for(char c:source){if(c=='\n')crlf_source.push_back('\r');crlf_source.push_back(c);}write_file(crlf/"makocode.cpp",crlf_source);auto crlf_min=run_cli(crlf,{"minify","makocode.cpp","--width","240","--height","80"},"crlf");expect_success(crlf_min,id+" CRLF");std::string crlf_result=read_file(crlf/"makocode_minified.cpp");require(crlf_result.find('\r')==std::string::npos,id+": CRLF remains");
     auto crlf_compile=run_process({"g++","-std=c++17","-Wall","-Wextra","-pedantic",(crlf/"makocode_minified.cpp").string(),"-o",(work/"crlf_test").string()},work,{},work/"crlf_compile.out",work/"crlf_compile.err");expect_success(crlf_compile,id+" CRLF compile");
     fs::path write_fail=work/"write_failure";fs::create_directories(write_fail/"makocode_minified.cpp");write_file(write_fail/"makocode.cpp",source);auto write_error=run_cli(write_fail,{"minify","makocode.cpp","--width","240","--height","80"},"write_error");expect_failure(write_error,id+" output write failure");require(write_error.out.find("minify: failed to write makocode_minified.cpp")!=std::string::npos||write_error.err.find("minify: failed to write makocode_minified.cpp")!=std::string::npos,id+": output-write diagnostic changed");
+    fs::path ppm_write_fail=work/"ppm_write_failure";fs::create_directories(ppm_write_fail/"page_0000.ppm");write_file(ppm_write_fail/"source.cpp","int value;\n");
+    auto ppm_write_error=run_cli(ppm_write_fail,{"minify","source.cpp","--width","240","--height","80","--output","page.cpp"},"ppm_write_error");
+    expect_failure(ppm_write_error,id+" PPM output write failure");require(ppm_write_error.err.find("minify: failed to write PPM output")!=std::string::npos,id+": PPM-output write diagnostic changed");
+    fs::path unsupported_ppm=work/"unsupported_ppm";fs::create_directories(unsupported_ppm);write_file(unsupported_ppm/"source.cpp",std::string("int value;\n",11)+"\x01");
+    auto unsupported_ppm_result=run_cli(unsupported_ppm,{"minify","source.cpp","--width","240","--height","80"},"unsupported_ppm");
+    expect_failure(unsupported_ppm_result,id+" unsupported PPM character");require(unsupported_ppm_result.err.find("PPM output supports printable ASCII and LF only")!=std::string::npos,id+": unsupported PPM character diagnostic changed");
+    auto small_page=run_cli(unsupported_ppm,{"minify","source.cpp","--width","5","--height","8"},"small_page");
+    expect_failure(small_page,id+" undersized PPM page");require(small_page.err.find("page dimensions must fit at least one 5x8 character cell")!=std::string::npos,id+": undersized-page diagnostic changed");
+    fs::path oversized_ppm=work/"oversized_ppm";fs::create_directories(oversized_ppm);write_file(oversized_ppm/"source.cpp","int value;\n");
+    auto oversized_page=run_cli(oversized_ppm,{"minify","source.cpp","--width","3000000000","--height","3000000000"},"oversized_page");
+    expect_failure(oversized_page,id+" oversized PPM");require(oversized_page.err.find("minify: rendered PPM is too large")!=std::string::npos,id+": oversized-PPM diagnostic changed");
     auto allocation_check=[&](const fs::path& dir,unsigned long at,const std::string& expected){auto fail=run_process({test_executable().string(),"--minify-allocation-failure",std::to_string(at)},dir,{},dir/"alloc.out",dir/"alloc.err");expect_success(fail,id+" allocation failure mode");require(fail.out.find(expected)!=std::string::npos||fail.err.find(expected)!=std::string::npos,id+": allocation diagnostic changed at "+std::to_string(at));};
-    fs::path alloc=work/"alloc";fs::create_directories(alloc);write_file(alloc/"makocode.cpp","int value;\n");allocation_check(alloc,5,"minify: failed to compact whitespace");allocation_check(alloc,3,"minify: failed to read input file");allocation_check(alloc,4,"minify: failed to strip comments");
+    fs::path alloc=work/"alloc";fs::create_directories(alloc);write_file(alloc/"makocode.cpp","int value;\n");allocation_check(alloc,5,"minify: failed to compact whitespace");allocation_check(alloc,3,"minify: failed to read input file");allocation_check(alloc,4,"minify: failed to strip comments");allocation_check(alloc,6,"minify: failed to allocate PPM scanline");
     fs::path literal_alloc=work/"literal_alloc";fs::create_directories(literal_alloc);write_file(literal_alloc/"makocode.cpp",std::string(64,'0')+"'x");allocation_check(literal_alloc,4,"minify: failed to strip comments");
     fs::path ws_alloc=work/"ws_alloc";fs::create_directories(ws_alloc);write_file(ws_alloc/"makocode.cpp",std::string(64,'0')+"\n");allocation_check(ws_alloc,6,"minify: failed to compact whitespace");
     fs::path no_source=work/"no_source";fs::create_directories(no_source);allocation_check(no_source,0,"minify: failed to read input file");

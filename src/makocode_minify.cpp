@@ -425,17 +425,8 @@ int command_minify(int arg_count, char** args) {
         console_line(2, "minify: page dimensions must fit at least one 5x8 character cell");
         return 1;
     }
-    if (image_width > 0xFFFFFFFFu || image_height > 0xFFFFFFFFu ||
-        image_width > U64_MAX_VALUE / image_height) {
-        console_line(2, "minify: rendered PPM dimensions exceed the supported range");
-        return 1;
-    }
     u64 columns = image_width / cell_width;
     u64 rows = image_height / cell_height;
-    if (columns > U64_MAX_VALUE / rows) {
-        console_line(2, "minify: page capacity exceeds the supported range");
-        return 1;
-    }
     u64 page_capacity = columns * rows;
     u64 page_count = text_cells / page_capacity + ((text_cells % page_capacity) ? 1u : 0u);
     if (!page_count) page_count = 1u;

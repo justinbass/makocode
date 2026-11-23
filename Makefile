@@ -1,5 +1,5 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
+CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O3
 LDFLAGS ?=
 INCLUDES ?= 1
 FREESTANDING ?= 0
