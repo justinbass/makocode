@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include "makocode_platform.hpp"
 #define LZMA_PROPS_SIZE 5
 #define FOOTER_GLYPH_BLANK_ROW "00000"
@@ -17,12 +18,12 @@
 #define FOOTER_GLYPH_CUSTOM(symbol, r0, r1, r2, r3, r4, r5, r6, r7) {symbol, {r0, r1, r2, r3, r4, r5, r6, r7}}
 
 
-typedef unsigned char       u8;
-typedef unsigned short      u16;
-typedef unsigned int        u32;
-typedef unsigned long       usize;
-typedef unsigned long long  u64;
-typedef long long           i64;
+typedef uint8_t             u8;
+typedef uint16_t            u16;
+typedef uint32_t            u32;
+typedef size_t              usize;
+typedef uint64_t            u64;
+typedef int64_t             i64;
 static const usize USIZE_MAX_VALUE = (usize)~(usize)0;
 
 static const u64 U64_MAX_VALUE = (u64)~(u64)0;
@@ -384,33 +385,6 @@ struct Sha256State {
 } // namespace makocode
 
 namespace makocode {
-typedef unsigned __int128 u128;
-} // namespace makocode
-
-namespace makocode {
-static const u128 PCG64_MULTIPLIER = (((u128)0x2360ED051FC65DA4ull) << 64u) | (u128)0x4385DF649FCCF645ull;
-} // namespace makocode
-
-namespace makocode {
-static const u128 PCG64_INCREMENT = (((u128)0x5851F42D4C957F2Dull) << 64u) | (u128)0x14057B7EF767814Full;
-} // namespace makocode
-
-namespace makocode {
-struct Pcg64Generator {
-    u128 state;
-    Pcg64Generator() : state(0u) {}
-    void seed(u64 seed_value) { state = 0u; (void)next(); state += (u128)seed_value; (void)next(); }
-    u64 next() {
-        u128 oldstate = state;
-        state = oldstate * PCG64_MULTIPLIER + PCG64_INCREMENT;
-        u64 xorshifted = (u64)(((oldstate >> 64u) ^ oldstate) >> 64u);
-        u32 rotate = (u32)(oldstate >> 122u) & 63u;
-        return (xorshifted >> rotate) | (xorshifted << ((64u - rotate) & 63u));
-    }
-};
-} // namespace makocode
-
-namespace makocode {
 struct Poly1305State {
     u64 r0, r1, r2, r3, r4;
     u64 s1, s2, s3, s4;
@@ -420,6 +394,78 @@ struct Poly1305State {
         : r0(0u), r1(0u), r2(0u), r3(0u), r4(0u),
           s1(0u), s2(0u), s3(0u), s4(0u),
           h0(0u), h1(0u), h2(0u), h3(0u), h4(0u) {}
+};
+} // namespace makocode
+
+namespace makocode {
+struct Pcg64Generator {
+    u64 state_high;
+    u64 state_low;
+    u64 increment_high;
+    u64 increment_low;
+
+    Pcg64Generator()
+        : state_high(0u), state_low(0u), increment_high(0u), increment_low(1u) {}
+
+    void seed(u64 seed_value, u64 stream_id) {
+        state_high = 0u;
+        state_low = 0u;
+        increment_low = (stream_id << 1u) | 1u;
+        increment_high = stream_id >> 63u;
+        (void)next();
+        state_low += seed_value;
+        state_high += state_low < seed_value;
+        (void)next();
+    }
+
+    void seed(u64 seed_value, const u8 key[32]) {
+        u64 seed_high = 0u;
+        u64 seed_low = 0u;
+        increment_low = 0u;
+        increment_high = 0u;
+        for (u32 i = 0u; i < 8u; ++i) {
+            seed_low |= (u64)key[i] << (i * 8u);
+            seed_high |= (u64)key[i + 8u] << (i * 8u);
+            increment_low |= (u64)key[i + 16u] << (i * 8u);
+            increment_high |= (u64)key[i + 24u] << (i * 8u);
+        }
+        increment_low |= 1u;
+        seed_low += seed_value;
+        seed_high += seed_low < seed_value;
+        state_high = 0u;
+        state_low = 0u;
+        (void)next();
+        state_low += seed_low;
+        state_high += seed_high + (state_low < seed_low);
+        (void)next();
+    }
+
+    u64 next() {
+        const u64 old_high = state_high;
+        const u64 old_low = state_low;
+        const u64 multiplier_high = 0x2360ED051FC65DA4ull;
+        const u64 multiplier_low = 0x4385DF649FCCF645ull;
+        u64 a0 = (u32)old_low;
+        u64 a1 = old_low >> 32u;
+        u64 b0 = (u32)multiplier_low;
+        u64 b1 = multiplier_low >> 32u;
+        u64 p00 = a0 * b0;
+        u64 p01 = a0 * b1;
+        u64 p10 = a1 * b0;
+        u64 p11 = a1 * b1;
+        u64 middle = (p00 >> 32u) + (u32)p01 + (u32)p10;
+        u64 product_low = (middle << 32u) | (u32)p00;
+        u64 product_high = p11 + (p01 >> 32u) + (p10 >> 32u) +
+                           (middle >> 32u);
+        state_low = product_low + increment_low;
+        state_high = product_high + old_low * multiplier_high +
+                     old_high * multiplier_low + increment_high +
+                     (state_low < product_low);
+        u64 output = old_high ^ old_low;
+        u32 rotation = (u32)(old_high >> 58u);
+        return (output >> rotation) |
+               (output << ((0u - rotation) & 63u));
+    }
 };
 } // namespace makocode
 
@@ -455,7 +501,7 @@ static const usize STEALTH_CONTAINER_HEADER_BYTES = STEALTH_CONTAINER_PREFIX_BYT
 namespace makocode {
 struct BitWriter {
     ByteBuffer buffer;
-    usize bit_position;
+    u64 bit_position;
     bool  failed;
 
     BitWriter() : buffer(), bit_position(0u), failed(false) {}
@@ -470,8 +516,10 @@ struct BitWriter {
         failed = false;
     }
 
-    bool ensure_bits(usize target_bits) {
-        usize target_bytes = (target_bits + 7u) >> 3u;
+    bool ensure_bits(u64 target_bits) {
+        u64 target_bytes_u64 = (target_bits >> 3u) + ((target_bits & 7u) != 0u);
+        if (target_bytes_u64 > (u64)USIZE_MAX_VALUE) return false;
+        usize target_bytes = (usize)target_bytes_u64;
         return buffer.ensure(target_bytes);
     }
 
@@ -479,12 +527,12 @@ struct BitWriter {
         if (failed) {
             return false;
         }
-        if (!ensure_bits(bit_position + 1u)) {
+        if (bit_position == U64_MAX_VALUE || !ensure_bits(bit_position + 1u)) {
             failed = true;
             return false;
         }
-        usize byte_index = bit_position >> 3u;
-        usize bit_offset = bit_position & 7u;
+        usize byte_index = (usize)(bit_position >> 3u);
+        usize bit_offset = (usize)(bit_position & 7u);
         u8 mask = (u8)(1u << bit_offset);
         if (byte_index >= buffer.size) {
             buffer.push(0u);
@@ -499,6 +547,10 @@ struct BitWriter {
     }
 
     bool write_bits(u64 value, usize count) {
+        if (count > 64u) {
+            failed = true;
+            return false;
+        }
         for (usize i = 0; i < count; ++i) {
             u8 bit = (u8)((value >> i) & 1u);
             if (!write_bit(bit)) {
@@ -526,12 +578,12 @@ struct BitWriter {
         return buffer.data;
     }
 
-    usize bit_size() const {
+    u64 bit_size() const {
         return bit_position;
     }
 
     usize byte_size() const {
-        return (bit_position + 7u) >> 3u;
+        return (usize)((bit_position >> 3u) + ((bit_position & 7u) != 0u));
     }
 };
 } // namespace makocode
@@ -539,13 +591,13 @@ struct BitWriter {
 namespace makocode {
 struct BitReader {
     const u8* data;
-    usize bit_count;
-    usize cursor;
+    u64 bit_count;
+    u64 cursor;
     bool failed;
 
     BitReader() : data(0), bit_count(0u), cursor(0u), failed(false) {}
 
-    void reset(const u8* source, usize bits) {
+    void reset(const u8* source, u64 bits) {
         data = source;
         bit_count = bits;
         cursor = 0u;
@@ -557,13 +609,17 @@ struct BitReader {
             failed = true;
             return 0u;
         }
-        usize byte_index = cursor >> 3u;
-        usize bit_offset = cursor & 7u;
+        usize byte_index = (usize)(cursor >> 3u);
+        usize bit_offset = (usize)(cursor & 7u);
         ++cursor;
         return (u8)((data[byte_index] >> bit_offset) & 1u);
     }
 
     u64 read_bits(usize count) {
+        if (count > 64u) {
+            failed = true;
+            return 0u;
+        }
         u64 result = 0u;
         for (usize i = 0; i < count; ++i) {
             u8 bit = read_bit();
@@ -573,15 +629,16 @@ struct BitReader {
     }
 
     bool align_to_byte() {
-        usize remainder = cursor & 7u;
+        u64 remainder = cursor & 7u;
         if (!remainder) {
             return true;
         }
-        if ((cursor + (8u - remainder)) > bit_count) {
+        u64 missing = 8u - remainder;
+        if (cursor > U64_MAX_VALUE - missing || cursor + missing > bit_count) {
             failed = true;
             return false;
         }
-        cursor += (8u - remainder);
+        cursor += missing;
         return true;
     }
 };
@@ -617,6 +674,9 @@ struct EncoderConfig {
     u32 metadata_key_count;
     u32 fiducial_density;
     double ecc_redundancy;
+    u64 ecc_redundancy_numerator;
+    u64 ecc_redundancy_denominator;
+    bool ecc_redundancy_is_exact;
     u16 overlay_erasure_budget;
     u16 unknown_error_budget;
     u32 palette_size;
@@ -631,6 +691,9 @@ struct EncoderConfig {
         : metadata_key_count(0u),
           fiducial_density(0u),
           ecc_redundancy(0.0),
+          ecc_redundancy_numerator(0u),
+          ecc_redundancy_denominator(1u),
+          ecc_redundancy_is_exact(false),
           overlay_erasure_budget(0u),
           unknown_error_budget(0u),
           palette_size(0u),
@@ -757,7 +820,8 @@ struct PaletteSymbolHeaderRecovery {
           overlay_erasure_budget(0u), unknown_error_budget(0u) {}
 };
 
-static const u64 PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED = 0x4D616B6F76300005ull;
+static const u64 PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED = 0u;
+static const u64 PALETTE_SYMBOL_PUBLIC_WHITENING_CONTEXT = 0x4D616B6F76300005ull;
 static const u32 PALETTE_SYMBOL_BOOTSTRAP_SYMBOLS = 48u;
 static const u32 PALETTE_SYMBOL_BOOTSTRAP_DATA_SYMBOLS = 32u;
 static const u32 PALETTE_SYMBOL_PAGE_SALT_SYMBOLS = 48u;
@@ -789,6 +853,11 @@ bool palette_symbol_decode_page_salt(const PaletteSymbolProfile& profile,
                                      EccDecodeStats* stats = 0);
 bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
                                           double redundancy,
+                                          u32& parity_symbols,
+                                          u32 parity_step = 4u);
+bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
+                                          u64 redundancy_numerator,
+                                          u64 redundancy_denominator,
                                           u32& parity_symbols,
                                           u32 parity_step = 4u);
 bool palette_symbol_to_dots(const PaletteSymbolProfile& profile,
@@ -847,7 +916,10 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   EccSummary& summary,
                                   bool omit_bootstrap = false,
                                   u32 parity_step = 4u,
-                                  const PaletteSymbolPasswordContext* password_context = 0);
+                                  const PaletteSymbolPasswordContext* password_context = 0,
+                                  bool redundancy_is_exact = false,
+                                  u64 redundancy_numerator = 0u,
+                                  u64 redundancy_denominator = 1u);
 bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
                                   const ByteBuffer& encoded_symbols,
                                   const ByteBuffer& erased_symbols,
@@ -944,7 +1016,10 @@ struct EncoderContext {
                                           ecc_summary,
                                           config.omit_palette_symbol_bootstrap,
                                           config.parity_step,
-                                          config.password_context)) {
+                                          config.password_context,
+                                          config.ecc_redundancy_is_exact,
+                                          config.ecc_redundancy_numerator,
+                                          config.ecc_redundancy_denominator)) {
             return false;
         }
         for (usize symbol_index = 0u; symbol_index < symbols.size / 4u; ++symbol_index) {
@@ -1283,7 +1358,6 @@ struct Values {
         u32 encoded_metadata_size;
         u32 metadata_bit_count;
         u32 metadata_ecc_bytes;
-        double metadata_ecc_redundancy;
         u32 metadata_ecc_minimum_parity_bytes;
         u32 metadata_length_prefix_bits;
         u32 metadata_outer_length_bits;
@@ -1329,7 +1403,6 @@ struct Values {
               encoded_metadata_size(0u),
               metadata_bit_count(0u),
               metadata_ecc_bytes(0u),
-              metadata_ecc_redundancy(0.0),
               metadata_ecc_minimum_parity_bytes(2u),
               metadata_length_prefix_bits(0u),
               metadata_outer_length_bits(0u),
@@ -1832,6 +1905,19 @@ bool ascii_to_fraction(const char* text,
                               usize length,
                               u64& numerator,
                               u64& denominator);
+bool multiply_divide_u64(u64 left,
+                         u64 right,
+                         u64 divisor,
+                         u64& quotient,
+                         u64& remainder);
+
+static inline u32 fraction_floor_u32(u32 value,
+                                     u64 numerator,
+                                     u64 denominator) {
+    return denominator
+        ? (u32)(((u64)value * numerator) / denominator)
+        : 0u;
+}
 
 bool ppm_write_metadata_header(const PpmParserState& state,
                                       makocode::ByteBuffer& output);
@@ -2062,7 +2148,9 @@ bool find_best_ecc_fill(usize payload_bytes,
                                u16& best_parity,
                                u64& best_frame_bits,
                                u64& best_bits_needed,
-                               u64& best_page_count);
+                               u64& best_page_count,
+                               u64 overlay_numerator,
+                               u64 overlay_denominator);
 
 bool archive_collect_directory(const char* fs_path,
                                       const char* rel_path,
@@ -2190,7 +2278,9 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         u32 metadata_ecc_minimum_parity_bytes = 2u,
                                         u16 required_unknown_errors = 0u,
                                         u32 parity_step = 4u,
-                                        bool omit_bootstrap = false);
+                                        bool omit_bootstrap = false,
+                                        u64 overlay_numerator = 0u,
+                                        u64 overlay_denominator = 1u);
 
 bool write_all_fd(int fd, const u8* data, usize length);
 

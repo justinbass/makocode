@@ -129,6 +129,7 @@ int command_encode(int arg_count, char** args) {
     PageFooterConfig footer_config;
     enum EccMode { ECC_AUTO_MINIMUM, ECC_EXPLICIT_RATIO, ECC_FILL };
     EccMode ecc_mode = ECC_AUTO_MINIMUM;
+    u32 selected_ecc_parity = 0u;
     double overlay_fraction = 0.0;
     u64 overlay_fraction_numerator = 0u;
     u64 overlay_fraction_denominator = 1u;
@@ -143,6 +144,9 @@ int command_encode(int arg_count, char** args) {
     const char* overlay_ignore_colors_text = 0;
     usize overlay_ignore_colors_length = 0u;
     double ecc_redundancy = 0.0;
+    u64 ecc_redundancy_numerator = 0u;
+    u64 ecc_redundancy_denominator = 1u;
+    bool ecc_redundancy_is_exact = false;
     static const usize MAX_INPUT_ITEMS = 512u;
     const char* input_paths[MAX_INPUT_ITEMS];
     usize input_count = 0u;
@@ -161,7 +165,8 @@ int command_encode(int arg_count, char** args) {
     bool have_random_data = false;
     bool hidden_option_specified = false;
     bool hidden_fill = false;
-    double hidden_ratio = 0.0;
+    u64 hidden_ratio_numerator = 0u;
+    u64 hidden_ratio_denominator = 1u;
     bool fill_pages_specified = false;
     u64 fill_pages = 0u;
     bool have_footer = false;
@@ -553,12 +558,16 @@ int command_encode(int arg_count, char** args) {
             u64 ratio_denominator = 1u;
             if (!ascii_to_fraction(ecc_value, ecc_length,
                                    ratio_numerator, ratio_denominator) ||
-                (long double)ratio_numerator / (long double)ratio_denominator >
-                    (long double)(makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH - 1u)) {
+                ratio_numerator >
+                    (u64)(makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH - 1u) *
+                        ratio_denominator) {
                 console_line(2, "encode: --ecc ratio must be between 0 and 1023");
                 return 1;
             }
             ecc_redundancy = (double)ratio_numerator / (double)ratio_denominator;
+            ecc_redundancy_numerator = ratio_numerator;
+            ecc_redundancy_denominator = ratio_denominator;
+            ecc_redundancy_is_exact = true;
             ecc_mode = ECC_EXPLICIT_RATIO;
             continue;
         }
@@ -592,11 +601,12 @@ int command_encode(int arg_count, char** args) {
                 u64 numerator = 0u;
                 u64 denominator = 1u;
                 if (!ascii_to_fraction(hidden_value, hidden_value_length, numerator, denominator) ||
-                    (long double)numerator / (long double)denominator > 64.0L) {
+                    numerator > 64u * denominator) {
                     console_line(2, "encode: --hidden ratio must be between 0 and 64, or 'fill'");
                     return 1;
                 }
-                hidden_ratio = (double)numerator / (double)denominator;
+                hidden_ratio_numerator = numerator;
+                hidden_ratio_denominator = denominator;
             }
             continue;
         }
@@ -973,8 +983,8 @@ int command_encode(int arg_count, char** args) {
         console_line(2, "encode: each --overlay-ppm requires a following --overlay-pages");
         return 1;
     }
-    if (ecc_mode == ECC_EXPLICIT_RATIO && ecc_redundancy == 0.0) {
-        console_line(2, overlay_fraction > 0.0
+    if (ecc_mode == ECC_EXPLICIT_RATIO && ecc_redundancy_numerator == 0u) {
+        console_line(2, overlay_fraction_numerator > 0u
                               ? "encode: overlay requires ECC"
                               : "encode: ECC cannot cover structural erasures or scan errors when --ecc=0");
         return 1;
@@ -995,7 +1005,7 @@ int command_encode(int arg_count, char** args) {
         console_line(2, "encode: --random-data requires --password or --fill-pages");
         return 1;
     }
-    bool hidden_mode_enabled = hidden_fill || hidden_ratio > 0.0;
+    bool hidden_mode_enabled = hidden_fill || hidden_ratio_numerator > 0u;
     bool use_symbol_placement_salt = have_password || hidden_mode_enabled;
     if (use_symbol_placement_salt) {
         if (!makocode_platform_secure_random(symbol_placement_salt,
@@ -1191,7 +1201,8 @@ int command_encode(int arg_count, char** args) {
         ecc_payload_bytes += container_overhead;
     }
     bool extended_auto_scan_budget = false;
-    if (ecc_mode == ECC_AUTO_MINIMUM && !have_password && overlay_fraction == 0.0) {
+    if (ecc_mode == ECC_AUTO_MINIMUM && !have_password &&
+        overlay_fraction_numerator == 0u) {
         u32 automatic_palette_size = mapping_has_custom_palette(mapping)
                                          ? mapping.custom_palette_count
                                          : (1u << bits_per_sample(mapping.color_channels));
@@ -1223,7 +1234,8 @@ int command_encode(int arg_count, char** args) {
         u32 explicit_parity = 0u;
         if (!makocode::palette_symbol_profile(explicit_palette_size, explicit_profile) ||
             !makocode::palette_symbol_parity_for_redundancy(
-                explicit_profile, ecc_redundancy, explicit_parity)) {
+                explicit_profile, ecc_redundancy_numerator,
+                ecc_redundancy_denominator, explicit_parity)) {
             console_line(2, "encode: invalid explicit palette-symbol ECC ratio");
             return 1;
         }
@@ -1233,6 +1245,9 @@ int command_encode(int arg_count, char** args) {
                 explicit_parity = rounded_parity;
                 ecc_redundancy = (double)explicit_parity /
                     ((double)explicit_profile.block_length - (double)explicit_parity);
+                ecc_redundancy_numerator = explicit_parity;
+                ecc_redundancy_denominator =
+                    explicit_profile.block_length - explicit_parity;
             }
         }
     }
@@ -1254,17 +1269,24 @@ int command_encode(int arg_count, char** args) {
         }
         u32 sizing_parity = 0u;
         if (ecc_redundancy > 0.0) {
-            if (!makocode::palette_symbol_parity_for_redundancy(
-                    sizing_profile, ecc_redundancy, sizing_parity,
-                    ecc_mode == ECC_FILL ? 2u : 4u)) {
+            bool sizing_parity_valid = ecc_mode == ECC_EXPLICIT_RATIO
+                ? makocode::palette_symbol_parity_for_redundancy(
+                      sizing_profile, ecc_redundancy_numerator,
+                      ecc_redundancy_denominator, sizing_parity,
+                      ecc_mode == ECC_FILL ? 2u : 4u)
+                : makocode::palette_symbol_parity_for_redundancy(
+                      sizing_profile, ecc_redundancy, sizing_parity,
+                      ecc_mode == ECC_FILL ? 2u : 4u);
+            if (!sizing_parity_valid) {
                 console_line(2, "encode: invalid palette-symbol ECC ratio");
                 return 1;
             }
         } else if (ecc_mode != ECC_EXPLICIT_RATIO) {
             sizing_parity = 8u;
         }
-        u32 sizing_overlay = (u32)floor((double)sizing_profile.block_length *
-                                         overlay_fraction);
+        u32 sizing_overlay = fraction_floor_u32(
+            sizing_profile.block_length, overlay_fraction_numerator,
+            overlay_fraction_denominator);
         if (sizing_overlay > sizing_parity) sizing_parity = sizing_overlay;
         if (sizing_parity >= sizing_profile.block_length) {
             sizing_parity = sizing_profile.block_length - 1u;
@@ -1372,8 +1394,9 @@ int command_encode(int arg_count, char** args) {
             console_line(2, "encode: unsupported palette-symbol profile");
             return 1;
         }
-        u32 capacity_overlay = (u32)floor(
-            (double)capacity_profile.block_length * overlay_fraction);
+        u32 capacity_overlay = fraction_floor_u32(
+            capacity_profile.block_length, overlay_fraction_numerator,
+            overlay_fraction_denominator);
         u32 capacity_available_errors =
             (capacity_profile.block_length - 1u - capacity_overlay) / 2u;
         u16 capacity_required_errors = 0u;
@@ -1411,7 +1434,9 @@ int command_encode(int arg_count, char** args) {
                                                metadata_ecc_minimum_parity_bytes,
                                                capacity_required_errors,
                                                ecc_mode == ECC_FILL ? 2u : 4u,
-                                               omit_palette_symbol_bootstrap) &&
+                                               omit_palette_symbol_bootstrap,
+                                               overlay_fraction_numerator,
+                                               overlay_fraction_denominator) &&
                    candidate.page_count <= target_page_count;
         };
         u64 hidden_capacity = 0u;
@@ -1447,11 +1472,21 @@ int command_encode(int arg_count, char** args) {
                     container_ok = false;
                 }
             }
-        } else if (container_ok && hidden_ratio > 0.0) {
-            long double requested = ceill((long double)visible_body.size *
-                                          (long double)hidden_ratio);
-            if (requested > (long double)U64_MAX_VALUE) container_ok = false;
-            else hidden_capacity = (u64)requested;
+        } else if (container_ok && hidden_ratio_numerator > 0u) {
+            u64 visible_bytes = (u64)visible_body.size;
+            u64 requested = 0u;
+            u64 requested_remainder = 0u;
+            if ((usize)visible_bytes != visible_body.size ||
+                !multiply_divide_u64(visible_bytes,
+                                     hidden_ratio_numerator,
+                                     hidden_ratio_denominator,
+                                     requested,
+                                     requested_remainder) ||
+                (requested_remainder && requested == U64_MAX_VALUE)) {
+                container_ok = false;
+            } else {
+                hidden_capacity = requested + (requested_remainder != 0u);
+            }
         }
         if (container_ok && hidden_capacity < (u64)hidden_body.size) {
             console_line(2, "encode: hidden payload exceeds the --hidden capacity");
@@ -1588,8 +1623,9 @@ int command_encode(int arg_count, char** args) {
     double maximum_ecc_ratio = (double)(requirement_profile.block_length - 1u);
     u16 required_unknown_errors = 0u;
     if (ecc_mode == ECC_AUTO_MINIMUM) {
-        u32 requirement_overlay = (u32)floor(
-            (double)requirement_profile.block_length * overlay_fraction);
+        u32 requirement_overlay = fraction_floor_u32(
+            requirement_profile.block_length, overlay_fraction_numerator,
+            overlay_fraction_denominator);
         u32 maximum_parity = requirement_profile.block_length - 1u;
         u32 available_errors = (maximum_parity - requirement_overlay) / 2u;
         u32 automatic_error_target = requirement_overlay
@@ -1714,7 +1750,9 @@ int command_encode(int arg_count, char** args) {
     if (ecc_mode != ECC_EXPLICIT_RATIO) {
         EccFillCandidate minimum_candidate;
         u32 candidate_parity_step = ecc_mode == ECC_FILL ? 2u : 4u;
-        double low_ratio = overlay_fraction >= 0.9 ? maximum_ecc_ratio : 0.01;
+        double low_ratio = overlay_fraction_numerator * 10u >=
+                                   overlay_fraction_denominator * 9u
+                               ? maximum_ecc_ratio : 0.01;
         double high_ratio = low_ratio;
         bool found_minimum = evaluate_ecc_fill_candidate(ecc_payload_bytes,
                                           high_ratio,
@@ -1730,7 +1768,9 @@ int command_encode(int arg_count, char** args) {
                                           metadata_ecc_minimum_parity_bytes,
                                           required_unknown_errors,
                                           candidate_parity_step,
-                                          omit_palette_symbol_bootstrap);
+                                          omit_palette_symbol_bootstrap,
+                                          overlay_fraction_numerator,
+                                          overlay_fraction_denominator);
         if (!found_minimum) {
             for (u32 attempt = 0u; attempt < 16u && high_ratio < maximum_ecc_ratio; ++attempt) {
                 low_ratio = high_ratio;
@@ -1750,7 +1790,9 @@ int command_encode(int arg_count, char** args) {
                                           metadata_ecc_minimum_parity_bytes,
                                           required_unknown_errors,
                                           candidate_parity_step,
-                                          omit_palette_symbol_bootstrap);
+                                          omit_palette_symbol_bootstrap,
+                                          overlay_fraction_numerator,
+                                          overlay_fraction_denominator);
                 if (found_minimum) break;
             }
             if (found_minimum) {
@@ -1809,7 +1851,9 @@ int command_encode(int arg_count, char** args) {
                                                     metadata_ecc_minimum_parity_bytes,
                                                     required_unknown_errors,
                                                     candidate_parity_step,
-                                                    omit_palette_symbol_bootstrap)) {
+                                                    omit_palette_symbol_bootstrap,
+                                                    overlay_fraction_numerator,
+                                                    overlay_fraction_denominator)) {
                         high_rank = middle_rank;
                         minimum_candidate = candidate;
                     } else {
@@ -1834,6 +1878,7 @@ int command_encode(int arg_count, char** args) {
             return 1;
         }
         ecc_redundancy = minimum_candidate.requested_ratio;
+        selected_ecc_parity = minimum_candidate.parity;
     }
     if (ecc_mode == ECC_FILL) {
         double best_ratio = -1.0;
@@ -1862,12 +1907,15 @@ int command_encode(int arg_count, char** args) {
                                 best_parity,
                                 best_frame_bits,
                                 best_bits_needed,
-                                best_page_count);
+                                best_page_count,
+                                overlay_fraction_numerator,
+                                overlay_fraction_denominator);
         if (!found_fill) {
             console_line(2, "encode: failed to derive ECC fill candidate");
             return 1;
         }
         ecc_redundancy = best_requested_ratio;
+        selected_ecc_parity = best_parity;
         char ratio_buffer[32];
         format_fixed_3(ecc_redundancy, ratio_buffer, sizeof(ratio_buffer));
         char block_buffer[32];
@@ -1900,16 +1948,44 @@ int command_encode(int arg_count, char** args) {
         return 1;
     }
     u32 symbol_parity = 0u;
-    if (!makocode::palette_symbol_parity_for_redundancy(
-            symbol_profile, ecc_redundancy, symbol_parity,
-            ecc_mode == ECC_FILL ? 2u : 4u)) {
+    bool symbol_parity_valid = false;
+    if (ecc_mode == ECC_EXPLICIT_RATIO) {
+        symbol_parity_valid = makocode::palette_symbol_parity_for_redundancy(
+            symbol_profile, ecc_redundancy_numerator,
+            ecc_redundancy_denominator, symbol_parity, 4u);
+    } else if (selected_ecc_parity > 0u) {
+        symbol_parity = selected_ecc_parity;
+        u32 maximum_parity = symbol_profile.block_length - 1u;
+        u32 parity_step = ecc_mode == ECC_FILL ? 2u : 4u;
+        if (symbol_parity == maximum_parity &&
+            (symbol_parity % parity_step) != 0u) {
+            ecc_redundancy_numerator = maximum_parity;
+            ecc_redundancy_denominator = 1u;
+        } else {
+            u64 requested_symbols = symbol_parity == 2u
+                ? 3u : (u64)symbol_parity - (parity_step - 1u);
+            u64 requested_scale = symbol_parity == 2u ? 2u : 1u;
+            ecc_redundancy_numerator = requested_symbols;
+            ecc_redundancy_denominator =
+                (u64)symbol_profile.block_length * requested_scale -
+                requested_symbols;
+        }
+        ecc_redundancy_is_exact = true;
+        u32 verified_parity = 0u;
+        symbol_parity_valid = makocode::palette_symbol_parity_for_redundancy(
+            symbol_profile, ecc_redundancy_numerator,
+            ecc_redundancy_denominator, verified_parity, parity_step) &&
+            verified_parity == symbol_parity;
+    }
+    if (!symbol_parity_valid) {
         console_line(2, "encode: invalid palette-symbol ECC ratio");
         return 1;
     }
     u16 symbol_overlay_budget = 0u;
-    if (overlay_fraction > 0.0) {
-        symbol_overlay_budget = (u16)floor((double)symbol_profile.block_length *
-                                           overlay_fraction);
+    if (overlay_fraction_numerator > 0u) {
+        symbol_overlay_budget = (u16)fraction_floor_u32(
+            symbol_profile.block_length, overlay_fraction_numerator,
+            overlay_fraction_denominator);
     }
     if (symbol_overlay_budget > symbol_parity) {
         console_line(2, "encode: palette-symbol ECC cannot cover the requested overlay");
@@ -1925,6 +2001,10 @@ int command_encode(int arg_count, char** args) {
 
     makocode::EncoderContext encoder;
     encoder.config.ecc_redundancy = ecc_redundancy;
+    encoder.config.ecc_redundancy_numerator = ecc_redundancy_numerator;
+    encoder.config.ecc_redundancy_denominator = ecc_redundancy_denominator;
+    encoder.config.ecc_redundancy_is_exact =
+        ecc_redundancy_is_exact;
     encoder.config.omit_palette_symbol_bootstrap = omit_palette_symbol_bootstrap;
     encoder.config.overlay_erasure_budget = overlay_erasure_budget;
     encoder.config.unknown_error_budget = unknown_parity_budget;
@@ -2155,7 +2235,7 @@ int command_encode(int arg_count, char** args) {
     if (no_metadata) {
         memset(metadata_page_assignments.data, 0u, metadata_page_assignments.size);
     }
-    if (overlay_fraction > 0.0 && page_count > 1u &&
+    if (overlay_fraction_numerator > 0u && page_count > 1u &&
         ecc_mode == ECC_EXPLICIT_RATIO && ecc_redundancy < 0.5) {
         console_line(2, "encode: multi-page overlays require --ecc of at least 0.5; larger overlays may require more");
         return 1;
@@ -2265,8 +2345,9 @@ int command_encode(int arg_count, char** args) {
              candidate_hundredths <= 25400u;
              ++candidate_hundredths) {
             u32 candidate_parity = 0u;
-            u32 candidate_overlay = (u32)floor(
-                (double)candidate_profile.block_length * overlay_fraction);
+            u32 candidate_overlay = fraction_floor_u32(
+                candidate_profile.block_length, overlay_fraction_numerator,
+                overlay_fraction_denominator);
             if (!makocode::palette_symbol_parity_for_redundancy(
                     candidate_profile,
                     (double)candidate_hundredths / 100.0,
@@ -2287,15 +2368,11 @@ int command_encode(int arg_count, char** args) {
                 : 0u;
         u64 current_block_total = (u64)encoder.ecc_info().block_data_symbols +
                                   encoder.ecc_info().parity_symbols;
-        long double max_overlay_fraction = current_block_total
-            ? (long double)available_overlay_per_block / (long double)current_block_total
-            : 0.0L;
-        if (max_overlay_fraction > 254.0L / 255.0L) {
-            max_overlay_fraction = 254.0L / 255.0L;
-        }
-        max_overlay_fraction = (long double)floor((double)(max_overlay_fraction * 1000.0L)) /
-                               1000.0L;
-        format_fixed_3((double)max_overlay_fraction,
+        u64 supported_overlay_milli = current_block_total
+            ? (u64)available_overlay_per_block * 1000u / current_block_total
+            : 0u;
+        if (supported_overlay_milli > 996u) supported_overlay_milli = 996u;
+        format_fixed_3((double)supported_overlay_milli / 1000.0,
                        supported_overlay_buffer,
                        sizeof(supported_overlay_buffer));
         if (supported_overlay_buffer[0] == '\0') {

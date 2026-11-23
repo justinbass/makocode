@@ -292,11 +292,74 @@ bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
     if (!profile.block_length || redundancy < 0.0 ||
         (parity_step != 2u && parity_step != 4u)) return false;
     if (redundancy == 0.0) return true;
-    long double requested = (long double)profile.block_length *
-                            (long double)redundancy /
-                            (1.0L + (long double)redundancy);
-    if (requested > (long double)profile.block_length) return false;
-    u32 parity = (u32)ceill(requested);
+    if (sizeof(double) != sizeof(u64) || DBL_MANT_DIG != 53 ||
+        DBL_MAX_EXP != 1024) return false;
+    u64 bits = 0u;
+    memcpy(&bits, &redundancy, sizeof(bits));
+    u32 exponent = (u32)((bits >> 52u) & 0x7ffu);
+    u64 significand = bits & 0x000fffffffffffffull;
+    if ((bits >> 63u) || exponent == 0x7ffu) return false;
+    i64 binary_exponent = 0;
+    if (exponent) {
+        significand |= 0x0010000000000000ull;
+        binary_exponent = (i64)exponent - 1023 - 52;
+    } else {
+        binary_exponent = -1074;
+    }
+    u32 parity = 0u;
+    if (significand) {
+        if (binary_exponent >= 0) {
+            if (redundancy >= (double)(profile.block_length - 1u)) {
+                parity = profile.block_length - 1u;
+            } else {
+                u64 numerator = significand << (u32)binary_exponent;
+                u64 denominator = numerator + 1u;
+                u64 product = (u64)profile.block_length * numerator;
+                parity = (u32)(product / denominator +
+                               ((product % denominator) != 0u));
+            }
+        } else {
+            u64 denominator = 0u;
+            u64 shift = (u64)(-binary_exponent);
+            if (shift >= 64u) {
+                parity = 1u;
+            } else {
+                denominator = (1ull << (u32)shift) + significand;
+                u64 product = (u64)profile.block_length * significand;
+                parity = (u32)(product / denominator +
+                               ((product % denominator) != 0u));
+            }
+        }
+    }
+    if (parity == 0u) return true;
+    if (parity < 2u) parity = 2u;
+    if (parity_step == 2u) {
+        if (parity & 1u) ++parity;
+    } else if (parity >= 4u && (parity & 3u)) {
+        parity += 4u - (parity & 3u);
+    }
+    if (parity >= profile.block_length) parity = profile.block_length - 1u;
+    parity_symbols = parity;
+    return true;
+}
+
+bool palette_symbol_parity_for_redundancy(const PaletteSymbolProfile& profile,
+                                          u64 redundancy_numerator,
+                                          u64 redundancy_denominator,
+                                          u32& parity_symbols,
+                                          u32 parity_step) {
+    parity_symbols = 0u;
+    if (!profile.block_length || !redundancy_denominator ||
+        (parity_step != 2u && parity_step != 4u)) return false;
+    if (!redundancy_numerator) return true;
+    if (redundancy_numerator > U64_MAX_VALUE - redundancy_denominator ||
+        redundancy_numerator > U64_MAX_VALUE / profile.block_length) return false;
+    u64 denominator = redundancy_numerator + redundancy_denominator;
+    u64 product = (u64)profile.block_length * redundancy_numerator;
+    u64 parity_value = product / denominator + ((product % denominator) != 0u);
+    u32 parity = parity_value > profile.block_length
+                     ? profile.block_length
+                     : (u32)parity_value;
     if (parity < 2u) parity = 2u;
     if (parity_step == 2u) {
         if (parity & 1u) ++parity;
@@ -1445,6 +1508,44 @@ bool ascii_to_fraction(const char* text,
     return true;
 }
 
+bool multiply_divide_u64(u64 left,
+                         u64 right,
+                         u64 divisor,
+                         u64& quotient,
+                         u64& remainder) {
+    quotient = 0u;
+    remainder = 0u;
+    if (!divisor) return false;
+    u64 right_quotient = right / divisor;
+    u64 right_remainder = right % divisor;
+    for (i64 bit = 63; bit >= 0; --bit) {
+        if (quotient > U64_MAX_VALUE / 2u) return false;
+        quotient *= 2u;
+        u64 carry = 0u;
+        if (remainder >= divisor - remainder) {
+            remainder -= divisor - remainder;
+            carry = 1u;
+        } else {
+            remainder += remainder;
+        }
+        if ((left >> (u32)bit) & 1u) {
+            if (right_quotient > U64_MAX_VALUE - quotient) return false;
+            quotient += right_quotient;
+            if (right_remainder) {
+                if (remainder >= divisor - right_remainder) {
+                    remainder -= divisor - right_remainder;
+                    ++carry;
+                } else {
+                    remainder += right_remainder;
+                }
+            }
+        }
+        if (carry > U64_MAX_VALUE - quotient) return false;
+        quotient += carry;
+    }
+    return true;
+}
+
 void console_write(int fd, const char* text) {
     usize len = ascii_length(text);
     if (len) {
@@ -1583,10 +1684,10 @@ static bool read_entire_file(const char* path,
             data = resized;
             capacity = new_capacity;
         }
-        unsigned long request = (unsigned long)(capacity - total);
-        if (request > 65536ul) request = 65536ul;
-        long read_result = makocode_platform_read(fd, data + total, request);
-        if (read_result < 0 || (unsigned long)read_result > request) {
+        size_t request = capacity - total;
+        if (request > 65536u) request = 65536u;
+        ptrdiff_t read_result = makocode_platform_read(fd, data + total, request);
+        if (read_result < 0 || (size_t)read_result > request) {
             makocode_platform_free(data);
             makocode_platform_close(fd);
             set_diag_message(diag, "read failure");
@@ -2075,37 +2176,13 @@ typedef int SRes;
 #define RINOK(x) { int __result__ = (x); if (__result__ != 0) return __result__; }
 #endif
 
-typedef unsigned char Byte;
-typedef short Int16;
-typedef unsigned short UInt16;
-
-#ifdef _LZMA_UINT32_IS_ULONG
-typedef long Int32;
-typedef unsigned long UInt32;
-#else
-typedef int Int32;
-typedef unsigned int UInt32;
-#endif
-
-#ifdef _SZ_NO_INT_64
-
-/* define _SZ_NO_INT_64, if your compiler doesn't support 64-bit integers.
-   NOTES: Some code will work incorrectly in that case! */
-
-typedef long Int64;
-typedef unsigned long UInt64;
-
-#else
-
-#if defined(_MSC_VER) || defined(__BORLANDC__)
-typedef __int64 Int64;
-typedef unsigned __int64 UInt64;
-#else
-typedef long long int Int64;
-typedef unsigned long long int UInt64;
-#endif
-
-#endif
+typedef uint8_t Byte;
+typedef int16_t Int16;
+typedef uint16_t UInt16;
+typedef int32_t Int32;
+typedef uint32_t UInt32;
+typedef int64_t Int64;
+typedef uint64_t UInt64;
 
 #ifdef _LZMA_NO_SYSTEM_SIZE_T
 typedef UInt32 SizeT;
@@ -4035,7 +4112,8 @@ UInt32 GetPosSlot1(UInt32 pos)
 
 #else
 
-#define kNumLogBits (9 + (int)sizeof(size_t) / 2)
+// Keep the position-slot lookup geometry independent of host pointer size.
+#define kNumLogBits 13
 
 void LzmaEnc_FastPosInit(Byte *g_FastPos)
 {
@@ -6428,21 +6506,9 @@ static bool chacha20_xor(const u8 key[32],
     return true;
 }
 
-__extension__ 
-
-
-
-
-
-
 static void poly1305_init_state(Poly1305State& state, const u8 key[32]) {
-    u128 r = (u128)read_le_u64(key) |
-             ((u128)read_le_u64(key + 8u) << 64u);
-    u128 mask = (((u128)0x0ffffffc0ffffffcull) << 64u) |
-                (u128)0x0ffffffc0fffffffull;
-    r &= mask;
-    u64 r_low = (u64)(r & ((u128)0xFFFFFFFFFFFFFFFFull));
-    u64 r_high = (u64)(r >> 64u);
+    u64 r_low = read_le_u64(key) & 0x0ffffffc0fffffffull;
+    u64 r_high = read_le_u64(key + 8u) & 0x0ffffffc0ffffffcull;
     state.r0 = r_low & 0x3ffffffu;
     state.r1 = ((r_low >> 26u) & 0x3ffffffu);
     state.r2 = (((r_low >> 52u) | (r_high << 12u)) & 0x3ffffffu);
@@ -6464,31 +6530,31 @@ static void poly1305_process_block(Poly1305State& state, const u8 block[16], u64
     state.h3 += (t1 >> 14u) & 0x3ffffffu;
     state.h4 += ((t1 >> 40u) & 0x3ffffffu) + hibit;
 
-    u128 d0 = (u128)state.h0 * state.r0 +
-              (u128)state.h1 * state.s4 +
-              (u128)state.h2 * state.s3 +
-              (u128)state.h3 * state.s2 +
-              (u128)state.h4 * state.s1;
-    u128 d1 = (u128)state.h0 * state.r1 +
-              (u128)state.h1 * state.r0 +
-              (u128)state.h2 * state.s4 +
-              (u128)state.h3 * state.s3 +
-              (u128)state.h4 * state.s2;
-    u128 d2 = (u128)state.h0 * state.r2 +
-              (u128)state.h1 * state.r1 +
-              (u128)state.h2 * state.r0 +
-              (u128)state.h3 * state.s4 +
-              (u128)state.h4 * state.s3;
-    u128 d3 = (u128)state.h0 * state.r3 +
-              (u128)state.h1 * state.r2 +
-              (u128)state.h2 * state.r1 +
-              (u128)state.h3 * state.r0 +
-              (u128)state.h4 * state.s4;
-    u128 d4 = (u128)state.h0 * state.r4 +
-              (u128)state.h1 * state.r3 +
-              (u128)state.h2 * state.r2 +
-              (u128)state.h3 * state.r1 +
-              (u128)state.h4 * state.r0;
+    u64 d0 = state.h0 * state.r0 +
+             state.h1 * state.s4 +
+             state.h2 * state.s3 +
+             state.h3 * state.s2 +
+             state.h4 * state.s1;
+    u64 d1 = state.h0 * state.r1 +
+             state.h1 * state.r0 +
+             state.h2 * state.s4 +
+             state.h3 * state.s3 +
+             state.h4 * state.s2;
+    u64 d2 = state.h0 * state.r2 +
+             state.h1 * state.r1 +
+             state.h2 * state.r0 +
+             state.h3 * state.s4 +
+             state.h4 * state.s3;
+    u64 d3 = state.h0 * state.r3 +
+             state.h1 * state.r2 +
+             state.h2 * state.r1 +
+             state.h3 * state.r0 +
+             state.h4 * state.s4;
+    u64 d4 = state.h0 * state.r4 +
+             state.h1 * state.r3 +
+             state.h2 * state.r2 +
+             state.h3 * state.r1 +
+             state.h4 * state.r0;
 
     u64 h0 = (u64)(d0 & 0x3ffffffu);
     u64 carry = (u64)(d0 >> 26u);
@@ -6595,18 +6661,18 @@ static void poly1305_finish(Poly1305State& state, const u8 pad[16], u8 tag[16]) 
     state.h3 = (state.h3 & mask) | g3;
     state.h4 = (state.h4 & mask) | g4;
 
-    u128 acc = (u128)state.h0 |
-               ((u128)state.h1 << 26u) |
-               ((u128)state.h2 << 52u) |
-               ((u128)state.h3 << 78u) |
-               ((u128)state.h4 << 104u);
-    u128 sum0 = (u128)(u64)acc + (u128)read_le_u64(pad);
-    u64 f0 = (u64)sum0;
-    u128 sum1 = ((u128)(u64)(acc >> 64u) +
-                 (u128)read_le_u64(pad + 8u) + (sum0 >> 64u));
-    u64 f1 = (u64)sum1;
-    write_le_u64(tag, f0);
-    write_le_u64(tag + 8u, f1);
+    u64 f0 = ((state.h0 | (state.h1 << 26u)) & 0xffffffffu) +
+             read_le_u32(pad);
+    u64 f1 = (((state.h1 >> 6u) | (state.h2 << 20u)) & 0xffffffffu) +
+             read_le_u32(pad + 4u) + (f0 >> 32u);
+    u64 f2 = (((state.h2 >> 12u) | (state.h3 << 14u)) & 0xffffffffu) +
+             read_le_u32(pad + 8u) + (f1 >> 32u);
+    u64 f3 = (((state.h3 >> 18u) | (state.h4 << 8u)) & 0xffffffffu) +
+             read_le_u32(pad + 12u) + (f2 >> 32u);
+    write_le_u32(tag, (u32)f0);
+    write_le_u32(tag + 4u, (u32)f1);
+    write_le_u32(tag + 8u, (u32)f2);
+    write_le_u32(tag + 12u, (u32)f3);
 }
 
 static bool chacha20_poly1305_encrypt(const u8* key,
@@ -7310,7 +7376,7 @@ static bool palette_symbol_public_whiten(const PaletteSymbolProfile& profile,
                                          u64 first_symbol_index = 0u) {
     if (symbols.size % 4u || profile.field_order < 2u) return false;
     u8 seed[64] = {};
-    write_le_u64(seed, PALETTE_SYMBOL_DEFAULT_PLACEMENT_SEED);
+    write_le_u64(seed, PALETTE_SYMBOL_PUBLIC_WHITENING_CONTEXT);
     write_le_u64(seed + 8u, profile.field_order);
     write_le_u32(seed + 16u, profile.palette_size);
     write_le_u32(seed + 20u, profile.field_characteristic);
@@ -7469,7 +7535,10 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
                                   EccSummary& summary,
                                   bool omit_bootstrap,
                                   u32 parity_step,
-                                  const PaletteSymbolPasswordContext* password_context) {
+                                  const PaletteSymbolPasswordContext* password_context,
+                                  bool redundancy_is_exact,
+                                  u64 redundancy_numerator,
+                                  u64 redundancy_denominator) {
     encoded_symbols.release();
     summary = EccSummary();
     if (!bytes || !byte_count || profile.field_order < 2u ||
@@ -7477,8 +7546,15 @@ bool palette_symbol_encode_stream(const PaletteSymbolProfile& profile,
         profile.block_length > PALETTE_SYMBOL_MAX_BLOCK_LENGTH || redundancy < 0.0) return false;
     u32 block_length = profile.block_length;
     u32 parity = 0u;
-    if (!palette_symbol_parity_for_redundancy(profile, redundancy, parity,
-                                               parity_step)) return false;
+    bool parity_valid = redundancy_is_exact
+        ? palette_symbol_parity_for_redundancy(profile,
+                                                redundancy_numerator,
+                                                redundancy_denominator,
+                                                parity,
+                                                parity_step)
+        : palette_symbol_parity_for_redundancy(profile, redundancy, parity,
+                                                parity_step);
+    if (!parity_valid) return false;
     if (overlay_erasure_budget > parity ||
         2u * (u32)unknown_error_budget + overlay_erasure_budget > parity) return false;
     ByteBuffer data_symbols;
@@ -7953,7 +8029,7 @@ bool palette_symbol_decode_stream(const PaletteSymbolProfile& profile,
 bool stealth_fill_random(ByteBuffer& output, usize size) {
     output.release();
     if (!output.ensure(size)) return false;
-    if (!makocode_platform_secure_random(output.data, (unsigned long)size)) {
+    if (!makocode_platform_secure_random(output.data, size)) {
         output.release();
         return false;
     }
@@ -7964,11 +8040,11 @@ bool stealth_fill_random(ByteBuffer& output, usize size) {
 bool read_password_from_terminal(SecretBuffer& output,
                                  const char* prompt,
                                  bool confirm) {
-    static const unsigned long PASSWORD_CAPACITY = 4096u;
+    static const size_t PASSWORD_CAPACITY = 4096u;
     char first[PASSWORD_CAPACITY];
     char second[PASSWORD_CAPACITY];
-    unsigned long first_length = 0u;
-    unsigned long second_length = 0u;
+    size_t first_length = 0u;
+    size_t second_length = 0u;
     memset(first, 0, sizeof(first));
     memset(second, 0, sizeof(second));
     bool ok = makocode_platform_read_password(first, sizeof(first),
@@ -7989,7 +8065,7 @@ bool read_password_from_terminal(SecretBuffer& output,
     }
     volatile char* clear_first = first;
     volatile char* clear_second = second;
-    for (unsigned long i = 0u; i < PASSWORD_CAPACITY; ++i) {
+    for (size_t i = 0u; i < PASSWORD_CAPACITY; ++i) {
         clear_first[i] = 0;
         clear_second[i] = 0;
     }
@@ -9347,12 +9423,6 @@ namespace MetadataTile {
         out_values.metadata_ecc_minimum_parity_bytes = reader.read_bit() ? 8u : 2u;
         out_values.scatter_payload = reader.read_bit() != 0u;
         if (reader.failed) return false;
-        out_values.metadata_ecc_redundancy = out_values.ecc_block_data
-            ? (double)out_values.ecc_parity / (double)out_values.ecc_block_data
-            : 0.0;
-        if (out_values.metadata_ecc_redundancy > 0.25) {
-            out_values.metadata_ecc_redundancy = 0.25;
-        }
         if (!derive_schema_payload_layout(out_values)) return false;
         if (reader.failed || !metadata_values_sane(out_values)) return false;
         return build_palette_text_from_colors(out_values.palette,
@@ -9651,7 +9721,7 @@ namespace MetadataTile {
                 write_le_u64(derivation_input + 8u, values.palette_count);
             }
             u8 placement_key[32];
-            static const u8 public_placement_domain[] = "MakoCode v0 spatial interleaver";
+            static const u8 public_placement_domain[] = "MakoCode v0 PCG64 spatial shuffle";
             static const u8 salt_locator_domain[] = "MakoCode v0 salt locator interleaver";
             const u8* placement_domain = legacy_public_placement
                 ? public_placement_domain : salt_locator_domain;
@@ -9686,26 +9756,22 @@ namespace MetadataTile {
                     placement_key);
             }
             if (!placement_key_derived) return false;
-            u8 nonce[12] = {};
-            u8 random_block[64];
-            u64 counter = 0u;
-            usize random_offset = sizeof(random_block);
+            Pcg64Generator shuffle_generator;
+            if (password_shuffle_key) {
+                shuffle_generator.seed(symbol_placement_seed, placement_key);
+            } else {
+                shuffle_generator.seed(symbol_placement_seed,
+                                       read_le_u64(placement_key));
+            }
             for (u64 count = group_count; count > 1u; --count) {
                 u64 other = 0u;
                 u64 rejection_threshold = (u64)(0u - count) % count;
                 do {
-                    if (random_offset + 8u > sizeof(random_block)) {
-                        if (counter > 0xFFFFFFFFull) return false;
-                        chacha20_block(placement_key, nonce, (u32)counter++, random_block);
-                        random_offset = 0u;
-                    }
-                    other = read_le_u64(random_block + random_offset);
-                    random_offset += 8u;
+                    other = shuffle_generator.next();
                 } while (other < rejection_threshold);
                 other %= count;
-                u64 last = count - 1u;
-                u64 temporary = permuted_groups[last];
-                permuted_groups[last] = permuted_groups[other];
+                u64 temporary = permuted_groups[count - 1u];
+                permuted_groups[count - 1u] = permuted_groups[other];
                 permuted_groups[other] = temporary;
             }
             // Keep the per-page salt prefix out of the central metadata window.
@@ -9811,32 +9877,38 @@ namespace MetadataTile {
                         keyed_salted_input, sizeof(keyed_salted_input), salted_key);
                     memset(keyed_salted_input, 0, sizeof(keyed_salted_input));
                 } else {
+                    u8 empty_password_salted_input[
+                        sizeof(salted_domain) - 1u +
+                        sizeof(salted_derivation_input)];
+                    memcpy(empty_password_salted_input, salted_domain,
+                           sizeof(salted_domain) - 1u);
+                    memcpy(empty_password_salted_input +
+                               sizeof(salted_domain) - 1u,
+                           salted_derivation_input,
+                           sizeof(salted_derivation_input));
                     salted_key_derived = hmac_sha256(
-                        salted_derivation_input, sizeof(salted_derivation_input),
-                        salted_domain, sizeof(salted_domain) - 1u, salted_key);
+                        0, 0u, empty_password_salted_input,
+                        sizeof(empty_password_salted_input), salted_key);
+                    memset(empty_password_salted_input, 0,
+                           sizeof(empty_password_salted_input));
                 }
                 if (!salted_key_derived) return false;
                 memset(salted_derivation_input, 0, sizeof(salted_derivation_input));
-                memset(nonce, 0, sizeof(nonce));
-                memset(random_block, 0, sizeof(random_block));
-                counter = 0u;
-                random_offset = sizeof(random_block);
+                if (salted_password_shuffle_key) {
+                    shuffle_generator.seed(symbol_placement_seed, salted_key);
+                } else {
+                    shuffle_generator.seed(symbol_placement_seed,
+                                           read_le_u64(salted_key));
+                }
                 for (u64 count = remaining_group_count; count > 1u; --count) {
                     u64 other = 0u;
                     u64 rejection_threshold = (u64)(0u - count) % count;
                     do {
-                        if (random_offset + 8u > sizeof(random_block)) {
-                            if (counter > 0xFFFFFFFFull) return false;
-                            chacha20_block(salted_key, nonce, (u32)counter++, random_block);
-                            random_offset = 0u;
-                        }
-                        other = read_le_u64(random_block + random_offset);
-                        random_offset += 8u;
+                        other = shuffle_generator.next();
                     } while (other < rejection_threshold);
                     other %= count;
-                    u64 last = count - 1u;
-                    u64 temporary = destination_values[last];
-                    destination_values[last] = destination_values[other];
+                    u64 temporary = destination_values[count - 1u];
+                    destination_values[count - 1u] = destination_values[other];
                     destination_values[other] = temporary;
                 }
                 for (u64 group = 0u; group < remaining_group_count; ++group) {
@@ -9855,7 +9927,7 @@ namespace MetadataTile {
             }
             memset(placement_key, 0, sizeof(placement_key));
             memset(derivation_input, 0, sizeof(derivation_input));
-            memset(random_block, 0, sizeof(random_block));
+            memset(&shuffle_generator, 0, sizeof(shuffle_generator));
         }
         return true;
     }
@@ -9925,16 +9997,27 @@ namespace MetadataTile {
         u32 parity_bytes = 0u;
         if (values.metadata_bit_count > 0u) {
             parity_bytes = values.metadata_ecc_bytes;
-        } else if (values.metadata_ecc_redundancy > 0.0) {
+        } else if (values.ecc_parity && values.ecc_block_data) {
             usize ecc_basis_bytes = metadata_payload.size;
-            double parity_estimate = ceil((double)ecc_basis_bytes *
-                                          values.metadata_ecc_redundancy);
-            if (parity_estimate > 254.0) parity_estimate = 254.0;
-            u32 estimated_parity_bytes = (u32)parity_estimate;
+            u64 ratio_numerator = values.ecc_parity;
+            u64 ratio_denominator = values.ecc_block_data;
+            if (ratio_numerator * 4u > ratio_denominator) {
+                ratio_numerator = 1u;
+                ratio_denominator = 4u;
+            }
+            u64 estimated_parity_bytes = 0u;
+            u64 parity_remainder = 0u;
+            if (!multiply_divide_u64((u64)metadata_payload.size,
+                                     ratio_numerator,
+                                     ratio_denominator,
+                                     estimated_parity_bytes,
+                                     parity_remainder)) return false;
+            estimated_parity_bytes += parity_remainder != 0u;
+            if (estimated_parity_bytes > 254u) estimated_parity_bytes = 254u;
             if (estimated_parity_bytes < values.metadata_ecc_minimum_parity_bytes) {
                 estimated_parity_bytes = values.metadata_ecc_minimum_parity_bytes;
             }
-            parity_bytes = estimated_parity_bytes;
+            parity_bytes = (u32)estimated_parity_bytes;
             if (parity_bytes >= ecc_basis_bytes) {
                 parity_bytes = ecc_basis_bytes > 1u
                                    ? (u32)ecc_basis_bytes - 1u
@@ -9951,8 +10034,10 @@ namespace MetadataTile {
             if (!metadata_writer.write_bits((u64)metadata_payload.data[i], 8u)) return false;
         }
         if (!metadata_writer.align_to_byte()) return false;
-        u32 metadata_bit_count = (u32)metadata_writer.bit_size();
-        if (metadata_bit_count == 0u || metadata_bit_count > TILE_PAYLOAD_MODULE_CAPACITY) return false;
+        u64 metadata_bit_count_u64 = metadata_writer.bit_size();
+        if (metadata_bit_count_u64 == 0u ||
+            metadata_bit_count_u64 > TILE_PAYLOAD_MODULE_CAPACITY) return false;
+        u32 metadata_bit_count = (u32)metadata_bit_count_u64;
 
         ByteBuffer metadata;
         usize metadata_bytes = metadata_writer.byte_size();
@@ -9997,9 +10082,10 @@ namespace MetadataTile {
             memcpy(base_conversion_work.data, codeword.data, codeword.size);
             for (usize remaining_bytes = codeword.size; remaining_bytes > 0u;) {
                 u32 remainder = 0u;
-                for (ssize_t byte_index = (ssize_t)remaining_bytes - 1; byte_index >= 0; --byte_index) {
-                    u32 value = (remainder << 8u) | base_conversion_work.data[byte_index];
-                    base_conversion_work.data[byte_index] = (u8)(value / values.palette_count);
+                for (usize byte_index = remaining_bytes; byte_index > 0u; --byte_index) {
+                    usize current_index = byte_index - 1u;
+                    u32 value = (remainder << 8u) | base_conversion_work.data[current_index];
+                    base_conversion_work.data[current_index] = (u8)(value / values.palette_count);
                     remainder = value % values.palette_count;
                 }
                 while (remaining_bytes > 0u && base_conversion_work.data[remaining_bytes - 1u] == 0u) {
@@ -10012,7 +10098,7 @@ namespace MetadataTile {
         }
         BitWriter metadata_length_writer;
         if (!write_compact_u64(metadata_length_writer, (u64)metadata_bit_count)) return false;
-        usize metadata_length_bits = metadata_length_writer.bit_size();
+        usize metadata_length_bits = (usize)metadata_length_writer.bit_size();
         usize total_metadata_cells = metadata_length_bits + metadata_symbol_count;
         if (total_metadata_cells == 0u || total_metadata_cells > 0xFFFFu) return false;
         ByteBuffer metadata_square_symbols;
@@ -10036,7 +10122,7 @@ namespace MetadataTile {
         while ((usize)square_side * (usize)square_side < total_metadata_cells) ++square_side;
         BitWriter outer_length_writer;
         if (!write_compact_u16(outer_length_writer, (u32)total_metadata_cells)) return false;
-        usize outer_length_bits = outer_length_writer.bit_size();
+        usize outer_length_bits = (usize)outer_length_writer.bit_size();
         u32 tile_width = square_side;
         if (tile_width < TILE_MARKER_WIDTH) tile_width = TILE_MARKER_WIDTH;
         if (tile_width < values.palette_count + 1u) tile_width = values.palette_count + 1u;
@@ -10207,7 +10293,8 @@ namespace MetadataTile {
                             if (write_compact_u16(inferred_outer_length,
                                                   forced_total_metadata_cells)) {
                                 total_metadata_cells = forced_total_metadata_cells;
-                                outer_length_prefix_bits = inferred_outer_length.bit_size();
+                                outer_length_prefix_bits =
+                                    (usize)inferred_outer_length.bit_size();
                                 outer_length_read = true;
                                 outer_length_forced = true;
                             }
@@ -14159,9 +14246,9 @@ bool write_all_fd(int fd, const u8* data, usize length) {
     }
     usize written = 0u;
     while (written < length) {
-        unsigned long slice = (unsigned long)(length - written);
-        long result = makocode_platform_write(fd, data + written, slice);
-        if (result <= 0 || (unsigned long)result > slice) {
+        size_t slice = length - written;
+        ptrdiff_t result = makocode_platform_write(fd, data + written, slice);
+        if (result <= 0 || (size_t)result > slice) {
             return false;
         }
         written += (usize)result;
@@ -28630,6 +28717,7 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
                                     makocode::ByteBuffer& tile_active_mask,
                                     PaletteColor& tile_light,
                                     PaletteColor& tile_dark) {
+    (void)metadata_ecc_redundancy;
     const PaletteColor* palette = 0;
     u32 palette_size = 0u;
     if (mapping_has_custom_palette(mapping)) {
@@ -28710,7 +28798,6 @@ static bool build_page_metadata_tile(const ImageMappingConfig& mapping,
                                          tile_values.fiducial_columns,
                                          tile_values.fiducial_rows);
     tile_values.ecc_enabled = (ecc_summary && ecc_summary->enabled);
-    tile_values.metadata_ecc_redundancy = metadata_ecc_redundancy;
     tile_values.metadata_ecc_minimum_parity_bytes =
         ecc_summary ? ecc_summary->metadata_ecc_minimum_parity_bytes : 2u;
     if (ecc_summary && ecc_summary->palette_symbol_stream) {
@@ -29628,8 +29715,8 @@ bool read_entire_stdin(makocode::ByteBuffer& buffer) {
             buffer.release();
             return false;
         }
-        long read_result = makocode_platform_read(0, buffer.data + total, chunk);
-        if (read_result < 0 || (unsigned long)read_result > chunk) {
+        ptrdiff_t read_result = makocode_platform_read(0, buffer.data + total, chunk);
+        if (read_result < 0 || (size_t)read_result > chunk) {
             buffer.release();
             return false;
         }
@@ -29662,8 +29749,8 @@ bool read_entire_file(const char* path, makocode::ByteBuffer& buffer) {
             buffer.release();
             return false;
         }
-        long read_result = makocode_platform_read(fd, buffer.data + total, chunk);
-        if (read_result < 0 || (unsigned long)read_result > chunk) {
+        ptrdiff_t read_result = makocode_platform_read(fd, buffer.data + total, chunk);
+        if (read_result < 0 || (size_t)read_result > chunk) {
             makocode_platform_close(fd);
             buffer.release();
             return false;
@@ -29803,9 +29890,9 @@ bool archive_finalize(ArchiveBuildContext& ctx) {
     makocode::BitWriter archive;
     if (!MetadataTile::write_compact_u64(archive, ctx.entry_count)) return false;
     const u8* entry_data = ctx.entries.data();
-    usize entry_bits = ctx.entries.bit_size();
-    for (usize bit = 0u; bit < entry_bits; ++bit) {
-        u8 value = (u8)((entry_data[bit >> 3u] >> (bit & 7u)) & 1u);
+    u64 entry_bits = ctx.entries.bit_size();
+    for (u64 bit = 0u; bit < entry_bits; ++bit) {
+        u8 value = (u8)((entry_data[(usize)(bit >> 3u)] >> (bit & 7u)) & 1u);
         if (!archive.write_bit(value)) return false;
     }
     usize archive_bytes = archive.byte_size();
@@ -30139,7 +30226,7 @@ bool archive_parse(const makocode::ByteBuffer& archive,
     if (!archive.data || archive.size == 0u ||
         archive.size > (usize)(USIZE_MAX_VALUE / 8u)) return false;
     makocode::BitReader reader;
-    reader.reset(archive.data, archive.size * 8u);
+    reader.reset(archive.data, (u64)archive.size * 8u);
     u64 entry_count = 0u;
     if (!MetadataTile::read_compact_u64(reader, entry_count)) {
         return false;
@@ -31070,13 +31157,16 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
                                         u32 metadata_ecc_minimum_parity_bytes,
                                         u16 required_unknown_errors,
                                         u32 parity_step,
-                                        bool omit_bootstrap) {
+                                        bool omit_bootstrap,
+                                        u64 overlay_numerator,
+                                        u64 overlay_denominator) {
     (void)structural_erasure_fraction;
     if (payload_bytes == 0u || requested_redundancy <= 0.0 ||
         requested_redundancy >
             (double)(makocode::PALETTE_SYMBOL_MAX_BLOCK_LENGTH - 1u) ||
         overlay_fraction < 0.0 ||
-        overlay_fraction >= 1.0) return false;
+        overlay_fraction >= 1.0 ||
+        !overlay_denominator || overlay_numerator >= overlay_denominator) return false;
     u32 palette_size = mapping_has_custom_palette(mapping)
                            ? mapping.custom_palette_count
                            : (1u << bits_per_sample(mapping.color_channels));
@@ -31085,7 +31175,9 @@ bool evaluate_ecc_fill_candidate(usize payload_bytes,
     u32 parity = 0u;
     if (!makocode::palette_symbol_parity_for_redundancy(
             profile, requested_redundancy, parity, parity_step)) return false;
-    u32 overlay_budget = (u32)floor((double)profile.block_length * overlay_fraction);
+    u32 overlay_budget = fraction_floor_u32(profile.block_length,
+                                            overlay_numerator,
+                                            overlay_denominator);
     if (overlay_budget > parity) return false;
     u32 block_length = profile.block_length;
     u32 data_symbols = block_length - parity;
@@ -31203,7 +31295,9 @@ bool find_best_ecc_fill(usize payload_bytes,
                                u16& best_parity,
                                u64& best_frame_bits,
                                u64& best_bits_needed,
-                               u64& best_page_count) {
+                               u64& best_page_count,
+                               u64 overlay_numerator,
+                               u64 overlay_denominator) {
     best_ratio = -1.0;
     best_requested_ratio = -1.0;
     best_block_data = 0u;
@@ -31254,7 +31348,9 @@ bool find_best_ecc_fill(usize payload_bytes,
                                                       2u,
                                                       required_unknown_errors,
                                                       2u,
-                                                      omit_bootstrap);
+                                                      omit_bootstrap,
+                                                      overlay_numerator,
+                                                      overlay_denominator);
         parity_candidate_state[parity] = evaluated ? 1u : 2u;
         if (!evaluated) return false;
         parity_candidates[parity] = local_candidate;

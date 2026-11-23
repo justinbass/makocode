@@ -50,39 +50,39 @@ bool write_terminal_text(int fd, const char* text, size_t length) {
 } // namespace
 
 #ifdef MAKOCODE_TEST_BUILD
-extern "C" void* makocode_test_malloc(unsigned long size);
+extern "C" void* makocode_test_malloc(size_t size);
 #endif
 
-extern "C" void* makocode_platform_malloc(unsigned long size) {
+extern "C" void* makocode_platform_malloc(size_t size) {
 #ifdef MAKOCODE_TEST_BUILD
     return makocode_test_malloc(size);
 #else
-    return ::malloc((size_t)size);
+    return ::malloc(size);
 #endif
 }
 
-extern "C" void* makocode_platform_realloc(void* ptr, unsigned long size) {
-    return ::realloc(ptr, (size_t)size);
+extern "C" void* makocode_platform_realloc(void* ptr, size_t size) {
+    return ::realloc(ptr, size);
 }
 
 extern "C" void makocode_platform_free(void* ptr) {
     ::free(ptr);
 }
 
-extern "C" long makocode_platform_read(int fd, void* buffer, unsigned long count) {
+extern "C" ptrdiff_t makocode_platform_read(int fd, void* buffer, size_t count) {
     ssize_t result;
     do {
-        result = ::read(fd, buffer, (size_t)count);
+        result = ::read(fd, buffer, count);
     } while (result < 0 && errno == EINTR);
-    return (long)result;
+    return (ptrdiff_t)result;
 }
 
-extern "C" long makocode_platform_write(int fd, const void* buffer, unsigned long count) {
+extern "C" ptrdiff_t makocode_platform_write(int fd, const void* buffer, size_t count) {
     ssize_t result;
     do {
-        result = ::write(fd, buffer, (size_t)count);
+        result = ::write(fd, buffer, count);
     } while (result < 0 && errno == EINTR);
-    return (long)result;
+    return (ptrdiff_t)result;
 }
 
 extern "C" int makocode_platform_open(const char* path, int flags, ...) {
@@ -177,57 +177,57 @@ extern "C" const char* makocode_platform_getenv(const char* name) {
 }
 
 extern "C" int makocode_platform_snprintf(char* buffer,
-                                             unsigned long size,
+                                             size_t size,
                                              const char* format,
                                              ...) {
     va_list args;
     va_start(args, format);
-    int result = ::vsnprintf(buffer, (size_t)size, format, args);
+    int result = ::vsnprintf(buffer, size, format, args);
     va_end(args);
     return result;
 }
 
-extern "C" bool makocode_platform_utc_timestamp(char* buffer, unsigned long capacity) {
+extern "C" bool makocode_platform_utc_timestamp(char* buffer, size_t capacity) {
     if (!buffer || !capacity) return false;
     time_t now = ::time(0);
     struct tm utc;
     if (!::gmtime_r(&now, &utc)) return false;
-    size_t length = ::strftime(buffer, (size_t)capacity, "%Y%m%dT%H%M%SZ", &utc);
+    size_t length = ::strftime(buffer, capacity, "%Y%m%dT%H%M%SZ", &utc);
     return length > 0u && length < capacity;
 }
 
-extern "C" bool makocode_platform_local_timestamp(char* buffer, unsigned long capacity) {
+extern "C" bool makocode_platform_local_timestamp(char* buffer, size_t capacity) {
     if (!buffer || !capacity) return false;
     time_t now = ::time(0);
     struct tm local;
     if (!::localtime_r(&now, &local)) return false;
     size_t length = ::strftime(buffer,
-                               (size_t)capacity,
+                               capacity,
                                "makocode_decoded_%Y%m%d%H%M%S.txt",
                                &local);
     return length > 0u && length < capacity;
 }
 
-extern "C" bool makocode_platform_secure_random(void* buffer, unsigned long size) {
+extern "C" bool makocode_platform_secure_random(void* buffer, size_t size) {
     if (!buffer && size) return false;
     int fd = ::open("/dev/urandom", O_RDONLY);
     if (fd < 0) return false;
-    unsigned long offset = 0u;
+    size_t offset = 0u;
     while (offset < size) {
-        ssize_t result = ::read(fd, (char*)buffer + offset, (size_t)(size - offset));
+        ssize_t result = ::read(fd, (char*)buffer + offset, size - offset);
         if (result < 0 && errno == EINTR) continue;
         if (result <= 0) {
             ::close(fd);
             return false;
         }
-        offset += (unsigned long)result;
+        offset += (size_t)result;
     }
     return ::close(fd) == 0;
 }
 
 extern "C" bool makocode_platform_read_password(char* buffer,
-                                                 unsigned long capacity,
-                                                 unsigned long* length,
+                                                 size_t capacity,
+                                                 size_t* length,
                                                  const char* prompt) {
     if (!buffer || capacity < 2u || !length || !prompt) return false;
     *length = 0u;
@@ -273,7 +273,7 @@ extern "C" bool makocode_platform_read_password(char* buffer,
     bool ok = nonblocking && changed && ::tcflush(fd, TCIFLUSH) == 0 &&
               write_terminal_text(fd, prompt, strlen(prompt));
     bool overflow = false;
-    unsigned long used = 0u;
+    size_t used = 0u;
     while (ok && !password_prompt_signal) {
         if (fd >= FD_SETSIZE) {
             ok = false;

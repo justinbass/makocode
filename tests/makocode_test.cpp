@@ -45,7 +45,7 @@ static unsigned long minify_allocation_count=0;
 static unsigned long minify_allocation_failure_at=0;
 static unsigned long minify_allocation_failure_size=0;
 static unsigned long minify_4096_allocation_count=0;
-extern "C" void* makocode_test_malloc(unsigned long size);
+extern "C" void* makocode_test_malloc(size_t size);
 
 #include <fcntl.h>
 #include <signal.h>
@@ -67,7 +67,7 @@ extern char** environ;
 #include "../src/makocode.cpp"
 #undef main
 
-extern "C" void* makocode_test_malloc(unsigned long size) {
+extern "C" void* makocode_test_malloc(size_t size) {
     if(size==4096ul)++minify_4096_allocation_count;
     if(minify_allocation_failure_at&&++minify_allocation_count==minify_allocation_failure_at){minify_allocation_failure_size=size;return nullptr;}
     return std::malloc(static_cast<size_t>(size));
@@ -3755,6 +3755,40 @@ static void rs_erasures_case(){
 }
 
 static void metadata_tile_format_case(){
+    u64 quotient = 0u;
+    u64 remainder = 0u;
+    require(multiply_divide_u64(100u, 1u, 10u, quotient, remainder) &&
+                quotient == 10u && remainder == 0u,
+            "exact hidden-ratio capacity changed for 100 bytes at 0.1");
+    require(multiply_divide_u64(101u, 1u, 10u, quotient, remainder) &&
+                quotient == 10u && remainder == 1u,
+            "exact hidden-ratio remainder was lost");
+    require(multiply_divide_u64(U64_MAX_VALUE, U64_MAX_VALUE,
+                                U64_MAX_VALUE, quotient, remainder) &&
+                quotient == U64_MAX_VALUE && remainder == 0u,
+            "wide multiply-divide failed at the u64 boundary");
+    require(!multiply_divide_u64(U64_MAX_VALUE, 2u, 1u,
+                                 quotient, remainder),
+            "wide multiply-divide accepted an overflowing quotient");
+    u8 pcg_key[32];
+    for (u32 i = 0u; i < sizeof(pcg_key); ++i) pcg_key[i] = (u8)i;
+    makocode::Pcg64Generator pcg;
+    pcg.seed(0u, pcg_key);
+    const u64 expected_pcg[] = {
+        0x6ce0951c055e28ebull, 0x8e0e8a7d1213c156ull,
+        0x62cc7147e90f621bull, 0xdd223c84d65bde5cull
+    };
+    for (u32 i = 0u; i < sizeof(expected_pcg) / sizeof(expected_pcg[0]); ++i) {
+        require(pcg.next() == expected_pcg[i],
+                "PCG64 stream changed across fixed-width builds");
+    }
+    makocode::PaletteSymbolProfile exact_ratio_profile;
+    u32 exact_ratio_parity = 0u;
+    require(makocode::palette_symbol_profile(2u, exact_ratio_profile) &&
+                makocode::palette_symbol_parity_for_redundancy(
+                    exact_ratio_profile, 1u, 10u, exact_ratio_parity) &&
+                exact_ratio_parity == 24u,
+            "exact fractional ECC parity changed");
     MetadataTile::Values rank_values;rank_values.metadata_square_side=21u;rank_values.metadata_square_x0=13u;rank_values.metadata_square_y0=20u;rank_values.metadata_tag_y0=8u;rank_values.metadata_length_prefix_bits=1u;rank_values.metadata_symbol_count=1u;
     MetadataTile::Placement rank_placement=MetadataTile::compute_center_tile_placement(80u,80u);makocode::ByteBuffer rank_mask;require(rank_mask.ensure(80u*80u),"metadata rank mask allocation failed");rank_mask.size=80u*80u;memset(rank_mask.data,0,rank_mask.size);
     u8 active_metadata_cells[MetadataTile::TILE_SIDE*MetadataTile::TILE_SIDE]={};u8 guarded_metadata_cells[MetadataTile::TILE_SIDE*MetadataTile::TILE_SIDE]={};u32 marker_local_x=MetadataTile::tag_marker_x0(),marker_local_y=rank_values.metadata_tag_y0+1u;active_metadata_cells[(usize)marker_local_y*MetadataTile::TILE_SIDE+marker_local_x]=1u;active_metadata_cells[(usize)rank_values.metadata_square_y0*MetadataTile::TILE_SIDE+rank_values.metadata_square_x0]=1u;active_metadata_cells[(usize)rank_values.metadata_square_y0*MetadataTile::TILE_SIDE+rank_values.metadata_square_x0+1u]=1u;

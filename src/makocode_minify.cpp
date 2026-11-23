@@ -13,8 +13,8 @@ static bool read_file_into_buffer(const char* path, makocode::ByteBuffer& buffer
     }
     u8 chunk[4096];
     while (1) {
-        long read_result = makocode_platform_read(fd, chunk, sizeof(chunk));
-        if (read_result < 0 || (unsigned long)read_result > sizeof(chunk)) {
+        ptrdiff_t read_result = makocode_platform_read(fd, chunk, sizeof(chunk));
+        if (read_result < 0 || (size_t)read_result > sizeof(chunk)) {
             makocode_platform_close(fd);
             buffer.release();
             return false;
@@ -444,7 +444,7 @@ int command_minify(int arg_count, char** args) {
         }
     }
     usize scanline_size = (usize)(image_width * 3u);
-    u8* scanline = (u8*)makocode_platform_malloc((unsigned long)scanline_size);
+    u8* scanline = (u8*)makocode_platform_malloc((size_t)scanline_size);
     if (!scanline) {
         console_line(2, "minify: failed to allocate PPM scanline");
         return 1;
