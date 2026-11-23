@@ -468,7 +468,6 @@ static bool checkpoint_parse_bundle(const makocode::ByteBuffer& bundle,
             incomplete = true;
             break;
         }
-        if (path_length > (u64)(USIZE_MAX_VALUE - 1u)) { incomplete = true; break; }
         entry.path = (char*)makocode_platform_malloc((usize)path_length + 1u);
         if (!entry.path) return false;
         memcpy(entry.path, bundle.data + cursor, (usize)path_length);
