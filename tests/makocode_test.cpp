@@ -43,6 +43,8 @@
 
 static unsigned long minify_allocation_count=0;
 static unsigned long minify_allocation_failure_at=0;
+static unsigned long minify_allocation_failure_size=0;
+static unsigned long minify_4096_allocation_count=0;
 extern "C" void* makocode_test_malloc(unsigned long size);
 
 #include <fcntl.h>
@@ -66,7 +68,8 @@ extern char** environ;
 #undef main
 
 extern "C" void* makocode_test_malloc(unsigned long size) {
-    if(minify_allocation_failure_at&&++minify_allocation_count==minify_allocation_failure_at)return nullptr;
+    if(size==4096ul)++minify_4096_allocation_count;
+    if(minify_allocation_failure_at&&++minify_allocation_count==minify_allocation_failure_at){minify_allocation_failure_size=size;return nullptr;}
     return std::malloc(static_cast<size_t>(size));
 }
 
@@ -2792,6 +2795,12 @@ static void decoded_file_case(){
 static void checkpoint_restore_case(){
     const std::string id="0112_checkpoint_restore";fs::path work=make_work_dir(id);
     fs::create_directories(work/"base_a");fs::create_directories(work/"base_b");fs::create_directories(work/"current_a");fs::create_directories(work/"current_b");fs::create_directories(work/"pages");
+    fs::path empty_directory_input=work/"empty_directory";fs::create_directories(empty_directory_input);
+    auto empty_directory_bundle=run_cli(work,{"checkpoint","create","--input","empty_directory","--output","empty_directory.mcp"},"empty_directory_bundle");expect_success(empty_directory_bundle,id+" empty directory checkpoint");
+    fs::path empty_directory_output=work/"empty_directory_output";
+    auto empty_directory_restore=run_cli(work,{"checkpoint","restore","--input","empty_directory.mcp","--output","empty_directory_output"},"empty_directory_restore");expect_success(empty_directory_restore,id+" empty directory restore");require(fs::is_directory(empty_directory_output/"empty_directory"),id+": empty directory entry was not restored");
+    fs::path empty_directory_collision=work/"empty_directory_collision";fs::create_directories(empty_directory_collision);write_file(empty_directory_collision/"empty_directory","occupied");
+    auto failed_empty_directory_restore=run_cli(work,{"checkpoint","restore","--input","empty_directory.mcp","--output","empty_directory_collision"},"empty_directory_collision_restore");expect_failure(failed_empty_directory_restore,id+" directory entry collision");
     std::vector<unsigned char> a(256*20+173),b(5100);for(size_t i=0;i<a.size();++i)a[i]=static_cast<unsigned char>((i*29+i/7)&255);
     uint32_t state=0xabc123u;for(auto& v:b){state^=state<<13;state^=state>>17;state^=state<<5;v=static_cast<unsigned char>(state&255);}
     write_file(work/"base_a"/"old-a.bin",std::string(a.begin(),a.end()));write_file(work/"base_b"/"old-b.bin",std::string(b.begin(),b.end()));
@@ -2800,6 +2809,16 @@ static void checkpoint_restore_case(){
     auto delta=run_cli(work,{"checkpoint","create","--input=current_a","--input=current_b","--base=base_a","--base=base_b","--output=update.mcp","--chunk-size=256"},"checkpoint_delta");expect_success(delta,id+" delta checkpoint");
     auto full=run_cli(work,{"checkpoint","create","--input=current_a","--input=current_b","--output=full.mcp","--chunk-size=256"},"checkpoint_full");expect_success(full,id+" full checkpoint");
     require(fs::file_size(work/"update.mcp")<fs::file_size(work/"full.mcp"),id+": base chunks did not reduce bundle size");
+    fs::path cache_base=work/"cache_base",cache_input=work/"cache_input";fs::create_directories(cache_base);fs::create_directories(cache_input);std::string cache_source(32768,'\0');uint32_t cache_state=0x83d2a17u;for(char& value:cache_source){cache_state^=cache_state<<13;cache_state^=cache_state>>17;cache_state^=cache_state<<5;value=static_cast<char>(cache_state&255u);}write_file(cache_base/"source.bin",cache_source);write_file(cache_input/"source.bin",cache_source);
+    auto cache_bundle=run_cli(work,{"checkpoint","create","--input","cache_input","--base","cache_base","--output","cache_update.mcp","--chunk-size","256"},"cache_bundle");expect_success(cache_bundle,id+" repeated base source bundle");
+    auto cache_restore=run_process({test_executable().string(),"--checkpoint-restore-allocation-failure","100000","cache_update.mcp","cache_base","cache_output"},work,{},work/"cache_restore.out",work/"cache_restore.err");expect_success(cache_restore,id+" cached base source restore");
+    std::string cache_restore_output=read_file(work/"cache_restore.out");usize read_count_offset=cache_restore_output.find("READ_4096_COUNT:");require(cache_restore_output.find("CHECKPOINT_STATUS:0 ")!=std::string::npos&&read_count_offset!=std::string::npos,id+": cached base source restore status changed");unsigned long source_read_count=std::strtoul(cache_restore_output.c_str()+read_count_offset+16u,nullptr,10);require(source_read_count<=4u,id+": repeated base chunks reread the source file instead of using the cache");compare_files(cache_input/"source.bin",work/"cache_output/cache_input/source.bin",id);
+    fs::path stale_base=work/"stale_base";fs::create_directories(stale_base);std::string stale_source(32768,'\0');uint32_t stale_state=0x4b1d23u;for(char& value:stale_source){stale_state^=stale_state<<13;stale_state^=stale_state>>17;stale_state^=stale_state<<5;value=static_cast<char>(stale_state&255u);}write_file(stale_base/"source.bin",stale_source);write_file(work/"source.bin","replacement");usize stale_chunk_offset=0u,stale_chunk_end=0u;while(stale_chunk_offset<stale_source.size()){stale_chunk_end=checkpoint_chunk_end((const u8*)stale_source.data(),stale_chunk_offset,stale_source.size(),256u);if(stale_chunk_offset>8192u)break;stale_chunk_offset=stale_chunk_end;}require(stale_chunk_offset>8192u&&stale_chunk_end>stale_chunk_offset,id+": no later base chunk was found");usize stale_chunk_length=stale_chunk_end-stale_chunk_offset;write_file(work/"later.bin",stale_source.substr(stale_chunk_offset,stale_chunk_length));
+    auto stale_bundle=run_cli(work,{"checkpoint","create","--input","source.bin","--input","later.bin","--base",stale_base.string(),"--output","stale_source.mcp","--chunk-size","256"},"stale_source_bundle");expect_success(stale_bundle,id+" stale-source bundle");
+    auto stale_restore=run_cli(work,{"checkpoint","restore","--input","stale_source.mcp","--base",stale_base.string(),"--output",stale_base.string()},"stale_source_restore");expect_success(stale_restore,id+" changed-base source recovery");
+    require(read_file(stale_base/"source.bin")=="replacement",id+": earlier entry was not restored over the base source");
+    require(fs::exists(stale_base/"later.bin.partial")&&read_file(stale_base/"later.bin.partial")==std::string(stale_chunk_length,'\0'),id+": changed base source range was not recovered as zero-filled partial data");
+    require(read_file(stale_base/"checkpoint_recovery.txt").find("missing 6c617465722e62696e offset=0 length="+std::to_string(stale_chunk_length))!=std::string::npos,id+": changed base source range was not reported");
     auto missing_snapshot=run_cli(work,{"checkpoint","create","--input","missing_input","--output","missing_snapshot.mcp"},"missing_snapshot");
     expect_failure(missing_snapshot,id+" missing snapshot input");require(missing_snapshot.err.find("failed to build snapshot")!=std::string::npos,id+": snapshot-build diagnostic changed");
     auto missing_create_base=run_cli(work,{"checkpoint","create","--input","current_a","--base","missing_base","--output","missing_base.mcp"},"missing_create_base");
@@ -2823,6 +2842,18 @@ static void checkpoint_restore_case(){
     expect_failure(bundle_write_error,id+" bundle write failure");require(bundle_write_error.err.find("failed to write bundle")!=std::string::npos,id+": bundle-write diagnostic changed");
     auto allocation_failure=run_process({test_executable().string(),"--checkpoint-allocation-failure"},work,{},work/"checkpoint_alloc.out",work/"checkpoint_alloc.err");
     expect_success(allocation_failure,id+" checkpoint allocation failure mode");require(read_file(work/"checkpoint_alloc.err").find("failed to initialize bundle")!=std::string::npos,id+": checkpoint initialization allocation diagnostic changed");
+    write_file(work/"allocation_input.bin",std::string(16,'a'));
+    auto allocation_bundle=run_cli(work,{"checkpoint","create","--input","allocation_input.bin","--output","allocation_bundle.mcp","--chunk-size","256"},"allocation_bundle");expect_success(allocation_bundle,id+" allocation checkpoint");
+    fs::path destination_allocation_failure=work/"destination_allocation_failure";fs::create_directories(destination_allocation_failure);
+    auto destination_alloc_fail=run_process({test_executable().string(),"--checkpoint-restore-allocation-failure","7","allocation_bundle.mcp","destination_allocation_failure"},work,{},work/"destination_alloc.out",work/"destination_alloc.err");
+    expect_success(destination_alloc_fail,id+" restore destination allocation failure mode");
+    require(read_file(work/"destination_alloc.out").find("CHECKPOINT_STATUS:1 ALLOCATION_COUNT:7 FAILURE_SIZE:64")!=std::string::npos&&read_file(work/"destination_alloc.err").empty(),id+": restore destination-path allocation failure was not returned before writing");
+    require(!fs::exists(destination_allocation_failure/"allocation_input.bin"),id+": restore wrote a file after destination-path allocation failed");
+    fs::path output_buffer_allocation_failure=work/"output_buffer_allocation_failure";fs::create_directories(output_buffer_allocation_failure);
+    auto output_buffer_alloc_fail=run_process({test_executable().string(),"--checkpoint-restore-allocation-failure","6","allocation_bundle.mcp","output_buffer_allocation_failure"},work,{},work/"output_buffer_alloc.out",work/"output_buffer_alloc.err");
+    expect_success(output_buffer_alloc_fail,id+" restore output-buffer allocation failure mode");
+    require(read_file(work/"output_buffer_alloc.out").find("CHECKPOINT_STATUS:1 ALLOCATION_COUNT:6 FAILURE_SIZE:64")!=std::string::npos&&read_file(work/"output_buffer_alloc.err").empty(),id+": failed output-buffer allocation was not returned");
+    require(!fs::exists(output_buffer_allocation_failure/"allocation_input.bin"),id+": restore wrote a file after output-buffer allocation failed");
     auto missing_bundle=run_cli(work,{"checkpoint","restore","--input","missing.mcp","--output","missing_bundle_out"},"missing_bundle");
     expect_failure(missing_bundle,id+" missing bundle");require(missing_bundle.err.find("failed to read bundle")!=std::string::npos,id+": missing-bundle read diagnostic changed");
     std::string raw_bundle=read_file(work/"update.mcp");raw_bundle.resize(8u);write_file(work/"truncated_header.mcp",raw_bundle);
@@ -2830,6 +2861,7 @@ static void checkpoint_restore_case(){
     auto preserved=run_cli(work,{"checkpoint","restore","--input","truncated_header.mcp","--output",unmapped.string()},"preserve_unmapped");expect_success(preserved,id+" preserve unmapped bundle");
     compare_files(work/"truncated_header.mcp",unmapped/"checkpoint_unmapped.partial",id+" unmapped bundle");
     require(fs::exists(unmapped/"checkpoint_recovery.txt"),id+": missing unmapped-bundle recovery report");
+    require(read_file(unmapped/"checkpoint_recovery.txt")=="No complete snapshot records were recoverable; raw bundle bytes are preserved in checkpoint_unmapped.partial.\n",id+": unmapped-bundle recovery report changed");
     auto missing_base=run_cli(work,{"checkpoint","restore","--input","update.mcp","--base","missing_base","--output","missing_base_out"},"missing_base_restore");
     expect_failure(missing_base,id+" missing base directory");require(missing_base.err.find("failed to scan base")!=std::string::npos,id+": missing base scan diagnostic changed");
     write_file(work/"output_is_file","output path conflict");
@@ -2839,6 +2871,7 @@ static void checkpoint_restore_case(){
     auto pages=ppm_paths(work/"pages","checkpoint");require(!pages.empty(),id+": no checkpoint pages");
     fs::path decoded=work/"decoded";auto decoded_result=run_cli(work,decode_file_args(pages,decoded),"decode");expect_success(decoded_result,id+" decode checkpoint");
     fs::path restored=work/"restored";auto restore=run_cli(work,{"checkpoint","restore","--input", (decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--base",(work/"base_b").string(),"--output",restored.string()},"restore");expect_success(restore,id+" restore");
+    require(restore.out.find("checkpoint: restored snapshot")!=std::string::npos,id+": successful restore diagnostic changed");
     for(const auto& name:{"alpha.bin","renamed.bin"})compare_files(work/"current_a"/name,restored/"current_a"/name,id);
     for(const auto& name:{"beta.bin","new.txt"})compare_files(work/"current_b"/name,restored/"current_b"/name,id);
     std::string valid_bundle=read_file(work/"full.mcp");
@@ -2860,6 +2893,7 @@ static void checkpoint_restore_case(){
     std::string zero_length_bundle=valid_bundle;write_le_u64((u8*)zero_length_bundle.data()+first_ref_offset+32u,0u);damaged_bundles.push_back({"zero_chunk",zero_length_bundle});
     std::string invalid_kind_bundle=valid_bundle;invalid_kind_bundle[first_ref_offset+40u]=3;damaged_bundles.push_back({"invalid_kind",invalid_kind_bundle});
     std::string truncated_chunk_bundle=valid_bundle;truncated_chunk_bundle.resize(first_data_offset+(usize)(first_ref_length/2u));damaged_bundles.push_back({"embedded_chunk",truncated_chunk_bundle});
+    std::string invalid_chunk_id_bundle=valid_bundle;invalid_chunk_id_bundle[first_data_offset]^=1;damaged_bundles.push_back({"embedded_chunk_id",invalid_chunk_id_bundle});
     std::string manifest_tail_bundle=valid_bundle;write_le_u64((u8*)manifest_tail_bundle.data()+file_size_offset,read_le_u64((const u8*)manifest_tail_bundle.data()+file_size_offset)+1u);damaged_bundles.push_back({"manifest_tail",manifest_tail_bundle});
     std::string overflow_bundle=valid_bundle;u64 huge_ref=(u64)USIZE_MAX_VALUE/2u+1u;
     write_le_u64((u8*)overflow_bundle.data()+chunk_count_offset,2u);write_le_u64((u8*)overflow_bundle.data()+first_ref_offset+32u,huge_ref);overflow_bundle[first_ref_offset+40u]=0;
@@ -2876,7 +2910,13 @@ static void checkpoint_restore_case(){
         auto malformed_restore=run_cli(work,{"checkpoint","restore","--input",malformed_input.string(),"--output",malformed_output.string()},damaged_bundle.first+"_restore");expect_success(malformed_restore,id+" "+damaged_bundle.first+" recovery");
         require(fs::exists(malformed_output/(first_file_path+".partial"))&&fs::exists(malformed_output/"checkpoint_recovery.txt"),id+": "+damaged_bundle.first+" did not produce partial recovery");
     }
-    std::string tail_report=read_file(work/"manifest_tail_out/checkpoint_recovery.txt");require(tail_report.find("manifest-tail")!=std::string::npos,id+": manifest tail was not reported");
+    require(read_file(work/"manifest_file_size_out/checkpoint_recovery.txt").find("bundle manifest truncated; later entries may be unavailable\n")!=std::string::npos,id+": truncated bundle manifest was not reported");
+    std::string invalid_chunk_recovery=read_file(work/"embedded_chunk_id_out"/(first_file_path+".partial"));require(invalid_chunk_recovery.size()>=(usize)first_ref_length&&std::all_of(invalid_chunk_recovery.begin(),invalid_chunk_recovery.begin()+(usize)first_ref_length,[](char ch){return ch==0;}),id+": embedded chunk with invalid identifier was restored");
+    std::string tail_report=read_file(work/"manifest_tail_out/checkpoint_recovery.txt");require(tail_report.find(" length=1 manifest-tail\n")!=std::string::npos,id+": manifest tail length was not reported");
+    static const char hex_digits[]="0123456789abcdef";std::string expected_tail_line="missing ";for(unsigned char ch:first_file_path){expected_tail_line+=hex_digits[ch>>4u];expected_tail_line+=hex_digits[ch&15u];}expected_tail_line+=" offset=";expected_tail_line+=std::to_string(read_le_u64((const u8*)valid_bundle.data()+file_size_offset));expected_tail_line+=" length=1 manifest-tail\n";
+    require(tail_report.find(expected_tail_line)!=std::string::npos,id+": manifest-tail report path or offset changed");
+    std::string expected_missing_chunk_line="missing ";for(unsigned char ch:first_file_path){expected_missing_chunk_line+=hex_digits[ch>>4u];expected_missing_chunk_line+=hex_digits[ch&15u];}expected_missing_chunk_line+=" offset=0 length=";expected_missing_chunk_line+=std::to_string(first_ref_length);expected_missing_chunk_line+=" chunk=";for(usize i=0u;i<32u;++i){u8 ch=(u8)valid_bundle[first_ref_offset+i];expected_missing_chunk_line+=hex_digits[ch>>4u];expected_missing_chunk_line+=hex_digits[ch&15u];}expected_missing_chunk_line+='\n';
+    std::string embedded_report=read_file(work/"embedded_chunk_out/checkpoint_recovery.txt");require(embedded_report.find(expected_missing_chunk_line)!=std::string::npos,id+": missing chunk report path, range, or identifier changed");
     fs::path write_failure=work/"write_failure";fs::create_directories(write_failure/"current_a/alpha.bin");
     auto failed_write=run_cli(work,{"checkpoint","restore","--input",(decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--base",(work/"base_b").string(),"--output",write_failure.string()},"failed_write_restore");
     expect_failure(failed_write,id+" restored file write failure");require(failed_write.err.find("failed to write restored file")!=std::string::npos,id+": restored-file write diagnostic changed");
@@ -2886,6 +2926,7 @@ static void checkpoint_restore_case(){
     expect_failure(failed_parent,id+" restored parent-directory creation failure");require(failed_parent.err.find("failed to write restored file")!=std::string::npos,id+": parent-directory failure diagnostic changed");
     fs::path report_failure=work/"report_failure";fs::create_directories(report_failure/"checkpoint_recovery.txt");
     auto failed_report=run_cli(work,{"checkpoint","restore","--input",(work/"manifest_tail.mcp").string(),"--output",report_failure.string()},"failed_report_restore");
+    require(failed_report.err.find("checkpoint: restored available chunks")==std::string::npos,id+": reported partial recovery after recovery-report write failure");
     expect_failure(failed_report,id+" recovery-report write failure");
     fs::path partial=work/"partial";auto partial_result=run_cli(work,{"checkpoint","restore","--input",(decoded/"update.mcp").string(),"--base",(work/"base_a").string(),"--output",partial.string()},"partial_restore");
     expect_success(partial_result,id+" partial restore");require(fs::exists(partial/"current_b/beta.bin.partial")&&fs::exists(partial/"checkpoint_recovery.txt"),id+": missing base did not create partial file/recovery report");
@@ -5560,6 +5601,15 @@ int main(int argc, char** argv) {
         char create[]="create",input_option[]="--input",input_value[]="current_a",output_option[]="--output",output_value[]="allocation_failure.mcp";
         char* args[]={create,input_option,input_value,output_option,output_value};
         return command_checkpoint(5,args)==1?0:1;
+    }
+    if (argc >= 5 && std::strcmp(argv[1], "--checkpoint-restore-allocation-failure") == 0) {
+        minify_allocation_count=0;minify_allocation_failure_at=std::strtoul(argv[2],nullptr,10);
+        char restore[]="restore",input_option[]="--input",output_option[]="--output";
+        int status=0;
+        if(argc>=6){char base_option[]="--base";char* args[]={restore,input_option,argv[3],base_option,argv[4],output_option,argv[5]};status=command_checkpoint(7,args);}
+        else{char* args[]={restore,input_option,argv[3],output_option,argv[4]};status=command_checkpoint(5,args);}
+        std::cout<<"CHECKPOINT_STATUS:"<<status<<" ALLOCATION_COUNT:"<<minify_allocation_count<<" FAILURE_SIZE:"<<minify_allocation_failure_size<<" READ_4096_COUNT:"<<minify_4096_allocation_count<<'\n';
+        return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "--minify-allocation-failure") == 0) {
         minify_allocation_count=0;minify_allocation_failure_at=argc>2?std::strtoul(argv[2],nullptr,10):3ul;

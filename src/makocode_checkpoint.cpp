@@ -710,7 +710,6 @@ int command_checkpoint(int arg_count, char** args) {
                 !ensure_directory_tree((const char*)directory_path.data)) return 1;
             continue;
         }
-        if (entry.file_size > (u64)USIZE_MAX_VALUE) return 1;
         makocode::ByteBuffer output_file;
         if (!output_file.ensure((usize)entry.file_size)) return 1;
         output_file.size = (usize)entry.file_size;
@@ -774,11 +773,6 @@ int command_checkpoint(int arg_count, char** args) {
                 checkpoint_append_hex(line, ref.id, sizeof(ref.id));
                 line.append_char('\n');
                 report.append_bytes(line.data, line.size);
-            }
-            if (ref.length > USIZE_MAX_VALUE - file_offset) {
-                file_partial = true;
-                any_partial = true;
-                break;
             }
             file_offset += ref.length;
         }
