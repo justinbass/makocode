@@ -1,6 +1,5 @@
 TODO
 
-- Attempt to optimize/shrink/minify/dedupe/fix-warnings/remove-unused/constants-everywhere/remove-debug code, it still should be readable. Remove --ignore-errors.
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
 - Run physical tests, against calibration script.
   - Improve calibration script until max data density is found. Convert to cpp, ./makocode calibration?
@@ -22,7 +21,27 @@ TODO
 - Hard reset git history to Initial Commit, save locally but don't publish it
 
 Prompts:
+- Quality
+Let's improve the code quality in this project across all source and test code:
+  - Optimize code
+  - Shrink code
+  - Dedupe code that is common
+  - Fix any warnings
+  - Use constants if they're used in multiple places
+  - Remove literally all debug code
+  - Improve readability
+  - Improve general organization
+  - Code should only use standard libraries, re-implement anything locally that isn't from C++ standard libraries. This needs to work with no dependencies.
+  - Improve documentation readability or organization.
+  - Command line help text
+  - Improve performance
+  - Improve security
+  DO NOT:
+  - DO NOT Relax test critera
+  - DO NOT Relax test coverage (it can change, but no significant reduction in scope)
+  - DO NOT Remove any features, keep parity.
+  Deep dive into the code. Use a checklist to scan each source code file, each function in each file, make any improvements as you see fit. When complete list them to me in terse summary form. If you cannot think of any improvements, tell me the code is totally flawless and has literally none of these issues. Use an adversary agent to be skeptical of that claim.
 - CC
-  - I want you to orchestrate X luna xhigh subagents, Y at a time (config.toml limit) each one will inspect a set of 10 of those blocks. Each subagent will deep dive and, only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. 2. It's active code but we don't have a test against it. Suggest a test. 3. Ambiguous, not enough information to determine without human input. Write the suggestions out into separate temporary files, be very terse and start each line with: code line range, TEST|REMOVE|AMBIGUOUS, terse explanation in ~100 words per line on one line ONLY for TEST lines explaining how to write the test (if it's REMOVE|AMBIGUOUS, leave it blank) Then you, the master agent, can combine all those into ./todo2.txt. You will NOT actually perform the removal or test addition. Your final output should just be todo2.txt basically, it must be sorted by starting line number ascending. I would expect almost exactly Z lines in there, basically one per block, but it's ok if we were a bit off too.
+  - Run 'make -j4 coverage' and get the last 5 uncovered blocks of code in each source code cpp file (if a source code file has no uncovered blocks, ignore it). Go through each one in reverse order, in sequence. Only where there is high confidence, suggest either: 1. It's dead code, likely unreachable or unnecessary to acheive the project goals. AI slop basically. So remove it. 2. It's active code but we don't have a test against it. Suggest and implement a test. 3. Ambiguous, not enough information to determine without human input. Ignore it and move on.
 - Implement
   - ~ADV, feedback loop until the criteria is met, 'make clean ; make -j4 test' passes 3 times in a row. If tests take > 1 min then focus on performance improvement so there's no regression. Do NOT relax tests or the idea behind them, avoid touching existing tests unless absolutely necessary, but you will add tests if there is new functionality. DO NOT increment version, version is always 0, we do not support backwards compatibility for any changes (yet) delete all old code pathways.
