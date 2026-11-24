@@ -2161,7 +2161,6 @@ u8 color_mode_samples_per_pixel(u8 mode);
 bool merge_parser_state(PpmParserState& dest, const PpmParserState& src);
 
 bool build_frame_bits(const makocode::EncoderContext& encoder,
-                             const ImageMappingConfig& mapping,
                              makocode::ByteBuffer& frame_bits,
                              u64& frame_bit_count);
 

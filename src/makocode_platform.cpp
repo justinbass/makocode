@@ -115,6 +115,14 @@ extern "C" int makocode_platform_create_file(const char* path, int mode) {
 }
 
 extern "C" int makocode_platform_close(int fd) {
+#ifdef MAKOCODE_TEST_BUILD
+    const char* fail_next = ::getenv("MAKOCODE_TEST_FAIL_NEXT_CLOSE");
+    if (fail_next) {
+        ::unsetenv("MAKOCODE_TEST_FAIL_NEXT_CLOSE");
+        int close_result = ::close(fd);
+        return close_result == 0 ? -1 : close_result;
+    }
+#endif
     return ::close(fd);
 }
 

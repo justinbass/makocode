@@ -2038,7 +2038,7 @@ int command_encode(int arg_count, char** args) {
     if (metadata_ecc_redundancy > 0.25) metadata_ecc_redundancy = 0.25;
     makocode::ByteBuffer frame_bits;
     u64 frame_bit_count = 0u;
-    if (!build_frame_bits(encoder, mapping, frame_bits, frame_bit_count)) {
+    if (!build_frame_bits(encoder, frame_bits, frame_bit_count)) {
         console_line(2, "encode: failed to build frame");
         return 1;
     }

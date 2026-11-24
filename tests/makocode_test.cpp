@@ -4160,7 +4160,7 @@ static void raw_fallback_case(){
     const std::string id="0069_decode_raw_fallback";fs::path work=make_work_dir(id),payload_path=work/"raw_payload.bin",ppm_path=work/"raw_payload.ppm";generate_bytes(work,payload_path,4096,5066,"raw_payload");makocode::ByteBuffer payload;require(read_entire_file(payload_path.c_str(),payload),id+": cannot read raw payload");
     makocode::EncoderContext encoder;encoder.config.palette_size=2;encoder.config.ecc_redundancy=.5;encoder.config.overlay_erasure_budget=0;require(encoder.set_payload(payload.data,payload.size)&&encoder.build(),id+": raw fallback fixture encode failed");
     ImageMappingConfig mapping;const u32 width=500,height=500;PageFooterConfig footer_config;makocode::ByteBuffer frame;u64 frame_bits=0;FooterLayout footer;u32 data_height=height;u64 bits_per_page=0,page_count=0;
-    require(build_frame_bits(encoder,mapping,frame,frame_bits)&&compute_page_layout(mapping,footer_config,frame_bits,width,height,footer,data_height,bits_per_page,page_count,&encoder.ecc_info(),0.0,encoder.ecc_info().unknown_error_budget,encoder.ecc_info().overlay_erasure_budget)&&page_count==1,id+": raw fallback fixture page layout failed");
+    require(build_frame_bits(encoder,frame,frame_bits)&&compute_page_layout(mapping,footer_config,frame_bits,width,height,footer,data_height,bits_per_page,page_count,&encoder.ecc_info(),0.0,encoder.ecc_info().unknown_error_budget,encoder.ecc_info().overlay_erasure_budget)&&page_count==1,id+": raw fallback fixture page layout failed");
     makocode::ByteBuffer page;require(encode_page_to_ppm(mapping,frame,frame_bits,0,width,height,1,bits_per_page,&encoder.ecc_info(),0.0,nullptr,0,footer,page),id+": raw fallback fixture page render failed");makocode::ByteBuffer fiducials;const u8 white[3]={255,255,255};require(apply_default_fiducial_grid(page,fiducials,data_height,white),id+": raw fallback fiducials failed");write_file(ppm_path,std::string(reinterpret_cast<const char*>(fiducials.data),fiducials.size));
     fs::path disabled=work/"disabled",enabled=work/"enabled";fs::create_directories(disabled);fs::create_directories(enabled);auto off=run_cli(work,decode_file_args({ppm_path.string()},disabled),"disabled",{},{{"MAKOCODE_DECODE_RAW_FALLBACK","0"}});expect_failure(off,id+" disabled fallback");require(!fs::exists(disabled/"payload.bin"),id+": disabled fallback wrote a raw payload");
     auto on=run_cli(work,decode_file_args({ppm_path.string()},enabled),"enabled",{},{{"MAKOCODE_DECODE_RAW_FALLBACK","1"}});expect_success(on,id+" enabled fallback");compare_files(payload_path,enabled/"payload.bin",id);
@@ -5493,6 +5493,1256 @@ static std::vector<TestCase> build_cases() {
     cases.push_back({"0043_header_copy_corruption","Payload ECC repairs former in-band header damage",[](const fs::path&){header_copy_corruption_case();}});
     cases.push_back({"0057_archive_tree_roundtrip","Nested and empty archive directories round-trip",[](const fs::path&){archive_tree_case();}});
     cases.push_back({"0058_cli_help","CLI usage and command help smoke test",[](const fs::path&){cli_help_case();}});
+    cases.push_back({"0206_cli_rejects_invalid_page_height","CLI rejects zero page height",[](const fs::path& work){
+        ProcessResult result = run_cli(work, {"encode", "--page-height=0"}, "invalid_page_height");
+        expect_failure(result, "0206 invalid page height");
+        require(result.err.find("--page-height must be a positive integer number of pixels") != std::string::npos,
+                "0206: invalid page-height diagnostic changed");
+        require(result.err.find("unknown option") == std::string::npos,
+                "0206: invalid page height was not reported as a parse failure");
+    }});
+    cases.push_back({"0207_cli_rejects_empty_page_height","CLI rejects an empty page-height value",[](const fs::path& work){
+        ProcessResult result = run_cli(work, {"encode", "--page-height="}, "empty_page_height");
+        expect_failure(result, "0207 empty page height");
+        require(result.err.find("--page-height requires a value (pixels)") != std::string::npos,
+                "0207: empty page-height diagnostic changed");
+        require(result.err.find("unknown option") == std::string::npos,
+                "0207: empty page height was not reported as a parse failure");
+    }});
+    cases.push_back({"0208_cli_page_height_separate_value","Page-height parser consumes a separate value",[](const fs::path&){
+        char option[] = "--page-height";
+        char value[] = "256";
+        char* args[] = {option, value};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(process_image_mapping_option(2, args, &arg_index, mapping, "encode", &handled),
+                "0208: separate page-height value was rejected");
+        require(handled && arg_index == 1,
+                "0208: parser did not consume the separate page-height value");
+        require(mapping.page_height_set && mapping.page_height_pixels == 256u,
+                "0208: parsed page height was not stored");
+    }});
+    cases.push_back({"0209_cli_rejects_missing_page_height","CLI rejects a missing separate page-height value",[](const fs::path& work){
+        (void)work;
+        char option[] = "--page-height";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0209: parser accepted a missing separate page-height value");
+        require(!handled,
+                "0209: parser marked a missing page-height value as handled");
+    }});
+    cases.push_back({"0210_cli_rejects_invalid_page_width","Page-width parser rejects zero pixels",[](const fs::path&){
+        char option[] = "--page-width=0";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0210: parser accepted a zero page width");
+        require(!handled && !mapping.page_width_set,
+                "0210: rejected page width changed the mapping");
+    }});
+    cases.push_back({"0211_cli_rejects_empty_page_width","Page-width parser rejects an empty value",[](const fs::path&){
+        char option[] = "--page-width=";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0211: parser accepted an empty page width");
+        require(!handled && !mapping.page_width_set,
+                "0211: rejected page width changed the mapping");
+    }});
+    cases.push_back({"0212_cli_page_width_separate_value","Page-width parser consumes a separate value",[](const fs::path&){
+        char option[] = "--page-width";
+        char value[] = "256";
+        char* args[] = {option, value};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(process_image_mapping_option(2, args, &arg_index, mapping, "encode", &handled),
+                "0212: separate page-width value was rejected");
+        require(handled && arg_index == 1,
+                "0212: parser did not consume the separate page-width value");
+        require(mapping.page_width_set && mapping.page_width_pixels == 256u,
+                "0212: parsed page width was not stored");
+    }});
+    cases.push_back({"0213_cli_rejects_missing_page_width","Page-width parser rejects a missing separate value",[](const fs::path&){
+        char option[] = "--page-width";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0213: parser accepted a missing separate page-width value");
+        require(!handled,
+                "0213: parser marked a missing page-width value as handled");
+    }});
+    cases.push_back({"0214_cli_rejects_empty_palette","Palette parser rejects an empty value",[](const fs::path&){
+        char option[] = "--palette=";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0214: parser accepted an empty palette");
+        require(!handled && !mapping.palette_set,
+                "0214: rejected palette changed the mapping");
+    }});
+    cases.push_back({"0215_cli_rejects_missing_palette","Palette parser rejects a missing separate value",[](const fs::path&){
+        char option[] = "--palette";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0215: parser accepted a missing palette value");
+        require(!handled && !mapping.palette_set,
+                "0215: rejected palette changed the mapping");
+    }});
+    cases.push_back({"0216_cli_rejects_out_of_range_mapping_index","Image-mapping parser rejects an index at the argument count",[](const fs::path&){
+        char option[] = "--palette";
+        char extra[] = "White Black";
+        char* args[] = {option, extra};
+        int arg_index = 1;
+        bool handled = false;
+        ImageMappingConfig mapping;
+        require(!process_image_mapping_option(1, args, &arg_index, mapping, "encode", &handled),
+                "0216: parser accepted an argument index equal to arg_count");
+        require(!handled && !mapping.palette_set,
+                "0216: out-of-range argument changed the mapping");
+    }});
+    cases.push_back({"0217_cli_rejects_too_small_fiducial_spacing","Fiducial spacing parser rejects a value below the marker size",[](const fs::path&){
+        char option[] = "--fiducial-spacing=1";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        FiducialGridDefaults defaults;
+        require(!process_fiducial_spacing_option(1, args, &arg_index, defaults, "encode", &handled),
+                "0217: parser accepted fiducial spacing smaller than the marker");
+        require(!handled && defaults.spacing_pixels == 24u,
+                "0217: rejected fiducial spacing changed defaults");
+    }});
+    cases.push_back({"0218_cli_rejects_non_numeric_fiducial_spacing","Fiducial spacing parser rejects non-numeric values",[](const fs::path&){
+        char option[] = "--fiducial-spacing=abc";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        FiducialGridDefaults defaults;
+        require(!process_fiducial_spacing_option(1, args, &arg_index, defaults, "encode", &handled),
+                "0218: parser accepted non-numeric fiducial spacing");
+        require(!handled && defaults.spacing_pixels == 24u,
+                "0218: rejected fiducial spacing changed defaults");
+    }});
+    cases.push_back({"0219_cli_fiducial_spacing_separate_value","Fiducial spacing parser consumes a separate value",[](const fs::path&){
+        char option[] = "--fiducial-spacing";
+        char value[] = "48";
+        char* args[] = {option, value};
+        int arg_index = 0;
+        bool handled = false;
+        FiducialGridDefaults defaults;
+        require(process_fiducial_spacing_option(2, args, &arg_index, defaults, "encode", &handled),
+                "0219: parser rejected a valid separate fiducial spacing");
+        require(handled && arg_index == 1 && defaults.spacing_pixels == 48u,
+                "0219: parser did not consume or apply the separate spacing value");
+    }});
+    cases.push_back({"0220_cli_rejects_missing_fiducial_spacing","Fiducial spacing parser rejects a missing separate value",[](const fs::path&){
+        char option[] = "--fiducial-spacing";
+        char* args[] = {option};
+        int arg_index = 0;
+        bool handled = false;
+        FiducialGridDefaults defaults;
+        require(!process_fiducial_spacing_option(1, args, &arg_index, defaults, "encode", &handled),
+                "0220: parser accepted missing fiducial spacing");
+        require(!handled && defaults.spacing_pixels == 24u,
+                "0220: rejected fiducial spacing changed defaults");
+    }});
+    cases.push_back({"0221_cli_rejects_out_of_range_fiducial_index","Fiducial spacing parser rejects an out-of-range argument index",[](const fs::path&){
+        char option[] = "--unrelated-option";
+        char* args[] = {option, option};
+        int arg_index = 1;
+        bool handled = true;
+        FiducialGridDefaults defaults;
+        require(!process_fiducial_spacing_option(1, args, &arg_index, defaults, "encode", &handled),
+                "0221: parser accepted an argument index equal to arg_count");
+        require(!handled,
+                "0221: out-of-range argument index was marked handled");
+    }});
+    cases.push_back({"0222_metadata_guard_ring_uses_palette_noise","Palette-symbol metadata guard cells use non-endpoint palette noise",[](const fs::path& work){
+        const std::string id = "0222_metadata_guard_ring_uses_palette_noise";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "metadata noise refill";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out a single metadata page");
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        MetadataTile::PayloadRankMapCache rank_cache;
+        require(encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                   width, height, 1u, bits_per_page,
+                                   &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                   footer, rendered,
+                                   encoder.ecc_info().unknown_error_budget,
+                                   encoder.ecc_info().overlay_erasure_budget,
+                                   true, &tile, &rank_cache, page_count),
+                id + ": could not render the metadata page");
+        fs::path rendered_path = work / "page.ppm";
+        write_file(rendered_path,
+                   std::string((const char*)rendered.data, rendered.size));
+        PpmImage image = read_ppm(rendered_path);
+        require(tile.palette_count == 4u && tile.ecc_enabled &&
+                    tile.ecc_block_data > 0u && tile.ecc_parity > 0u,
+                id + ": fixture did not use a four-color palette-symbol stream");
+        makocode::ByteBuffer tile_bits, active_mask;
+        u8 guard_mask[MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE] = {};
+        require(MetadataTile::build_tile_bits(tile, tile_bits, &active_mask) &&
+                    active_mask.size == sizeof(guard_mask) &&
+                    MetadataTile::build_active_guard_mask(active_mask.data,
+                                                          active_mask.size,
+                                                          guard_mask,
+                                                          sizeof(guard_mask)),
+                id + ": could not rebuild metadata guard mask");
+        MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
+            image.width, image.height);
+        require(placement.valid, id + ": metadata tile placement is invalid");
+        makocode::ByteBuffer fiducial_mask;
+        u64 reserved_data_pixels = 0u;
+        require(compute_fiducial_marker_mask(width, height, data_height,
+                                             reserved_data_pixels, &fiducial_mask,
+                                             false, 0u, 0u, 0u),
+                id + ": could not rebuild the fiducial reservation mask");
+        require(rank_cache.page_rank_map.size ==
+                    (usize)width * data_height * sizeof(u64),
+                id + ": renderer did not publish a complete payload rank map");
+        const u64* page_ranks =
+            (const u64*)rank_cache.page_rank_map.data;
+        for (usize pixel = 0u; pixel < fiducial_mask.size; ++pixel) {
+            if (fiducial_mask.data[pixel]) {
+                require(page_ranks[pixel] == U64_MAX_VALUE,
+                        id + ": fiducial marker pixel was assigned a payload rank");
+            }
+        }
+        for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+            for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
+                usize cell = (usize)y * MetadataTile::TILE_SIDE + x;
+                if (!active_mask.data[cell]) continue;
+                i64 page_x = (i64)placement.x0 + x - placement.offset_x;
+                i64 page_y = (i64)placement.y0 + y - placement.offset_y;
+                if (page_x < 0 || page_y < 0 || page_x >= width ||
+                    page_y >= data_height) continue;
+                usize pixel = (usize)page_y * width + (usize)page_x;
+                require(page_ranks[pixel] == U64_MAX_VALUE,
+                        id + ": metadata tile pixel was assigned a payload rank");
+            }
+        }
+        u32 non_endpoint_guard_pixels = 0u;
+        u64 guard_symbol_checksum = 1469598103934665603ull;
+        for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
+            for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
+                usize cell = (usize)y * MetadataTile::TILE_SIDE + x;
+                if (guard_mask[cell] != 2u) continue;
+                u32 px = placement.x0 + x - placement.offset_x;
+                u32 py = placement.y0 + y - placement.offset_y;
+                usize pixel = ((usize)py * image.width + px) * 3u;
+                u32 matched_symbol = tile.palette_count;
+                for (u32 color_index = 0u; color_index < tile.palette_count; ++color_index) {
+                    const PaletteColor& expected = tile.palette[color_index];
+                    if ((u8)image.pixels[pixel] == expected.r &&
+                        (u8)image.pixels[pixel + 1u] == expected.g &&
+                        (u8)image.pixels[pixel + 2u] == expected.b) {
+                        matched_symbol = color_index;
+                        break;
+                    }
+                }
+                require(matched_symbol < tile.palette_count,
+                        id + ": guard cell is not rendered with a palette symbol");
+                guard_symbol_checksum =
+                    (guard_symbol_checksum ^ matched_symbol) * 1099511628211ull;
+                if (matched_symbol >= 2u) ++non_endpoint_guard_pixels;
+            }
+        }
+        require(non_endpoint_guard_pixels > 0u,
+                id + ": guard cells did not render with palette noise beyond the light/dark endpoints");
+        require(guard_symbol_checksum == 12247527806360534212ull,
+                id + ": deterministic metadata guard noise changed: " +
+                    std::to_string(guard_symbol_checksum));
+    }});
+    cases.push_back({"0223_metadata_outer_length_row_uses_palette_symbols","Outer metadata length row renders its encoded palette symbols",[](const fs::path& work){
+        const std::string id = "0223_metadata_outer_length_row_uses_palette_symbols";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "outer length palette mapping";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out a single metadata page");
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        require(encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                   width, height, 1u, bits_per_page,
+                                   &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                   footer, rendered,
+                                   encoder.ecc_info().unknown_error_budget,
+                                   encoder.ecc_info().overlay_erasure_budget,
+                                   true, &tile, nullptr, page_count),
+                id + ": could not render the metadata page");
+        fs::path rendered_path = work / "page.ppm";
+        write_file(rendered_path,
+                   std::string((const char*)rendered.data, rendered.size));
+        PpmImage image = read_ppm(rendered_path);
+        require(tile.palette_count == 4u && tile.metadata_outer_length_bits > 0u,
+                id + ": fixture lacks a four-color outer length row");
+        makocode::ByteBuffer tile_bits;
+        require(MetadataTile::build_tile_bits(tile, tile_bits),
+                id + ": could not rebuild metadata tile bits");
+        MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
+            image.width, image.height);
+        require(placement.valid, id + ": metadata tile placement is invalid");
+        int tile_x = (int)placement.x0 - (int)placement.offset_x;
+        int tile_y = (int)placement.y0 - (int)placement.offset_y;
+        u32 length_row = tile.metadata_tag_y0 + MetadataTile::TILE_LENGTH_ROW;
+        u32 length_x0 = (MetadataTile::TILE_SIDE - tile.metadata_outer_length_bits) / 2u;
+        u32 one_symbols = 0u;
+        for (u32 i = 0u; i < tile.metadata_outer_length_bits; ++i) {
+            u32 x = length_x0 + i;
+            usize cell = (usize)length_row * MetadataTile::TILE_SIDE + x;
+            u32 symbol = tile_bits.data[cell];
+            require(symbol < tile.palette_count,
+                    id + ": length row contains a symbol outside its palette");
+            int pixel_x = tile_x + (int)x;
+            int pixel_y = tile_y + (int)length_row;
+            usize pixel = ((usize)pixel_y * image.width + (usize)pixel_x) * 3u;
+            const PaletteColor& expected = tile.palette[symbol];
+            require((u8)image.pixels[pixel] == expected.r &&
+                        (u8)image.pixels[pixel + 1u] == expected.g &&
+                        (u8)image.pixels[pixel + 2u] == expected.b,
+                    id + ": outer length symbol rendered with the wrong color");
+            if (symbol == 1u) ++one_symbols;
+        }
+        require(one_symbols > 0u,
+                id + ": length row has no one symbol to verify its palette mapping");
+    }});
+    cases.push_back({"0224_metadata_tag_rows_use_palette_symbols","Metadata tag rows render their encoded palette symbols",[](const fs::path& work){
+        const std::string id = "0224_metadata_tag_rows_use_palette_symbols";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "metadata tag palette mapping";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out a single metadata page");
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        require(encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                   width, height, 1u, bits_per_page,
+                                   &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                   footer, rendered,
+                                   encoder.ecc_info().unknown_error_budget,
+                                   encoder.ecc_info().overlay_erasure_budget,
+                                   true, &tile, nullptr, page_count),
+                id + ": could not render the metadata page");
+        fs::path rendered_path = work / "page.ppm";
+        write_file(rendered_path,
+                   std::string((const char*)rendered.data, rendered.size));
+        PpmImage image = read_ppm(rendered_path);
+        makocode::ByteBuffer tile_bits, active_mask;
+        require(tile.palette_count == 4u &&
+                    MetadataTile::build_tile_bits(tile, tile_bits, &active_mask),
+                id + ": could not rebuild metadata tag symbols");
+        MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
+            image.width, image.height);
+        require(placement.valid, id + ": metadata tile placement is invalid");
+        int tile_x = (int)placement.x0 - (int)placement.offset_x;
+        int tile_y = (int)placement.y0 - (int)placement.offset_y;
+        u32 colored_tag_symbols = 0u;
+        for (u32 y = tile.metadata_tag_y0;
+             y < tile.metadata_tag_y0 + MetadataTile::TILE_TAG_ROWS; ++y) {
+            for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
+                usize cell = (usize)y * MetadataTile::TILE_SIDE + x;
+                if (!active_mask.data[cell]) continue;
+                u32 symbol = tile_bits.data[cell];
+                require(symbol < tile.palette_count,
+                        id + ": tag row contains a symbol outside its palette");
+                const PaletteColor& expected = tile.palette[symbol];
+                int pixel_x = tile_x + (int)x;
+                int pixel_y = tile_y + (int)y;
+                usize pixel = ((usize)pixel_y * image.width + (usize)pixel_x) * 3u;
+                require((u8)image.pixels[pixel] == expected.r &&
+                            (u8)image.pixels[pixel + 1u] == expected.g &&
+                            (u8)image.pixels[pixel + 2u] == expected.b,
+                        id + ": tag symbol rendered with the wrong color");
+                if ((expected.r == 255u && expected.g == 0u && expected.b == 0u) ||
+                    (expected.r == 0u && expected.g == 0u && expected.b == 255u)) {
+                    ++colored_tag_symbols;
+                }
+            }
+        }
+        require(colored_tag_symbols > 0u,
+                id + ": tag rows lack a non-endpoint palette symbol");
+    }});
+    cases.push_back({"0225_render_rejects_overlapping_rank_map_cache","Page rendering rejects an overlapping rank-map cache",[](const fs::path&){
+        const std::string id = "0225_render_rejects_overlapping_rank_map_cache";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "rank-map failure";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out a single metadata page");
+
+        MetadataTile::PayloadRankMapCache rank_cache;
+        usize rank_map_bytes = (usize)width * data_height * sizeof(u64);
+        u8* shared_rank_map = (u8*)makocode_platform_malloc(rank_map_bytes);
+        require(shared_rank_map != 0,
+                id + ": could not prepare the invalid rank-map cache");
+        memset(shared_rank_map, 0, rank_map_bytes);
+        rank_cache.page_rank_map.data = shared_rank_map;
+        rank_cache.page_rank_map.capacity = rank_map_bytes;
+        rank_cache.base_rank_map.data = shared_rank_map;
+        rank_cache.base_rank_map.capacity = rank_map_bytes;
+
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        bool ok = encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                     width, height, 1u, bits_per_page,
+                                     &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                     footer, rendered,
+                                     encoder.ecc_info().unknown_error_budget,
+                                     encoder.ecc_info().overlay_erasure_budget,
+                                     true, &tile, &rank_cache, page_count);
+        rank_cache.page_rank_map.data = 0;
+        rank_cache.page_rank_map.size = 0u;
+        rank_cache.page_rank_map.capacity = 0u;
+        require(!ok,
+                id + ": page rendering accepted overlapping rank-map cache storage");
+    }});
+    cases.push_back({"0226_render_rejects_empty_page_width","Page rendering rejects an empty width before building metadata",[](const fs::path&){
+        const std::string id = "0226_render_rejects_empty_page_width";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "invalid page width";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        FooterLayout footer;
+        footer.data_height_pixels = 220u;
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        metadata_tile_build_call_count = 0u;
+        bool ok = encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                     0u, 220u, 0u, frame_bit_count,
+                                     &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                     footer, rendered,
+                                     encoder.ecc_info().unknown_error_budget,
+                                     encoder.ecc_info().overlay_erasure_budget,
+                                     true, &tile, nullptr, 1u);
+        require(!ok,
+                id + ": page rendering accepted a zero-width page");
+        require(metadata_tile_build_call_count == 0u,
+                id + ": metadata tile was built before rejecting the invalid placement");
+    }});
+    cases.push_back({"0227_render_rejects_invalid_field_symbol","Page rendering rejects a field symbol outside its palette profile",[](const fs::path&){
+        const std::string id = "0227_render_rejects_invalid_field_symbol";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "invalid field symbol";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count) &&
+                    frame.size >= 4u,
+                id + ": could not build a complete frame symbol");
+        makocode::PaletteSymbolProfile profile;
+        require(makocode::palette_symbol_profile(mapping.custom_palette_count,
+                                                  profile) &&
+                    profile.field_order <= 0xFFFFFFFFu,
+                id + ": could not build the palette-symbol profile");
+        u32 invalid_symbol = (u32)profile.field_order;
+        frame.data[0] = (u8)invalid_symbol;
+        frame.data[1] = (u8)(invalid_symbol >> 8u);
+        frame.data[2] = (u8)(invalid_symbol >> 16u);
+        frame.data[3] = (u8)(invalid_symbol >> 24u);
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out a single metadata page");
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        bool ok = encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                     width, height, 1u, bits_per_page,
+                                     &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                     footer, rendered,
+                                     encoder.ecc_info().unknown_error_budget,
+                                     encoder.ecc_info().overlay_erasure_budget,
+                                     true, &tile, nullptr, page_count);
+        require(!ok,
+                id + ": page rendering accepted a symbol outside the field");
+    }});
+    cases.push_back({"0228_render_rejects_unaligned_field_symbol_offset","Page rendering rejects a misaligned field-symbol offset before metadata construction",[](const fs::path&){
+        const std::string id = "0228_render_rejects_unaligned_field_symbol_offset";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "unaligned field-symbol offset";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u && (bits_per_page & 31u) == 0u,
+                id + ": could not lay out an aligned single metadata page");
+        const u64 invalid_frame_bit_count = bits_per_page + 1u;
+        usize required_frame_bytes = (usize)((invalid_frame_bit_count + 7u) / 8u);
+        usize old_frame_size = frame.size;
+        require(frame.ensure(required_frame_bytes),
+                id + ": could not extend the frame backing buffer");
+        if (required_frame_bytes > old_frame_size) {
+            memset(frame.data + old_frame_size, 0,
+                   required_frame_bytes - old_frame_size);
+        }
+        frame.size = required_frame_bytes;
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        metadata_tile_build_call_count = 0u;
+        bool ok = encode_page_to_ppm(mapping, frame, invalid_frame_bit_count,
+                                     1u, width, height, 1u, bits_per_page,
+                                     &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                     footer, rendered,
+                                     encoder.ecc_info().unknown_error_budget,
+                                     encoder.ecc_info().overlay_erasure_budget,
+                                     true, &tile, nullptr, page_count);
+        require(!ok,
+                id + ": page rendering accepted an unaligned field-symbol offset");
+        require(metadata_tile_build_call_count == 0u,
+                id + ": metadata construction began before alignment rejection");
+    }});
+    cases.push_back({"0229_render_rejects_header_allocation_failure","Page rendering rejects a PPM header allocation failure",[](const fs::path&){
+        const std::string id = "0229_render_rejects_header_allocation_failure";
+        const char palette_text[] = "#FF0000 #0000FF #FFFFFF #000000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the four-color palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "header allocation";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 100u, height = 100u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out a single metadata page");
+        bool found_header_allocation_failure = false;
+        for (unsigned long failure_at = 1ul;
+             failure_at <= 256ul && !found_header_allocation_failure;
+             ++failure_at) {
+            makocode::ByteBuffer rendered;
+            require(rendered.append_ascii("sentinel"),
+                    id + ": could not prepare the output marker");
+            minify_allocation_count = 0ul;
+            minify_allocation_failure_size = 0ul;
+            minify_allocation_failure_at = failure_at;
+            MetadataTile::Values tile;
+            bool encoded = encode_page_to_ppm(
+                mapping, frame, frame_bit_count, 0u, width, height, 1u,
+                bits_per_page, &encoder.ecc_info(), 0.0, nullptr, 0u,
+                footer, rendered, encoder.ecc_info().unknown_error_budget,
+                encoder.ecc_info().overlay_erasure_budget, true, &tile,
+                nullptr, page_count);
+            unsigned long failed_allocation_size = minify_allocation_failure_size;
+            minify_allocation_failure_at = 0ul;
+            if (!encoded && rendered.size == 0u && failed_allocation_size == 64ul) {
+                found_header_allocation_failure = true;
+            }
+        }
+        require(found_header_allocation_failure,
+                id + ": could not target the initial PPM header allocation");
+    }});
+    cases.push_back({"0230_render_rejects_mismatched_page_capacity","Page rendering rejects a page capacity that disagrees with the raster before metadata work",[](const fs::path&){
+        const std::string id = "0230_render_rejects_mismatched_page_capacity";
+        ImageMappingConfig mapping;
+        const u32 width = 220u, height = 220u;
+        makocode::ByteBuffer fiducial_mask;
+        u64 reserved_data_pixels = 0u;
+        require(compute_fiducial_marker_mask(width, height, height,
+                                             reserved_data_pixels,
+                                             &fiducial_mask),
+                id + ": could not calculate fiducial reservation");
+        u64 usable_data_pixels = (u64)width * height - reserved_data_pixels;
+        u64 expected_capacity = mapping_capacity_bits(mapping, usable_data_pixels);
+        require(expected_capacity != U64_MAX_VALUE,
+                id + ": calculated page capacity overflowed");
+        makocode::ByteBuffer frame, rendered;
+        MetadataTile::Values tile;
+        FooterLayout footer;
+        footer.data_height_pixels = height;
+        metadata_tile_build_call_count = 0u;
+        bool encoded = encode_page_to_ppm(mapping, frame, 0u, 0u,
+                                         width, height, 1u,
+                                         expected_capacity + 1u, nullptr, 0.0,
+                                         nullptr, 0u, footer, rendered, 0u, 0u,
+                                         false, &tile, nullptr, 1u);
+        require(!encoded,
+                id + ": page rendering accepted a capacity inconsistent with its raster");
+        require(metadata_tile_build_call_count == 0u,
+                id + ": metadata construction began before rejecting the capacity mismatch");
+    }});
+    cases.push_back({"0231_render_rejects_reservation_mask_allocation_failure","Page rendering rejects a reservation-mask allocation failure",[](const fs::path&){
+        const std::string id = "0231_render_rejects_reservation_mask_allocation_failure";
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame, rendered;
+        MetadataTile::Values tile;
+        FooterLayout footer;
+        footer.data_height_pixels = 100u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool encoded = encode_page_to_ppm(mapping, frame, 0u, 0u,
+                                         100u, 100u, 1u, 0u, nullptr, 0.0,
+                                         nullptr, 0u, footer, rendered, 0u, 0u,
+                                         false, &tile, nullptr, 1u);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!encoded,
+                id + ": page rendering succeeded after reservation-mask allocation failed");
+        require(allocation_count == 2ul && failed_allocation_size != 0ul,
+                id + ": failure injection did not reach the reservation-mask allocation");
+    }});
+    cases.push_back({"0235_build_frame_rejects_frame_buffer_allocation_failure","Frame construction rejects final buffer allocation failure",[](const fs::path&){
+        const std::string id = "0235_build_frame_rejects_frame_buffer_allocation_failure";
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 2u;
+        encoder.payload_is_preencoded = true;
+        const u8 payload[] = {0x41u};
+        require(encoder.set_payload(payload, sizeof(payload)) && encoder.build(),
+                id + ": could not build a small encoded frame");
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame_bits;
+        u64 frame_bit_count = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = ~0ul;
+        bool baseline_ok = build_frame_bits(encoder, frame_bits,
+                                            frame_bit_count);
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        frame_bits.release();
+        require(baseline_ok && frame_bit_count > 0u && allocation_count >= 2ul,
+                id + ": baseline did not allocate the writer and final frame buffers");
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = allocation_count;
+        bool built = build_frame_bits(encoder, frame_bits,
+                                      frame_bit_count);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long failed_allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!built,
+                id + ": frame construction succeeded after final-buffer allocation failed");
+        require(failed_allocation_count == allocation_count &&
+                    failed_allocation_size != 0ul,
+                id + ": fault injection did not reach the final frame-buffer allocation");
+    }});
+    cases.push_back({"0236_build_frame_rejects_writer_allocation_failure","Frame construction rejects bit-writer allocation failure",[](const fs::path&){
+        const std::string id = "0236_build_frame_rejects_writer_allocation_failure";
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 2u;
+        encoder.payload_is_preencoded = true;
+        const u8 payload[] = {0x41u};
+        require(encoder.set_payload(payload, sizeof(payload)) && encoder.build(),
+                id + ": could not build a small encoded frame");
+        makocode::ByteBuffer frame_bits;
+        u64 frame_bit_count = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool built = build_frame_bits(encoder, frame_bits, frame_bit_count);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!built,
+                id + ": frame construction succeeded after bit-writer allocation failed");
+        require(allocation_count == 1ul && failed_allocation_size != 0ul,
+                id + ": fault injection did not reach the bit-writer allocation");
+    }});
+    cases.push_back({"0237_page_filename_rejects_suffix_allocation_failure","Page filename construction rejects component allocation failures",[](const fs::path&){
+        const std::string id = "0237_page_filename_rejects_suffix_allocation_failure";
+        std::string timestamp(120u, 't');
+        makocode::ByteBuffer output;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool timestamp_built = build_page_filename(output, timestamp.c_str(), 1u, 1u);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!timestamp_built,
+                id + ": page filename succeeded after timestamp allocation failed");
+        require(allocation_count == 1ul && failed_allocation_size != 0ul,
+                id + ": fault injection did not reach the timestamp allocation");
+
+        std::string prefix(64u, 'p');
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool built = build_page_filename(output, prefix.c_str(), 1u, 1u);
+        failed_allocation_size = minify_allocation_failure_size;
+        allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!built,
+                id + ": page filename succeeded after suffix allocation failed");
+        require(allocation_count == 2ul && failed_allocation_size != 0ul,
+                id + ": fault injection did not reach the filename suffix allocation");
+
+        std::string indexed_prefix(64u, 'i');
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool indexed = build_page_filename(output, indexed_prefix.c_str(), 1u, 2u);
+        failed_allocation_size = minify_allocation_failure_size;
+        allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!indexed,
+                id + ": page filename succeeded after page component allocation failed");
+        require(allocation_count == 2ul && failed_allocation_size != 0ul,
+                id + ": fault injection did not reach the page component allocation");
+
+        std::string long_prefix(120u, 'p');
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool padded = build_page_filename(output, long_prefix.c_str(), 1u, 2u);
+        failed_allocation_size = minify_allocation_failure_size;
+        allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!padded,
+                id + ": page filename succeeded after zero-padding allocation failed");
+        require(allocation_count == 2ul && failed_allocation_size != 0ul,
+                id + ": fault injection did not reach the page-index zero-padding allocation");
+    }});
+    cases.push_back({"0238_page_filename_expands_for_large_page_count","Page filenames expand index padding beyond four digits",[](const fs::path&){
+        const std::string id = "0238_page_filename_expands_for_large_page_count";
+        makocode::ByteBuffer output;
+        require(build_page_filename(output, "capture", 1u, 10000u),
+                id + ": page filename construction failed");
+        require(std::string(reinterpret_cast<const char*>(output.data)) ==
+                    "capture_page_00001.ppm",
+                id + ": index padding did not expand to match page-count digits");
+        require(build_page_filename(output, "capture", 1u,
+                                    100000000000000000ull),
+                id + ": large page-count filename construction failed");
+        require(std::string(reinterpret_cast<const char*>(output.data)) ==
+                    "capture_page_0000000000000001.ppm",
+                id + ": large page-count padding exceeded the 16-digit limit");
+    }});
+    cases.push_back({"0239_page_filename_rejects_invalid_arguments","Page filenames reject null timestamps and zero page indices",[](const fs::path&){
+        const std::string id = "0239_page_filename_rejects_invalid_arguments";
+        makocode::ByteBuffer output;
+        require(!build_page_filename(output, nullptr, 1u, 1u),
+                id + ": page filename accepted a null timestamp");
+        require(!build_page_filename(output, "capture", 0u, 1u),
+                id + ": page filename accepted a zero page index");
+    }});
+    cases.push_back({"0240_bits_per_page_rejects_fiducial_mask_allocation_failure","Page capacity calculation rejects fiducial-mask allocation failure",[](const fs::path&){
+        ImageMappingConfig mapping;
+        u64 bits_per_page = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool ok = compute_bits_per_page(mapping, 80u, 80u, 80u, bits_per_page);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!ok,
+                "0240: page capacity succeeded after fiducial-mask allocation failed");
+        require(allocation_count == 1ul && failed_allocation_size != 0ul,
+                "0240: fault injection did not reach the fiducial-mask allocation");
+    }});
+    cases.push_back({"0241_fiducial_reservation_propagates_mask_failure","Fiducial reservation propagates mask allocation failure",[](const fs::path&){
+        makocode::ByteBuffer mask;
+        u64 reserved_pixels = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool ok = compute_fiducial_reservation(80u, 80u, 80u, reserved_pixels,
+                                               &mask, false, 0u, 0u, 0u);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!ok,
+                "0241: reservation succeeded after fiducial-mask allocation failed");
+        require(allocation_count == 1ul && failed_allocation_size != 0ul,
+                "0241: fault injection did not reach the fiducial-mask allocation");
+    }});
+    cases.push_back({"0242_fiducial_mask_counts_overlaps_once","Overlapping fiducials count each reserved pixel once",[](const fs::path&){
+        makocode::ByteBuffer mask;
+        u64 reserved_pixels = 0u;
+        require(compute_fiducial_marker_mask(60u, 60u, 60u, reserved_pixels,
+                                             &mask, true, 60u, 60u, 1u),
+                "0242: could not build an overlapping fiducial mask");
+        u32 mask_pixels = 0u;
+        for (usize i = 0u; i < mask.size; ++i) {
+            if (mask.data[i]) ++mask_pixels;
+        }
+        require(mask_pixels == reserved_pixels,
+                "0242: reservation count differed from unique mask pixels");
+    }});
+    cases.push_back({"0243_ppm_dimensions_reject_invalid_height","PPM dimensions reject a zero height",[](const fs::path&){
+        makocode::ByteBuffer ppm;
+        require(ppm.append_ascii("P6\n2 0\n255\n"),
+                "0243: could not build invalid-height PPM header");
+        u32 width = 0u, height = 0u;
+        require(!ppm_measure_dimensions(ppm, width, height),
+                "0243: PPM dimensions accepted a zero height");
+    }});
+    cases.push_back({"0245_ppm_dimensions_reject_invalid_width","PPM dimensions reject a non-numeric width",[](const fs::path&){
+        makocode::ByteBuffer ppm;
+        require(ppm.append_ascii("P6\nwidth 2\n255\n"),
+                "0245: could not build invalid-width PPM header");
+        u32 width = 0u, height = 0u;
+        require(!ppm_measure_dimensions(ppm, width, height),
+                "0245: PPM dimensions accepted a non-numeric width");
+    }});
+    cases.push_back({"0244_ppm_dimensions_reject_missing_height","PPM dimensions reject a missing height token",[](const fs::path&){
+        makocode::ByteBuffer ppm;
+        require(ppm.append_ascii("P6\n2\n"),
+                "0244: could not build incomplete PPM header");
+        u32 width = 0u, height = 0u;
+        require(!ppm_measure_dimensions(ppm, width, height),
+                "0244: PPM dimensions accepted a missing height token");
+    }});
+    cases.push_back({"0246_ppm_dimensions_reject_invalid_magic","PPM dimensions reject non-P6 magic",[](const fs::path&){
+        makocode::ByteBuffer ppm;
+        require(ppm.append_ascii("P3\n2 2\n255\n"),
+                "0246: could not build non-P6 PPM header");
+        u32 width = 0u, height = 0u;
+        require(!ppm_measure_dimensions(ppm, width, height),
+                "0246: PPM dimensions accepted non-P6 magic");
+    }});
+    cases.push_back({"0247_ppm_dimensions_reject_missing_magic","PPM dimensions reject a missing magic token",[](const fs::path&){
+        makocode::ByteBuffer ppm;
+        require(ppm.append_ascii("\n# no magic token\n"),
+                "0247: could not build incomplete PPM header");
+        u32 width = 0u, height = 0u;
+        require(!ppm_measure_dimensions(ppm, width, height),
+                "0247: PPM dimensions accepted a missing magic token");
+    }});
+    cases.push_back({"0248_fiducial_insert_propagates_header_allocation_failure","Fiducial insertion propagates PPM header allocation failure",[](const fs::path&){
+        makocode::ByteBuffer input, output;
+        const u32 width = 100u, height = 100u;
+        std::string ppm("P6\n100 100\n255\n");
+        ppm.append(static_cast<size_t>(width) * height * 3u, '\0');
+        require(input.append_bytes((const u8*)ppm.data(), ppm.size()),
+                "0248: could not build PPM input");
+        const u8 white[3] = {255u, 255u, 255u};
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool inserted = ppm_insert_fiducial_grid(input, 0u, 0u, 0u, 0u,
+                                                  white, output);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(!inserted,
+                "0248: fiducial insertion succeeded after PPM header allocation failed");
+        require(allocation_count == 2ul && failed_allocation_size != 0ul,
+                "0248: fault injection did not reach PPM header allocation");
+    }});
+    cases.push_back({"0249_fiducial_insert_clips_marker_at_page_edges","Fiducial insertion clips markers to page edges",[](const fs::path&){
+        makocode::ByteBuffer input, output;
+        const u32 width = 100u, height = 100u;
+        std::string ppm("P6\n100 100\n255\n");
+        ppm.append(static_cast<size_t>(width) * height * 3u, '\0');
+        require(input.append_bytes((const u8*)ppm.data(), ppm.size()),
+                "0249: could not build PPM input");
+        const u8 red[3] = {255u, 0u, 0u};
+        require(ppm_insert_fiducial_grid(input, 2u, 2u, 100u, height,
+                                         red, output),
+                "0249: fiducial insertion failed for clipped edge markers");
+        const char header[] = "P6\n100 100\n255\n";
+        usize raster_offset = sizeof(header) - 1u;
+        require(output.size == raster_offset + (usize)width * height * 3u &&
+                    memcmp(output.data, header, raster_offset) == 0,
+                "0249: fiducial insertion returned an invalid PPM");
+        usize top_left = raster_offset;
+        usize top_right = raster_offset + ((usize)width - 1u) * 3u;
+        usize bottom_left = raster_offset + ((usize)(height - 1u) * width) * 3u;
+        usize bottom_right = raster_offset + (((usize)height * width) - 1u) * 3u;
+        require(output.data[top_left] == red[0] &&
+                    output.data[top_left + 1u] == red[1] &&
+                    output.data[top_left + 2u] == red[2] &&
+                    output.data[top_right] == red[0] &&
+                    output.data[top_right + 1u] == red[1] &&
+                    output.data[top_right + 2u] == red[2] &&
+                    output.data[bottom_left] == red[0] &&
+                    output.data[bottom_left + 1u] == red[1] &&
+                    output.data[bottom_left + 2u] == red[2] &&
+                    output.data[bottom_right] == red[0] &&
+                    output.data[bottom_right + 1u] == red[1] &&
+                    output.data[bottom_right + 2u] == red[2],
+                "0249: clipped fiducial markers do not reach all page edges");
+    }});
+    cases.push_back({"0250_fiducial_insert_rejects_too_small_image","Fiducial insertion rejects images smaller than a marker",[](const fs::path&){
+        makocode::ByteBuffer input, output;
+        std::string ppm("P6\n1 1\n255\n");
+        ppm.append(3u, '\0');
+        require(input.append_bytes((const u8*)ppm.data(), ppm.size()),
+                "0250: could not build PPM input");
+        const u8 red[3] = {255u, 0u, 0u};
+        require(!ppm_insert_fiducial_grid(input, 1u, 1u, 1u, 1u,
+                                          red, output),
+                "0250: fiducial insertion accepted an image smaller than a marker");
+    }});
+    cases.push_back({"0251_fiducial_insert_rejects_truncated_raster","Fiducial insertion rejects a truncated PPM raster",[](const fs::path&){
+        makocode::ByteBuffer input, output;
+        require(input.append_ascii("P6\n48 48\n255\n"),
+                "0251: could not build truncated PPM header");
+        const u8 white[3] = {255u, 255u, 255u};
+        require(!ppm_insert_fiducial_grid(input, 0u, 0u, 0u, 0u,
+                                          white, output),
+                "0251: fiducial insertion accepted a missing PPM raster");
+    }});
+    cases.push_back({"0252_fiducial_insert_rejects_non_255_maxval","Fiducial insertion rejects unsupported PPM max values",[](const fs::path&){
+        makocode::ByteBuffer input, output;
+        require(input.append_ascii("P6\n48 48\n254\n"),
+                "0252: could not build unsupported-maxval PPM header");
+        std::string raster(48u * 48u * 3u, '\0');
+        require(input.append_bytes((const u8*)raster.data(), raster.size()),
+                "0252: could not build PPM raster");
+        const u8 white[3] = {255u, 255u, 255u};
+        require(!ppm_insert_fiducial_grid(input, 0u, 0u, 0u, 0u,
+                                          white, output),
+                "0252: fiducial insertion accepted maxval 254");
+    }});
+    cases.push_back({"0253_fiducial_insert_requires_color","Fiducial insertion rejects a missing marker color",[](const fs::path&){
+        makocode::ByteBuffer input, output;
+        require(input.append_ascii("P6\n48 48\n255\n"),
+                "0253: could not build PPM header");
+        std::string raster(48u * 48u * 3u, '\0');
+        require(input.append_bytes((const u8*)raster.data(), raster.size()),
+                "0253: could not build PPM raster");
+        require(!ppm_insert_fiducial_grid(input, 0u, 0u, 0u, 0u,
+                                          nullptr, output),
+                "0253: fiducial insertion accepted a missing marker color");
+    }});
+    cases.push_back({"0254_metadata_free_rejects_unrecognized_page","Metadata-free recovery rejects a page with no decodable symbols",[](const fs::path&){
+        makocode::ByteBuffer input;
+        require(input.append_ascii("P6\n80 80\n255\n"),
+                "0254: could not build PPM header");
+        std::string raster(80u * 80u * 3u, '\0');
+        for (usize pixel = 0u; pixel < 80u * 80u; ++pixel) {
+            u8 value = (pixel & 1u) ? 255u : 0u;
+            usize offset = pixel * 3u;
+            raster[offset] = (char)value;
+            raster[offset + 1u] = (char)value;
+            raster[offset + 2u] = (char)value;
+        }
+        require(input.append_bytes((const u8*)raster.data(), raster.size()),
+                "0254: could not build PPM raster");
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame_bits, frame_erasures;
+        u64 frame_bit_count = 0u, page_capacity_bits = 0u;
+        PpmParserState state;
+        MetadataTile::Values values;
+        require(!recover_metadata_free_single_page(input, mapping, true,
+                                                   frame_bits, frame_erasures,
+                                                   frame_bit_count,
+                                                   page_capacity_bits, state,
+                                                   values, nullptr),
+                "0254: metadata-free recovery accepted an undecodable page");
+    }});
+    cases.push_back({"0255_metadata_free_marks_invalid_palette_symbols_as_erasures","Metadata-free recovery marks unrepresentable palette dots as ECC erasures",[](const fs::path&){
+        const std::string id = "0255_metadata_free_marks_invalid_palette_symbols_as_erasures";
+        const u32 width = 80u, height = 80u;
+        const char palette_text[] = "White Black Cyan Magenta Yellow #FF0000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test") &&
+                    mapping.custom_palette_count == 6u,
+                id + ": could not build a six-color palette");
+        mapping.page_width_pixels = width;
+        mapping.page_width_set = true;
+        mapping.page_height_pixels = height;
+        mapping.page_height_set = true;
+        struct FiducialSpacingRestore {
+            u32 spacing;
+            ~FiducialSpacingRestore() { g_fiducial_defaults.spacing_pixels = spacing; }
+        } restore{g_fiducial_defaults.spacing_pixels};
+        g_fiducial_defaults.spacing_pixels = 0u;
+
+        makocode::PaletteSymbolProfile profile;
+        require(makocode::palette_symbol_profile(mapping.custom_palette_count, profile),
+                id + ": could not build the palette-symbol profile");
+        u8 invalid_dots[8];
+        for (u32 dot = 0u; dot < 8u; ++dot) invalid_dots[dot] = 5u;
+        u32 invalid_value = 0u;
+        require(!makocode::palette_dots_to_symbol(profile, invalid_dots, invalid_value),
+                id + ": fixture dots unexpectedly represent a field symbol");
+
+        const PaletteColor& invalid_color = mapping.custom_palette[5u];
+        std::string raster((usize)width * height * 3u, '\0');
+        for (u64 pixel = 0u; pixel < (u64)width * height; ++pixel) {
+            const PaletteColor& color = invalid_color;
+            usize offset = (usize)pixel * 3u;
+            raster[offset] = (char)color.r;
+            raster[offset + 1u] = (char)color.g;
+            raster[offset + 2u] = (char)color.b;
+        }
+        makocode::ByteBuffer input;
+        require(input.append_ascii("P6\n80 80\n255\n") &&
+                    input.append_bytes((const u8*)raster.data(), raster.size()),
+                id + ": could not build the PPM fixture");
+        makocode::ByteBuffer frame_bits, frame_erasures;
+        u64 frame_bit_count = 0u, page_capacity_bits = 0u;
+        PpmParserState state;
+        MetadataTile::Values values;
+        makocode::PaletteSymbolPageSalt page_salt;
+        require(recover_metadata_free_single_page(input, mapping, true,
+                                                   frame_bits, frame_erasures,
+                                                   frame_bit_count,
+                                                   page_capacity_bits, state,
+                                                   values, &page_salt),
+                id + ": metadata-free recovery rejected the valid raster fixture");
+        u64 erased_count = 0u;
+        for (usize group = 0u; group < frame_erasures.size; ++group) {
+            erased_count += frame_erasures.data[group] != 0u;
+        }
+        require(frame_erasures.size > 0u && erased_count > 0u,
+                id + ": unrepresentable palette-dot symbols were not marked as erasures");
+    }});
+    cases.push_back({"0232_metadata_tile_rejects_missing_schema_payload","Metadata tile construction rejects missing schema payload data",[](const fs::path&){
+        const std::string id = "0232_metadata_tile_rejects_missing_schema_payload";
+        ImageMappingConfig mapping;
+        MetadataTile::Values tile;
+        makocode::ByteBuffer tile_bits, active_mask;
+        PaletteColor tile_light, tile_dark;
+        require(!build_page_metadata_tile(mapping, 0u, 1u, 220u, 220u, 220u,
+                                          nullptr, 0.0, 0u, 0u, tile,
+                                          tile_bits, active_mask,
+                                          tile_light, tile_dark),
+                id + ": metadata tile accepted an absent ECC/schema payload");
+    }});
+    cases.push_back({"0233_metadata_tile_rejects_low_contrast_palette","Metadata tile construction rejects palettes with indistinguishable endpoints",[](const fs::path&){
+        const std::string id = "0233_metadata_tile_rejects_low_contrast_palette";
+        const char palette_text[] = "#808080 #818181 #828282 #838383";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the low-contrast palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "low contrast endpoints";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        MetadataTile::Values tile;
+        makocode::ByteBuffer tile_bits, active_mask;
+        PaletteColor tile_light, tile_dark;
+        require(!build_page_metadata_tile(mapping, frame_bit_count, 0u,
+                                          220u, 220u, 220u,
+                                          &encoder.ecc_info(), 0.0,
+                                          encoder.ecc_info().unknown_error_budget,
+                                          encoder.ecc_info().overlay_erasure_budget,
+                                          tile, tile_bits, active_mask,
+                                          tile_light, tile_dark),
+                id + ": metadata tile accepted palette endpoints without contrast");
+    }});
+    cases.push_back({"0234_metadata_tile_selects_darkest_palette_color","Metadata tile selects the darkest custom palette color",[](const fs::path&){
+        const std::string id = "0234_metadata_tile_selects_darkest_palette_color";
+        const char palette_text[] = "#808080 #FFFFFF #000000 #0000FF";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not build the custom palette");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "darkest palette endpoint";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the palette-symbol stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        MetadataTile::Values tile;
+        makocode::ByteBuffer tile_bits, active_mask;
+        PaletteColor tile_light, tile_dark;
+        require(build_page_metadata_tile(mapping, frame_bit_count, 0u,
+                                          220u, 220u, 220u,
+                                          &encoder.ecc_info(), 0.0,
+                                          encoder.ecc_info().unknown_error_budget,
+                                          encoder.ecc_info().overlay_erasure_budget,
+                                          tile, tile_bits, active_mask,
+                                          tile_light, tile_dark),
+                id + ": metadata tile construction failed");
+        require(tile_dark.r == 0u && tile_dark.g == 0u && tile_dark.b == 0u,
+                id + ": metadata tile did not select the darkest palette color");
+    }});
     cases.push_back({"0059_minify_literals","Minify preserves source literals and directives",[](const fs::path&){minify_literals_case();}});
     cases.push_back({"0061_cli_decoder_paths","Decoder image paths, LZMA, and match finder behavior",[](const fs::path&){cli_decoder_paths_case();}});
     cases.push_back({"0113_footer_features","Footer wrapping, page selection, over-barcode ECC, and page bounds",[](const fs::path&){footer_features_case();}});
@@ -5875,6 +7125,14 @@ static std::vector<TestCase> build_cases() {
         require(fs::is_directory(raced_directory),
                 "0160: simulated concurrent directory was not created");
     }});
+    cases.push_back({"0195_directory_tree_path_component_too_long","Directory tree rejects an uncreatable path component",[](const fs::path&){
+        const std::string id = "0195_directory_tree_path_component_too_long";
+        fs::path work = make_work_dir(id);
+        std::string too_long_component(300u, 'x');
+        bool created = ensure_directory_tree((work / too_long_component / "child").c_str());
+        require(!created,
+                "0195: directory tree succeeded when mkdir rejected an overlong component");
+    }});
     cases.push_back({"0161_archive_file_size_usize_limit","Archive rejects a file size that exceeds the simulated usize limit",[](const fs::path&){
         makocode::BitWriter archive_bits;
         require(MetadataTile::write_compact_u64(archive_bits, 1u) &&
@@ -6171,36 +7429,16 @@ static std::vector<TestCase> build_cases() {
         require(archive_init(archive) && archive.path_registry.ensure(128u) &&
                     archive.entries.buffer.ensure(128u),
                 "0176: archive setup allocation failed");
-        int stderr_pipe[2];
-        require(::pipe(stderr_pipe) == 0, "0176: stderr pipe creation failed");
-        pid_t child = ::fork();
-        require(child >= 0, "0176: fork failed");
-        if (child == 0) {
-            ::close(stderr_pipe[0]);
-            if (::dup2(stderr_pipe[1], STDERR_FILENO) < 0) _exit(2);
-            ::close(stderr_pipe[1]);
-            minify_allocation_count = 0ul;
-            minify_allocation_failure_size = 0ul;
-            minify_allocation_failure_at = 1ul;
-            bool collected = archive_collect_directory(input.c_str(), "input", archive);
-            _exit(!collected && minify_allocation_failure_size != 0ul ? 0 : 1);
-        }
-        ::close(stderr_pipe[1]);
-        std::string diagnostic;
-        char buffer[256];
-        for (;;) {
-            ssize_t count = ::read(stderr_pipe[0], buffer, sizeof(buffer));
-            if (count <= 0) break;
-            diagnostic.append(buffer, static_cast<size_t>(count));
-        }
-        ::close(stderr_pipe[0]);
-        int status = 0;
-        require(::waitpid(child, &status, 0) == child,
-                "0176: child wait failed");
-        require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool collected = archive_collect_directory(input.c_str(), "input", archive);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0176: selected filesystem-path allocation did not fail");
+        require(!collected,
                 "0176: filesystem-path allocation failure was not returned cleanly");
-        require(diagnostic.empty(),
-                "0176: allocation failure was misreported as a stat failure");
     }});
     cases.push_back({"0177_archive_collect_open_failure","Archive collection fails when the input directory cannot be opened",[](const fs::path&){
         const std::string id = "0177_archive_collect_open_failure";
@@ -6249,6 +7487,19 @@ static std::vector<TestCase> build_cases() {
                 "0180: selected relative-path allocation did not fail");
         require(!joined,
                 "0180: relative path join succeeded after allocation failure");
+    }});
+    cases.push_back({"0196_join_fs_path_allocation_failure","Filesystem path join reports allocation failure",[](const fs::path&){
+        makocode::ByteBuffer output;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool joined = join_fs_path("base", "child", output);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0196: selected filesystem-path allocation did not fail");
+        require(!joined,
+                "0196: filesystem path join succeeded after allocation failure");
     }});
     cases.push_back({"0181_join_rel_path_empty_name","Relative path join rejects an empty name",[](const fs::path&){
         makocode::ByteBuffer output;
@@ -6349,6 +7600,150 @@ static std::vector<TestCase> build_cases() {
                 "0194: duplicate archive path was accepted");
         require(archive.entry_count == 1u,
                 "0194: duplicate path changed the archive entry count");
+    }});
+    cases.push_back({"0197_archive_add_directory_duplicate_path","Archive directories reject duplicate paths without changing entry count",[](const fs::path&){
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0197: archive initialization failed");
+        require(archive_add_directory(archive, "duplicate"),
+                "0197: initial archive directory was rejected");
+        require(!archive_add_directory(archive, "duplicate"),
+                "0197: duplicate archive directory was accepted");
+        require(archive.entry_count == 1u,
+                "0197: duplicate path changed the archive entry count");
+    }});
+    cases.push_back({"0198_archive_add_directory_empty_path","Archive directories reject an empty path",[](const fs::path&){
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0198: archive initialization failed");
+        require(!archive_add_directory(archive, ""),
+                "0198: empty archive directory path was accepted");
+        require(archive.entry_count == 0u,
+                "0198: empty path changed the archive entry count");
+    }});
+    cases.push_back({"0199_archive_path_registry_allocation_failure","Archive path registration reports allocation failure",[](const fs::path&){
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0199: archive initialization failed");
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool added = archive_add_directory(archive, "directory");
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0199: path-registry allocation did not fail");
+        require(!added,
+                "0199: archive directory succeeded after path-registry allocation failed");
+        require(archive.entry_count == 0u && archive.path_registry.size == 0u,
+                "0199: failed path registration changed archive state");
+    }});
+    cases.push_back({"0200_archive_append_bytes_allocation_failure","Archive byte append reports writer allocation failure",[](const fs::path&){
+        const u8 contents[] = {0xA5u};
+        makocode::BitWriter writer;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool appended = archive_append_bytes(writer, contents, sizeof(contents));
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0200: selected writer allocation did not fail");
+        require(!appended && writer.failed,
+                "0200: archive byte append succeeded after writer allocation failed");
+        require(writer.bit_size() == 0u,
+                "0200: failed archive byte append advanced the writer");
+    }});
+    cases.push_back({"0201_read_entire_file_close_failure","File read reports close failure and releases its buffer",[](const fs::path&){
+        const std::string id = "0201_read_entire_file_close_failure";
+        fs::path work = make_work_dir(id);
+        fs::path source = work / "source.bin";
+        write_file(source, "read-close-failure");
+        require(::setenv("MAKOCODE_TEST_FAIL_NEXT_CLOSE", "1", 1) == 0,
+                "0201: could not enable close failure injection");
+        makocode::ByteBuffer contents;
+        bool read = read_entire_file(source.c_str(), contents);
+        bool hook_consumed = ::getenv("MAKOCODE_TEST_FAIL_NEXT_CLOSE") == nullptr;
+        ::unsetenv("MAKOCODE_TEST_FAIL_NEXT_CLOSE");
+        require(hook_consumed,
+                "0201: close failure injection was not consumed by file read");
+        require(!read,
+                "0201: file read succeeded after close failure");
+        require(!contents.data && contents.size == 0u,
+                "0201: file buffer was not released after close failure");
+    }});
+    cases.push_back({"0202_read_entire_file_size_overflow","File read rejects growth beyond its size limit",[](const fs::path&){
+        const std::string id = "0202_read_entire_file_size_overflow";
+        fs::path work = make_work_dir(id);
+        fs::path source = work / "source.bin";
+        write_file(source, std::string(8192u, 'r'));
+        read_entire_file_usize_max_override = 8191u;
+        makocode::ByteBuffer contents;
+        bool read = read_entire_file(source.c_str(), contents);
+        read_entire_file_usize_max_override = USIZE_MAX_VALUE;
+        require(!read,
+                "0202: file read succeeded after reaching its size limit");
+        require(!contents.data && contents.size == 0u,
+                "0202: file buffer was not released after the size-limit failure");
+    }});
+    cases.push_back({"0203_read_entire_stdin_read_failure","Stdin read reports an invalid descriptor and releases its buffer",[](const fs::path&){
+        int saved_stdin = ::dup(STDIN_FILENO);
+        require(saved_stdin >= 0,
+                "0203: could not save stdin before read-failure injection");
+        if (::close(STDIN_FILENO) != 0) {
+            ::close(saved_stdin);
+            throw Failure("0203: could not close stdin for read-failure injection");
+        }
+        makocode::ByteBuffer contents;
+        bool read = read_entire_stdin(contents);
+        int restore_result = ::dup2(saved_stdin, STDIN_FILENO);
+        ::close(saved_stdin);
+        require(restore_result >= 0,
+                "0203: could not restore stdin after read-failure injection");
+        require(!read,
+                "0203: stdin read succeeded with an invalid descriptor");
+        require(!contents.data && contents.size == 0u,
+                "0203: stdin buffer was not released after read failure");
+    }});
+    cases.push_back({"0204_read_entire_stdin_allocation_failure","Stdin read reports allocation failure and releases its buffer",[](const fs::path&){
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        makocode::ByteBuffer contents;
+        bool read = read_entire_stdin(contents);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == 4096ul,
+                "0204: stdin buffer allocation failure was not selected");
+        require(!read,
+                "0204: stdin read succeeded after buffer allocation failed");
+        require(!contents.data && contents.size == 0u,
+                "0204: stdin buffer was not released after allocation failure");
+    }});
+    cases.push_back({"0205_read_entire_stdin_size_overflow","Stdin read rejects growth beyond its size limit",[](const fs::path&){
+        const std::string id = "0205_read_entire_stdin_size_overflow";
+        fs::path work = make_work_dir(id);
+        fs::path source = work / "stdin.bin";
+        write_file(source, std::string(8192u, 's'));
+        int input = ::open(source.c_str(), O_RDONLY);
+        require(input >= 0,
+                "0205: could not open stdin overflow input");
+        int saved_stdin = ::dup(STDIN_FILENO);
+        if (saved_stdin < 0 || ::dup2(input, STDIN_FILENO) < 0) {
+            if (saved_stdin >= 0) ::close(saved_stdin);
+            ::close(input);
+            throw Failure("0205: could not redirect stdin for overflow test");
+        }
+        ::close(input);
+        read_entire_stdin_usize_max_override = 8191u;
+        makocode::ByteBuffer contents;
+        bool read = read_entire_stdin(contents);
+        read_entire_stdin_usize_max_override = USIZE_MAX_VALUE;
+        int restore_result = ::dup2(saved_stdin, STDIN_FILENO);
+        ::close(saved_stdin);
+        require(restore_result >= 0,
+                "0205: could not restore stdin after overflow test");
+        require(!read,
+                "0205: stdin read succeeded after reaching its size limit");
+        require(!contents.data && contents.size == 0u,
+                "0205: stdin buffer was not released after the size-limit failure");
     }});
     cases.push_back({"0123_metadata_pages","Metadata tiles appear only on selected pages",[](const fs::path&){metadata_pages_case();}});
     cases.push_back({"0086_decoded_file","Decoded file retains metadata and archive bytes",[](const fs::path&){decoded_file_case();}});
@@ -6593,10 +7988,24 @@ int main(int argc, char** argv) {
                        test.id == "0158_directory_tree_allocation_failure" ||
                        test.id == "0175_archive_collect_join_rel_alloc_failure" ||
                        test.id == "0176_archive_collect_join_fs_alloc_failure" ||
+                       test.id == "0196_join_fs_path_allocation_failure" ||
+                       test.id == "0199_archive_path_registry_allocation_failure" ||
+                       test.id == "0201_read_entire_file_close_failure" ||
+                       test.id == "0203_read_entire_stdin_read_failure" ||
+                       test.id == "0204_read_entire_stdin_allocation_failure" ||
+                       test.id == "0205_read_entire_stdin_size_overflow" ||
+                       test.id == "0200_archive_append_bytes_allocation_failure" ||
                        test.id == "0172_archive_collection_read_failure" ||
                        test.id == "0180_join_rel_path_allocation_failure" ||
                        test.id == "0183_normalize_store_path_output_allocation_failure" ||
                        test.id == "0191_normalize_store_path_scratch_allocation_failure" ||
+                       test.id == "0229_render_rejects_header_allocation_failure" ||
+                       test.id == "0231_render_rejects_reservation_mask_allocation_failure" ||
+                       test.id == "0255_metadata_free_marks_invalid_palette_symbols_as_erasures" ||
+                       test.id == "0235_build_frame_rejects_frame_buffer_allocation_failure" ||
+                       test.id == "0236_build_frame_rejects_writer_allocation_failure" ||
+                       test.id == "0237_page_filename_rejects_suffix_allocation_failure" ||
+                       test.id == "0240_bits_per_page_rejects_fiducial_mask_allocation_failure" ||
                        test.id == "0160_directory_creation_race") {
                 isolated_cases.push_back(&test);
             } else {

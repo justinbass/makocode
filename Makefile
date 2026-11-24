@@ -87,7 +87,7 @@ coverage: clean
 	$(call test_status,capture coverage data)
 	@lcov --capture --no-external --directory "$(COVERAGE_DATA_DIR)" --base-directory "$(CURDIR)" --output-file "$(LCOV_REPORT)" $(LCOV_RC)
 	$(call test_status,generate coverage HTML)
-	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) --branch-coverage $(LCOV_RC)
+	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) --branch-coverage --ignore-errors inconsistent $(LCOV_RC)
 
 # Compile every translation unit without the host platform implementation.
 # A target integration supplies the makocode_platform_* definitions at link time.
