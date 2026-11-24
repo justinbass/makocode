@@ -86,6 +86,14 @@ extern "C" ptrdiff_t makocode_platform_write(int fd, const void* buffer, size_t 
 }
 
 extern "C" int makocode_platform_open(const char* path, int flags, ...) {
+#ifdef MAKOCODE_TEST_BUILD
+    const char* failed_path = ::getenv("MAKOCODE_TEST_FAIL_OPEN_FILE");
+    if ((flags & MAKOCODE_OPEN_READ) && failed_path && path &&
+        ::strcmp(failed_path, path) == 0) {
+        errno = EACCES;
+        return -1;
+    }
+#endif
     int native_flags = 0;
     if (flags & MAKOCODE_OPEN_READ) native_flags |= O_RDONLY;
     if (flags & MAKOCODE_OPEN_WRITE) native_flags |= O_WRONLY;
@@ -133,6 +141,13 @@ extern "C" int makocode_platform_is_symlink(const char* path) {
 }
 
 extern "C" int makocode_platform_create_directory(const char* path) {
+#ifdef MAKOCODE_TEST_BUILD
+    const char* race_path = ::getenv("MAKOCODE_TEST_CREATE_DIR_RACE_PATH");
+    if (race_path && path && ::strcmp(path, race_path) == 0 &&
+        ::mkdir(path, 0700) == 0) {
+        return 1;
+    }
+#endif
     int result = ::mkdir(path, 0700);
 #ifdef MAKOCODE_TEST_BUILD
     if (result == 0 && path) {

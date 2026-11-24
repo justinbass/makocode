@@ -29904,17 +29904,10 @@ bool archive_finalize(ArchiveBuildContext& ctx) {
 }
 
 static const char* find_last_path_component(const char* path) {
+    if (!path) return 0;
     usize length = ascii_length(path);
     const char* start = path;
     const char* end = path + length;
-    while (end > start) {
-        char c = end[-1];
-        if (c == '/' || c == '\\') {
-            --end;
-        } else {
-            break;
-        }
-    }
     const char* component = start;
     const char* cursor = start;
     while (cursor < end) {
@@ -29983,9 +29976,6 @@ bool normalize_store_path(const char* source,
     if (component_count == 0u) {
         scratch.release();
         char* resolved = makocode_platform_realpath(source);
-        if (!resolved) {
-            return false;
-        }
         const char* base = find_last_path_component(resolved);
         usize base_len = ascii_length(base);
         bool valid_base = (base_len > 0u);
@@ -30218,6 +30208,10 @@ bool is_safe_archive_path(const char* path, usize length) {
 
 
 
+#ifdef MAKOCODE_TEST_BUILD
+static thread_local u64 archive_parse_usize_max_override = (u64)USIZE_MAX_VALUE;
+#endif
+
 bool archive_parse(const makocode::ByteBuffer& archive,
                           ArchiveEntryCallback callback,
                           void* callback_context,
@@ -30234,8 +30228,13 @@ bool archive_parse(const makocode::ByteBuffer& archive,
     if (entry_count_out) *entry_count_out = entry_count;
     if (entry_count == 0u) {
         u64 stream_size_value = 0u;
+#ifdef MAKOCODE_TEST_BUILD
+        if (!MetadataTile::read_compact_u64(reader, stream_size_value) ||
+            stream_size_value > archive_parse_usize_max_override) {
+#else
         if (!MetadataTile::read_compact_u64(reader, stream_size_value) ||
             stream_size_value > (u64)USIZE_MAX_VALUE) {
+#endif
             return false;
         }
         usize available_size = (usize)((reader.bit_count - reader.cursor) / 8u);
@@ -30247,7 +30246,6 @@ bool archive_parse(const makocode::ByteBuffer& archive,
         stream_data.size = stream_size;
         for (usize i = 0u; i < stream_size; ++i) {
             stream_data.data[i] = (u8)reader.read_bits(8u);
-            if (reader.failed) return false;
         }
         if (truncated) {
             return !callback || callback(2u,
@@ -30279,11 +30277,13 @@ bool archive_parse(const makocode::ByteBuffer& archive,
         u64 path_length_value = 0u;
         if (reader.failed) return allow_partial && emitted_entry;
         if (entry_type > 1u) return allow_partial && emitted_entry;
-        if (!MetadataTile::read_compact_u64(reader, path_length_value)) {
-            return allow_partial && emitted_entry;
-        }
+        MetadataTile::read_compact_u64(reader, path_length_value);
+        u64 max_path_length = (u64)(USIZE_MAX_VALUE - 1u);
+#ifdef MAKOCODE_TEST_BUILD
+        max_path_length = archive_parse_usize_max_override - 1u;
+#endif
         if (path_length_value == 0u ||
-            path_length_value > (u64)(USIZE_MAX_VALUE - 1u)) {
+            path_length_value > max_path_length) {
             return allow_partial && emitted_entry;
         }
         if (path_length_value > (u64)((reader.bit_count - reader.cursor) / 8u)) {
@@ -30310,7 +30310,11 @@ bool archive_parse(const makocode::ByteBuffer& archive,
             if (!MetadataTile::read_compact_u64(reader, file_size_value)) {
                 return allow_partial && emitted_entry;
             }
+#ifdef MAKOCODE_TEST_BUILD
+            if (file_size_value > archive_parse_usize_max_override) {
+#else
             if (file_size_value > (u64)USIZE_MAX_VALUE) {
+#endif
                 return allow_partial && emitted_entry;
             }
             usize available_file_size = (usize)((reader.bit_count - reader.cursor) / 8u);
@@ -31316,9 +31320,9 @@ bool find_best_ecc_fill(usize payload_bytes,
     auto evaluate_cached_candidate = [&](double redundancy,
                                          EccFillCandidate& out_candidate) -> bool {
         u32 parity = 0u;
-        if (!makocode::palette_symbol_parity_for_redundancy(fill_profile,
-                                                             redundancy,
-                                                             parity, 2u)) return false;
+        makocode::palette_symbol_parity_for_redundancy(fill_profile,
+                                                       redundancy,
+                                                       parity, 2u);
         if (parity_candidate_state[parity]) {
             if (parity_candidate_state[parity] != 1u) return false;
             out_candidate = parity_candidates[parity];

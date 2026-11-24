@@ -5701,6 +5701,15 @@ static std::vector<TestCase> build_cases() {
         fs::create_directories(output);
         fs::create_directories(outside);
         fs::path race_dir = output / "race", moved_dir = work / "original_race";
+        const char* prior_swap_path = ::getenv("MAKOCODE_TEST_SWAP_DIR_PATH");
+        const char* prior_swap_backup = ::getenv("MAKOCODE_TEST_SWAP_DIR_BACKUP");
+        const char* prior_swap_target = ::getenv("MAKOCODE_TEST_SWAP_DIR_TARGET");
+        bool had_swap_path = prior_swap_path != 0;
+        bool had_swap_backup = prior_swap_backup != 0;
+        bool had_swap_target = prior_swap_target != 0;
+        std::string saved_swap_path = had_swap_path ? prior_swap_path : "";
+        std::string saved_swap_backup = had_swap_backup ? prior_swap_backup : "";
+        std::string saved_swap_target = had_swap_target ? prior_swap_target : "";
         const u8 contents[] = {'x'};
         ArchiveBuildContext archive;
         require(archive_init(archive) &&
@@ -5711,9 +5720,12 @@ static std::vector<TestCase> build_cases() {
         setenv("MAKOCODE_TEST_SWAP_DIR_BACKUP", moved_dir.c_str(), 1);
         setenv("MAKOCODE_TEST_SWAP_DIR_TARGET", outside.c_str(), 1);
         bool extracted = unpack_archive_to_directory(archive.buffer, output.c_str());
-        unsetenv("MAKOCODE_TEST_SWAP_DIR_PATH");
-        unsetenv("MAKOCODE_TEST_SWAP_DIR_BACKUP");
-        unsetenv("MAKOCODE_TEST_SWAP_DIR_TARGET");
+        if (had_swap_path) setenv("MAKOCODE_TEST_SWAP_DIR_PATH", saved_swap_path.c_str(), 1);
+        else unsetenv("MAKOCODE_TEST_SWAP_DIR_PATH");
+        if (had_swap_backup) setenv("MAKOCODE_TEST_SWAP_DIR_BACKUP", saved_swap_backup.c_str(), 1);
+        else unsetenv("MAKOCODE_TEST_SWAP_DIR_BACKUP");
+        if (had_swap_target) setenv("MAKOCODE_TEST_SWAP_DIR_TARGET", saved_swap_target.c_str(), 1);
+        else unsetenv("MAKOCODE_TEST_SWAP_DIR_TARGET");
         require(fs::is_symlink(race_dir) && fs::is_directory(moved_dir),
                 "0150: parent directory was not replaced by the test symlink hook");
         require(!extracted, "0150: extraction accepted a parent replaced by a symlink");
@@ -5751,6 +5763,592 @@ static std::vector<TestCase> build_cases() {
                 "0152: extraction continued after directory creation failed");
         require(read_file(output / "blocked") == "not a directory",
                 "0152: extraction changed the blocking file");
+    }});
+    cases.push_back({"0153_archive_raw_stream_extract","Anonymous archive payload extracts as payload.bin",[](const fs::path&){
+        const std::string id = "0153_archive_raw_stream_extract";
+        fs::path work = make_work_dir(id);
+        fs::path output = work / "output";
+        fs::create_directories(output);
+        const u8 contents[] = {0u, 'r', 'a', 'w', 0xFFu};
+        ArchiveBuildContext archive;
+        require(archive_init(archive) &&
+                    MetadataTile::write_compact_u64(archive.entries, sizeof(contents)) &&
+                    archive_append_bytes(archive.entries, contents, sizeof(contents)),
+                "0153: raw archive setup failed");
+        archive.raw_stream = true;
+        require(archive_finalize(archive), "0153: raw archive finalization failed");
+        require(unpack_archive_to_directory(archive.buffer, output.c_str()),
+                "0153: raw archive extraction failed");
+        require(read_file(output / "payload.bin") ==
+                    std::string(reinterpret_cast<const char*>(contents), sizeof(contents)),
+                "0153: raw archive payload changed during extraction");
+    }});
+    cases.push_back({"0192_archive_raw_stream_symlink_output","Anonymous archive payload rejects a symlinked output root",[](const fs::path&){
+        const std::string id = "0192_archive_raw_stream_symlink_output";
+        fs::path work = make_work_dir(id);
+        fs::path target = work / "target";
+        fs::path output = work / "output";
+        fs::create_directories(target);
+        fs::create_directory_symlink(target, output);
+        const u8 contents[] = {0u, 'r', 'a', 'w', 0xFFu};
+        ArchiveBuildContext archive;
+        require(archive_init(archive) &&
+                    MetadataTile::write_compact_u64(archive.entries, sizeof(contents)) &&
+                    archive_append_bytes(archive.entries, contents, sizeof(contents)),
+                "0192: raw archive setup failed");
+        archive.raw_stream = true;
+        require(archive_finalize(archive), "0192: raw archive finalization failed");
+        require(!unpack_archive_to_directory(archive.buffer, output.c_str()),
+                "0192: extraction accepted a symlinked output root");
+        require(!fs::exists(target / "payload.bin"),
+                "0192: extraction wrote through the output symlink");
+    }});
+    cases.push_back({"0154_join_output_path_backslashes","Output path joins normalize backslash separators",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(join_output_path("cache\\renders\\pages", "page.ppm", output),
+                "0154: output path join failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "cache/renders/pages/page.ppm",
+                "0154: backslash separators were not normalized");
+    }});
+    cases.push_back({"0155_join_output_path_allocation_failure","Output path join reports allocation failure",[](const fs::path&){
+        makocode::ByteBuffer output;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool joined = join_output_path("output", "payload.bin", output);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0155: selected output-path allocation did not fail");
+        require(!joined, "0155: path join succeeded after output allocation failed");
+    }});
+    cases.push_back({"0156_parent_path_allocation_failure","Parent path creation reports allocation failure",[](const fs::path&){
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool created = ensure_parent_directories("output/payload.bin");
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0156: selected parent-path allocation did not fail");
+        require(!created,
+                "0156: parent-path creation succeeded after allocation failed");
+    }});
+    cases.push_back({"0157_parent_path_empty_rejected","Empty file path is rejected by parent-directory preparation",[](const fs::path&){
+        require(!ensure_parent_directories(""),
+                "0157: empty file path was accepted");
+    }});
+    cases.push_back({"0158_directory_tree_allocation_failure","Directory tree creation reports allocation failure",[](const fs::path&){
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool created = ensure_directory_tree("output/subdirectory");
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0158: selected path allocation did not fail");
+        require(!created,
+                "0158: directory tree succeeded after allocation failed");
+    }});
+    cases.push_back({"0159_directory_tree_creation_failure","Directory tree creation reports a filesystem failure",[](const fs::path&){
+        const std::string id = "0159_directory_tree_creation_failure";
+        fs::path work = make_work_dir(id);
+        write_file(work / "blocked", "not a directory");
+        bool created = ensure_directory_tree((work / "blocked" / "child").c_str());
+        require(!created,
+                "0159: directory tree succeeded when a file blocked its path");
+    }});
+    cases.push_back({"0160_directory_creation_race","Directory tree accepts a directory created during mkdir",[](const fs::path&){
+        const std::string id = "0160_directory_creation_race";
+        fs::path work = make_work_dir(id);
+        fs::path raced_directory = work / "created_by_racer";
+        const char* prior_race_path = ::getenv("MAKOCODE_TEST_CREATE_DIR_RACE_PATH");
+        bool had_race_path = prior_race_path != 0;
+        std::string saved_race_path = had_race_path ? prior_race_path : "";
+        setenv("MAKOCODE_TEST_CREATE_DIR_RACE_PATH", raced_directory.c_str(), 1);
+        bool created = ensure_directory_tree(raced_directory.c_str());
+        if (had_race_path) setenv("MAKOCODE_TEST_CREATE_DIR_RACE_PATH", saved_race_path.c_str(), 1);
+        else unsetenv("MAKOCODE_TEST_CREATE_DIR_RACE_PATH");
+        require(created,
+                "0160: directory tree rejected a concurrently created directory");
+        require(fs::is_directory(raced_directory),
+                "0160: simulated concurrent directory was not created");
+    }});
+    cases.push_back({"0161_archive_file_size_usize_limit","Archive rejects a file size that exceeds the simulated usize limit",[](const fs::path&){
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bit(0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bits((u8)'f', 8u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 0x100000000ull),
+                "0161: malformed archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0161: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        u64 previous_limit = archive_parse_usize_max_override;
+        archive_parse_usize_max_override = 0xFFFFFFFFull;
+        bool parsed = archive_parse(archive, (ArchiveEntryCallback)0,
+                                    (void*)0, (u64*)0, true);
+        archive_parse_usize_max_override = previous_limit;
+        require(!parsed,
+                "0161: archive parser accepted a file size above the usize limit");
+    }});
+    cases.push_back({"0162_archive_partial_truncated_file_size","Partial archive parsing retains earlier entries when a file size is truncated",[](const fs::path&){
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 2u) &&
+                    archive_bits.write_bit(0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bits((u8)'a', 8u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bits((u8)'x', 8u) &&
+                    archive_bits.write_bit(0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bits((u8)'b', 8u) &&
+                    archive_bits.write_bits(4u, 3u),
+                "0162: truncated archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0162: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        require(archive_parse(archive, (ArchiveEntryCallback)0,
+                              (void*)0, (u64*)0, true),
+                "0162: partial parsing discarded a prior complete entry");
+        require(!archive_parse(archive, (ArchiveEntryCallback)0,
+                               (void*)0, (u64*)0, false),
+                "0162: strict parsing accepted a truncated file size");
+    }});
+    cases.push_back({"0163_archive_partial_truncated_path","Partial archive parsing retains earlier entries when a path is truncated",[](const fs::path&){
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 2u) &&
+                    archive_bits.write_bit(1u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bits((u8)'a', 8u) &&
+                    archive_bits.write_bit(0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 2u) &&
+                    archive_bits.write_bits((u8)'b', 8u),
+                "0163: truncated path archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0163: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        require(archive_parse(archive, (ArchiveEntryCallback)0,
+                              (void*)0, (u64*)0, true),
+                "0163: partial parsing discarded a prior complete entry");
+        require(!archive_parse(archive, (ArchiveEntryCallback)0,
+                               (void*)0, (u64*)0, false),
+                "0163: strict parsing accepted a truncated path");
+    }});
+    cases.push_back({"0164_archive_path_length_usize_limit","Archive rejects a path length above the simulated usize limit",[](const fs::path&){
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bit(1u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 2u) &&
+                    archive_bits.write_bits((u8)'o', 8u) &&
+                    archive_bits.write_bits((u8)'k', 8u),
+                "0164: archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0164: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        u64 previous_limit = archive_parse_usize_max_override;
+        archive_parse_usize_max_override = 1u;
+        bool parsed = archive_parse(archive, (ArchiveEntryCallback)0,
+                                    (void*)0, (u64*)0, false);
+        archive_parse_usize_max_override = previous_limit;
+        require(!parsed,
+                "0164: archive parser accepted a path above the usize limit");
+    }});
+    cases.push_back({"0165_archive_partial_raw_stream","Partial raw streams expose complete bytes despite a truncated final byte",[](const fs::path&){
+        const u8 contents[] = {0u, 'r', 'a', 0xFFu};
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 5u) &&
+                    archive_bits.write_bits(contents[0], 8u) &&
+                    archive_bits.write_bits(contents[1], 8u) &&
+                    archive_bits.write_bits(contents[2], 8u) &&
+                    archive_bits.write_bits(0xBu, 4u),
+                "0165: truncated raw archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0165: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        std::vector<u8> extracted;
+        auto callback = [](u8 entry_type, const char*, usize, const u8* data,
+                           usize length, u64, void* context) -> bool {
+            if (entry_type != 2u) return false;
+            std::vector<u8>* output = (std::vector<u8>*)context;
+            output->assign(data, data + length);
+            return true;
+        };
+        require(archive_parse(archive, callback, &extracted, (u64*)0, true),
+                "0165: partial raw archive parsing failed");
+        require(extracted.size() == 3u &&
+                    memcmp(extracted.data(), contents, extracted.size()) == 0,
+                "0165: partial raw archive did not expose its complete bytes");
+        extracted.clear();
+        require(!archive_parse(archive, callback, &extracted, (u64*)0, false),
+                "0165: strict raw archive parsing accepted truncated data");
+        require(extracted.empty(),
+                "0165: strict parsing invoked the raw-stream callback");
+    }});
+    cases.push_back({"0193_archive_partial_raw_stream_callback_failure","Partial raw stream parsing propagates callback failure",[](const fs::path&){
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 2u) &&
+                    archive_bits.write_bits((u8)'x', 8u),
+                "0193: truncated raw archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0193: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        bool callback_called = false;
+        auto callback = [](u8 entry_type, const char*, usize, const u8*,
+                           usize, u64, void* context) -> bool {
+            if (entry_type != 2u) return false;
+            *(bool*)context = true;
+            return false;
+        };
+        require(!archive_parse(archive, callback, &callback_called,
+                               (u64*)0, true),
+                "0193: partial raw archive ignored callback failure");
+        require(callback_called,
+                "0193: partial raw archive did not invoke its callback");
+    }});
+    cases.push_back({"0166_archive_raw_stream_usize_limit","Raw archive rejects a stream size above the simulated usize limit",[](const fs::path&){
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 0u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 0x100000000ull),
+                "0166: malformed raw archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0166: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        u64 previous_limit = archive_parse_usize_max_override;
+        archive_parse_usize_max_override = 0xFFFFFFFFull;
+        bool parsed = archive_parse(archive, (ArchiveEntryCallback)0,
+                                    (void*)0, (u64*)0, true);
+        archive_parse_usize_max_override = previous_limit;
+        require(!parsed,
+                "0166: raw archive accepted a stream size above the usize limit");
+    }});
+    cases.push_back({"0167_archive_rejects_dot_path","Archive extraction rejects a single-dot path segment",[](const fs::path&){
+        const std::string id = "0167_archive_rejects_dot_path";
+        fs::path work = make_work_dir(id);
+        fs::path output = work / "output";
+        fs::create_directories(output);
+        makocode::BitWriter archive_bits;
+        require(MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bit(1u) &&
+                    MetadataTile::write_compact_u64(archive_bits, 1u) &&
+                    archive_bits.write_bits((u8)'.', 8u),
+                "0167: malformed archive setup failed");
+        makocode::ByteBuffer archive;
+        require(archive.ensure(archive_bits.byte_size()),
+                "0167: archive buffer allocation failed");
+        archive.size = archive_bits.byte_size();
+        memcpy(archive.data, archive_bits.data(), archive.size);
+        require(!unpack_archive_to_directory(archive, output.c_str()),
+                "0167: extraction accepted a single-dot archive path");
+        require(fs::is_empty(output),
+                "0167: rejected dot path changed the extraction directory");
+    }});
+    cases.push_back({"0168_archive_path_rejects_backslash_and_nul","Archive paths reject backslashes and embedded NUL bytes",[](const fs::path&){
+        const std::string backslash_path = "a\\b";
+        const std::string nul_path("a\0b", 3u);
+        require(!is_safe_archive_path(backslash_path.data(), backslash_path.size()),
+                "0168: archive path accepted a backslash");
+        require(!is_safe_archive_path(nul_path.data(), nul_path.size()),
+                "0168: archive path accepted an embedded NUL");
+    }});
+    cases.push_back({"0169_archive_path_rejects_absolute","Archive paths reject absolute paths",[](const fs::path&){
+        const std::string absolute_path = "/tmp/archive.txt";
+        require(!is_safe_archive_path(absolute_path.data(), absolute_path.size()),
+                "0169: archive path accepted an absolute path");
+    }});
+    cases.push_back({"0170_archive_rejects_fifo_input","Archive collection rejects unsupported FIFO entries",[](const fs::path&){
+        const std::string id = "0170_archive_rejects_fifo_input";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        fs::path fifo = input / "stream.pipe";
+        require(::mkfifo(fifo.c_str(), 0600) == 0,
+                "0170: could not create FIFO input");
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0170: archive initialization failed");
+        require(!archive_collect_directory(input.c_str(), "input", archive),
+                "0170: archive collection accepted a FIFO input");
+    }});
+    cases.push_back({"0171_archive_collection_entry_count_overflow","Archive collection propagates entry-count overflow",[](const fs::path&){
+        const std::string id = "0171_archive_collection_entry_count_overflow";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        write_file(input / "payload.bin", "entry count boundary");
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0171: archive initialization failed");
+        archive.entry_count = U64_MAX_VALUE - 1u;
+        require(!archive_collect_directory(input.c_str(), "input", archive),
+                "0171: archive collection accepted an overflowing entry count");
+    }});
+    cases.push_back({"0172_archive_collection_read_failure","Archive collection rejects a regular file that cannot be opened",[](const fs::path&){
+        const std::string id = "0172_archive_collection_read_failure";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        fs::path unreadable = input / "unreadable.bin";
+        write_file(unreadable, "cannot read this payload");
+        const char* prior_failed_path = ::getenv("MAKOCODE_TEST_FAIL_OPEN_FILE");
+        bool had_failed_path = prior_failed_path != 0;
+        std::string saved_failed_path = had_failed_path ? prior_failed_path : "";
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0172: archive initialization failed");
+        setenv("MAKOCODE_TEST_FAIL_OPEN_FILE", unreadable.c_str(), 1);
+        bool collected = archive_collect_directory(input.c_str(), "input", archive);
+        if (had_failed_path) setenv("MAKOCODE_TEST_FAIL_OPEN_FILE", saved_failed_path.c_str(), 1);
+        else unsetenv("MAKOCODE_TEST_FAIL_OPEN_FILE");
+        require(!collected,
+                "0172: archive collection accepted a regular file that could not be opened");
+    }});
+    cases.push_back({"0173_archive_collect_nested_failure","Archive collection propagates nested-directory failures",[](const fs::path&){
+        const std::string id = "0173_archive_collect_nested_failure";
+        fs::path input = make_work_dir(id) / "input";
+        fs::path nested = input / "nested";
+        fs::create_directories(nested);
+        fs::path fifo = nested / "stream.pipe";
+        require(::mkfifo(fifo.c_str(), 0600) == 0,
+                "0173: could not create nested FIFO input");
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0173: archive initialization failed");
+        require(!archive_collect_directory(input.c_str(), "input", archive),
+                "0173: parent collection accepted a failed nested scan");
+    }});
+    cases.push_back({"0174_archive_collection_stat_failure","Archive collection rejects a dangling symlink entry",[](const fs::path&){
+        const std::string id = "0174_archive_collection_stat_failure";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        fs::path dangling = input / "dangling-link";
+        fs::create_symlink("missing-target", dangling);
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0174: archive initialization failed");
+        require(!archive_collect_directory(input.c_str(), "input", archive),
+                "0174: archive collection accepted a dangling symlink");
+    }});
+    cases.push_back({"0175_archive_collect_join_rel_alloc_failure","Archive collection propagates relative-path allocation failure",[](const fs::path&){
+        const std::string id = "0175_archive_collect_join_rel_alloc_failure";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        write_file(input / "payload.bin", "payload");
+        ArchiveBuildContext archive;
+        require(archive_init(archive) && archive.path_registry.ensure(128u) &&
+                    archive.entries.buffer.ensure(128u),
+                "0175: archive setup allocation failed");
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool collected = archive_collect_directory(input.c_str(), "input", archive);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0175: selected relative-path allocation did not fail");
+        require(!collected,
+                "0175: archive collection succeeded after relative-path allocation failed");
+        require(archive.path_registry.size == sizeof("input") &&
+                    memcmp(archive.path_registry.data, "input", sizeof("input")) == 0,
+                "0175: failed relative-path join registered a partial path");
+    }});
+    cases.push_back({"0176_archive_collect_join_fs_alloc_failure","Archive collection stops before stat after filesystem-path allocation failure",[](const fs::path&){
+        const std::string id = "0176_archive_collect_join_fs_alloc_failure";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        write_file(input / "payload.bin", "payload");
+        ArchiveBuildContext archive;
+        require(archive_init(archive) && archive.path_registry.ensure(128u) &&
+                    archive.entries.buffer.ensure(128u),
+                "0176: archive setup allocation failed");
+        int stderr_pipe[2];
+        require(::pipe(stderr_pipe) == 0, "0176: stderr pipe creation failed");
+        pid_t child = ::fork();
+        require(child >= 0, "0176: fork failed");
+        if (child == 0) {
+            ::close(stderr_pipe[0]);
+            if (::dup2(stderr_pipe[1], STDERR_FILENO) < 0) _exit(2);
+            ::close(stderr_pipe[1]);
+            minify_allocation_count = 0ul;
+            minify_allocation_failure_size = 0ul;
+            minify_allocation_failure_at = 1ul;
+            bool collected = archive_collect_directory(input.c_str(), "input", archive);
+            _exit(!collected && minify_allocation_failure_size != 0ul ? 0 : 1);
+        }
+        ::close(stderr_pipe[1]);
+        std::string diagnostic;
+        char buffer[256];
+        for (;;) {
+            ssize_t count = ::read(stderr_pipe[0], buffer, sizeof(buffer));
+            if (count <= 0) break;
+            diagnostic.append(buffer, static_cast<size_t>(count));
+        }
+        ::close(stderr_pipe[0]);
+        int status = 0;
+        require(::waitpid(child, &status, 0) == child,
+                "0176: child wait failed");
+        require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                "0176: filesystem-path allocation failure was not returned cleanly");
+        require(diagnostic.empty(),
+                "0176: allocation failure was misreported as a stat failure");
+    }});
+    cases.push_back({"0177_archive_collect_open_failure","Archive collection fails when the input directory cannot be opened",[](const fs::path&){
+        const std::string id = "0177_archive_collect_open_failure";
+        fs::path missing = make_work_dir(id) / "missing";
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0177: archive initialization failed");
+        require(!archive_collect_directory(missing.c_str(), "missing", archive),
+                "0177: archive collection accepted a nonexistent input directory");
+        require(archive.entry_count == 1u,
+                "0177: archive root entry was not registered before opening the input");
+    }});
+    cases.push_back({"0178_archive_collect_root_registration_failure","Archive collection stops when root registration fails",[](const fs::path&){
+        const std::string id = "0178_archive_collect_root_registration_failure";
+        fs::path input = make_work_dir(id) / "input";
+        fs::create_directories(input);
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0178: archive initialization failed");
+        archive.entry_count = U64_MAX_VALUE;
+        require(!archive_collect_directory(input.c_str(), "input", archive),
+                "0178: archive collection continued after root registration overflow");
+        require(archive.entry_count == U64_MAX_VALUE,
+                "0178: failed root registration changed the entry count");
+    }});
+    cases.push_back({"0179_join_fs_path_existing_separator","Filesystem path joins preserve an existing separator",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(join_fs_path("base/", "file", output),
+                "0179: slash-terminated path join failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "base/file",
+                "0179: slash-terminated base gained a duplicate separator");
+        require(join_fs_path("base\\", "file", output),
+                "0179: backslash-terminated path join failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "base\\file",
+                "0179: backslash-terminated base gained a separator");
+    }});
+    cases.push_back({"0180_join_rel_path_allocation_failure","Relative path join reports allocation failure",[](const fs::path&){
+        makocode::ByteBuffer output;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool joined = join_rel_path("base", "child", output);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0180: selected relative-path allocation did not fail");
+        require(!joined,
+                "0180: relative path join succeeded after allocation failure");
+    }});
+    cases.push_back({"0181_join_rel_path_empty_name","Relative path join rejects an empty name",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(!join_rel_path("base", "", output),
+                "0181: relative path join accepted an empty name");
+    }});
+    cases.push_back({"0182_join_rel_path_backslashes","Relative path joins normalize backslash separators",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(join_rel_path("directory", "nested\\file.txt", output),
+                "0182: relative path join failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "directory/nested/file.txt",
+                "0182: backslash separator was not normalized");
+    }});
+    cases.push_back({"0183_normalize_store_path_output_allocation_failure","Store path normalization reports output allocation failure",[](const fs::path&){
+        makocode::ByteBuffer output;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool normalized = normalize_store_path("folder/file", output);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0183: output-buffer allocation did not fail");
+        require(!normalized,
+                "0183: path normalization succeeded after output allocation failed");
+    }});
+    cases.push_back({"0184_normalize_store_path_root_rejected","Store path normalization rejects a filesystem root",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(!normalize_store_path("/", output),
+                "0184: filesystem root was accepted as a store basename");
+    }});
+    cases.push_back({"0185_normalize_store_path_current_directory","Store path normalization resolves the current directory basename",[](const fs::path&){
+        const std::string expected = fs::current_path().filename().string();
+        require(!expected.empty(),
+                "0185: current directory has no basename");
+        makocode::ByteBuffer output;
+        require(normalize_store_path(".", output),
+                "0185: current directory did not normalize");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    expected,
+                "0185: current directory normalized to the wrong basename");
+    }});
+    cases.push_back({"0187_normalize_store_path_component_limit","Store path normalization rejects too many components",[](const fs::path&){
+        std::string path;
+        for (usize i = 0u; i <= MAX_ARCHIVE_PATH_COMPONENTS; ++i) {
+            if (!path.empty()) path.push_back('/');
+            path.push_back('a');
+        }
+        makocode::ByteBuffer output;
+        require(!normalize_store_path(path.c_str(), output),
+                "0187: path above the component limit was accepted");
+    }});
+    cases.push_back({"0188_normalize_store_path_parent_component","Store path normalization resolves parent components",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(normalize_store_path("root/sub/../file", output),
+                "0188: path normalization failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "root/file",
+                "0188: parent component was not removed");
+    }});
+    cases.push_back({"0189_normalize_store_path_dot_component","Store path normalization removes dot components",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(normalize_store_path("folder/./file", output),
+                "0189: path normalization failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "folder/file",
+                "0189: dot component was not removed");
+    }});
+    cases.push_back({"0190_normalize_store_path_backslashes","Store path normalization maps backslashes to slashes",[](const fs::path&){
+        makocode::ByteBuffer output;
+        require(normalize_store_path("folder\\file.txt", output),
+                "0190: path normalization failed");
+        require(std::string(reinterpret_cast<const char*>(output.data), output.size) ==
+                    "folder/file.txt",
+                "0190: backslash separator was not normalized");
+    }});
+    cases.push_back({"0191_normalize_store_path_scratch_allocation_failure","Store path normalization reports scratch allocation failure",[](const fs::path&){
+        makocode::ByteBuffer output;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool normalized = normalize_store_path("folder/file.txt", output);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0191: selected scratch allocation did not fail");
+        require(!normalized,
+                "0191: path normalization succeeded after scratch allocation failed");
+    }});
+    cases.push_back({"0194_archive_add_file_duplicate_path","Archive files reject duplicate paths without changing entry count",[](const fs::path&){
+        const u8 contents[] = {'x'};
+        ArchiveBuildContext archive;
+        require(archive_init(archive), "0194: archive initialization failed");
+        require(archive_add_file(archive, "duplicate.txt", contents, sizeof(contents)),
+                "0194: initial archive file was rejected");
+        require(!archive_add_file(archive, "duplicate.txt", contents, sizeof(contents)),
+                "0194: duplicate archive path was accepted");
+        require(archive.entry_count == 1u,
+                "0194: duplicate path changed the archive entry count");
     }});
     cases.push_back({"0123_metadata_pages","Metadata tiles appear only on selected pages",[](const fs::path&){metadata_pages_case();}});
     cases.push_back({"0086_decoded_file","Decoded file retains metadata and archive bytes",[](const fs::path&){decoded_file_case();}});
@@ -5988,7 +6586,18 @@ int main(int argc, char** argv) {
                 startup_cases.push_back(&test);
             } else if (test.id == "0118_decode_partial_tag_scan" ||
                        test.id == "0144_metadata_page_layout_alloc_failure" ||
-                       test.id == "0145_metadata_fiducial_mask_alloc_failure") {
+                       test.id == "0145_metadata_fiducial_mask_alloc_failure" ||
+                       test.id == "0150_archive_parent_symlink_race" ||
+                       test.id == "0155_join_output_path_allocation_failure" ||
+                       test.id == "0156_parent_path_allocation_failure" ||
+                       test.id == "0158_directory_tree_allocation_failure" ||
+                       test.id == "0175_archive_collect_join_rel_alloc_failure" ||
+                       test.id == "0176_archive_collect_join_fs_alloc_failure" ||
+                       test.id == "0172_archive_collection_read_failure" ||
+                       test.id == "0180_join_rel_path_allocation_failure" ||
+                       test.id == "0183_normalize_store_path_output_allocation_failure" ||
+                       test.id == "0191_normalize_store_path_scratch_allocation_failure" ||
+                       test.id == "0160_directory_creation_race") {
                 isolated_cases.push_back(&test);
             } else {
                 parallel_cases.push_back(test);
