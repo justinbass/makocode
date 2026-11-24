@@ -276,8 +276,10 @@ struct ByteBuffer {
     }
 };
 
-struct SecretBuffer : ByteBuffer {
+struct SecretBuffer : ByteBuffer { // LCOV_EXCL_BR_LINE
     SecretBuffer() : ByteBuffer(true) {}
+    // Keep gcov's destructor location on an executable line, not the type declaration.
+    ~SecretBuffer() {} // LCOV_EXCL_BR_LINE
 };
 } // namespace makocode
 
@@ -1483,6 +1485,9 @@ struct PayloadRankMapCache {
           base_rank_map(),
           page_rank_map(),
           rank_to_pixel() {}
+
+    // Keep gcov's destructor location on an executable line, not the type declaration.
+    ~PayloadRankMapCache() {} // LCOV_EXCL_BR_LINE
 };
 } // namespace MetadataTile
 
@@ -2331,6 +2336,10 @@ void fiducial_select_color(const ImageMappingConfig& mapping,
                                   u8* fiducial_rgb);
 
 void console_write(int fd, const char* text);
+
+#ifdef MAKOCODE_TEST_BUILD
+extern thread_local bool makocode_test_quiet_stderr;
+#endif
 
 bool ensure_directory_tree(const char* path);
 

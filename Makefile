@@ -73,7 +73,7 @@ $(MAKOCODE_TEST_BIN): tests/makocode_test.cpp $(MAKOCODE_SOURCES) $(MAKOCODE_HEA
 
 test: $(MAKOCODE_BIN) $(MAKOCODE_TEST_BIN)
 	$(call test_status,run CLI test suite)
-	@"$(MAKOCODE_TEST_BIN)" --all
+	@"$(MAKOCODE_TEST_BIN)" --all --quiet
 
 coverage: clean
 	$(call test_status,check lcov)
@@ -85,9 +85,9 @@ coverage: clean
 	$(call test_status,prepare coverage output)
 	@mkdir -p "$(dir $(LCOV_REPORT))"
 	$(call test_status,capture coverage data)
-	@lcov --capture --no-external --directory "$(COVERAGE_DATA_DIR)" --base-directory "$(CURDIR)" --output-file "$(LCOV_REPORT)" $(LCOV_RC)
+	@lcov --capture --no-external --filter branch_region --directory "$(COVERAGE_DATA_DIR)" --base-directory "$(CURDIR)" --output-file "$(LCOV_REPORT)" $(LCOV_RC)
 	$(call test_status,generate coverage HTML)
-	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) --branch-coverage --ignore-errors inconsistent $(LCOV_RC)
+	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) --branch-coverage $(LCOV_RC)
 
 # Compile every translation unit without the host platform implementation.
 # A target integration supplies the makocode_platform_* definitions at link time.

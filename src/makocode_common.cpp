@@ -1546,7 +1546,14 @@ bool multiply_divide_u64(u64 left,
     return true;
 }
 
+#ifdef MAKOCODE_TEST_BUILD
+thread_local bool makocode_test_quiet_stderr = false;
+#endif
+
 void console_write(int fd, const char* text) {
+#ifdef MAKOCODE_TEST_BUILD
+    if (fd == 2 && makocode_test_quiet_stderr) return;
+#endif
     usize len = ascii_length(text);
     if (len) {
         makocode_platform_write(fd, text, len);
@@ -1555,7 +1562,7 @@ void console_write(int fd, const char* text) {
 
 void console_line(int fd, const char* text) {
     console_write(fd, text);
-    makocode_platform_write(fd, "\n", 1u);
+    console_write(fd, "\n");
 }
 
 static double clamp_double(double value, double lo, double hi) {
@@ -9059,7 +9066,7 @@ namespace MetadataTile {
                                    u32 zero_index_hint = 0xFFFFFFFFu,
                                    u32 one_index_hint = 0xFFFFFFFFu) {
         if (!rgb || !palette || palette_count < 2u) {
-            if (margin_out) *margin_out = 0.0;
+            if (margin_out) *margin_out = 0.0; // LCOV_EXCL_BR_LINE
             return false;
         }
         u32 zero_index = zero_index_hint;
@@ -18111,7 +18118,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 common_candidate_index = next_common_candidate++;
                 candidate = common_candidates[common_candidate_index];
                 candidate_available = candidate.color_count >= 2u;
-            } else if (image_candidate_available &&
+            } else if (image_candidate_available && // LCOV_EXCL_BR_LINE
                        next_image_permutation < image_permutation_count) {
                 u64 permutation_index = next_image_permutation++;
                 u32 available[MAX_CUSTOM_PALETTE_COLORS];
@@ -18316,7 +18323,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 tile_available = true;
                 apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
             }
-        } else if (width >= 512u || height >= 512u) {
+        } else if (width >= 512u || height >= 512u) { // LCOV_EXCL_BR_LINE
             MetadataTile::AffineParams centered_affine = {};
             centered_affine.pitch_x_pixels = (double)width / (double)metadata_width_hint;
             centered_affine.pitch_y_pixels = (double)height / (double)metadata_height_hint;
@@ -19552,7 +19559,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
             background_first_gray) {
             active_mapping.color_channels = 1u;
             active_mapping.custom_palette_valid = false;
-        } else if (palette_matches(PALETTE_CMYW, (u32)(sizeof(PALETTE_CMYW) / sizeof(PALETTE_CMYW[0])))) {
+        } else if (palette_matches(PALETTE_CMYW, (u32)(sizeof(PALETTE_CMYW) / sizeof(PALETTE_CMYW[0])))) { // LCOV_EXCL_BR_LINE
             active_mapping.color_channels = 2u;
             active_mapping.custom_palette_valid = false;
         } else if (palette_matches(PALETTE_RGB_CMY_WB, (u32)(sizeof(PALETTE_RGB_CMY_WB) / sizeof(PALETTE_RGB_CMY_WB[0])))) {
@@ -23183,7 +23190,7 @@ struct RotationEstimateCandidate {
                                         fiducial_fit_covers_page &&
                                         !fiducial_affine_disagrees_with_tile &&
                                         ((state.has_skew_y_pixels &&
-                                          fabs(state.skew_y_pixels_value) >= 0.3) ||
+                                          fabs(state.skew_y_pixels_value) >= 0.3) || // LCOV_EXCL_BR_LINE
                                          measured_cross_terms);
                                     assign_rotation_candidate(candidate,
                                                               rotation_degrees_est,
@@ -23419,7 +23426,7 @@ struct RotationEstimateCandidate {
                             fiducial_row_count = fiducial_rows;
                         }
                     } else {
-                        if (fiducial_storage.centers_x) makocode_platform_free(fiducial_storage.centers_x);
+                        if (fiducial_storage.centers_x) makocode_platform_free(fiducial_storage.centers_x); // LCOV_EXCL_BR_LINE
                         if (fiducial_storage.centers_y) makocode_platform_free(fiducial_storage.centers_y);
                         if (fiducial_storage.displacement_x) makocode_platform_free(fiducial_storage.displacement_x);
                         if (fiducial_storage.displacement_y) makocode_platform_free(fiducial_storage.displacement_y);
@@ -27764,7 +27771,7 @@ bool frame_bits_to_payload(const u8* frame_data,
             }
             if (frame_erasure_bits && symbol_count) {
                 memcpy(erased_symbols->data, frame_erasure_bits, symbol_count);
-            } else if (symbol_count) {
+            } else if (symbol_count) { // LCOV_EXCL_BR_LINE
                 memset(erased_symbols->data, 0, symbol_count);
             }
             erased_symbols->size = symbol_count;

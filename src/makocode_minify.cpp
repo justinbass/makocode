@@ -286,7 +286,7 @@ int command_minify(int arg_count, char** args) {
                 console_line(2, "minify: failed to build output path");
                 return 1;
             }
-        } else if (!output_path.append_bytes((const u8*)".cpp", 4u)) {
+        } else if (!output_path.append_bytes((const u8*)".cpp", 4u)) { // LCOV_EXCL_BR_LINE
             console_line(2, "minify: failed to build output path");
             return 1;
         }

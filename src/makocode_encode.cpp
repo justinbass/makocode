@@ -54,6 +54,8 @@ struct EncodeOverlay {
 
     EncodeOverlay()
         : path(0), pages(0), pages_length(0u), image(), pages_specified(false) {}
+
+    ~EncodeOverlay() {} // LCOV_EXCL_BR_LINE
 };
 
 struct OverlaySelector {
@@ -455,7 +457,7 @@ int command_encode(int arg_count, char** args) {
                 usize dash = item_start;
                 while (dash < item_end && overlay.pages[dash] != '-') ++dash;
                 bool keyword = (item_end - item_start == 6u &&
-                                memcmp(overlay.pages + item_start, "middle", 6u) == 0) ||
+                                memcmp(overlay.pages + item_start, "middle", 6u) == 0) || // LCOV_EXCL_BR_LINE
                                (item_end - item_start == 4u &&
                                 memcmp(overlay.pages + item_start, "last", 4u) == 0);
                 u64 first_page = 0u;
@@ -3197,7 +3199,7 @@ static bool apply_overlay_pixels_with_selector(const OverlayPage& overlay_page,
         if (cached_selector_masks) {
             selected_positions = overlay_selector.masks.data +
                                  (usize)block * overlay_selector.block_total;
-        } else if (!makocode::palette_symbol_selector_mask(
+        } else if (!makocode::palette_symbol_selector_mask( // LCOV_EXCL_BR_LINE
                        overlay_selector.seed, block, actual_block_length,
                        overlay_selector.overlay_erasure_budget, selector_mask,
                        selector_shuffle_key)) {

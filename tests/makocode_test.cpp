@@ -1723,7 +1723,9 @@ namespace fs = std::filesystem;
 namespace {
 
 struct Failure : std::runtime_error {
-    using std::runtime_error::runtime_error;
+    explicit Failure(const char* message) : std::runtime_error(message) {}
+    explicit Failure(const std::string& message) : std::runtime_error(message) {}
+    ~Failure() override {}
 };
 
 struct ProcessResult {
@@ -2652,7 +2654,19 @@ static void ppm_transform_cli_case() {
 
 static void cli_help_case() {
     const std::string id="0058_cli_help";fs::path work=make_work_dir(id);
-    struct HelpCheck{std::vector<std::string> args;const char* first;const char* second;};
+    struct HelpCheck {
+        std::vector<std::string> args;
+        const char* first;
+        const char* second;
+
+        HelpCheck(std::vector<std::string> args_value,
+                  const char* first_value,
+                  const char* second_value)
+            : args(args_value), first(first_value), second(second_value) {}
+        HelpCheck(const HelpCheck& other)
+            : args(other.args), first(other.first), second(other.second) {}
+        ~HelpCheck() {}
+    };
     std::vector<HelpCheck> help={{{},"Usage:","makocode encode [options]"},{{"--help"},"Usage:","makocode encode [options]"},{{"-h"},"Usage:","makocode encode [options]"},{{"encode","--help"},"Usage: makocode encode","--input PATH"},{{"decode","--help"},"Usage: makocode decode","stdin"},{{"checkpoint","--help"},"makocode checkpoint","checkpoint restore"},{{"overlay","--help"},"Usage:","makocode encode [options]"},{{"minify","--help"},"Usage: makocode minify","Strips comments/whitespace"}};
     for(size_t i=0;i<help.size();++i){auto result=run_cli(work,help[i].args,"help_"+std::to_string(i));require(result.status==0,id+": help command failed");std::string all=result.out+result.err;require(all.find(help[i].first)!=std::string::npos&&all.find(help[i].second)!=std::string::npos,id+": missing expected help text");require(all.find("--debug")==std::string::npos,id+": removed option remains in help text");}
     auto unknown_command=run_cli(work,{"unknown-command"},"unknown_command");
@@ -2734,7 +2748,12 @@ static void prefix_ends_encoded_case(){
 static void metadata_pages_case(){
     const std::string id="0123_metadata_pages";fs::path work=make_work_dir(id);fs::path payload=work/"payload.bin";
     unsigned seed=case_seed("metadata_pages/payload");generate_bytes(work,payload,3000,seed,"payload");std::string payload_bytes=read_file(payload);
-    struct Selection{const char* name;const char* selector;std::vector<int> pages;};
+    struct Selection {
+        const char* name;
+        const char* selector;
+        std::vector<int> pages;
+        ~Selection() {}
+    };
     const Selection selections[]={{"middle","middle",{2}},{"one","1",{1}},{"range","2-3",{2,3}},{"list","1,3",{1,3}},{"last","last",{3}}};
     for(const auto& selection:selections){
         fs::path out=work/(std::string(selection.name)+"_pages");fs::create_directories(out);
@@ -2983,7 +3002,36 @@ static void hidden_volumes_case(){
     expect_success(run_transform(work,{"overlay-mask","--output",overlay.string(),"--circle-color","0 0 0","--background-color","255 255 255","--width","1000","--height","1000"},"overlay"),id+" overlay");
     expect_success(run_transform(work,{"overlay-mask","--output",bad_overlay.string(),"--circle-color","0 0 0","--background-color","255 255 255","--width","800","--height","1000"},"bad_overlay"),id+" wrong overlay");
     auto random_for=[&](const std::string& key){std::ostringstream out;for(int i=0;i<7;++i){char chunk[16];std::snprintf(chunk,sizeof(chunk),"%08x",fixture_seed("crypto/"+id+"/"+key+"/"+std::to_string(i)));out<<chunk;}return out.str();};
-    struct Success {const char* name;int pages;const char* visible_password;const char* hidden_password;bool hidden_capable;bool random_fill;std::vector<std::string> options;bool marker_free=false;};
+    struct Success {
+        const char* name;
+        int pages;
+        const char* visible_password;
+        const char* hidden_password;
+        bool hidden_capable;
+        bool random_fill;
+        std::vector<std::string> options;
+        bool marker_free = false;
+
+        Success(const char* name_value, int pages_value,
+                const char* visible_password_value,
+                const char* hidden_password_value, bool hidden_capable_value,
+                bool random_fill_value, std::vector<std::string> options_value,
+                bool marker_free_value = false)
+            : name(name_value), pages(pages_value),
+              visible_password(visible_password_value),
+              hidden_password(hidden_password_value),
+              hidden_capable(hidden_capable_value),
+              random_fill(random_fill_value), options(options_value),
+              marker_free(marker_free_value) {}
+        Success(const Success& other)
+            : name(other.name), pages(other.pages),
+              visible_password(other.visible_password),
+              hidden_password(other.hidden_password),
+              hidden_capable(other.hidden_capable),
+              random_fill(other.random_fill), options(other.options),
+              marker_free(other.marker_free) {}
+        ~Success() {}
+    };
     const std::vector<Success> scenarios={
         {"visible_default",1,"","",false,false,{}},{"visible_hidden_zero",1,"","",false,false,{"--hidden=0","--ecc=0.5"}},
         {"visible_password_hidden_zero",1,"visible test password","",false,false,{"--hidden=0"}},
@@ -3043,7 +3091,18 @@ static void hidden_volumes_case(){
             require(!fs::exists(hidden_out/"visible.bin")&&!fs::exists(hidden_out/"hidden_tree"),id+" filler-only output "+name);
         }
     }
-    struct Reject {const char* name;const char* message;std::vector<std::string> args;};
+    struct Reject {
+        const char* name;
+        const char* message;
+        std::vector<std::string> args;
+
+        Reject(const char* name_value, const char* message_value,
+               std::vector<std::string> args_value)
+            : name(name_value), message(message_value), args(args_value) {}
+        Reject(const Reject& other)
+            : name(other.name), message(other.message), args(other.args) {}
+        ~Reject() {}
+    };
     const std::string visible_password="visible test password",hidden_password="hidden test password";
     std::vector<Reject> rejects={
         {"hidden_fill_ecc_fill","--hidden fill and --ecc fill compete",{"--hidden=fill","--ecc=fill","--password-cli="+visible_password}},
@@ -4108,7 +4167,16 @@ static void canonical_overlay_multipage_case(){
     auto dec=run_cli(work,decode_file_args(pages,work/"decoded"),"decode");expect_success(dec,id+" decode");compare_files(payload,work/"decoded/payload.bin",id);
 }
 
-struct BlobDecodeResult{bool parsed=false,partial=false;u64 unrecoverable=0,erased=0;u32 failed_errors=0,failed_erasures=0;};
+struct BlobDecodeResult {
+    bool parsed = false;
+    bool partial = false;
+    u64 unrecoverable = 0;
+    u64 erased = 0;
+    u32 failed_errors = 0;
+    u32 failed_erasures = 0;
+
+    BlobDecodeResult() {}
+};
 
 static bool test_uniform_region_detector(){
     const u32 width=100,height=100;usize count=static_cast<usize>(width)*height;makocode::ByteBuffer symbols,ranks;if(!symbols.ensure(count)||!ranks.ensure(count*sizeof(u64)))return false;symbols.size=count;ranks.size=count*sizeof(u64);u64* rank=reinterpret_cast<u64*>(ranks.data);u32 state=0xA341316Cu;
@@ -7890,6 +7958,21 @@ static int jobs_from_makeflags() {
     return jobs;
 }
 
+class ScopedTestQuietDiagnostics {
+public:
+    explicit ScopedTestQuietDiagnostics(bool quiet)
+        : previous_(makocode_test_quiet_stderr) {
+        makocode_test_quiet_stderr = quiet || previous_;
+    }
+
+    ~ScopedTestQuietDiagnostics() {
+        makocode_test_quiet_stderr = previous_;
+    }
+
+private:
+    bool previous_;
+};
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -7942,14 +8025,16 @@ int main(int argc, char** argv) {
         std::cerr << "Unable to locate repository root from " << test_executable() << '\n';
         return 2;
     }
+    bool quiet = argc > 1 && std::strcmp(argv[argc - 1], "--quiet") == 0;
+    int command_argc = quiet ? argc - 1 : argc;
     std::vector<TestCase> cases = build_cases();
-    if (argc == 2 && std::strcmp(argv[1], "--list") == 0) {
+    if (command_argc == 2 && std::strcmp(argv[1], "--list") == 0) {
         for (const auto& test : cases) std::cout << test.id << '\n';
         return 0;
     }
-    if (!(argc == 2 && std::strcmp(argv[1], "--all") == 0) &&
-        !(argc == 3 && std::strcmp(argv[1], "--case") == 0)) {
-        std::cerr << "Usage: makocode_test --list | --case ID | --all\n";
+    if (!(command_argc == 2 && std::strcmp(argv[1], "--all") == 0) &&
+        !(command_argc == 3 && std::strcmp(argv[1], "--case") == 0)) {
+        std::cerr << "Usage: makocode_test --list | --case ID [--quiet] | --all [--quiet]\n";
         return 2;
     }
     bool stdout_color = isatty(STDOUT_FILENO) != 0;
@@ -7966,13 +8051,13 @@ int main(int argc, char** argv) {
         seed_file << master_seed << '\n';
     }
     std::cout << test_label << "Test seed: " << master_seed << "\n";
-    if (argc == 3 && std::strcmp(argv[1], "--case") == 0) {
+    if (command_argc == 3 && std::strcmp(argv[1], "--case") == 0) {
         auto found = std::find_if(cases.begin(), cases.end(), [&](const TestCase& test) { return test.id == std::string(argv[2]); });
         if (found == cases.end()) { std::cerr << "unknown test case: " << argv[2] << '\n'; return 2; }
-        try { found->run(output_root()); std::cout << pass_label << found->id << '\n'; return 0; }
+        try { ScopedTestQuietDiagnostics quiet_scope(quiet); found->run(output_root()); std::cout << pass_label << found->id << '\n'; return 0; }
         catch (const std::exception& error) { std::cerr << fail_label << found->id << ": " << error.what() << '\n'; return 1; }
     }
-    if (argc == 2 && std::strcmp(argv[1], "--all") == 0) {
+    if (command_argc == 2 && std::strcmp(argv[1], "--all") == 0) {
         std::vector<TestCase> parallel_cases;
         std::vector<const TestCase*> startup_cases;
         std::vector<const TestCase*> isolated_cases;
@@ -8017,9 +8102,9 @@ int main(int argc, char** argv) {
         // starts without memory retained by earlier image stress cases.
         for (const TestCase* startup_case : startup_cases) {
             try {
-                startup_case->run(output_root());
+                { ScopedTestQuietDiagnostics quiet_scope(quiet); startup_case->run(output_root()); }
                 std::cout << pass_label << startup_case->id << "\n";
-            } catch (const std::exception& error) {
+            } catch (const std::exception& error) { // LCOV_EXCL_BR_LINE
                 ++failed;
                 std::cerr << fail_label << startup_case->id << ": "
                           << error.what() << "\n";
@@ -8034,9 +8119,9 @@ int main(int argc, char** argv) {
                 if (index >= parallel_cases.size()) break;
                 const auto& test = parallel_cases[index];
                 try {
-                    test.run(output_root());
+                    { ScopedTestQuietDiagnostics quiet_scope(quiet); test.run(output_root()); }
                     std::lock_guard<std::mutex> lock(output_mutex); std::cout << pass_label << test.id << "\n";
-                } catch (const std::exception& error) {
+                } catch (const std::exception& error) { // LCOV_EXCL_BR_LINE
                     failed.fetch_add(1);
                     std::lock_guard<std::mutex> lock(output_mutex); std::cerr << fail_label << test.id << ": " << error.what() << "\n";
                 }
@@ -8047,9 +8132,9 @@ int main(int argc, char** argv) {
         // memory pressure while other image tests run in parallel.
         for (const TestCase* isolated_case : isolated_cases) {
             try {
-                isolated_case->run(output_root());
+                { ScopedTestQuietDiagnostics quiet_scope(quiet); isolated_case->run(output_root()); }
                 std::cout << pass_label << isolated_case->id << "\n";
-            } catch (const std::exception& error) {
+            } catch (const std::exception& error) { // LCOV_EXCL_BR_LINE
                 ++failed;
                 std::cerr << fail_label << isolated_case->id << ": "
                           << error.what() << "\n";
