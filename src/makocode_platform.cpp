@@ -133,7 +133,20 @@ extern "C" int makocode_platform_is_symlink(const char* path) {
 }
 
 extern "C" int makocode_platform_create_directory(const char* path) {
-    if (::mkdir(path, 0700) == 0) return 0;
+    int result = ::mkdir(path, 0700);
+#ifdef MAKOCODE_TEST_BUILD
+    if (result == 0 && path) {
+        const char* swap_path = ::getenv("MAKOCODE_TEST_SWAP_DIR_PATH");
+        const char* backup_path = ::getenv("MAKOCODE_TEST_SWAP_DIR_BACKUP");
+        const char* target_path = ::getenv("MAKOCODE_TEST_SWAP_DIR_TARGET");
+        if (swap_path && backup_path && target_path && ::strcmp(path, swap_path) == 0) {
+            if (::rename(swap_path, backup_path) == 0) {
+                ::symlink(target_path, swap_path);
+            }
+        }
+    }
+#endif
+    if (result == 0) return 0;
     return errno == EEXIST ? 1 : -1;
 }
 

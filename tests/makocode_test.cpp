@@ -5514,6 +5514,244 @@ static std::vector<TestCase> build_cases() {
     cases.push_back({"0069_decode_raw_fallback","Raw decode fallback is gated and writes recovered bytes",[](const fs::path&){raw_fallback_case();}});
     cases.push_back({"0062_prefix_ends_encoded","Prefix ending in _encoded keeps its filename and fiducials",[](const fs::path&){prefix_ends_encoded_case();}});
     cases.push_back({"0065_page_fit","Automatic page width and height fit independently",[](const fs::path&){page_fit_case();}});
+    cases.push_back({"0137_ecc_fill_fit_limit","ECC fill search backs off when a parity candidate cannot fit",[](const fs::path&){
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        double ratio = -1.0, requested_ratio = -1.0;
+        u16 block_data = 0u, parity = 0u;
+        u64 frame_bits = 0u, bits_needed = 0u, page_count = 0u;
+        require(find_best_ecc_fill(4096u, 0.01, 254.0, mapping, footer,
+                                   0u, 80u, true, false, 0.0, 0.0, 2u, false,
+                                   ratio, requested_ratio, block_data, parity,
+                                   frame_bits, bits_needed, page_count, 0u, 1u),
+                "0137: ECC fill did not find a feasible one-page candidate");
+        require(parity > 200u && page_count == 1u,
+                "0137: ECC fill did not retain the strongest parity candidate that fits");
+    }});
+    cases.push_back({"0138_ecc_fill_low_start_recovery","ECC fill recovers from an infeasible minimum ratio",[](const fs::path&){
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        double ratio = -1.0, requested_ratio = -1.0;
+        u16 block_data = 0u, parity = 0u;
+        u64 frame_bits = 0u, bits_needed = 0u, page_count = 0u;
+        require(find_best_ecc_fill(256u, 0.001, 254.0, mapping, footer,
+                                   0u, 80u, true, false, 0.0, 0.0, 2u, false,
+                                   ratio, requested_ratio, block_data, parity,
+                                   frame_bits, bits_needed, page_count, 0u, 1u),
+                "0138: ECC fill failed after the minimum ratio proved infeasible");
+        require(ratio > 0.0 && ratio < 0.02 && parity == 4u && page_count == 1u,
+                "0138: ECC fill did not retain the lowest feasible redundancy");
+    }});
+    cases.push_back({"0141_ecc_fill_zero_minimum","Zero ECC minimum starts at one symbol per payload byte",[](const fs::path&){
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        double zero_ratio = -1.0, zero_requested_ratio = -1.0;
+        u16 zero_block_data = 0u, zero_parity = 0u;
+        u64 zero_frame_bits = 0u, zero_bits_needed = 0u, zero_page_count = 0u;
+        double expected_ratio = -1.0, expected_requested_ratio = -1.0;
+        u16 expected_block_data = 0u, expected_parity = 0u;
+        u64 expected_frame_bits = 0u, expected_bits_needed = 0u, expected_page_count = 0u;
+        require(find_best_ecc_fill(256u, 0.0, 254.0, mapping, footer,
+                                   0u, 80u, true, false, 0.0, 0.0, 2u, false,
+                                   zero_ratio, zero_requested_ratio, zero_block_data, zero_parity,
+                                   zero_frame_bits, zero_bits_needed, zero_page_count, 0u, 1u),
+                "0141: ECC fill rejected a zero minimum ratio");
+        require(find_best_ecc_fill(256u, 1.0 / 256.0, 254.0, mapping, footer,
+                                   0u, 80u, true, false, 0.0, 0.0, 2u, false,
+                                   expected_ratio, expected_requested_ratio,
+                                   expected_block_data, expected_parity,
+                                   expected_frame_bits, expected_bits_needed,
+                                   expected_page_count, 0u, 1u),
+                "0141: ECC fill rejected its derived minimum ratio");
+        require(zero_ratio == expected_ratio &&
+                    zero_requested_ratio == expected_requested_ratio &&
+                    zero_block_data == expected_block_data && zero_parity == expected_parity &&
+                    zero_frame_bits == expected_frame_bits &&
+                    zero_bits_needed == expected_bits_needed &&
+                    zero_page_count == expected_page_count,
+                "0141: zero minimum ratio did not use the one-symbol payload minimum");
+    }});
+    cases.push_back({"0142_empty_frame_page_layout","Empty frame layout still contains one page",[](const fs::path&){
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        FooterLayout layout;
+        u32 data_height = 0u;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer, 0u, 500u, 500u,
+                                    layout, data_height, bits_per_page, page_count,
+                                    0, 0.0, 0u, 0u),
+                "0142: empty frame layout failed");
+        require(page_count == 1u && bits_per_page > 0u,
+                "0142: empty frame layout lost its minimum page");
+    }});
+    cases.push_back({"0143_page_layout_insufficient_capacity","Page layout rejects space smaller than one data symbol",[](const fs::path&){
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        FooterLayout layout;
+        u32 data_height = 0u;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(!compute_page_layout(mapping, footer, 1u, 7u, 1u,
+                                     layout, data_height, bits_per_page, page_count,
+                                     0, 0.0, 0u, 0u),
+                "0143: page layout accepted a page without one data symbol of capacity");
+    }});
+    cases.push_back({"0144_metadata_page_layout_alloc_failure","Metadata page layout fails when a later metadata tile allocation fails",[](const fs::path&){
+        makocode::PaletteSymbolProfile profile;
+        require(makocode::palette_symbol_profile(2u, profile), "0144: profile failed");
+        std::vector<u8> bytes(4096u, 0x5Au);
+        makocode::ByteBuffer stream;
+        makocode::EccSummary summary;
+        require(makocode::palette_symbol_encode_stream(profile, bytes.data(), bytes.size(),
+                                                        0.05, 0u, 0u, 0, 0u,
+                                                        stream, summary), "0144: encode failed");
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        FooterLayout layout;
+        u32 data_height = 0u;
+        u64 bits_per_page = 0u, page_count = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 25ul;
+        bool ok = compute_page_layout(mapping, footer, (u64)stream.size * 8u,
+                                      80u, 80u, layout, data_height, bits_per_page,
+                                      page_count, &summary, 0.0,
+                                      summary.unknown_error_budget,
+                                      summary.overlay_erasure_budget);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0144: selected allocation did not fail while building a later metadata tile");
+        require(!ok, "0144: page layout succeeded after a later metadata tile allocation failed");
+    }});
+    cases.push_back({"0145_metadata_fiducial_mask_alloc_failure","Metadata page layout fails when fiducial mask allocation fails",[](const fs::path&){
+        makocode::PaletteSymbolProfile profile;
+        require(makocode::palette_symbol_profile(2u, profile), "0145: profile failed");
+        std::vector<u8> bytes(256u, 0x5Au);
+        makocode::ByteBuffer stream;
+        makocode::EccSummary summary;
+        require(makocode::palette_symbol_encode_stream(profile, bytes.data(), bytes.size(),
+                                                        0.05, 0u, 0u, 0, 0u,
+                                                        stream, summary), "0145: encode failed");
+        ImageMappingConfig mapping;
+        PageFooterConfig footer;
+        FooterLayout layout;
+        u32 data_height = 0u;
+        u64 bits_per_page = 0u, page_count = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool ok = compute_page_layout(mapping, footer, (u64)stream.size * 8u,
+                                      80u, 80u, layout, data_height, bits_per_page,
+                                      page_count, &summary, 0.0,
+                                      summary.unknown_error_budget,
+                                      summary.overlay_erasure_budget);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size != 0ul,
+                "0145: selected allocation did not fail while building the fiducial mask");
+        require(!ok, "0145: page layout succeeded after fiducial mask allocation failed");
+    }});
+    cases.push_back({"0146_footer_invalid_range_end","Malformed footer ranges do not select a page",[](const fs::path&){
+        PageFooterConfig footer;
+        footer.text = "footer";
+        footer.text_length = 6u;
+        footer.pages = "1-bad";
+        footer.pages_length = 5u;
+        makocode::ByteBuffer text;
+        require(footer_build_page_text(footer, 1u, 2u, text),
+                "0146: malformed page range failed text construction");
+        require(text.size == 0u,
+                "0146: malformed range end incorrectly selected a footer page");
+        text.release();
+    }});
+    cases.push_back({"0147_footer_last_page_selector","Footer last selector includes the final page",[](const fs::path&){
+        PageFooterConfig footer;
+        footer.text = "last";
+        footer.text_length = 4u;
+        footer.pages = "last";
+        footer.pages_length = 4u;
+        makocode::ByteBuffer text;
+        require(footer_build_page_text(footer, 3u, 3u, text),
+                "0147: final-page footer text construction failed");
+        require(text.size == 4u && std::memcmp(text.data, "last", 4u) == 0,
+                "0147: last selector omitted the final page footer");
+        text.release();
+    }});
+    cases.push_back({"0148_footer_rejects_control_characters","Footer text rejects control characters",[](const fs::path&){
+        require(footer_char_is_allowed('A'), "0148: printable footer character was rejected");
+        require(!footer_char_is_allowed('\n'), "0148: newline was allowed in footer text");
+        require(!footer_char_is_allowed('\x7f'), "0148: DEL was allowed in footer text");
+    }});
+    cases.push_back({"0149_archive_file_write_failure","Archive extraction reports a file write failure",[](const fs::path&){
+        const std::string id = "0149_archive_file_write_failure";
+        fs::path work = make_work_dir(id);
+        fs::path output = work / "output";
+        fs::create_directories(output / "blocked.txt");
+        const u8 contents[] = {'x'};
+        ArchiveBuildContext archive;
+        require(archive_init(archive) && archive_add_file(archive, "blocked.txt", contents,
+                                                         sizeof(contents)) && archive_finalize(archive),
+                "0149: archive setup failed");
+        require(!unpack_archive_to_directory(archive.buffer, output.c_str()),
+                "0149: extraction succeeded when the target path was a directory");
+    }});
+    cases.push_back({"0150_archive_parent_symlink_race","Archive extraction rejects a parent directory replaced by a symlink",[](const fs::path&){
+        const std::string id = "0150_archive_parent_symlink_race";
+        fs::path work = make_work_dir(id), output = work / "output", outside = work / "outside";
+        fs::create_directories(output);
+        fs::create_directories(outside);
+        fs::path race_dir = output / "race", moved_dir = work / "original_race";
+        const u8 contents[] = {'x'};
+        ArchiveBuildContext archive;
+        require(archive_init(archive) &&
+                    archive_add_file(archive, "race/payload.txt", contents, sizeof(contents)) &&
+                    archive_finalize(archive),
+                "0150: archive setup failed");
+        setenv("MAKOCODE_TEST_SWAP_DIR_PATH", race_dir.c_str(), 1);
+        setenv("MAKOCODE_TEST_SWAP_DIR_BACKUP", moved_dir.c_str(), 1);
+        setenv("MAKOCODE_TEST_SWAP_DIR_TARGET", outside.c_str(), 1);
+        bool extracted = unpack_archive_to_directory(archive.buffer, output.c_str());
+        unsetenv("MAKOCODE_TEST_SWAP_DIR_PATH");
+        unsetenv("MAKOCODE_TEST_SWAP_DIR_BACKUP");
+        unsetenv("MAKOCODE_TEST_SWAP_DIR_TARGET");
+        require(fs::is_symlink(race_dir) && fs::is_directory(moved_dir),
+                "0150: parent directory was not replaced by the test symlink hook");
+        require(!extracted, "0150: extraction accepted a parent replaced by a symlink");
+        require(!fs::exists(outside / "payload.txt"),
+                "0150: extraction wrote through the replaced parent symlink");
+    }});
+    cases.push_back({"0151_archive_parent_creation_failure","Archive extraction fails when a file blocks parent directory creation",[](const fs::path&){
+        const std::string id = "0151_archive_parent_creation_failure";
+        fs::path work = make_work_dir(id);
+        fs::path output = work / "output";
+        fs::create_directories(output);
+        write_file(output / "blocked", "not a directory");
+        const u8 contents[] = {'x'};
+        ArchiveBuildContext archive;
+        require(archive_init(archive) &&
+                    archive_add_file(archive, "blocked/payload.txt", contents, sizeof(contents)) &&
+                    archive_finalize(archive),
+                "0151: archive setup failed");
+        require(!unpack_archive_to_directory(archive.buffer, output.c_str()),
+                "0151: extraction continued after parent directory creation failed");
+        require(read_file(output / "blocked") == "not a directory",
+                "0151: extraction changed the blocking file");
+    }});
+    cases.push_back({"0152_archive_directory_creation_failure","Archive extraction fails when a file blocks directory creation",[](const fs::path&){
+        const std::string id = "0152_archive_directory_creation_failure";
+        fs::path work = make_work_dir(id);
+        fs::path output = work / "output";
+        fs::create_directories(output);
+        write_file(output / "blocked", "not a directory");
+        ArchiveBuildContext archive;
+        require(archive_init(archive) && archive_add_directory(archive, "blocked") &&
+                    archive_finalize(archive),
+                "0152: archive setup failed");
+        require(!unpack_archive_to_directory(archive.buffer, output.c_str()),
+                "0152: extraction continued after directory creation failed");
+        require(read_file(output / "blocked") == "not a directory",
+                "0152: extraction changed the blocking file");
+    }});
     cases.push_back({"0123_metadata_pages","Metadata tiles appear only on selected pages",[](const fs::path&){metadata_pages_case();}});
     cases.push_back({"0086_decoded_file","Decoded file retains metadata and archive bytes",[](const fs::path&){decoded_file_case();}});
     cases.push_back({"0072_decode_scale_318","Decode a 160x160 page rendered at 3.18 pixels per module",[](const fs::path&){decode_scale_318_case();}});
@@ -5748,7 +5986,9 @@ int main(int argc, char** argv) {
         for (const auto& test : cases) {
             if (test.id == "0123_metadata_pages") {
                 startup_cases.push_back(&test);
-            } else if (test.id == "0118_decode_partial_tag_scan") {
+            } else if (test.id == "0118_decode_partial_tag_scan" ||
+                       test.id == "0144_metadata_page_layout_alloc_failure" ||
+                       test.id == "0145_metadata_fiducial_mask_alloc_failure") {
                 isolated_cases.push_back(&test);
             } else {
                 parallel_cases.push_back(test);

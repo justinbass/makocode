@@ -30700,8 +30700,6 @@ bool footer_char_is_allowed(char c) {
         case '\\':
         case '_':
             return true;
-        default:
-            break;
     }
     return false;
 }
@@ -30894,8 +30892,6 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
                 values.metadata_length_prefix_bits = 0u;
                 values.metadata_symbol_count = 0u;
             } else {
-                if (!active_mask.data || active_mask.size !=
-                    (usize)MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE) return false;
                 u64 fiducial_reserved_pixels = reserved_data_pixels;
                 u64 max_reserved_pixels = fiducial_reserved_pixels;
                 u64 pages_to_measure = page_count ? page_count : 1u;
@@ -30917,8 +30913,6 @@ bool compute_page_layout(const ImageMappingConfig& mapping,
                                                   active_mask,
                                                   tile_light,
                                                   tile_dark)) return false;
-                    if (!active_mask.data || active_mask.size !=
-                        (usize)MetadataTile::TILE_SIDE * MetadataTile::TILE_SIDE) return false;
                     u64 page_reserved_pixels = fiducial_reserved_pixels;
                     for (u32 tile_y = 0u; tile_y < MetadataTile::TILE_SIDE; ++tile_y) {
                         for (u32 tile_x = 0u; tile_x < MetadataTile::TILE_SIDE; ++tile_x) {
@@ -31324,9 +31318,7 @@ bool find_best_ecc_fill(usize payload_bytes,
         u32 parity = 0u;
         if (!makocode::palette_symbol_parity_for_redundancy(fill_profile,
                                                              redundancy,
-                                                             parity, 2u) ||
-            parity >= sizeof(parity_candidate_state) /
-                          sizeof(parity_candidate_state[0])) return false;
+                                                             parity, 2u)) return false;
         if (parity_candidate_state[parity]) {
             if (parity_candidate_state[parity] != 1u) return false;
             out_candidate = parity_candidates[parity];
@@ -31367,35 +31359,26 @@ bool find_best_ecc_fill(usize payload_bytes,
         EccFillCandidate local;
         if (!evaluate_cached_candidate(redundancy, local)) return false;
         u64 bits_remaining = final_page_slack(local);
-        if (best_ratio < 0.0 ||
-            local.page_count < best_page_count ||
-            (local.page_count == best_page_count && bits_remaining < best_bits_needed) ||
-            (local.page_count == best_page_count && bits_remaining == best_bits_needed && local.ratio < best_ratio)) {
-            best_ratio = local.ratio;
-            best_requested_ratio = local.requested_ratio;
-            best_block_data = local.block_data;
-            best_parity = local.parity;
-            best_frame_bits = local.frame_bits;
-            best_bits_needed = bits_remaining;
-            best_page_count = local.page_count;
-        }
+        best_ratio = local.ratio;
+        best_requested_ratio = local.requested_ratio;
+        best_block_data = local.block_data;
+        best_parity = local.parity;
+        best_frame_bits = local.frame_bits;
+        best_bits_needed = bits_remaining;
+        best_page_count = local.page_count;
         candidate = local;
         return true;
     };
     if (!try_candidate(search_low)) {
-        bool found_feasible_start = false;
-        for (u32 increase = 0u; increase < 32u; ++increase) {
+        for (u32 increase = 0u; increase < 32u && search_low != search_high; ++increase) {
             double next_ratio = search_low * 2.0;
             if (next_ratio <= search_low) next_ratio = search_low + 0.01;
             if (next_ratio > search_high) next_ratio = search_high;
             search_low = next_ratio;
             if (try_candidate(search_low)) {
-                found_feasible_start = true;
                 break;
             }
-            if (search_low >= search_high) break;
         }
-        if (!found_feasible_start) return false;
     }
     for (u32 iteration = 0u; iteration < 64u; ++iteration) {
         double mid = (search_low + search_high) * 0.5;
