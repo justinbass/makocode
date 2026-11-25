@@ -2132,6 +2132,56 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    u64 page_capacity_override = 0u,
                                    makocode::PaletteSymbolPageSalt* page_salt_out = 0);
 
+void skew_rotate_sample_coordinates(double sample_col,
+                                    double sample_row,
+                                    u64 source_width,
+                                    double skew_pixels,
+                                    double rotation_center_x,
+                                    double rotation_center_y,
+                                    double rotation_cos,
+                                    double rotation_sin,
+                                    double rotation_offset_x,
+                                    double rotation_offset_y,
+                                    double& output_x,
+                                    double& output_y);
+
+void rotate_sample_coordinates(double sample_x,
+                               double sample_y,
+                               double center_x,
+                               double center_y,
+                               double rotation_cos,
+                               double rotation_sin,
+                               double offset_x,
+                               double offset_y,
+                               double& output_x,
+                               double& output_y);
+
+bool rotation_sampling_dimensions_valid(unsigned rotation_width,
+                                        unsigned rotation_height,
+                                        unsigned raster_width,
+                                        unsigned raster_height);
+
+double skew_raster_row_offset(double sample_col,
+                               u64 source_width,
+                               double skew_pixels);
+
+bool sample_nearest_rgb(const u8* pixels,
+                        u64 pixel_stride,
+                        u64 width,
+                        u64 height,
+                        u64 pixel_count,
+                        double x,
+                        double y,
+                        u8 rgb_out[3]);
+
+bool sample_bilinear_rgb(const u8* pixels,
+                         u64 pixel_stride,
+                         u64 width,
+                         u64 height,
+                         double x,
+                         double y,
+                         u8 rgb_out[3]);
+
 bool palette_colors_equal(const PaletteColor& a, const PaletteColor& b);
 
 bool find_best_ecc_fill(usize payload_bytes,
