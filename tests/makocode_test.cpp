@@ -1975,8 +1975,8 @@ static std::string stable_seed_key(const std::string& key) {
     return result;
 }
 
-static unsigned case_seed(const std::string& key) {
-    return crc_cksum(std::to_string(master_seed) + ":" + stable_seed_key(key)) & 0x7fffffffu;
+static unsigned case_seed(const std::string& key, unsigned seed = master_seed) {
+    return crc_cksum(std::to_string(seed) + ":" + stable_seed_key(key)) & 0x7fffffffu;
 }
 
 static fs::path make_work_dir(const std::string& label) {
@@ -4266,6 +4266,8 @@ struct RoundTrip {
     std::string id;
     size_t size = 0;
     std::string literal;
+    bool has_master_seed_override = false;
+    unsigned master_seed_override = 0;
     bool has_payload_seed_override = false; // Stable random bytes for geometry-sensitive fixtures.
     unsigned payload_seed_override = 0;
     std::vector<std::string> encode_args;
@@ -4282,10 +4284,13 @@ struct RoundTrip {
 static void run_roundtrip(const RoundTrip& test) {
     fs::path work = make_work_dir(test.id);
     const std::string prefix = test.id + "_random_payload_encoded";
+    unsigned test_master_seed = test.has_master_seed_override
+        ? test.master_seed_override
+        : master_seed;
     unsigned payload_seed = test.has_payload_seed_override
         ? test.payload_seed_override
-        : case_seed("payload/" + test.id);
-    unsigned crypto_seed = case_seed("crypto/" + test.id);
+        : case_seed("payload/" + test.id, test_master_seed);
+    unsigned crypto_seed = case_seed("crypto/" + test.id, test_master_seed);
     std::vector<unsigned char> expected = expected_payload(test.literal, test.size, payload_seed, work, "payload");
     fs::path payload = work / "payload.bin";
     write_file(payload, std::string(expected.begin(), expected.end()));
@@ -5537,12 +5542,12 @@ static std::vector<TestCase> build_cases() {
     r.size=256; r.encode_args={"--page-width=200","--page-height=64"}; rt("0016_fiducial_minimum_ecc","Minimum ECC with fiducial reservation",r); r={};
     r.size=65536; r.encode_args={"--footer", " !\"#$%&\\'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy | random.bin | Page %page/%totalpages | 100\\% done", "--font-size", "2"}; rt("0017_footer_metadata","Footer metadata rendering stress",r); r={};
     r.size=102400; rt("0018_gray_100k_single","100 KiB grayscale single page baseline",r); r={};
-    r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.5","--scale-y","2.5","--seed","0"}; rt("0019_gray_100k_scaled","100 KiB scaled 2.5x",r); r={};
+    r.size=102400; r.has_master_seed_override=true; r.master_seed_override=1501249248u; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.5","--scale-y","2.5","--seed","0"}; rt("0019_gray_100k_scaled","100 KiB scaled 2.5x",r); r={};
     r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.6","--scale-y","2.4","--seed","0"}; rt("0020_gray_100k_stretch_h26_v24","Grayscale horizontal 2.6 / vertical 2.4",r); r={};
     r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.4","--scale-y","2.6","--seed","0"}; rt("0021_gray_100k_stretch_h24_v26","Grayscale horizontal 2.4 / vertical 2.6",r); r={};
     r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3.03","--scale-y","3.03","--seed","0"}; rt("0022_gray_scale_303_blur","Grayscale upsample 3.03x",r); r={};
     r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--seed","1337"}; rt("0023_gray_rotate_seeded","Grayscale rotation with deterministic seed",r); r={};
-    r.size=65536; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0024_gray_skew_xy_seeded","Grayscale XY skew",r); r={};
+    r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0024_gray_skew_xy_seeded","Grayscale XY skew",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","-5","--skew-y","5","--seed","7331"}; rt("0025_gray_skew_xy_reverse_seeded","Grayscale reverse XY skew",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1003199588u; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0026_gray_rotate_skew_seeded","Grayscale rotation and skew",r); r={};
     r.size=32768; r.encode_args={"--password-cli=suite-password","--random-data=00112233445566778899aabbccddeeff102132435465768798a9bacb"}; r.decode_args={"--password-cli=suite-password"}; rt("0027_password_ecc","Password-protected payload with ECC",r); r={};
@@ -5782,7 +5787,7 @@ static std::vector<TestCase> build_cases() {
                                    encoder.ecc_info().overlay_erasure_budget,
                                    true, &tile, &rank_cache, page_count),
                 id + ": could not render the metadata page");
-        fs::path rendered_path = work / "page.ppm";
+        fs::path rendered_path = work / (id + ".ppm");
         write_file(rendered_path,
                    std::string((const char*)rendered.data, rendered.size));
         PpmImage image = read_ppm(rendered_path);
@@ -5981,7 +5986,7 @@ static std::vector<TestCase> build_cases() {
                                    encoder.ecc_info().overlay_erasure_budget,
                                    true, &tile, nullptr, page_count),
                 id + ": could not render the metadata page");
-        fs::path rendered_path = work / "page.ppm";
+        fs::path rendered_path = work / (id + ".ppm");
         write_file(rendered_path,
                    std::string((const char*)rendered.data, rendered.size));
         PpmImage image = read_ppm(rendered_path);
@@ -6511,6 +6516,99 @@ static std::vector<TestCase> build_cases() {
         require(mask_pixels == reserved_pixels,
                 "0242: reservation count differed from unique mask pixels");
     }});
+    cases.push_back({"0299_fiducial_mask_clips_out_of_page_markers","Fiducial masks clip markers that begin outside the page",[](const fs::path&){
+        makocode::ByteBuffer mask;
+        u64 reserved_pixels = 0u;
+        require(compute_fiducial_marker_mask(60u, 60u, 60u, reserved_pixels,
+                                             &mask, true, 100u, 100u, 1u),
+                "0299: could not build a mask for partially off-page markers");
+        u64 mask_pixels = 0u;
+        for (usize i = 0u; i < mask.size; ++i) {
+            if (mask.data[i]) ++mask_pixels;
+        }
+        require(mask.size == 3600u && mask_pixels == reserved_pixels,
+                "0299: clipped marker reservation exceeded the page mask");
+    }});
+    cases.push_back({"0300_affine_confidence_clips_border_neighbors","Affine confidence sampling clips neighbors beyond page edges",[](const fs::path&){
+        const std::string id = "0300_affine_confidence_clips_border_neighbors";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "border sample");
+        auto encoded = run_cli(work, encode_file_args(
+            payload, pages, "page",
+            {"--page-width=80", "--page-height=80", "--no-fiducials",
+             "--fiducial-spacing=200"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> page_paths = ppm_paths(pages, "page");
+        require(page_paths.size() == 1u, id + ": expected one encoded page");
+        fs::path scan = work / "edge_shift.ppm";
+        make_affine_scan(page_paths[0], scan, 100u, 100u, 1.25, 0.0, 0.0);
+        makocode::ByteBuffer input;
+        require(read_entire_file(scan.c_str(), input),
+                id + ": could not read translated page");
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame_bits;
+        u64 frame_bit_count = 0u;
+        PpmParserState state;
+        require(ppm_extract_frame_bits(
+                    input, mapping, frame_bits, frame_bit_count, state,
+                    false, (bool*)0, 1u, (makocode::ByteBuffer*)0,
+                    (u64*)0, (makocode::ByteBuffer*)0, (u16*)0, (u16*)0,
+                    (bool*)0, (const AffineTransform*)0, true),
+                id + ": forced affine confidence extraction failed");
+        double first_x = state.affine_transform.a00 * 0.5 +
+                         state.affine_transform.a01 * 0.5 +
+                         state.affine_transform.tx;
+        double first_y = state.affine_transform.a10 * 0.5 +
+                         state.affine_transform.a11 * 0.5 +
+                         state.affine_transform.ty;
+        require(first_x >= 0.0 && first_x < 0.5 &&
+                    first_y >= 0.0 && first_y < 0.5,
+                id + ": affine did not map the first module to the image edge: " +
+                    std::to_string(first_x) + ", " + std::to_string(first_y));
+    }});
+    cases.push_back({"0301_affine_confidence_skips_off_page_samples","Affine confidence sampling skips modules before the page origin",[](const fs::path&){
+        const std::string id = "0301_affine_confidence_skips_off_page_samples";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "border sample");
+        auto encoded = run_cli(work, encode_file_args(
+            payload, pages, "page",
+            {"--page-width=80", "--page-height=80", "--no-fiducials",
+             "--fiducial-spacing=200"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> page_paths = ppm_paths(pages, "page");
+        require(page_paths.size() == 1u, id + ": expected one encoded page");
+        fs::path scan = work / "off_page.ppm";
+        make_affine_scan(page_paths[0], scan, 100u, 100u, 1.25, -0.4, -0.4);
+        makocode::ByteBuffer input;
+        require(read_entire_file(scan.c_str(), input),
+                id + ": could not read translated page");
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame_bits;
+        u64 frame_bit_count = 0u;
+        PpmParserState state;
+        require(ppm_extract_frame_bits(
+                    input, mapping, frame_bits, frame_bit_count, state,
+                    false, (bool*)0, 1u, (makocode::ByteBuffer*)0,
+                    (u64*)0, (makocode::ByteBuffer*)0, (u16*)0, (u16*)0,
+                    (bool*)0, (const AffineTransform*)0, true),
+                id + ": forced affine confidence extraction failed");
+        double first_x = state.affine_transform.a00 * 0.5 +
+                         state.affine_transform.a01 * 0.5 +
+                         state.affine_transform.tx;
+        double first_y = state.affine_transform.a10 * 0.5 +
+                         state.affine_transform.a11 * 0.5 +
+                         state.affine_transform.ty;
+        require(first_x < 0.0 && first_y < 0.0 && frame_bit_count > 0u,
+                id + ": fixture did not place a sample before the image origin");
+    }});
     cases.push_back({"0243_ppm_dimensions_reject_invalid_height","PPM dimensions reject a zero height",[](const fs::path&){
         makocode::ByteBuffer ppm;
         require(ppm.append_ascii("P6\n2 0\n255\n"),
@@ -7005,6 +7103,69 @@ static std::vector<TestCase> build_cases() {
                 id + ": conflicting palette bases were merged");
         require(destination.palette_base_value == 4u,
                 id + ": rejected palette-base conflict changed the destination");
+    }});
+    cases.push_back({"0296_parser_state_copies_palette_base","Parser-state merge copies a palette base into an unset destination",[](const fs::path&){
+        const std::string id = "0296_parser_state_copies_palette_base";
+        PpmParserState destination, source;
+        source.has_palette_base = true;
+        source.palette_base_value = 7u;
+        require(merge_parser_state(destination, source),
+                id + ": palette base did not merge");
+        require(destination.has_palette_base && destination.palette_base_value == 7u,
+                id + ": merged palette base was not retained");
+    }});
+    cases.push_back({"0298_ppm_frame_extraction_rejects_legacy_raster","Frame extraction rejects metadata-free legacy raster input",[](const fs::path&){
+        const std::string id = "0298_ppm_frame_extraction_rejects_legacy_raster";
+        const u32 width = 64u, height = 64u;
+        std::string ppm = "P6\n64 64\n255\n";
+        ppm.reserve(ppm.size() + (usize)width * height * 3u);
+        for (u32 y = 0u; y < height; ++y) {
+            for (u32 x = 0u; x < width; ++x) {
+                const char value = ((x + y) & 1u) ? (char)255 : (char)0;
+                ppm.append(3u, value);
+            }
+        }
+        makocode::ByteBuffer input, frame_bits;
+        require(input.append_bytes((const u8*)ppm.data(), ppm.size()),
+                id + ": could not build the raster fixture");
+        ImageMappingConfig mapping;
+        PpmParserState metadata;
+        MetadataTile::Values legacy_tile;
+        legacy_tile.schema_version = 0u;
+        legacy_tile.palette_count = 2u;
+        legacy_tile.palette[0] = PaletteColor{0u, 0u, 0u};
+        legacy_tile.palette[1] = PaletteColor{255u, 255u, 255u};
+        legacy_tile.page_width_pixels = width;
+        legacy_tile.page_height_pixels = height;
+        legacy_tile.page_bits = (u64)width * height;
+        legacy_tile.page_index = 1u;
+        legacy_tile.page_count = 1u;
+        u64 frame_bit_count = 0u;
+        require(!ppm_extract_frame_bits(input, mapping, frame_bits,
+                                        frame_bit_count, metadata, true,
+                                        (bool*)0, 1u, (makocode::ByteBuffer*)0,
+                                        (u64*)0, (makocode::ByteBuffer*)0,
+                                        (u16*)0, (u16*)0, (bool*)0,
+                                        (const AffineTransform*)0, false,
+                                        (u64*)0, &legacy_tile, (const u8*)0,
+                                        0u, 0u, 0u, true, true, false, false),
+                id + ": accepted metadata-free legacy raster input");
+    }});
+    cases.push_back({"0297_parser_state_rejects_ecc_original_byte_conflict","Parser-state merge copies and checks the original ECC byte count",[](const fs::path&){
+        const std::string id = "0297_parser_state_rejects_ecc_original_byte_conflict";
+        PpmParserState destination, source;
+        source.has_ecc_original_bytes = true;
+        source.ecc_original_bytes_value = 123u;
+        require(merge_parser_state(destination, source) &&
+                    destination.has_ecc_original_bytes &&
+                    destination.ecc_original_bytes_value == 123u,
+                id + ": original byte count was not copied");
+        PpmParserState conflicting;
+        conflicting.has_ecc_original_bytes = true;
+        conflicting.ecc_original_bytes_value = 124u;
+        require(!merge_parser_state(destination, conflicting) &&
+                    destination.ecc_original_bytes_value == 123u,
+                id + ": conflicting original byte count was accepted or changed state");
     }});
     cases.push_back({"0268_parser_state_rejects_palette_text_conflict","Parser-state merge rejects conflicting palette text",[](const fs::path&){
         const std::string id = "0268_parser_state_rejects_palette_text_conflict";
@@ -7673,6 +7834,19 @@ static std::vector<TestCase> build_cases() {
                                        payload_bits, 0, erasures, 0u,
                                        &erased_symbols),
                 id + ": accepted an erasure bit count shorter than its symbol map");
+    }});
+    cases.push_back({"0295_frame_payload_rejects_unaligned_length","Frame payload extraction rejects a non-symbol-aligned frame length",[](const fs::path&){
+        const std::string id = "0295_frame_payload_rejects_unaligned_length";
+        const u8 frame_data[4] = {1u, 2u, 3u, 4u};
+        PpmParserState metadata;
+        makocode::ByteBuffer output, erased_symbols;
+        u64 payload_bits = 0u;
+        require(!frame_bits_to_payload(frame_data, 31u, metadata, output,
+                                       payload_bits, 0, nullptr, 0u,
+                                       &erased_symbols),
+                id + ": accepted a frame length that is not symbol aligned");
+        require(output.size == 0u && erased_symbols.size == 0u && payload_bits == 0u,
+                id + ": rejected frame extraction left nonempty outputs");
     }});
     cases.push_back({"0290_frame_payload_zeroes_missing_erasure_map","Frame payload extraction initializes absent erasures to zero",[](const fs::path&){
         const std::string id = "0290_frame_payload_zeroes_missing_erasure_map";
@@ -8722,6 +8896,16 @@ static std::vector<TestCase> build_cases() {
         require(!contents.data && contents.size == 0u,
                 "0202: file buffer was not released after the size-limit failure");
     }});
+    cases.push_back({"0294_read_entire_file_read_failure","File read rejects a directory and releases its buffer",[](const fs::path&){
+        const std::string id = "0294_read_entire_file_read_failure";
+        fs::path work = make_work_dir(id);
+        makocode::ByteBuffer contents;
+        bool read = read_entire_file(work.c_str(), contents);
+        require(!read,
+                "0293: file read succeeded for a directory");
+        require(!contents.data && contents.size == 0u,
+                "0293: file buffer was not released after read failure");
+    }});
     cases.push_back({"0203_read_entire_stdin_read_failure","Stdin read reports an invalid descriptor and releases its buffer",[](const fs::path&){
         int saved_stdin = ::dup(STDIN_FILENO);
         require(saved_stdin >= 0,
@@ -9057,6 +9241,10 @@ int main(int argc, char** argv) {
                        test.id == "0191_normalize_store_path_scratch_allocation_failure" ||
                        test.id == "0229_render_rejects_header_allocation_failure" ||
                        test.id == "0231_render_rejects_reservation_mask_allocation_failure" ||
+                       test.id == "0300_affine_confidence_clips_border_neighbors" ||
+                       test.id == "0301_affine_confidence_skips_off_page_samples" ||
+                       test.id == "0228_render_rejects_unaligned_field_symbol_offset" ||
+                       test.id == "0248_fiducial_insert_propagates_header_allocation_failure" ||
                        test.id == "0255_metadata_free_marks_invalid_palette_symbols_as_erasures" ||
                        test.id == "0276_append_bits_from_buffer_propagates_writer_failure" ||
                        test.id == "0278_decode_rejects_erasure_buffer_allocation_failure" ||
