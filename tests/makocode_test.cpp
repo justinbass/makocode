@@ -45,7 +45,15 @@ static unsigned long minify_allocation_count=0;
 static unsigned long minify_allocation_failure_at=0;
 static unsigned long minify_allocation_failure_size=0;
 static unsigned long minify_4096_allocation_count=0;
+static bool record_platform_allocation_sizes=false;
+static std::vector<size_t> platform_allocation_sizes;
+static size_t platform_allocation_size_limit=0u;
+static unsigned long platform_allocation_limit_rejection_count=0ul;
+static unsigned long watch_platform_allocation_at=0;
+static void* watch_platform_free_pointer=nullptr;
+static unsigned long watch_platform_free_count=0;
 extern "C" void* makocode_test_malloc(size_t size);
+extern "C" void makocode_test_free(void* ptr);
 
 #include <fcntl.h>
 #include <signal.h>
@@ -69,8 +77,26 @@ extern char** environ;
 
 extern "C" void* makocode_test_malloc(size_t size) {
     if(size==4096ul)++minify_4096_allocation_count;
-    if(minify_allocation_failure_at&&++minify_allocation_count==minify_allocation_failure_at){minify_allocation_failure_size=size;return nullptr;}
-    return std::malloc(static_cast<size_t>(size));
+    unsigned long allocation_index=0;
+    if(minify_allocation_failure_at||record_platform_allocation_sizes){
+        allocation_index=++minify_allocation_count;
+        if(record_platform_allocation_sizes)platform_allocation_sizes.push_back(size);
+    }
+    if(minify_allocation_failure_at&&allocation_index==minify_allocation_failure_at){minify_allocation_failure_size=size;return nullptr;}
+    if(platform_allocation_size_limit&&size>platform_allocation_size_limit){++platform_allocation_limit_rejection_count;return nullptr;}
+    void* ptr=std::malloc(static_cast<size_t>(size));
+    if(ptr&&watch_platform_allocation_at&&allocation_index==watch_platform_allocation_at){
+        watch_platform_free_pointer=ptr;
+    }
+    return ptr;
+}
+
+extern "C" void makocode_test_free(void* ptr) {
+    if(ptr&&ptr==watch_platform_free_pointer){
+        ++watch_platform_free_count;
+        watch_platform_free_pointer=nullptr;
+    }
+    std::free(ptr);
 }
 
 #define main ppm_transform_cli_main
@@ -3537,7 +3563,8 @@ static void affine_cell_sampling_case(){
     expect_success(run_transform(work,{"transform","--input",source[0],"--output",scaled.string(),"--scale-x","3.2363636363636363","--scale-y","3.2363636363636363"},"scale"),id+" scale");
     PpmImage image=read_ppm(scaled);require(image.width==259&&image.height==259,id+": scaled dimensions changed");
     std::vector<unsigned char> gray(278u*278u,255u);for(unsigned y=0;y<image.height;++y)for(unsigned x=0;x<image.width;++x)gray[(static_cast<size_t>(y)+6)*278+x+7]=static_cast<unsigned char>(image.pixels[(static_cast<size_t>(y)*image.width+x)*3]);
-    write_gray_ppm(scan,278,278,gray);auto result=run_cli(work,decode_file_args({scan.string()},decoded),"decode");expect_success(result,id+" decode");compare_files(payload,decoded/"makocode.bin",id);
+    write_gray_ppm(scan,278,278,gray);
+    auto result=run_cli(work,decode_file_args({scan.string()},decoded),"decode");expect_success(result,id+" decode");compare_files(payload,decoded/"makocode.bin",id);
 }
 
 static void decode_scale_318_case(){
@@ -6773,6 +6800,167 @@ static std::vector<TestCase> build_cases() {
                                                    values, nullptr),
                 "0254: metadata-free recovery accepted an undecodable page");
     }});
+    cases.push_back({"0300_decode_page_dimension_overrides","Decode page-width and page-height overrides affect page capacity",[](const fs::path&){
+        const std::string id = "0300_decode_page_dimension_overrides";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::create_directories(encoded_dir);
+        write_file(payload, "page height override");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, encoded_dir, "source",
+                             {"--page-width=220", "--page-height=220"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "source");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        makocode::ByteBuffer input, overridden_frame, overridden_width_frame,
+            metadata_frame;
+        require(read_entire_file(pages[0].c_str(), input),
+                id + ": could not read the encoded page");
+        ImageMappingConfig mapping;
+        mapping.page_height_set = true;
+        mapping.page_height_pixels = 400u;
+        u64 overridden_frame_bit_count = 0u, metadata_frame_bit_count = 0u;
+        u64 overridden_capacity = 0u, overridden_width_capacity = 0u;
+        u64 metadata_capacity = 0u;
+        PpmParserState overridden_state, overridden_width_state, metadata_state;
+        ImageMappingConfig width_mapping;
+        width_mapping.page_width_set = true;
+        width_mapping.page_width_pixels = 400u;
+        require(ppm_extract_frame_bits(input, mapping, overridden_frame,
+                                       overridden_frame_bit_count,
+                                       overridden_state, false, nullptr, 1u,
+                                       nullptr, nullptr, nullptr, nullptr,
+                                       nullptr, nullptr, nullptr, false,
+                                       &overridden_capacity) &&
+                    ppm_extract_frame_bits(input, width_mapping,
+                                           overridden_width_frame,
+                                           overridden_frame_bit_count,
+                                           overridden_width_state, false,
+                                           nullptr, 1u, nullptr, nullptr, nullptr,
+                                           nullptr, nullptr, nullptr, nullptr, false,
+                                           &overridden_width_capacity) &&
+                    ppm_extract_frame_bits(input, ImageMappingConfig(),
+                                           metadata_frame,
+                                           metadata_frame_bit_count,
+                                           metadata_state, false, nullptr, 1u,
+                                           nullptr, nullptr, nullptr, nullptr,
+                                           nullptr, nullptr, nullptr, false,
+                                           &metadata_capacity),
+                id + ": could not extract the page using both geometry sources");
+        require(overridden_capacity != metadata_capacity,
+                id + ": explicit page height did not affect page capacity");
+        require(overridden_width_capacity != metadata_capacity,
+                id + ": explicit page width did not affect page capacity");
+    }});
+    cases.push_back({"0302_fiducial_partial_allocation_is_released","Fiducial extraction frees the first center array when the second allocation fails",[](const fs::path&){
+        const std::string id = "0302_fiducial_partial_allocation_is_released";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::create_directories(encoded_dir);
+        write_file(payload, "partial fiducial allocation");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, encoded_dir, "source",
+                             {"--page-width=80", "--page-height=80"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "source");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        makocode::ByteBuffer input;
+        require(read_entire_file(pages[0].c_str(), input),
+                id + ": could not read the encoded page");
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer baseline_frame;
+        u64 baseline_bits = 0u;
+        PpmParserState baseline_state;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = ~0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool baseline_extracted = ppm_extract_frame_bits(input, mapping,
+                                                          baseline_frame,
+                                                          baseline_bits,
+                                                          baseline_state, false);
+        record_platform_allocation_sizes = false;
+        minify_allocation_failure_at = 0ul;
+        require(baseline_extracted && baseline_state.has_fiducial_columns &&
+                    baseline_state.has_fiducial_rows,
+                id + ": baseline did not decode a fiducial grid");
+        size_t center_array_size = (size_t)baseline_state.fiducial_columns_value *
+                                   (size_t)baseline_state.fiducial_rows_value *
+                                   sizeof(double);
+        size_t first_center_allocation = platform_allocation_sizes.size();
+        for (size_t index = 0u; index + 1u < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == center_array_size &&
+                platform_allocation_sizes[index + 1u] == center_array_size) {
+                first_center_allocation = index;
+                break;
+            }
+        }
+        require(first_center_allocation < platform_allocation_sizes.size(),
+                id + ": did not observe the adjacent fiducial center allocations");
+
+        makocode::ByteBuffer failed_frame;
+        u64 failed_bits = 0u;
+        PpmParserState failed_state;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        watch_platform_free_pointer = nullptr;
+        watch_platform_free_count = 0ul;
+        watch_platform_allocation_at = (unsigned long)first_center_allocation + 1ul;
+        minify_allocation_failure_at = (unsigned long)first_center_allocation + 2ul;
+        bool failure_extracted = ppm_extract_frame_bits(input, mapping,
+                                                         failed_frame,
+                                                         failed_bits,
+                                                         failed_state, false);
+        unsigned long failed_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        watch_platform_allocation_at = 0ul;
+        require(failed_size == center_array_size,
+                id + ": fault injection missed the second center allocation");
+        require(watch_platform_free_count == 1ul &&
+                    watch_platform_free_pointer == nullptr,
+                id + ": the first center allocation was not freed after the second failed");
+        (void)failure_extracted;
+    }});
+    cases.push_back({"0303_footer_override_rejects_underflowing_data_height","Footer metadata that underflows the payload height is rejected before rank-map allocation",[](const fs::path&){
+        const std::string id = "0303_footer_override_rejects_underflowing_data_height";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::create_directories(encoded_dir);
+        write_file(payload, "invalid footer override");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, encoded_dir, "source",
+                             {"--page-width=80", "--page-height=80"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "source");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        makocode::ByteBuffer input;
+        require(read_entire_file(pages[0].c_str(), input),
+                id + ": could not read the encoded page");
+        MetadataTile::Values values = extract_tile_values(pages.front());
+        values.footer_rows = 81u;
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame;
+        u64 frame_bits = 0u;
+        PpmParserState state;
+        platform_allocation_limit_rejection_count = 0ul;
+        platform_allocation_size_limit = 1024u * 1024u;
+        bool extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
+            nullptr);
+        platform_allocation_size_limit = 0u;
+        require(!extracted, id + ": accepted a footer override below zero data height");
+        require(platform_allocation_limit_rejection_count == 0ul,
+                id + ": attempted a large rank-map allocation before rejecting the footer");
+    }});
     cases.push_back({"0255_metadata_free_marks_invalid_palette_symbols_as_erasures","Metadata-free recovery marks unrepresentable palette dots as ECC erasures",[](const fs::path&){
         const std::string id = "0255_metadata_free_marks_invalid_palette_symbols_as_erasures";
         const u32 width = 80u, height = 80u;
@@ -7699,7 +7887,7 @@ static std::vector<TestCase> build_cases() {
             rendered, mapping, extracted, extracted_bits, metadata, false,
             &retry_without_subgrid, 1u, &erasures, nullptr, nullptr,
             nullptr, nullptr, nullptr, nullptr, false, nullptr, nullptr,
-            nullptr, 0u, 0u, 0u, false, true, false, false, 0u,
+            nullptr, 0u, 0u, 0u, false, true, false, false,
             &decoded_salt);
         require(extracted_ok && decoded_salt.available &&
                     memcmp(decoded_salt.salt, salt, sizeof(salt)) == 0,
@@ -9243,6 +9431,8 @@ int main(int argc, char** argv) {
                        test.id == "0231_render_rejects_reservation_mask_allocation_failure" ||
                        test.id == "0300_affine_confidence_clips_border_neighbors" ||
                        test.id == "0301_affine_confidence_skips_off_page_samples" ||
+                       test.id == "0302_fiducial_partial_allocation_is_released" ||
+                       test.id == "0303_footer_override_rejects_underflowing_data_height" ||
                        test.id == "0228_render_rejects_unaligned_field_symbol_offset" ||
                        test.id == "0248_fiducial_insert_propagates_header_allocation_failure" ||
                        test.id == "0255_metadata_free_marks_invalid_palette_symbols_as_erasures" ||

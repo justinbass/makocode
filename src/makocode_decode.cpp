@@ -308,7 +308,6 @@ int command_decode(int arg_count, char** args) {
     MetadataTile::Values center_probe_tile;
     bool center_probe_available = false;
     bool center_probe_page_present[MAX_INPUT_FILES] = {};
-    u64 center_probe_page_capacity[MAX_INPUT_FILES] = {};
     bool center_probe_attempted = false;
     u32 small_scan_geometry_variant = 0u;
     makocode::ByteBuffer stdin_ppm_stream;
@@ -376,7 +375,6 @@ retry_decode:
                                                       true,
                                                       false,
                                                       false,
-                                                      0u,
                                                       &archive_page_salt);
 
         if (!frame_extracted) {
@@ -609,7 +607,6 @@ retry_decode:
         u64 expected_page_index = 1u;
         u64 indexed_frame_bit_total = 0u;
         u64 aggregate_page_capacity_bits = 0u;
-        u64 common_page_capacity_override = 0u;
         AffineTransform previous_page_affine_hint = {};
         bool previous_page_affine_hint_available = false;
         AffineTransform center_probe_page_affines[MAX_INPUT_FILES] = {};
@@ -630,29 +627,26 @@ retry_decode:
                 makocode::ByteBuffer probe_bits;
                 makocode::ByteBuffer probe_erasures;
                 u64 probe_bit_count = 0u;
-                u64 probe_page_capacity_bits = 0u;
                 PpmParserState probe_state;
                 bool probe_found = ppm_extract_frame_bits(
                     probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
                     false, 0, (u64)probe_index + 1u, &probe_erasures,
-                    0, 0, 0, 0, 0, 0, false, &probe_page_capacity_bits,
+                    0, 0, 0, 0, 0, 0, false, 0,
                     0, 0, 0, 0, 0, false, true, false, true);
                 if (!probe_found) {
                     probe_bits.release();
                     probe_erasures.release();
                     probe_state = PpmParserState();
                     probe_bit_count = 0u;
-                    probe_page_capacity_bits = 0u;
                     probe_found = ppm_extract_frame_bits(
                         probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
                         false, 0, (u64)probe_index + 1u, &probe_erasures,
-                        0, 0, 0, 0, 0, 0, false, &probe_page_capacity_bits,
+                        0, 0, 0, 0, 0, 0, false, 0,
                         0, 0, 0, 0, 0, false, true, true, false);
                 }
                 if (probe_found && probe_state.has_encoded_tile &&
                     metadata_schema_is_current(probe_state.encoded_tile.schema_version)) {
                     center_probe_page_present[probe_index] = true;
-                    center_probe_page_capacity[probe_index] = probe_page_capacity_bits;
                     encoded_pages[probe_index] = probe_state.encoded_tile;
                     if (probe_state.has_affine_transform &&
                         probe_state.affine_fit_covers_page) {
@@ -673,7 +667,6 @@ retry_decode:
                 }
             }
             if (center_probe_available && file_count > 1u) {
-                u64 minimum_page_capacity_bits = U64_MAX_VALUE;
                 bool complete_page_set = true;
                 bool seen_page_indices[MAX_INPUT_FILES] = {};
                 for (usize page = 0u; page < file_count; ++page) {
@@ -691,41 +684,6 @@ retry_decode:
                         break;
                     }
                     seen_page_indices[tile.page_index - 1u] = true;
-                }
-                if (!complete_page_set) {
-                    for (usize page = 0u; page < file_count; ++page) {
-                        if (!center_probe_page_present[page] ||
-                            center_probe_page_capacity[page] > 0u) continue;
-                        makocode::ByteBuffer capacity_stream;
-                        if (!read_entire_file(input_files[page], capacity_stream)) {
-                            console_write(2, "decode: failed to read ");
-                            console_line(2, input_files[page]);
-                            return 1;
-                        }
-                        makocode::ByteBuffer capacity_bits;
-                        makocode::ByteBuffer capacity_erasures;
-                        u64 capacity_bit_count = 0u;
-                        u64 page_capacity_bits = 0u;
-                        PpmParserState capacity_state;
-                        bool capacity_found = ppm_extract_frame_bits(
-                            capacity_stream, mapping, capacity_bits, capacity_bit_count,
-                            capacity_state, false, 0, (u64)page + 1u,
-                            &capacity_erasures, 0, 0, 0, 0, 0, 0, false,
-                            &page_capacity_bits, 0, 0, 0, 0, 0, false, true,
-                            false, true);
-                        if (capacity_found && capacity_state.has_encoded_tile &&
-                            metadata_schema_is_current(
-                                capacity_state.encoded_tile.schema_version)) {
-                            center_probe_page_capacity[page] = page_capacity_bits;
-                        }
-                    }
-                    for (usize page = 0u; page < file_count; ++page) {
-                        if (!center_probe_page_present[page] ||
-                            center_probe_page_capacity[page] == 0u) continue;
-                        if (center_probe_page_capacity[page] < minimum_page_capacity_bits) {
-                            minimum_page_capacity_bits = center_probe_page_capacity[page];
-                        }
-                    }
                 }
                 if (complete_page_set) {
                     usize valid_affine_count = 0u;
@@ -769,14 +727,6 @@ retry_decode:
                         previous_page_affine_hint.ty = 0.0;
                         previous_page_affine_hint_available = true;
                     }
-                }
-                if (!complete_page_set &&
-                    minimum_page_capacity_bits != U64_MAX_VALUE &&
-                    minimum_page_capacity_bits > 0u) {
-                    // Pages without metadata still use the dimensions and encoding
-                    // profile from the readable page. Clamp their usable capacity to
-                    // the smallest capacity observed on a metadata-bearing page.
-                    common_page_capacity_override = minimum_page_capacity_bits;
                 }
             }
         }
@@ -844,9 +794,6 @@ retry_decode:
                                                               : true,
                                                           false,
                                                           false,
-                                                          page_tile_override_ptr
-                                                              ? common_page_capacity_override
-                                                              : 0u,
                                                           &page_salt);
 
             if (!frame_extracted) {

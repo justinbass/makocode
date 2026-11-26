@@ -16591,7 +16591,6 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    bool known_tile_is_present,
                                    bool metadata_center_probe_only,
                                    bool metadata_summary_only,
-                                   u64 page_capacity_override,
                                    makocode::PaletteSymbolPageSalt* page_salt_out) {
     if (frame_erasure_bits) frame_erasure_bits->release();
     if (overlay_selector_seed_out) *overlay_selector_seed_out = 0u;
@@ -17034,7 +17033,6 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
              (double)height / (double)metadata_height_hint);
         if (metadata_pitch_hint > 1.40) sample_scaled_metadata_tile = false;
     }
-    makocode::ByteBuffer downsampled_pixels;
     const u64 base_width = width;
     const u64 base_height = height;
     // Pixel-carried metadata: 48x48 palette-colored tile with a one-row MAKO/CODE tag.
@@ -18784,35 +18782,6 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 double best_alignment_error = 1.0e30;
                 double best_marker_mismatch = 1.0;
                 MetadataTile::Values expected_tile_values = tile_values;
-                makocode::ByteBuffer expected_tile_symbols;
-                makocode::ByteBuffer expected_tile_active_mask;
-                bool have_expected_tile_template = MetadataTile::build_tile_bits(
-                    expected_tile_values, expected_tile_symbols,
-                    &expected_tile_active_mask);
-                double expected_symbol_luminance[MAX_CUSTOM_PALETTE_COLORS] = {};
-                double expected_symbol_contrast = 1.0;
-                if (have_expected_tile_template) {
-                    double darkest_symbol_luminance = 255.0;
-                    double lightest_symbol_luminance = 0.0;
-                    for (u32 symbol = 0u;
-                         symbol < expected_tile_values.palette_count;
-                         ++symbol) {
-                        expected_symbol_luminance[symbol] =
-                            MetadataTile::rgb_luminance_u8(
-                                expected_tile_values.palette[symbol].r,
-                                expected_tile_values.palette[symbol].g,
-                                expected_tile_values.palette[symbol].b);
-                        if (expected_symbol_luminance[symbol] < darkest_symbol_luminance) {
-                            darkest_symbol_luminance = expected_symbol_luminance[symbol];
-                        }
-                        if (expected_symbol_luminance[symbol] > lightest_symbol_luminance) {
-                            lightest_symbol_luminance = expected_symbol_luminance[symbol];
-                        }
-                    }
-                    expected_symbol_contrast = lightest_symbol_luminance -
-                                               darkest_symbol_luminance;
-                    if (expected_symbol_contrast < 1.0) expected_symbol_contrast = 1.0;
-                }
                 auto score_tile_alignment = [&](const MetadataTile::AffineParams& candidate,
                                                 double& marker_mismatch_out) -> double {
                     double c = cos(candidate.angle_rad);
@@ -18820,22 +18789,6 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     double pitch_x = candidate.pitch_x_pixels;
                     double pitch_y = candidate.pitch_y_pixels;
                     double half = ((double)MetadataTile::TILE_SIDE - 1.0) * 0.5;
-                    auto sample_module = [&](u32 module_x, u32 module_y) -> double {
-                        double sx = (double)module_x - half;
-                        double sy = (double)module_y - half;
-                        double x = candidate.center_x + pitch_x * c * sx - pitch_y * s * sy;
-                        double y = candidate.center_y + pitch_x * s * sx + pitch_y * c * sy;
-                        return MetadataTile::sample_affine_module_luminance(pixel_data,
-                                                                            (u32)width,
-                                                                            (u32)height,
-                                                                            x,
-                                                                            y,
-                                                                            pitch_x,
-                                                                            pitch_y,
-                                                                            c,
-                                                                            s,
-                                                                            sample_scaled_cells);
-                    };
                     auto sample_module_rgb = [&](u32 module_x, u32 module_y,
                                                  u8* rgb_out) {
                         double sx = (double)module_x - half;
@@ -18883,33 +18836,9 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                     marker_mismatch_out = samples
                                               ? (double)mismatches / (double)samples
                                               : 1.0;
-                    if (!have_expected_tile_template) {
-                        return marker_mismatch_out;
-                    }
-                    double normalized_error = 0.0;
-                    usize sampled_cells = 0u;
-                    for (u32 y = 0u; y < MetadataTile::TILE_SIDE; ++y) {
-                        for (u32 x = 0u; x < MetadataTile::TILE_SIDE; ++x) {
-                            usize cell = (usize)y * MetadataTile::TILE_SIDE + x;
-                            if (!expected_tile_active_mask.data[cell]) continue;
-                            u32 symbol = expected_tile_symbols.data[cell];
-                            if (symbol >= expected_tile_values.palette_count) continue;
-                            normalized_error += fabs(
-                                sample_module(x, y) - expected_symbol_luminance[symbol]) /
-                                expected_symbol_contrast;
-                            ++sampled_cells;
-                        }
-                    }
-                    double tile_content_error = sampled_cells
-                        ? normalized_error / (double)sampled_cells
-                        : 1.0;
-                    return tile_content_error + marker_mismatch_out * 0.01;
+                    return marker_mismatch_out;
                 };
                 double pitch_center = found_affine.pitch_pixels;
-                if (refine_high_scale_scan && state.has_affine_transform &&
-                    fabs(state.affine_transform.a00 - pitch_center) <= pitch_center * 0.01) {
-                    pitch_center = state.affine_transform.a00;
-                }
                 double pitch_search_radius =
                     (refine_small_scan || refine_high_scale_scan) ? 0.02 : 0.08;
                 double pitch_step = 0.01;
@@ -18984,223 +18913,6 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                 
             }
         } 
-    }
-
-    // If the metadata tile is missing, try a simple nearest-neighbor downsample
-    // to an estimated logical square page size, then retry the tile decode.
-    if (!tile_available) {
-        bool downsample_buffer_ready = false;
-        u32 downsample_buffer_w = 0u;
-        u32 downsample_buffer_h = 0u;
-        makocode::ByteBuffer best_downsample;
-        double best_downsample_score = 1e30;
-        u32 best_downsample_w = 0u;
-        u32 best_downsample_h = 0u;
-        auto try_decode_shifted_tile = [&](const u8* pixels,
-                                           u32 canvas_w,
-                                           u32 canvas_h) -> bool {
-            const int kMaxShift = 12;
-            MetadataTile::Placement placement = MetadataTile::compute_center_tile_placement(
-                canvas_w, canvas_h);
-            if (placement.valid) {
-                for (int dy = -kMaxShift; dy <= kMaxShift; ++dy) {
-                    for (int dx = -kMaxShift; dx <= kMaxShift; ++dx) {
-                        MetadataTile::Placement p = placement;
-                        int sx = (int)p.x0 + dx;
-                        int sy = (int)p.y0 + dy;
-                        if (sx < 0 || sy < 0) continue;
-                        if ((u32)sx + MetadataTile::TILE_SIDE > canvas_w) continue;
-                        if ((u32)sy + MetadataTile::TILE_SIDE > canvas_h) continue;
-                        p.x0 = (u32)sx;
-                        p.y0 = (u32)sy;
-                        if (MetadataTile::decode_tile(pixels,
-                                                      canvas_w,
-                                                      canvas_h,
-                                                      canvas_h,
-                                                      p,
-                                                      tile_values,
-                                                      tile_palette_text)) {
-                            if (!metadata_tile_plausible(tile_values, canvas_w, canvas_h)) {
-                                continue;
-                            }
-                            if (tile_values.page_height_pixels > 0u) {
-                                double canvas_center_y = ((double)canvas_h - 1.0) * 0.5;
-                                double tile_center_y = (double)p.y0 +
-                                    ((double)MetadataTile::TILE_SIDE - 1.0) * 0.5;
-                                double footer_estimate = 2.0 *
-                                    (canvas_center_y - tile_center_y) *
-                                    (double)tile_values.page_height_pixels / (double)canvas_h;
-                                if (footer_estimate >= 4.0 &&
-                                    footer_estimate < (double)tile_values.page_height_pixels) {
-                                    u32 inferred_footer_rows =
-                                        (u32)(floor(footer_estimate / 8.0 + 0.5) * 8.0);
-                                    if (inferred_footer_rows < tile_values.page_height_pixels) {
-                                        tile_values.footer_rows = inferred_footer_rows;
-                                    }
-                                }
-                            }
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        };
-        u64 logical_guess = estimate_square_page_from_image(base_width, base_height);
-        
-        auto binarize_downsampled = [&](u8* buffer, u32 target_w, u32 target_h) {
-            if (!buffer || target_w == 0u || target_h == 0u) return;
-            double min_l = 255.0;
-            double max_l = 0.0;
-            usize total_px = (usize)target_w * (usize)target_h;
-            for (usize i = 0u; i < total_px; ++i) {
-                u8 r = buffer[i * 3u + 0u];
-                u8 g = buffer[i * 3u + 1u];
-                u8 b = buffer[i * 3u + 2u];
-                double l = 0.2126 * (double)r + 0.7152 * (double)g + 0.0722 * (double)b;
-                if (l < min_l) min_l = l;
-                if (l > max_l) max_l = l;
-            }
-            if (!(max_l > min_l + 32.0)) {
-                return;
-            }
-            double threshold = (min_l + max_l) * 0.5;
-            for (usize i = 0u; i < total_px; ++i) {
-                u8 r = buffer[i * 3u + 0u];
-                u8 g = buffer[i * 3u + 1u];
-                u8 b = buffer[i * 3u + 2u];
-                double l = 0.2126 * (double)r + 0.7152 * (double)g + 0.0722 * (double)b;
-                u8 v = (l < threshold) ? 0u : 255u;
-                buffer[i * 3u + 0u] = v;
-                buffer[i * 3u + 1u] = v;
-                buffer[i * 3u + 2u] = v;
-            }
-        };
-        auto fill_downsample = [&](u32 target_w, u32 target_h) -> bool {
-            if (!downsampled_pixels.ensure((usize)target_w * (usize)target_h * 3u)) {
-                return false;
-            }
-            downsampled_pixels.size = (usize)target_w * (usize)target_h * 3u;
-            for (u32 y = 0u; y < target_h; ++y) {
-                double y0 = ((double)y * (double)base_height) / (double)target_h;
-                double y1 = ((double)(y + 1u) * (double)base_height) / (double)target_h;
-                u32 iy0 = (u32)floor(y0);
-                u32 iy1 = (u32)ceil(y1);
-                if (iy1 > base_height) iy1 = (u32)base_height;
-                for (u32 x = 0u; x < target_w; ++x) {
-                    double x0 = ((double)x * (double)base_width) / (double)target_w;
-                    double x1 = ((double)(x + 1u) * (double)base_width) / (double)target_w;
-                    u32 ix0 = (u32)floor(x0);
-                    u32 ix1 = (u32)ceil(x1);
-                    if (ix1 > base_width) ix1 = (u32)base_width;
-                    u64 sum_r = 0u, sum_g = 0u, sum_b = 0u;
-                    u64 count = 0u;
-                    for (u32 sy = iy0; sy < iy1; ++sy) {
-                        double cy = (double)sy + 0.5;
-                        if (cy < y0 || cy >= y1) continue;
-                        for (u32 sx = ix0; sx < ix1; ++sx) {
-                            double cx = (double)sx + 0.5;
-                            if (cx < x0 || cx >= x1) continue;
-                            usize src_idx = ((usize)sy * (usize)base_width + (usize)sx) * 3u;
-                            sum_r += (u64)pixel_buffer.data[src_idx + 0u];
-                            sum_g += (u64)pixel_buffer.data[src_idx + 1u];
-                            sum_b += (u64)pixel_buffer.data[src_idx + 2u];
-                            ++count;
-                        }
-                    }
-                    if (count == 0u) {
-                        count = 1u;
-                    }
-                    usize dst_idx = ((usize)y * (usize)target_w + (usize)x) * 3u;
-                    downsampled_pixels.data[dst_idx + 0u] = (u8)((sum_r + (count / 2u)) / count);
-                    downsampled_pixels.data[dst_idx + 1u] = (u8)((sum_g + (count / 2u)) / count);
-                    downsampled_pixels.data[dst_idx + 2u] = (u8)((sum_b + (count / 2u)) / count);
-                }
-            }
-            binarize_downsampled(downsampled_pixels.data, target_w, target_h);
-            return true;
-        };
-        auto attempt_downsample = [&](u32 target_w, u32 target_h) -> void {
-            if (target_w < MetadataTile::TILE_SIDE || target_h < MetadataTile::TILE_SIDE) {
-                return;
-            }
-            if (!fill_downsample(target_w, target_h)) {
-
-                return;
-            }
-            downsample_buffer_ready = true;
-            downsample_buffer_w = target_w;
-            downsample_buffer_h = target_h;
-            double candidate_score = fabs((double)target_w - (double)target_h);
-            if (logical_guess > 0u) {
-                double lg = (double)logical_guess;
-                candidate_score += fabs((double)target_w - lg) * 0.5;
-            }
-            if (candidate_score < best_downsample_score &&
-                best_downsample.ensure((usize)target_w * (usize)target_h * 3u)) {
-                best_downsample.size = (usize)target_w * (usize)target_h * 3u;
-                memcpy(best_downsample.data, downsampled_pixels.data, best_downsample.size);
-                best_downsample_score = candidate_score;
-                best_downsample_w = target_w;
-                best_downsample_h = target_h;
-                downsample_buffer_w = target_w;
-                downsample_buffer_h = target_h;
-            }
-            if (try_decode_shifted_tile(downsampled_pixels.data, target_w, target_h)) {
-                tile_available = true;
-                apply_metadata_tile_metadata(state, tile_values, tile_palette_text);
-            }
-        };
-        if (logical_guess > 0u && logical_guess < base_width && logical_guess < base_height) {
-            u32 target_w = (u32)logical_guess;
-            u32 target_h = (u32)logical_guess;
-            if (target_w >= MetadataTile::TILE_SIDE && target_h >= MetadataTile::TILE_SIDE) {
-                attempt_downsample(target_w, target_h);
-            }
-        }
-        // Sweep around the best logical guess to catch non-integer scale factors (e.g., 3.03x upscales)
-        // before falling back to coarse factor guesses.
-        if (!tile_available && logical_guess > 0u) {
-            u32 sweep_min = logical_guess > 0u ? (u32)((logical_guess * 60ull) / 100ull) : MetadataTile::TILE_SIDE;
-            u32 sweep_max = logical_guess > 0u ? (u32)((logical_guess * 115ull) / 100ull) : (u32)base_width;
-            if (sweep_min < MetadataTile::TILE_SIDE) sweep_min = MetadataTile::TILE_SIDE;
-            if (sweep_max > base_width) sweep_max = (u32)base_width;
-            for (u32 target_w = sweep_min; target_w <= sweep_max && !tile_available; target_w += 20u) {
-                if (target_w > base_height) break;
-                
-                attempt_downsample(target_w, target_w);
-            }
-        }
-        // Try a geometric downsample sweep when the affine tile search and logical-size
-        // estimate both fail. This keeps the legacy fallback scale-independent.
-        if (!tile_available) {
-            double max_factor = ((double)(base_width < base_height ? base_width : base_height)) /
-                                (double)MetadataTile::TILE_SIDE;
-            for (double factor = 1.25; factor <= max_factor && !tile_available; factor *= 1.25) {
-                u32 target_w = (u32)floor(((double)base_width / factor) + 0.5);
-                u32 target_h = (u32)floor(((double)base_height / factor) + 0.5);
-                attempt_downsample(target_w, target_h);
-            }
-        }
-        if (!tile_available && downsample_buffer_ready) {
-            u8* chosen = downsampled_pixels.data;
-            if (best_downsample.size > 0u && best_downsample.data) {
-                chosen = best_downsample.data;
-                pixel_data = chosen;
-                width = best_downsample_w ? best_downsample_w : downsample_buffer_w;
-                height = best_downsample_h ? best_downsample_h : downsample_buffer_h;
-            } else {
-                pixel_data = chosen;
-                width = downsample_buffer_w;
-                height = downsample_buffer_h;
-            }
-        }
-        // If metadata was found via downsample, revert to full-resolution pixels for payload sampling.
-        if (tile_available) {
-            pixel_data = pixel_buffer.data;
-            width = base_width;
-            height = base_height;
-        }
     }
 
     if (!tile_available) {
@@ -19487,7 +19199,7 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         }
     }
     u8 detection_color_mode = active_mapping.color_channels;
-    double scale_x = 1.0;
+    double scale_x;
     double scale_y = 1.0;
     bool scale_x_integer = true;
     bool scale_y_integer = true;
@@ -19511,32 +19223,16 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
         expected_height = state.page_height_pixels_value;
         height_known = true;
     }
-	    if (!width_known && !height_known) {
-	        u64 guessed = estimate_square_page_from_image(width, height);
-	        if (guessed) {
-	            expected_width = guessed;
-	            expected_height = guessed;
-	            width_known = true;
-	            height_known = true;
-            state.has_page_width_pixels = true;
-            state.page_width_pixels_value = guessed;
-            state.has_page_height_pixels = true;
-            state.page_height_pixels_value = guessed;
-            
-        }
-    }
+    if (!width_known || !expected_width) return false;
     bool native_page_raster = width_known && height_known &&
                               width == expected_width && height == expected_height &&
                               !state.has_rotation_degrees && !state.has_skew_y_pixels;
-    bool fiducial_rotation_detected = false;
-
 struct RotationEstimateCandidate {
         bool valid;
         double angle_deg;
         u64 width;
         u64 height;
         double margin;
-        bool from_fiducials;
         bool has_affine;
         AffineTransform affine;
 
@@ -19546,7 +19242,6 @@ struct RotationEstimateCandidate {
               width(0u),
               height(0u),
               margin(0.0),
-              from_fiducials(false),
               has_affine(false),
               affine() {}
     };
@@ -19560,15 +19255,13 @@ struct RotationEstimateCandidate {
                                          u64 width_est,
                                          u64 height_est,
                                          double margin_est,
-                                         bool from_fiducials,
                                          const AffineTransform* affine_opt) {
         candidate.valid = true;
         candidate.angle_deg = angle;
         candidate.width = width_est;
         candidate.height = height_est;
         candidate.margin = margin_est;
-        candidate.from_fiducials = from_fiducials;
-        candidate.has_affine = (from_fiducials && affine_opt);
+        candidate.has_affine = affine_opt != 0;
         if (candidate.has_affine) {
             candidate.affine = *affine_opt;
         }
@@ -19610,7 +19303,7 @@ struct RotationEstimateCandidate {
         }
     };
 
-    auto apply_rotation_candidate = [&](const RotationEstimateCandidate& candidate_raw) -> bool {
+    auto apply_rotation_candidate = [&](const RotationEstimateCandidate& candidate_raw) {
         RotationEstimateCandidate candidate = candidate_raw;
         // Keep scales coherent before committing.
         if (width_known && height_known) {
@@ -19629,11 +19322,6 @@ struct RotationEstimateCandidate {
             state.affine_transform = candidate.affine;
         }
         refresh_rotation_state();
-        if (candidate.from_fiducials) {
-            fiducial_rotation_detected = true;
-        }
-        
-        return has_rotation;
     };
     if (!native_page_raster && width_known && height_known) {
         PpmParserState auto_state = state;
@@ -19652,7 +19340,6 @@ struct RotationEstimateCandidate {
                                       auto_width,
                                       auto_height,
                                       auto_margin,
-                                      false,
                                       (const AffineTransform*)0);
             
         }
@@ -19685,7 +19372,6 @@ struct RotationEstimateCandidate {
                                               rotation_width_est,
                                               rotation_height_est,
                                               rotation_margin_est,
-                                              false,
                                               (const AffineTransform*)0);
             }
         }
@@ -19812,23 +19498,6 @@ struct RotationEstimateCandidate {
                 page_angle_degrees = auto_candidate.angle_deg;
                 page_angle_available = true;
             }
-            if (gradient_candidate.valid &&
-                (!page_angle_available ||
-                 fabs(makocode::image::normalize_angle(
-                     gradient_candidate.angle_deg -
-                     (initial_sample_tile_hint_ptr
-                          ? tile_affine_hint.angle_rad *
-                                (180.0 / 3.14159265358979323846)
-                          : page_angle_degrees))) <
-                     fabs(makocode::image::normalize_angle(
-                         page_angle_degrees -
-                         (initial_sample_tile_hint_ptr
-                              ? tile_affine_hint.angle_rad *
-                                    (180.0 / 3.14159265358979323846)
-                              : page_angle_degrees))))) {
-                page_angle_degrees = gradient_candidate.angle_deg;
-                page_angle_available = true;
-            }
             if (!page_angle_available && state.has_rotation_degrees) {
                 page_angle_degrees = state.rotation_degrees_value;
                 page_angle_available = true;
@@ -19843,38 +19512,6 @@ struct RotationEstimateCandidate {
                      page_tile_angle_error > 1.5)) {
                     initial_sample_tile_hint.angle_rad = page_angle_degrees *
                                                          (3.14159265358979323846 / 180.0);
-                }
-            }
-            if ((!initial_sample_tile_hint_ptr ||
-                 !(initial_sample_tile_hint.pitch_pixels > 0.0)) &&
-                       page_angle_available && fabs(page_angle_degrees) >= 0.75 &&
-                       fabs(page_angle_degrees) < 10.0 &&
-                       expected_width > 1u && expected_height_eff > 1u &&
-                       expected_width <= 0xFFFFFFFFull &&
-                       expected_height_eff <= 0xFFFFFFFFull) {
-                double page_angle_radians = page_angle_degrees *
-                    (3.14159265358979323846 / 180.0);
-                double page_cosine = fabs(cos(page_angle_radians));
-                double page_sine = fabs(sin(page_angle_radians));
-                double projected_width = (double)expected_width * page_cosine +
-                                         (double)expected_height_eff * page_sine;
-                double projected_height = (double)expected_width * page_sine +
-                                          (double)expected_height_eff * page_cosine;
-                if (projected_width > 0.0 && projected_height > 0.0) {
-                    double pitch_x = (double)width / projected_width;
-                    double pitch_y = (double)sample_height / projected_height;
-                    double pitch = (pitch_x + pitch_y) * 0.5;
-                    if (pitch > 0.75 && pitch <= 16.0 &&
-                        fabs(pitch_x - pitch_y) <= pitch * 0.08) {
-                        initial_sample_tile_hint.pitch_pixels = pitch;
-                        initial_sample_tile_hint.pitch_x_pixels = pitch_x;
-                        initial_sample_tile_hint.pitch_y_pixels = pitch_y;
-                        initial_sample_tile_hint.center_x = ((double)width - 1.0) * 0.5;
-                        initial_sample_tile_hint.center_y = ((double)sample_height - 1.0) * 0.5;
-                        initial_sample_tile_hint.angle_rad = page_angle_radians;
-                        initial_sample_tile_hint_ptr = &initial_sample_tile_hint;
-                        refine_marker_centers = true;
-                    }
                 }
             }
             u8* centers_visible = 0;
@@ -19921,7 +19558,6 @@ struct RotationEstimateCandidate {
                                                                             &fiducial_affine,
                                                                             &fiducial_affine_valid,
                                                                             0);
-
                 bool fiducial_fit_covers_page = centers_visible == 0;
                 if (centers_visible) {
                     u32 min_row = fiducial_rows;
@@ -19973,145 +19609,11 @@ struct RotationEstimateCandidate {
                     }
                 }
 
-                double fiducial_grid_angle_est = rotation_degrees_est;
                 if (rotation_success && fiducial_affine_valid && tile_affine_hint_trusted &&
                     expected_width <= 0xFFFFFFFFull && expected_height_eff <= 0xFFFFFFFFull) {
                     MetadataTile::Placement logical_tile = logical_tile_placement(
                         (u32)expected_width, (u32)expected_height_eff);
                     if (logical_tile.valid) {
-                        double scale_x = sqrt(fiducial_affine.a00 * fiducial_affine.a00 +
-                                              fiducial_affine.a10 * fiducial_affine.a10);
-                        double scale_y = sqrt(fiducial_affine.a01 * fiducial_affine.a01 +
-                                              fiducial_affine.a11 * fiducial_affine.a11);
-                        double mean_scale = (scale_x + scale_y) * 0.5;
-                        double anisotropy = (mean_scale > 0.0)
-                                                ? fabs(scale_x - scale_y) / mean_scale
-                                                : 1.0;
-                        double non_orthogonality = (scale_x > 0.0 && scale_y > 0.0)
-                                                       ? fabs(fiducial_affine.a00 * fiducial_affine.a01 +
-                                                              fiducial_affine.a10 * fiducial_affine.a11) /
-                                                             (scale_x * scale_y)
-                                                       : 1.0;
-                        double bounds_angle = rotation_degrees_est;
-                        double tile_angle = tile_affine_hint.angle_rad *
-                                            (180.0 / 3.14159265358979323846);
-                        double bounds_angle_error = 180.0;
-                        if (auto_candidate.valid) {
-                            bounds_angle = auto_candidate.angle_deg;
-                            bounds_angle_error = fabs(makocode::image::normalize_angle(
-                                bounds_angle - tile_angle));
-                        }
-                        if (gradient_candidate.valid) {
-                            double gradient_error = fabs(makocode::image::normalize_angle(
-                                gradient_candidate.angle_deg - tile_angle));
-                            if (gradient_error < bounds_angle_error) {
-                                bounds_angle = gradient_candidate.angle_deg;
-                                bounds_angle_error = gradient_error;
-                            }
-                        }
-                        if (anisotropy < 0.01 && non_orthogonality < 0.001 && bounds_angle_error < 0.5 &&
-                            expected_width > 0u && expected_height > 0u) {
-                            double angle_rad = bounds_angle *
-                                               (3.14159265358979323846 / 180.0);
-                            double abs_cos = fabs(cos(angle_rad));
-                            double abs_sin = fabs(sin(angle_rad));
-                            double span_w = (double)expected_width * abs_cos +
-                                            (double)expected_height * abs_sin;
-                            double span_h = (double)expected_width * abs_sin +
-                                            (double)expected_height * abs_cos;
-                            double span_norm = span_w * span_w + span_h * span_h;
-                            if (span_norm > 0.0) {
-                                double bounds_scale = ((double)width * span_w +
-                                                       (double)height * span_h) / span_norm;
-                                double predicted_width = bounds_scale * span_w;
-                                double predicted_height = bounds_scale * span_h;
-                                double width_error = fabs(predicted_width - (double)width) /
-                                                     (double)width;
-                                double height_error = fabs(predicted_height - (double)height) /
-                                                      (double)height;
-                                double fitted_scale_error = (mean_scale > 0.0)
-                                                                ? fabs(bounds_scale - mean_scale) / mean_scale
-                                                                : 1.0;
-                                if (bounds_scale > 0.0 && fitted_scale_error < 0.001 &&
-                                    width_error < 0.005 && height_error < 0.005) {
-                                    double c = cos(angle_rad);
-                                    double s = sin(angle_rad);
-                                    AffineTransform similarity = fiducial_affine;
-                                    similarity.a00 = bounds_scale * c;
-                                    similarity.a01 = -bounds_scale * s;
-                                    similarity.a10 = bounds_scale * s;
-                                    similarity.a11 = bounds_scale * c;
-                                    double mean_logical_x = 0.0;
-                                    double mean_logical_y = 0.0;
-                                    double mean_screen_x = 0.0;
-                                    double mean_screen_y = 0.0;
-                                    u64 visible_count = 0u;
-                                    for (u32 row = 0u; row < fiducial_rows; ++row) {
-                                        double logical_y = fiducial_lattice_center(
-                                            row, fiducial_rows, (u32)expected_height_eff,
-                                            fiducial_spacing) + 0.5;
-                                        for (u32 column = 0u; column < fiducial_columns; ++column) {
-                                            usize point = (usize)row * (usize)fiducial_columns + column;
-                                            if (centers_visible && !centers_visible[point]) continue;
-                                            double logical_x = fiducial_lattice_center(
-                                                column, fiducial_columns, (u32)expected_width,
-                                                fiducial_spacing) + 0.5;
-                                            mean_logical_x += logical_x;
-                                            mean_logical_y += logical_y;
-                                            mean_screen_x += centers_x[point];
-                                            mean_screen_y += centers_y[point];
-                                            ++visible_count;
-                                        }
-                                    }
-                                    if (visible_count > 0u) {
-                                        double inverse_count = 1.0 / (double)visible_count;
-                                        mean_logical_x *= inverse_count;
-                                        mean_logical_y *= inverse_count;
-                                        mean_screen_x *= inverse_count;
-                                        mean_screen_y *= inverse_count;
-                                        similarity.tx = mean_screen_x -
-                                            similarity.a00 * mean_logical_x -
-                                            similarity.a01 * mean_logical_y;
-                                        similarity.ty = mean_screen_y -
-                                            similarity.a10 * mean_logical_x -
-                                            similarity.a11 * mean_logical_y;
-                                        double affine_error = 0.0;
-                                        double similarity_error = 0.0;
-                                        for (u32 row = 0u; row < fiducial_rows; ++row) {
-                                            double logical_y = fiducial_lattice_center(
-                                                row, fiducial_rows, (u32)expected_height_eff,
-                                                fiducial_spacing);
-                                            for (u32 column = 0u; column < fiducial_columns; ++column) {
-                                                usize point = (usize)row * (usize)fiducial_columns + column;
-                                                if (centers_visible && !centers_visible[point]) continue;
-                                                double logical_x = fiducial_lattice_center(
-                                                    column, fiducial_columns, (u32)expected_width,
-                                                    fiducial_spacing);
-                                                double affine_x = fiducial_affine.a00 * logical_x +
-                                                    fiducial_affine.a01 * logical_y + fiducial_affine.tx;
-                                                double affine_y = fiducial_affine.a10 * logical_x +
-                                                    fiducial_affine.a11 * logical_y + fiducial_affine.ty;
-                                                double similarity_x = similarity.a00 * logical_x +
-                                                    similarity.a01 * logical_y + similarity.tx;
-                                                double similarity_y = similarity.a10 * logical_x +
-                                                    similarity.a11 * logical_y + similarity.ty;
-                                                double affine_dx = centers_x[point] - affine_x;
-                                                double affine_dy = centers_y[point] - affine_y;
-                                                double similarity_dx = centers_x[point] - similarity_x;
-                                                double similarity_dy = centers_y[point] - similarity_y;
-                                                affine_error += affine_dx * affine_dx + affine_dy * affine_dy;
-                                                similarity_error += similarity_dx * similarity_dx +
-                                                                    similarity_dy * similarity_dy;
-                                            }
-                                        }
-                                        if (similarity_error <= affine_error +
-                                            (double)visible_count * 0.01) {
-                                            fiducial_affine = similarity;
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         double logical_center_x = (double)logical_tile.x0 +
                                                   (double)MetadataTile::TILE_SIDE * 0.5;
                         double logical_center_y = (double)logical_tile.y0 +
@@ -20147,11 +19649,6 @@ struct RotationEstimateCandidate {
                 if (rotation_success) {
                     double independent_angle_error = 180.0;
                     const RotationEstimateCandidate* independent_candidate = 0;
-                    if (auto_candidate.valid) {
-                        independent_angle_error = fabs(makocode::image::normalize_angle(
-                            rotation_degrees_est - auto_candidate.angle_deg));
-                        independent_candidate = &auto_candidate;
-                    }
                     if (gradient_candidate.valid) {
                         double gradient_angle_error = fabs(makocode::image::normalize_angle(
                             rotation_degrees_est - gradient_candidate.angle_deg));
@@ -20224,122 +19721,12 @@ struct RotationEstimateCandidate {
                             rotation_height_est = max_dim;
                         }
                     }
-                    
-                    bool rotation_consensus =
-                        (auto_candidate.valid && fabs(makocode::image::normalize_angle(
-                            auto_candidate.angle_deg - rotation_degrees_est)) < 2.0) ||
-                        (gradient_candidate.valid && fabs(makocode::image::normalize_angle(
-                            gradient_candidate.angle_deg - rotation_degrees_est)) < 2.0);
-                    // Rotation agreement does not rule out shear. Remove the fitted
-                    // rotation first, then measure the remaining vertical displacement
-                    // across each fiducial row.
-                    if (!state.has_skew_y_pixels && expected_width > 1u && fiducial_columns >= 2u) {
-                        double angle_rad = fiducial_grid_angle_est *
-                                           (3.14159265358979323846 / 180.0);
-                        double cos_r = cos(-angle_rad);
-                        double sin_r = sin(-angle_rad);
-                        double span_pixels = rotation_width_est ? (double)rotation_width_est : (double)expected_width;
-                        double* shear_values = (double*)makocode_platform_malloc((usize)fiducial_rows * sizeof(double));
-                        u32 shear_count = 0u;
-                        if (shear_values && span_pixels > 1.0) {
-                            for (u32 row = 0u; row < fiducial_rows; ++row) {
-                                usize left_idx = (usize)row * (usize)fiducial_columns;
-                                usize right_idx = left_idx + (usize)(fiducial_columns - 1u);
-                                double x0 = centers_x[left_idx];
-                                double y0 = centers_y[left_idx];
-                                double x1 = centers_x[right_idx];
-                                double y1 = centers_y[right_idx];
-                                double uy0 = x0 * sin_r + y0 * cos_r;
-                                double uy1 = x1 * sin_r + y1 * cos_r;
-                                shear_values[shear_count++] = uy1 - uy0;
-                            }
-                            for (u32 i = 1u; i < shear_count; ++i) {
-                                double value = shear_values[i];
-                                u32 j = i;
-                                while (j > 0u && shear_values[j - 1u] > value) {
-                                    shear_values[j] = shear_values[j - 1u];
-                                    --j;
-                                }
-                                shear_values[j] = value;
-                            }
-                        }
-                        if (span_pixels > 1.0 && shear_count > 0u) {
-                            double skew_y_pixels_est = (shear_count & 1u)
-                                                           ? shear_values[shear_count / 2u]
-                                                           : 0.5 * (shear_values[shear_count / 2u - 1u] +
-                                                                    shear_values[shear_count / 2u]);
-                            double activation_threshold = rotation_consensus
-                                                             ? 5.0
-                                                             : ((fabs(rotation_degrees_est) >= 0.1) ? 0.3 : 3.0);
-                            if (fabs(skew_y_pixels_est) >= activation_threshold) {
-                                state.has_skew_y_pixels = true;
-                                state.skew_y_pixels_value = skew_y_pixels_est;
-                                if (!state.has_skew_src_width) {
-                                    state.has_skew_src_width = true;
-                                    state.skew_src_width_value = rotation_width_est ? rotation_width_est : expected_width;
-                                }
-                                if (!state.has_skew_src_height) {
-                                    state.has_skew_src_height = true;
-                                    state.skew_src_height_value = rotation_height_est ? rotation_height_est : expected_height;
-                                }
-                            }
-                        }
-                        if (shear_values) {
-                            makocode_platform_free(shear_values);
-                        }
-                    }
-                    double tile_angle_degrees = tile_affine_hint_trusted
-                                                    ? tile_affine_hint.angle_rad *
-                                                          (180.0 / 3.14159265358979323846)
-                                                    : 0.0;
-                    bool trusted_tile_affine = tile_affine_hint_trusted &&
-                                               fabs(tile_angle_degrees) >= 0.5 &&
-                                               affine_rotation_validated;
-                    bool legacy_skew_affine = state.has_skew_y_pixels &&
-                                              fabs(state.skew_y_pixels_value) >= 0.3 &&
-                                              fabs(rotation_degrees_est) < 0.2;
-                    double fitted_scale_x = sqrt(fiducial_affine.a00 * fiducial_affine.a00 +
-                                                 fiducial_affine.a10 * fiducial_affine.a10);
-                    double fitted_scale_y = sqrt(fiducial_affine.a01 * fiducial_affine.a01 +
-                                                 fiducial_affine.a11 * fiducial_affine.a11);
-                    bool measured_cross_terms = fitted_scale_x > 0.0 && fitted_scale_y > 0.0 &&
-                        (fabs(fiducial_affine.a01) > 0.0005 * fitted_scale_x ||
-                         fabs(fiducial_affine.a10) > 0.0005 * fitted_scale_y);
-                    bool fiducial_fit_covers_page = centers_visible == 0;
-                    if (centers_visible) {
-                        u32 min_row = fiducial_rows;
-                        u32 max_row = 0u;
-                        u32 min_column = fiducial_columns;
-                        u32 max_column = 0u;
-                        for (u32 row = 0u; row < fiducial_rows; ++row) {
-                            for (u32 column = 0u; column < fiducial_columns; ++column) {
-                                usize point = (usize)row * (usize)fiducial_columns +
-                                              (usize)column;
-                                if (!centers_visible[point]) continue;
-                                if (row < min_row) min_row = row;
-                                if (row > max_row) max_row = row;
-                                if (column < min_column) min_column = column;
-                                if (column > max_column) max_column = column;
-                            }
-                        }
-                        u32 minimum_row_span = (fiducial_rows + 1u) / 2u;
-                        u32 minimum_column_span = (fiducial_columns * 3u + 3u) / 4u;
-                        fiducial_fit_covers_page = min_row < fiducial_rows &&
-                            min_column < fiducial_columns &&
-                            max_row - min_row + 1u >= minimum_row_span &&
-                            max_column - min_column + 1u >= minimum_column_span;
-                    }
-                    bool use_affine = fiducial_affine_valid &&
-                                      (trusted_tile_affine || legacy_skew_affine ||
-                                       (fiducial_fit_covers_page && measured_cross_terms &&
-                                        !fiducial_affine_disagrees_with_tile));
                     assign_rotation_candidate(fiducial_candidate,
                                               rotation_degrees_est,
                                               rotation_width_est,
                                               rotation_height_est,
                                               rotation_margin_est,
-                                              true,
-                                              use_affine ? &fiducial_affine : (const AffineTransform*)0);
+                                              (const AffineTransform*)0);
                 }
                 if (centers_visible) makocode_platform_free(centers_visible);
                 if (centers_x) {
@@ -21279,18 +20666,16 @@ struct RotationEstimateCandidate {
     
     if (width_known && expected_width) {
         double ratio_x = (double)analysis_width / (double)expected_width;
-        if (ratio_x > 0.0) {
-            scale_x = ratio_x;
-            double rounded_ratio_x = floor(ratio_x + 0.5);
-            double diff_x = ratio_x - rounded_ratio_x;
-            if (!has_skew && rounded_ratio_x >= 1.0 && diff_x < 0.08 && diff_x > -0.08) {
-                scale_x_int = (u64)rounded_ratio_x;
-                scale_x = (double)scale_x_int;
-                scale_x_integer = true;
-            } else {
-                scale_x_integer = false;
-            }
-            
+        if (!(ratio_x > 0.0)) return false;
+        scale_x = ratio_x;
+        double rounded_ratio_x = floor(ratio_x + 0.5);
+        double diff_x = ratio_x - rounded_ratio_x;
+        if (!has_skew && rounded_ratio_x >= 1.0 && diff_x < 0.08 && diff_x > -0.08) {
+            scale_x_int = (u64)rounded_ratio_x;
+            scale_x = (double)scale_x_int;
+            scale_x_integer = true;
+        } else {
+            scale_x_integer = false;
         }
     }
     if (height_known && expected_height) {
@@ -21795,15 +21180,6 @@ struct RotationEstimateCandidate {
                                    (u64)samples_per_pixel;
     }
     u64 capacity_with_reserve = capacity_without_reserve;
-    if (palette_symbol_stream_mode && page_capacity_override) {
-        u64 maximum_override = password_placement_requested
-            ? (capacity_without_reserve > unsalted_canonical_capacity
-                   ? capacity_without_reserve : unsalted_canonical_capacity)
-            : capacity_with_reserve;
-        if ((page_capacity_override & 31u) != 0u ||
-            page_capacity_override > maximum_override) return false;
-        capacity_with_reserve = page_capacity_override;
-    }
     if (state.has_encoded_tile) {
         if (capacity_with_reserve == 0u || state.encoded_tile.page_bits == 0u) return false;
         u64 derived_page_count = (state.encoded_tile.page_bits - 1u) / capacity_with_reserve + 1u;
@@ -21919,8 +21295,7 @@ struct RotationEstimateCandidate {
     u32 fiducial_column_count = 0u;
     u32 fiducial_row_count = 0u;
     bool dimension_scale_overrides_sparse_skew = false;
-    if ((!has_rotation || rotation_metadata_present || fiducial_rotation_detected ||
-         tile_affine_hint_available) &&
+    if ((!has_rotation || rotation_metadata_present || tile_affine_hint_available) &&
         state.has_fiducial_columns && state.has_fiducial_rows &&
         state.has_fiducial_spacing &&
         state.fiducial_columns_value >= 2u &&
@@ -22563,41 +21938,6 @@ struct RotationEstimateCandidate {
                                         measured_fiducial_affine_hint_available = true;
                                         state.affine_fit_covers_page = true;
                                     }
-                                    double scan_scale = (scale_xd + scale_yd) * 0.5;
-                                    // At low resolution, correct isolated pixel-centroid outliers
-                                    // from the robust affine fit of the other detected markers.
-                                    if (scan_scale < 1.5 && !fiducial_storage.affine_hint_centers_x) {
-                                        for (u32 row_index = 0u; row_index < fiducial_rows; ++row_index) {
-                                            double logical_center_y = fiducial_lattice_center(
-                                                row_index, fiducial_rows, (u32)data_height, fiducial_spacing);
-                                            for (u32 col_index = 0u; col_index < fiducial_columns; ++col_index) {
-                                                double logical_center_x = fiducial_lattice_center(
-                                                    col_index, fiducial_columns, (u32)logical_width,
-                                                    fiducial_spacing);
-                                                double predicted_screen_x = fiducial_affine.a00 *
-                                                                                (logical_center_x + 0.5) +
-                                                                            fiducial_affine.a01 *
-                                                                                (logical_center_y + 0.5) +
-                                                                            fiducial_affine.tx;
-                                                double predicted_screen_y = fiducial_affine.a10 *
-                                                                                (logical_center_x + 0.5) +
-                                                                            fiducial_affine.a11 *
-                                                                                (logical_center_y + 0.5) +
-                                                                            fiducial_affine.ty;
-                                                usize point_index = (usize)row_index *
-                                                                        (usize)fiducial_columns +
-                                                                    (usize)col_index;
-                                                double residual_x = fiducial_storage.centers_x[point_index] -
-                                                                    predicted_screen_x;
-                                                double residual_y = fiducial_storage.centers_y[point_index] -
-                                                                    predicted_screen_y;
-                                                if (residual_x * residual_x + residual_y * residual_y > 6.25) {
-                                                    fiducial_storage.centers_x[point_index] = predicted_screen_x;
-                                                    fiducial_storage.centers_y[point_index] = predicted_screen_y;
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                                 if (rotation_success && has_rotation && fiducial_affine_valid &&
                                     fiducial_fit_covers_page &&
@@ -22686,7 +22026,6 @@ struct RotationEstimateCandidate {
                                                               rotation_width_est,
                                                               rotation_height_est,
                                                               rotation_margin_est,
-                                                              true,
                                                               use_affine ? &fiducial_affine : (const AffineTransform*)0);
                                     apply_rotation_candidate(candidate);
                                 }
@@ -22705,117 +22044,6 @@ struct RotationEstimateCandidate {
         }
     }
 
-
-    if (!native_page_raster && !has_rotation && fiducial_grid_visible &&
-        logical_width > 1u && data_height > 1u &&
-        logical_width <= 0xFFFFFFFFull && data_height <= 0xFFFFFFFFull &&
-        fiducial_storage.centers_x && fiducial_storage.centers_y &&
-        fiducial_column_count >= 3u && fiducial_row_count >= 3u) {
-        double fitted_angle = 0.0;
-        u64 fitted_width = 0u;
-        u64 fitted_height = 0u;
-        double fitted_margin = 0.0;
-        AffineTransform measured_affine;
-        bool measured_affine_valid = false;
-        bool measured_grid_valid = auto_detect_rotation_from_fiducials(
-            fiducial_storage.centers_x,
-            fiducial_storage.centers_y,
-            fiducial_column_count,
-            fiducial_row_count,
-            logical_width,
-            data_height,
-            state.has_fiducial_spacing
-                ? (double)state.fiducial_spacing_value
-                : (double)g_fiducial_defaults.spacing_pixels,
-            width,
-            height,
-            state,
-            true,
-            fitted_angle,
-            fitted_width,
-            fitted_height,
-            fitted_margin,
-            &measured_affine,
-            &measured_affine_valid,
-            fiducial_storage.visible);
-        if (measured_grid_valid && measured_affine_valid) {
-            bool fiducial_fit_covers_page = fiducial_storage.visible == 0;
-            if (fiducial_storage.visible) {
-                u32 min_row = fiducial_row_count;
-                u32 max_row = 0u;
-                u32 min_column = fiducial_column_count;
-                u32 max_column = 0u;
-                for (u32 row = 0u; row < fiducial_row_count; ++row) {
-                    for (u32 column = 0u; column < fiducial_column_count; ++column) {
-                        usize point = (usize)row * (usize)fiducial_column_count +
-                                      (usize)column;
-                        if (!fiducial_storage.visible[point]) continue;
-                        if (row < min_row) min_row = row;
-                        if (row > max_row) max_row = row;
-                        if (column < min_column) min_column = column;
-                        if (column > max_column) max_column = column;
-                    }
-                }
-                u32 minimum_row_span = (fiducial_row_count + 1u) / 2u;
-                u32 minimum_column_span = (fiducial_column_count * 3u + 3u) / 4u;
-                fiducial_fit_covers_page = min_row < fiducial_row_count &&
-                    min_column < fiducial_column_count &&
-                    max_row - min_row + 1u >= minimum_row_span &&
-                    max_column - min_column + 1u >= minimum_column_span;
-            }
-            double fitted_scale_x = sqrt(measured_affine.a00 * measured_affine.a00 +
-                                         measured_affine.a10 * measured_affine.a10);
-            double fitted_scale_y = sqrt(measured_affine.a01 * measured_affine.a01 +
-                                         measured_affine.a11 * measured_affine.a11);
-            double cross_term_ratio_x = (fitted_scale_y > 0.0)
-                                            ? fabs(measured_affine.a01) / fitted_scale_y
-                                            : 0.0;
-            double cross_term_ratio_y = (fitted_scale_x > 0.0)
-                                            ? fabs(measured_affine.a10) / fitted_scale_x
-                                            : 0.0;
-            double page_scale_x = (double)width / (double)logical_width;
-            double page_scale_y = (double)height / (double)logical_height;
-            bool scale_matches = fitted_scale_x > 0.0 && fitted_scale_y > 0.0 &&
-                                 fabs(fitted_scale_x - page_scale_x) <= page_scale_x * 0.05 &&
-                                 fabs(fitted_scale_y - page_scale_y) <= page_scale_y * 0.05;
-            bool tile_center_matches = true;
-            if (tile_affine_hint_available && tile_affine_hint.pitch_pixels > 0.0) {
-                MetadataTile::Placement logical_tile = logical_tile_placement(
-                    (u32)logical_width, (u32)data_height);
-                if (logical_tile.valid) {
-                    double tile_center_x = (double)logical_tile.x0 +
-                                           (double)MetadataTile::TILE_SIDE * 0.5;
-                    double tile_center_y = (double)logical_tile.y0 +
-                                           (double)MetadataTile::TILE_SIDE * 0.5;
-                    double predicted_x = measured_affine.a00 * tile_center_x +
-                                         measured_affine.a01 * tile_center_y +
-                                         measured_affine.tx;
-                    double predicted_y = measured_affine.a10 * tile_center_x +
-                                         measured_affine.a11 * tile_center_y +
-                                         measured_affine.ty;
-                    double tile_tolerance = tile_affine_hint.pitch_pixels * 2.0;
-                    if (tile_tolerance < 8.0) tile_tolerance = 8.0;
-                    tile_center_matches = fabs(predicted_x - tile_affine_hint.center_x) <=
-                                              tile_tolerance &&
-                                          fabs(predicted_y - tile_affine_hint.center_y) <=
-                                              tile_tolerance;
-                }
-            }
-            bool axis_aligned_fiducial_fit = !has_rotation &&
-                cross_term_ratio_x <= 0.001 && cross_term_ratio_y <= 0.001;
-            if (fiducial_fit_covers_page && scale_matches && tile_center_matches &&
-                ((cross_term_ratio_x > 0.001 || cross_term_ratio_y > 0.001) ||
-                 axis_aligned_fiducial_fit)) {
-                if (!initial_fiducial_affine_hint_available) {
-                    state.affine_transform = measured_affine;
-                    state.has_affine_transform = true;
-                    initial_fiducial_affine_hint = measured_affine;
-                    initial_fiducial_affine_hint_available = true;
-                    recompute_skew_flags();
-                }
-            }
-        }
-    }
 
     if (native_page_raster) {
         state.has_affine_transform = false;
@@ -23080,9 +22308,7 @@ struct RotationEstimateCandidate {
                             fiducial_row_count,
                             logical_width,
                             data_height,
-                            state.has_fiducial_spacing
-                                ? (double)state.fiducial_spacing_value
-                                : (double)g_fiducial_defaults.spacing_pixels,
+                            (double)state.fiducial_spacing_value,
                             width,
                             height,
                             state,
@@ -23152,23 +22378,11 @@ struct RotationEstimateCandidate {
                             fit_max_row - fit_min_row + 1u >= minimum_row_span &&
                             fit_max_column - fit_min_column + 1u >= minimum_column_span;
                         double tile_scale = tile_affine_hint.pitch_pixels;
-                        bool retain_small_axis_tile_affine =
-                            logical_width <= 96u && data_height <= 96u &&
-                            tile_affine_hint_available &&
-                            tile_anchored_axis_affine_valid &&
-                            fabs(tile_affine_hint.angle_rad) <=
-                                (0.1 * 3.14159265358979323846 / 180.0);
                         bool fitted_affine_usable = fit_scale_x > 0.0 && fit_scale_y > 0.0 &&
                             fabs(fit_scale - tile_scale) <= tile_scale * 0.08 &&
                             fabs(fit_angle_delta) <=
                                 (5.0 * 3.14159265358979323846 / 180.0) &&
-                            residual_rms <= 2.5 && fit_covers_page &&
-                            !retain_small_axis_tile_affine;
-                        if (logical_width == logical_height &&
-                            fabs(fitted_degrees) > 45.0 &&
-                            auto_candidate.valid && fabs(auto_candidate.angle_deg) < 10.0) {
-                            fitted_affine_usable = false;
-                        }
+                            residual_rms <= 2.5 && fit_covers_page;
                         MetadataTile::Placement logical_tile = logical_tile_placement(
                             (u32)logical_width, (u32)data_height);
                         if (fitted_affine_usable && logical_tile.valid) {
@@ -23321,15 +22535,6 @@ struct RotationEstimateCandidate {
                 double fallback_angle_degrees = tile_affine_hint.angle_rad *
                                                  (180.0 / 3.14159265358979323846);
                 double fallback_angle_error = 180.0;
-                if (gradient_candidate.valid && fabs(gradient_candidate.angle_deg) < 10.0) {
-                    double error = fabs(makocode::image::normalize_angle(
-                        gradient_candidate.angle_deg -
-                        tile_affine_hint.angle_rad * (180.0 / 3.14159265358979323846)));
-                    if (error < fallback_angle_error) {
-                        fallback_angle_degrees = gradient_candidate.angle_deg;
-                        fallback_angle_error = error;
-                    }
-                }
                 if (state.has_rotation_degrees && fabs(state.rotation_degrees_value) < 10.0) {
                     double error = fabs(makocode::image::normalize_angle(
                         state.rotation_degrees_value -
@@ -23442,10 +22647,7 @@ struct RotationEstimateCandidate {
                 (!dense_page_affine_has_shear || axis_aligned_anisotropic_dimensions) &&
                 (exact_dimension_scale || page_scale_resolves_tile_pitch_error ||
                  anisotropic_page_dimensions || native_unit_dimensions);
-            if (directly_scaled_dimensions ||
-                ((!tile_anchored_axis_affine_valid || dimension_scale_overrides_sparse_skew) &&
-                 !dense_page_affine_has_shear &&
-                 tile_center_matches)) {
+            if (directly_scaled_dimensions) {
                 tile_anchored_axis_affine.a00 = exact_dimension_scale
                     ? tile_pitch_x
                     : page_scale_x;

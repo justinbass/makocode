@@ -51,6 +51,7 @@ bool write_terminal_text(int fd, const char* text, size_t length) {
 
 #ifdef MAKOCODE_TEST_BUILD
 extern "C" void* makocode_test_malloc(size_t size);
+extern "C" void makocode_test_free(void* ptr);
 #endif
 
 extern "C" void* makocode_platform_malloc(size_t size) {
@@ -66,7 +67,11 @@ extern "C" void* makocode_platform_realloc(void* ptr, size_t size) {
 }
 
 extern "C" void makocode_platform_free(void* ptr) {
+#ifdef MAKOCODE_TEST_BUILD
+    makocode_test_free(ptr);
+#else
     ::free(ptr);
+#endif
 }
 
 extern "C" ptrdiff_t makocode_platform_read(int fd, void* buffer, size_t count) {

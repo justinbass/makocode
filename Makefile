@@ -29,8 +29,10 @@ MAKOCODE_OBJECTS := $(patsubst %.cpp,$(CLI_OBJECT_DIR)/%.o,$(MAKOCODE_SOURCES))
 MAKOCODE_BIN := $(BIN_DIR)/makocode
 MAKOCODE_TEST_BIN := $(BIN_DIR)/makocode_test
 # Clang's gcov output can assign synthesized functions to declaration lines or
-# line 0. Do not infer function ranges from those incomplete locations.
+# line 0, and can report closure line/function counts inconsistently. Do not
+# infer function ranges from those incomplete locations; ignore those records.
 LCOV_RC ?= --rc branch_coverage=1 --rc derive_function_end_line=0
+LCOV_IGNORED_ERRORS ?= format,inconsistent,unsupported
 
 .PHONY: all clean test coverage freestanding makocode makocode_test
 
@@ -85,9 +87,9 @@ coverage: clean
 	$(call test_status,prepare coverage output)
 	@mkdir -p "$(dir $(LCOV_REPORT))"
 	$(call test_status,capture coverage data)
-	@lcov --capture --no-external --filter branch_region --directory "$(COVERAGE_DATA_DIR)" --base-directory "$(CURDIR)" --output-file "$(LCOV_REPORT)" $(LCOV_RC)
+	@lcov --capture --no-external --filter branch_region --directory "$(COVERAGE_DATA_DIR)" --base-directory "$(CURDIR)" --output-file "$(LCOV_REPORT)" $(LCOV_RC) --ignore-errors $(LCOV_IGNORED_ERRORS)
 	$(call test_status,generate coverage HTML)
-	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) --branch-coverage $(LCOV_RC)
+	@genhtml $(LCOV_REPORT) --output-directory $(LCOV_HTML_DIR) --branch-coverage $(LCOV_RC) --ignore-errors $(LCOV_IGNORED_ERRORS)
 
 # Compile every translation unit without the host platform implementation.
 # A target integration supplies the makocode_platform_* definitions at link time.

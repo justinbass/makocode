@@ -2129,7 +2129,6 @@ bool ppm_extract_frame_bits(const makocode::ByteBuffer& input,
                                    bool known_tile_is_present = true,
                                    bool metadata_center_probe_only = false,
                                    bool metadata_summary_only = false,
-                                   u64 page_capacity_override = 0u,
                                    makocode::PaletteSymbolPageSalt* page_salt_out = 0);
 
 void skew_rotate_sample_coordinates(double sample_col,

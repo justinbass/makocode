@@ -1,7 +1,6 @@
 TODO
 
 - 100% branch coverage, test parameterization of each combination of options. Remove dead unreachable code. Mutate each line and remove dead ones. Run 10 times to confirm tests do not have different coverage on different runs.
-- 64-bit vs 32-bit build?
 - Run physical tests, against calibration script.
   - Improve calibration script until max data density is found. Convert to cpp, ./makocode calibration?
   - Run physical damage tests, check different printer/scanner/computer combinations and paper/film mediums. Leave data for a while, artificially age, folder paper, different storage conditions, etc. Post findings.
