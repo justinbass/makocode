@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -52,6 +53,8 @@ static unsigned long platform_allocation_limit_rejection_count=0ul;
 static unsigned long watch_platform_allocation_at=0;
 static void* watch_platform_free_pointer=nullptr;
 static unsigned long watch_platform_free_count=0;
+static thread_local size_t test_allocation_fill_size=0u;
+static thread_local unsigned char test_allocation_fill_value=0u;
 extern "C" void* makocode_test_malloc(size_t size);
 extern "C" void makocode_test_free(void* ptr);
 
@@ -85,6 +88,7 @@ extern "C" void* makocode_test_malloc(size_t size) {
     if(minify_allocation_failure_at&&allocation_index==minify_allocation_failure_at){minify_allocation_failure_size=size;return nullptr;}
     if(platform_allocation_size_limit&&size>platform_allocation_size_limit){++platform_allocation_limit_rejection_count;return nullptr;}
     void* ptr=std::malloc(static_cast<size_t>(size));
+    if(ptr&&test_allocation_fill_size==size&&test_allocation_fill_value){std::memset(ptr,test_allocation_fill_value,size);}
     if(ptr&&watch_platform_allocation_at&&allocation_index==watch_platform_allocation_at){
         watch_platform_free_pointer=ptr;
     }
@@ -1756,6 +1760,7 @@ struct Failure : std::runtime_error {
 
 struct ProcessResult {
     int status = -1;
+    bool timed_out = false;
     std::string out;
     std::string err;
 };
@@ -1845,7 +1850,8 @@ static ProcessResult run_process(const std::vector<std::string>& args,
                                  const fs::path& stdin_path,
                                  const fs::path& stdout_path,
                                  const fs::path& stderr_path,
-                                 const std::map<std::string, std::string>& environment = {}) {
+                                 const std::map<std::string, std::string>& environment = {},
+                                 unsigned long timeout_milliseconds = 0ul) {
     require(!args.empty(), "empty process argv");
     fs::create_directories(stdout_path.parent_path());
     fs::create_directories(stderr_path.parent_path());
@@ -1949,12 +1955,37 @@ static ProcessResult run_process(const std::vector<std::string>& args,
         throw Failure("posix_spawn failed: " + std::string(std::strerror(spawn_error)));
     }
     int status = 0;
-    while (waitpid(child, &status, 0) < 0) {
-        if (errno == EINTR) continue;
-        throw Failure("waitpid failed: " + std::string(std::strerror(errno)));
+    bool timed_out = false;
+    if (timeout_milliseconds == 0ul) {
+        while (waitpid(child, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            throw Failure("waitpid failed: " + std::string(std::strerror(errno)));
+        }
+    } else {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(timeout_milliseconds);
+        for (;;) {
+            pid_t waited = waitpid(child, &status, WNOHANG);
+            if (waited == child) break;
+            if (waited < 0) {
+                if (errno == EINTR) continue;
+                throw Failure("waitpid failed: " + std::string(std::strerror(errno)));
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                kill(child, SIGKILL);
+                while (waitpid(child, &status, 0) < 0) {
+                    if (errno == EINTR) continue;
+                    throw Failure("waitpid failed: " + std::string(std::strerror(errno)));
+                }
+                timed_out = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
     }
     ProcessResult result;
     result.status = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    result.timed_out = timed_out;
     result.out = read_file(stdout_path);
     result.err = read_file(stderr_path);
     return result;
@@ -2019,11 +2050,13 @@ static ProcessResult run_cli(const fs::path& work,
                              const std::vector<std::string>& args,
                              const std::string& tag,
                              const fs::path& stdin_file = {},
-                             const std::map<std::string, std::string>& env = {}) {
+                             const std::map<std::string, std::string>& env = {},
+                             unsigned long timeout_milliseconds = 0ul) {
     std::vector<std::string> command{makocode_bin().string()};
     command.insert(command.end(), args.begin(), args.end());
     ProcessResult result = run_process(command, work, stdin_file,
-        work / (tag + ".stdout"), work / (tag + ".stderr"), env);
+        work / (tag + ".stdout"), work / (tag + ".stderr"), env,
+        timeout_milliseconds);
     return result;
 }
 
@@ -3795,7 +3828,7 @@ static void erased_metadata_scan_case(const std::string& id,int kind){
         unsigned changed=0;for(unsigned col=0;col<outer;++col){size_t at=(static_cast<size_t>(y)*source.width+x0+col)*3;if(static_cast<unsigned char>(source.pixels[at])!=255)++changed;source.pixels[at]=source.pixels[at+1]=source.pixels[at+2]=static_cast<char>(255);}require(changed>0,id+": length row fixture changed no cells");}
     const std::vector<std::array<double,3>> variants=kind==0?std::vector<std::array<double,3>>{{{0,0,0}}}:kind==1?std::vector<std::array<double,3>>{{{90,0,0},{180,0,0},{270,0,0},{0,1,0},{0,0,1}}}:std::vector<std::array<double,3>>{{{0,0,0},{90,0,0},{180,0,0},{270,0,0},{0,1,0},{0,0,1}}};
     for(size_t i=0;i<variants.size();++i){PpmImage variant=source;fs::path scan=work/("scan_"+std::to_string(i)+".ppm");write_file(work/"mutated_source.ppm","P6\n80 80\n255\n"+variant.pixels);variant=read_ppm(work/"mutated_source.ppm");make_oriented_scan(variant,scan,variants[i][0],variants[i][1]!=0,variants[i][2]!=0);
-        fs::path out=work/("decoded_"+std::to_string(i));auto dec=run_cli(work,decode_file_args({scan.string()},out,{}),"decode_"+std::to_string(i));expect_success(dec,id+" scan "+std::to_string(i));compare_files(payload,out/"payload.bin",id+" "+std::to_string(i));}
+        fs::path out=work/("decoded_"+std::to_string(i));auto dec=run_cli(work,decode_file_args({scan.string()},out,{}),"decode_"+std::to_string(i),{}, {},kind==1?5000ul:0ul);require(!dec.timed_out,id+" orientation decode exceeded the 5 second fast-path limit");expect_success(dec,id+" scan "+std::to_string(i));compare_files(payload,out/"payload.bin",id+" "+std::to_string(i));}
 }
 
 static void minify_literals_case(){
@@ -4208,8 +4241,18 @@ struct BlobDecodeResult {
 static bool test_uniform_region_detector(){
     const u32 width=100,height=100;usize count=static_cast<usize>(width)*height;makocode::ByteBuffer symbols,ranks;if(!symbols.ensure(count)||!ranks.ensure(count*sizeof(u64)))return false;symbols.size=count;ranks.size=count*sizeof(u64);u64* rank=reinterpret_cast<u64*>(ranks.data);u32 state=0xA341316Cu;
     for(usize i=0;i<count;++i){state^=state<<13;state^=state>>17;state^=state<<5;symbols.data[i]=static_cast<u8>(state&1u);rank[i]=i;}MetadataTile::Placement placement={};makocode::ByteBuffer mask;
-    if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,1,count,mask))return false;for(usize i=0;i<mask.size;++i)if(mask.data[i])return false;
-    for(u32 y=20;y<80;++y)for(u32 x=20;x<80;++x)symbols.data[static_cast<usize>(y)*width+x]=1;makocode::ByteBuffer blob;if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,1,count,blob))return false;u64 marked=0;for(usize i=0;i<blob.size;++i)marked+=blob.data[i]!=0;return marked>=1500&&marked<5000;
+    size_t mask_capacity=64u;while(mask_capacity<count)mask_capacity*=2u;test_allocation_fill_size=mask_capacity;test_allocation_fill_value=0xA5u;bool no_uniform_regions=detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,1,count,mask);test_allocation_fill_size=0u;test_allocation_fill_value=0u;if(!no_uniform_regions)return false;for(usize i=0;i<mask.size;++i)if(mask.data[i])return false;
+    for(u32 y=20;y<80;++y)for(u32 x=20;x<80;++x)symbols.data[static_cast<usize>(y)*width+x]=1;makocode::ByteBuffer blob;if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,1,count,blob))return false;u64 marked=0;for(usize i=0;i<blob.size;++i)marked+=blob.data[i]!=0;if(marked<1500||marked>=5000)return false;
+    makocode::ByteBuffer reservation_mask,masked_blob;if(!reservation_mask.ensure(count))return false;reservation_mask.size=count;memset(reservation_mask.data,0,count);usize reserved_index=static_cast<usize>(50u)*width+50u;reservation_mask.data[reserved_index]=1u;if(!blob.data[reserved_index])return false;if(!detect_uniform_payload_regions(symbols.data,width,height,rank,reservation_mask.data,reservation_mask.size,placement,1,count,masked_blob))return false;if(masked_blob.data[reserved_index])return false;
+    for(usize i=0;i<count;++i)symbols.data[i]=0u;
+    MetadataTile::Placement metadata_placement;
+    metadata_placement.valid=true;
+    metadata_placement.x0=20u;
+    metadata_placement.y0=40u;
+    for(u32 y=20u;y<56u;++y)for(u32 x=20u;x<68u;++x)symbols.data[static_cast<usize>(y)*width+x]=1u;
+    makocode::ByteBuffer metadata_blob;
+    if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,metadata_placement,2u,1u,count,metadata_blob,false,true,90u))return false;
+    return metadata_blob.size==count&&metadata_blob.data[30u*width+40u]==0u;
 }
 
 static bool decode_blob_fixture(const fs::path& path,bool detect,BlobDecodeResult& result){
@@ -4556,6 +4599,26 @@ static void run_roundtrip(const RoundTrip& test) {
         else {transformed_decode.insert(transformed_decode.end(),transformed_pages.begin(),transformed_pages.end());result=run_cli(work,transformed_decode,"transformed_decode",{},env);}
         expect_success(result, test.id + " transformed decode");
         check_decoded(result.out, expected, 5.0, test.id + " transformed");
+        if (test.id == "0023_gray_rotate_seeded") {
+            makocode::ByteBuffer rotated_input, rotated_frame;
+            require(read_entire_file(transformed_pages.front().c_str(), rotated_input),
+                    test.id + ": could not read rotated image for state inspection");
+            MetadataTile::Values rotated_tile = extract_tile_values(pages.front());
+            ImageMappingConfig rotated_mapping;
+            PpmParserState rotated_state;
+            u64 rotated_frame_bits = 0u;
+            require(ppm_extract_frame_bits(
+                        rotated_input, rotated_mapping, rotated_frame,
+                        rotated_frame_bits, rotated_state, false, nullptr, 1u,
+                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+                        nullptr, &rotated_tile, nullptr, 0u, 0u, 0u, true,
+                        false, false, false, nullptr),
+                    test.id + ": direct rotated-frame extraction failed");
+            require(rotated_state.has_rotation_degrees &&
+                        fabs(rotated_state.rotation_degrees_value - 1.0) < 1e-12,
+                    test.id + ": detected rotation was not snapped to exactly 1 degree: " +
+                        std::to_string(rotated_state.rotation_degrees_value));
+        }
     }
 }
 
@@ -5573,7 +5636,7 @@ static std::vector<TestCase> build_cases() {
     r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.6","--scale-y","2.4","--seed","0"}; rt("0020_gray_100k_stretch_h26_v24","Grayscale horizontal 2.6 / vertical 2.4",r); r={};
     r.size=102400; r.encode_args={"--page-width=1100","--page-height=1100"}; r.transform_args={"--scale-x","2.4","--scale-y","2.6","--seed","0"}; rt("0021_gray_100k_stretch_h24_v26","Grayscale horizontal 2.4 / vertical 2.6",r); r={};
     r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3.03","--scale-y","3.03","--seed","0"}; rt("0022_gray_scale_303_blur","Grayscale upsample 3.03x",r); r={};
-    r.size=65536; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--seed","1337"}; rt("0023_gray_rotate_seeded","Grayscale rotation with deterministic seed",r); r={};
+    r.size=65536; r.has_master_seed_override=true; r.master_seed_override=2081436891u; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--seed","1337"}; rt("0023_gray_rotate_seeded","Grayscale rotation with deterministic seed",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0024_gray_skew_xy_seeded","Grayscale XY skew",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1254688731u; r.encode_args={"--page-width=900","--page-height=900"}; r.transform_args={"--scale-x","3","--scale-y","3","--skew-x","-5","--skew-y","5","--seed","7331"}; rt("0025_gray_skew_xy_reverse_seeded","Grayscale reverse XY skew",r); r={};
     r.size=65536; r.has_payload_seed_override=true; r.payload_seed_override=1003199588u; r.encode_args={"--page-width=900","--page-height=900","--ecc=fill"}; r.transform_args={"--scale-x","3","--scale-y","3","--rotate","1","--skew-x","5","--skew-y","-5","--seed","1337"}; rt("0026_gray_rotate_skew_seeded","Grayscale rotation and skew",r); r={};
@@ -6980,6 +7043,31 @@ static std::vector<TestCase> build_cases() {
                 id + ": the first center allocation was not freed after the second failed");
         (void)failure_extracted;
     }});
+    cases.push_back({"0324_fiducial_center_allocation_failure_cleans_up","Fiducial center extraction releases prior allocations after a later allocation fails",[](const fs::path&){
+        const std::string id = "0324_fiducial_center_allocation_failure_cleans_up";
+        u8 pixels[12u * 12u * 3u] = {};
+        double* centers_x = nullptr;
+        double* centers_y = nullptr;
+        u8* visible = nullptr;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        watch_platform_allocation_at = 1ul;
+        watch_platform_free_pointer = nullptr;
+        watch_platform_free_count = 0ul;
+        bool sampled = sample_fiducial_centers(
+            pixels, 12u, 12u, 1u, 1u, 1.0, 0u, 0u, 0u, false,
+            centers_x, centers_y, nullptr, nullptr, &visible, false, nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        watch_platform_allocation_at = 0ul;
+        require(failed_allocation_size == sizeof(double),
+                id + ": fault injection missed the second center allocation");
+        require(!sampled, id + ": sampling continued after center allocation failed");
+        require(watch_platform_free_count == 1ul &&
+                    watch_platform_free_pointer == nullptr,
+                id + ": the first center allocation was not released");
+    }});
     cases.push_back({"0303_footer_override_rejects_underflowing_data_height","Invalid footer and layout metadata are rejected before payload extraction",[](const fs::path&){
         const std::string id = "0303_footer_override_rejects_underflowing_data_height";
         fs::path work = make_work_dir(id);
@@ -7060,6 +7148,745 @@ static std::vector<TestCase> build_cases() {
                 id + ": fault injection missed the fiducial mask allocation");
         require(!allocation_failure_extracted,
                 id + ": continued extraction after fiducial mask allocation failed");
+    }});
+    cases.push_back({"0310_ppm_extract_rank_map_allocation_failure","Frame extraction rejects a payload rank-map allocation failure",[](const fs::path&){
+        const std::string id = "0310_ppm_extract_rank_map_allocation_failure";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::create_directories(encoded_dir);
+        write_file(payload, "rank map allocation failure");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, encoded_dir, "source",
+                             {"--page-width=80", "--page-height=80"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "source");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        makocode::ByteBuffer input;
+        require(read_entire_file(pages[0].c_str(), input),
+                id + ": could not read the encoded page");
+        MetadataTile::Values values = extract_tile_values(pages.front());
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame;
+        u64 frame_bits = 0u;
+        PpmParserState state;
+        minify_allocation_count = 0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool baseline_extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
+            nullptr);
+        record_platform_allocation_sizes = false;
+        require(baseline_extracted,
+                id + ": valid metadata override failed before allocation injection");
+        const size_t rank_map_allocation_size = 65536u;
+        size_t rank_map_allocation = platform_allocation_sizes.size();
+        for (size_t index = 0u; index < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == rank_map_allocation_size) {
+                rank_map_allocation = index;
+                break;
+            }
+        }
+        require(rank_map_allocation < platform_allocation_sizes.size(),
+                id + ": did not observe the payload rank-map allocation");
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = (unsigned long)rank_map_allocation + 1ul;
+        bool allocation_failure_extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
+            nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == rank_map_allocation_size,
+                id + ": fault injection missed the payload rank-map allocation");
+        require(!allocation_failure_extracted,
+                id + ": continued extraction after payload rank-map allocation failed");
+    }});
+    cases.push_back({"0312_fiducial_border_bounds_affine","Forced fiducial fallback refines page bounds from all image borders",[](const fs::path&){
+        const std::string id = "0312_fiducial_border_bounds_affine";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "border affine fixture");
+        auto encoded = run_cli(work, encode_file_args(
+            payload, pages, "page", {"--page-width=80", "--page-height=80",
+                                      "--no-fiducials", "--fiducial-spacing=200"}), "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> page_paths = ppm_paths(pages, "page");
+        require(page_paths.size() == 1u, id + ": expected one encoded page");
+        MetadataTile::Values tile = extract_tile_values(page_paths[0]);
+        fs::path scan = work / "padded.ppm";
+        make_affine_scan(page_paths[0], scan, 180u, 180u, 2.0, 10.0, 10.0,
+                         0u, 234u, false, true);
+        makocode::ByteBuffer input, frame;
+        require(read_entire_file(scan.c_str(), input), id + ": could not read scan");
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 frame_bits = 0u;
+        require(ppm_extract_frame_bits(
+                    input, mapping, frame, frame_bits, state, true, nullptr, 1u,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+                    nullptr, &tile, nullptr, 0u, 0u, 0u, true, false, false, false,
+                    nullptr), id + ": forced fallback extraction failed");
+        require(state.has_affine_transform && frame_bits > 0u,
+                id + ": border fallback did not produce an affine frame");
+        require(state.affine_transform.a00 > 1.99 && state.affine_transform.a00 < 2.01 &&
+                    state.affine_transform.a11 > 1.99 && state.affine_transform.a11 < 2.01 &&
+                    state.affine_transform.tx >= 9.0 && state.affine_transform.tx <= 9.5 &&
+                    state.affine_transform.ty >= 9.25 && state.affine_transform.ty <= 9.75,
+                id + ": border-derived affine did not locate the padded page: " +
+                    std::to_string(state.affine_transform.a00) + ", " +
+                    std::to_string(state.affine_transform.a11) + ", " +
+                    std::to_string(state.affine_transform.tx) + ", " +
+                    std::to_string(state.affine_transform.ty));
+    }});
+    cases.push_back({"0318_ppm_extract_rejects_missing_input_storage","Frame extraction rejects a nonempty input without storage",[](const fs::path&){
+        const std::string id = "0318_ppm_extract_rejects_missing_input_storage";
+        makocode::ByteBuffer input;
+        input.size = 1u;
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame;
+        u64 frame_bits = 0u;
+        PpmParserState state;
+        require(!ppm_extract_frame_bits(input, mapping, frame, frame_bits,
+                                        state, false),
+                id + ": accepted an input buffer without backing storage");
+    }});
+    cases.push_back({"0319_uniform_region_excludes_metadata_header","Uniform blot regions do not bridge across the metadata header",[](const fs::path&){
+        require(test_uniform_region_detector(),
+                "0319_uniform_region_excludes_metadata_header: detector marked the metadata header");
+    }});
+    cases.push_back({"0320_vertical_scale_similarity_returns_divisor","Vertical similarity detector returns a repeated row divisor",[](const fs::path&){
+        const u8 pixels[] = {
+            10u,10u,10u, 10u,10u,10u,
+            20u,20u,20u, 20u,20u,20u,
+            30u,30u,30u, 30u,30u,30u
+        };
+        require(detect_vertical_scale_similarity(pixels, 1u, 6u) == 2u,
+                "0320_vertical_scale_similarity_returns_divisor: expected vertical scale 2");
+        const u8 identical_rows[] = {
+            42u,42u,42u, 42u,42u,42u, 42u,42u,42u,
+            42u,42u,42u, 42u,42u,42u, 42u,42u,42u
+        };
+        require(detect_vertical_scale_similarity(identical_rows, 1u, 6u) == 1u,
+                "0320_vertical_scale_similarity_returns_divisor: identical rows produced a scale");
+    }});
+    cases.push_back({"0321_vertical_scale_similarity_rejects_partial_height_run","Vertical similarity detector rejects a scale that does not divide image height",[](const fs::path&){
+        std::vector<u8> pixels(257u * 3u);
+        for (u64 row = 0u; row < 257u; ++row) {
+            u8 value = ((row / 2u) & 1u) ? 200u : 20u;
+            pixels[(usize)row * 3u + 0u] = value;
+            pixels[(usize)row * 3u + 1u] = value;
+            pixels[(usize)row * 3u + 2u] = value;
+        }
+        require(detect_vertical_scale_similarity(pixels.data(), 1u, 257u) == 1u,
+                "0321_vertical_scale_similarity_rejects_partial_height_run: returned a non-dividing scale");
+    }});
+    cases.push_back({"0322_fiducial_sampling_integral_allocation_fallback","Fiducial sampling matches the direct calculation when its integral image allocation fails",[](const fs::path&){
+        const std::string id = "0322_fiducial_sampling_integral_allocation_fallback";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "integral image fallback");
+        ProcessResult encoded = run_cli(work, encode_file_args(
+            payload, pages, "page", {"--page-width=240", "--page-height=240"}), "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> page_paths = ppm_paths(pages, "page");
+        require(page_paths.size() == 1u, id + ": expected one encoded page");
+        MetadataTile::Values tile = extract_tile_values(page_paths[0]);
+        PpmImage image = read_ppm(page_paths[0]);
+        ImageMappingConfig mapping;
+        usize point_count = (usize)tile.fiducial_columns * (usize)tile.fiducial_rows;
+        usize integral_allocation_size = ((usize)image.width + 1u) *
+                                         ((usize)image.height + 1u) * sizeof(u64);
+        double* integral_x = nullptr;
+        double* integral_y = nullptr;
+        u8* integral_visible = nullptr;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_at = 0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool integral_ok = sample_fiducial_centers(
+            reinterpret_cast<const u8*>(image.pixels.data()), image.width, image.height,
+            tile.fiducial_columns, tile.fiducial_rows,
+            (double)tile.fiducial_spacing_pixels, tile.page_width_pixels,
+            tile.page_height_pixels, tile.page_height_pixels - tile.footer_rows,
+            true, integral_x, integral_y, nullptr, nullptr, &integral_visible,
+            false, &mapping);
+        record_platform_allocation_sizes = false;
+        require(integral_ok, id + ": integral-image baseline failed");
+        usize integral_allocation_index = platform_allocation_sizes.size();
+        for (usize index = 0u; index < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == integral_allocation_size) {
+                integral_allocation_index = index;
+                break;
+            }
+        }
+        require(integral_allocation_index < platform_allocation_sizes.size(),
+                id + ": did not observe the integral-image allocation");
+        usize visible_count = 0u;
+        for (usize index = 0u; index < point_count; ++index) {
+            if (integral_visible[index]) ++visible_count;
+        }
+        require(visible_count > 0u, id + ": baseline detected no visible fiducials");
+
+        double* fallback_x = nullptr;
+        double* fallback_y = nullptr;
+        u8* fallback_visible = nullptr;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = (unsigned long)integral_allocation_index + 1ul;
+        bool fallback_ok = sample_fiducial_centers(
+            reinterpret_cast<const u8*>(image.pixels.data()), image.width, image.height,
+            tile.fiducial_columns, tile.fiducial_rows,
+            (double)tile.fiducial_spacing_pixels, tile.page_width_pixels,
+            tile.page_height_pixels, tile.page_height_pixels - tile.footer_rows,
+            true, fallback_x, fallback_y, nullptr, nullptr, &fallback_visible,
+            false, &mapping);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == integral_allocation_size,
+                id + ": fault injection missed the integral-image allocation");
+        require(fallback_ok, id + ": direct fallback failed after integral allocation failure");
+        for (usize index = 0u; index < point_count; ++index) {
+            require(fallback_visible[index] == integral_visible[index] &&
+                        fabs(fallback_x[index] - integral_x[index]) < 1e-9 &&
+                        fabs(fallback_y[index] - integral_y[index]) < 1e-9,
+                    id + ": direct fallback differed from integral-image sampling");
+        }
+        makocode_platform_free(integral_x);
+        makocode_platform_free(integral_y);
+        makocode_platform_free(integral_visible);
+        makocode_platform_free(fallback_x);
+        makocode_platform_free(fallback_y);
+        makocode_platform_free(fallback_visible);
+    }});
+    cases.push_back({"0323_fiducial_dark_threshold_clamp","Low-intensity fiducial sampling clamps a negative dark threshold",[](const fs::path&){
+        std::vector<u8> pixels(200u * 200u * 3u, 0u);
+        for (u32 row = 86u; row < 111u; ++row) {
+            usize unsampled_pixel = ((usize)row * 200u + 149u) * 3u;
+            pixels[unsampled_pixel + 0u] = 2u;
+            pixels[unsampled_pixel + 1u] = 2u;
+            pixels[unsampled_pixel + 2u] = 2u;
+        }
+        double* centers_x = nullptr;
+        double* centers_y = nullptr;
+        require(sample_fiducial_centers(
+                    pixels.data(), 200u, 200u, 1u, 1u, 12.0,
+                    24u, 24u, 24u, false, centers_x, centers_y),
+                "0323_fiducial_dark_threshold_clamp: sampling failed");
+        double expected_center = fiducial_lattice_center(0u, 1u, 24u, 12.0) *
+                                 (200.0 / 24.0);
+        require(centers_x[0] < expected_center - 0.001,
+                "0323_fiducial_dark_threshold_clamp: dark samples were not weighted: " +
+                    std::to_string(centers_x[0]) + " vs " + std::to_string(expected_center));
+        makocode_platform_free(centers_x);
+        makocode_platform_free(centers_y);
+    }});
+    cases.push_back({"0325_robust_affine_singular_refinement_fallback","Robust affine fitting retains the initial fit when inlier geometry is singular",[](const fs::path&){
+        const std::string id = "0325_robust_affine_singular_refinement_fallback";
+        double centers_x[24] = {};
+        double centers_y[24] = {};
+        const double outlier_signs[12] = {1.0, 1.0, -1.0, -1.0, 1.0, -1.0,
+                                          -1.0, 1.0, -1.0, -1.0, 1.0, 1.0};
+        for (u32 row = 0u; row < 12u; ++row) {
+            double logical_y = fiducial_lattice_center(row, 12u, 100u, 8.0);
+            for (u32 col = 0u; col < 2u; ++col) {
+                usize index = (usize)row * 2u + col;
+                double logical_x = fiducial_lattice_center(col, 2u, 100u, 8.0);
+                double outlier_offset = col == 1u ? outlier_signs[row] * 3.0 : 0.0;
+                centers_x[index] = logical_x + outlier_offset;
+                centers_y[index] = logical_y;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 2u, 12u, 100u, 100u, 8.0,
+                    100u, 100u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, nullptr),
+                id + ": rotation fit rejected a singular robust subset");
+        require(affine_valid && fabs(affine.a00 - 1.0) < 1e-9 &&
+                    fabs(affine.a01) < 1e-9 && fabs(affine.a10) < 1e-9 &&
+                    fabs(affine.a11 - 1.0) < 1e-9 && fabs(affine.tx) < 1e-9 &&
+                    fabs(affine.ty) < 1e-9,
+                id + ": singular refinement replaced the valid initial fit: " +
+                    std::to_string(affine.a00) + ", " + std::to_string(affine.a01) +
+                    ", " + std::to_string(affine.a10) + ", " + std::to_string(affine.a11) +
+                    ", " + std::to_string(affine.tx) + ", " + std::to_string(affine.ty));
+    }});
+    cases.push_back({"0326_singular_affine_fit_rejected","Singular fiducial geometry does not produce an affine fit",[](const fs::path&){
+        double centers_x[12] = {};
+        double centers_y[12] = {};
+        for (u32 row = 0u; row < 12u; ++row) {
+            centers_x[row] = 50.0;
+            centers_y[row] = fiducial_lattice_center(row, 12u, 100u, 8.0);
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = true;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 1u, 12u, 100u, 100u, 8.0,
+                    100u, 100u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, nullptr),
+                "0326_singular_affine_fit_rejected: rotation analysis failed");
+        require(!affine_valid,
+                "0326_singular_affine_fit_rejected: singular geometry produced an affine fit");
+    }});
+    cases.push_back({"0327_rotation_geometry_rejects_32bit_overflow","Rotation geometry rejects dimensions wider than its 32-bit representation",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = 20.0 + (double)col * 20.0;
+                centers_y[index] = 20.0 + (double)row * 20.0;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(!auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 20.0,
+                    0x100000000ull, 100u, state, false, degrees,
+                    rotation_width, rotation_height, margin, nullptr, nullptr,
+                    nullptr),
+                "0327_rotation_geometry_rejects_32bit_overflow: accepted oversized rotation width");
+    }});
+    cases.push_back({"0328_dimension_scale_uses_consistent_fiducials","Affine rotation scale preserves a consistent fiducial estimate near the image dimensions",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 1.0) * 2.2;
+                centers_y[index] = fiducial_lattice_center(row, 4u, 100u, 1.0) * 2.2;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 1.0,
+                    240u, 240u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0328_dimension_scale_uses_consistent_fiducials: fit failed");
+        require(rotation_width == 220u && rotation_height == 220u,
+                "0328_dimension_scale_uses_consistent_fiducials: expected the consistent 2.2x fit, got " +
+                    std::to_string(rotation_width) + "x" + std::to_string(rotation_height));
+    }});
+    cases.push_back({"0329_dimension_scale_prefers_closer_integer_snap","Dimension scale wins when its integer snap is closer than the fiducial estimate",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 1.0) * 2.3;
+                centers_y[index] = fiducial_lattice_center(row, 4u, 100u, 1.0) * 2.3;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 1.0,
+                    220u, 220u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0329_dimension_scale_prefers_closer_integer_snap: fit failed");
+        require(rotation_width == 220u && rotation_height == 220u,
+                "0329_dimension_scale_prefers_closer_integer_snap: dimension estimate was not preferred: " +
+                    std::to_string(rotation_width) + "x" + std::to_string(rotation_height));
+    }});
+    cases.push_back({"0339_rotation_fiducials_exclude_footer_rows","Rotation fitting maps fiducials over content height excluding footer rows",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 20.0);
+                centers_y[index] = fiducial_lattice_center(row, 4u, 80u, 20.0);
+            }
+        }
+        PpmParserState state;
+        state.has_footer_rows = true;
+        state.footer_rows_value = 20u;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 20.0,
+                    100u, 100u, state, false, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, nullptr),
+                "0339_rotation_fiducials_exclude_footer_rows: fit failed");
+        require(rotation_width == 100u && rotation_height == 100u && affine_valid &&
+                    fabs(affine.a11 - 1.0) < 1e-9 && fabs(affine.ty) < 1e-9,
+                "0339_rotation_fiducials_exclude_footer_rows: footer rows distorted fitted geometry: " +
+                    std::to_string(rotation_width) + "x" + std::to_string(rotation_height) +
+                    " ty=" + std::to_string(affine.ty));
+    }});
+    cases.push_back({"0337_rotation_uses_stored_dimensions_when_fiducials_are_unrotated","Stored source dimensions recover rotation when fiducial centers are unrotated",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 20.0);
+                centers_y[index] = fiducial_lattice_center(row, 4u, 80u, 20.0);
+            }
+        }
+        PpmParserState state;
+        state.has_rotation_width = true;
+        state.rotation_width_value = 100u;
+        state.has_rotation_height = true;
+        state.rotation_height_value = 80u;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 80u, 20.0,
+                    112u, 96u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0337_rotation_uses_stored_dimensions_when_fiducials_are_unrotated: fit failed");
+        require(degrees < -5.0 && degrees > -15.0,
+                "0337_rotation_uses_stored_dimensions_when_fiducials_are_unrotated: dimension geometry did not recover the rotation: " +
+                    std::to_string(degrees));
+    }});
+    cases.push_back({"0331_vertical_scale_uses_average_span_after_pitch_allocation_failure","Vertical scale falls back to average fiducial span when pitch storage cannot be allocated",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        const double physical_rows[4] = {100.0, 18.24, 100.0, 112.48};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 8.0) * 1.6;
+                centers_y[index] = physical_rows[row];
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 5ul;
+        bool fit = auto_detect_rotation_from_fiducials(
+            centers_x, centers_y, 4u, 4u, 100u, 100u, 8.0,
+            160u, 160u, state, false, degrees, rotation_width,
+            rotation_height, margin, nullptr, nullptr, nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == 9ul * sizeof(double),
+                "0331_vertical_scale_uses_average_span_after_pitch_allocation_failure: missed pitch storage allocation");
+        require(fit && rotation_height == 176u,
+                "0331_vertical_scale_uses_average_span_after_pitch_allocation_failure: expected average-span height 176, got " +
+                    std::to_string(rotation_height));
+    }});
+    cases.push_back({"0333_horizontal_scale_uses_average_span_after_pitch_allocation_failure","Horizontal scale falls back to average fiducial span when pitch storage cannot be allocated",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        const double physical_columns[4] = {100.0, 18.24, 100.0, 112.48};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = physical_columns[col];
+                centers_y[index] = fiducial_lattice_center(row, 4u, 100u, 8.0) * 1.6;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 5ul;
+        bool fit = auto_detect_rotation_from_fiducials(
+            centers_x, centers_y, 4u, 4u, 100u, 100u, 8.0,
+            160u, 160u, state, false, degrees, rotation_width,
+            rotation_height, margin, nullptr, nullptr, nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == 9ul * sizeof(double),
+                "0333_horizontal_scale_uses_average_span_after_pitch_allocation_failure: missed pitch storage allocation");
+        require(fit && rotation_width == 176u,
+                "0333_horizontal_scale_uses_average_span_after_pitch_allocation_failure: expected average-span width 176, got " +
+                    std::to_string(rotation_width));
+    }});
+    cases.push_back({"0334_horizontal_scale_uses_average_span_when_axis_fit_is_nonpositive","Horizontal average fiducial span recovers a nonpositive regression scale",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                double logical_x = fiducial_lattice_center(col, 4u, 100u, 8.0);
+                double logical_y = fiducial_lattice_center(row, 4u, 100u, 8.0);
+                centers_x[index] = 200.0 - (logical_x - 37.5) * (200.0 / 24.0);
+                centers_y[index] = 50.0 + (logical_y - 37.5) * 9.0;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 5ul;
+        bool fit = auto_detect_rotation_from_fiducials(
+            centers_x, centers_y, 4u, 4u, 100u, 100u, 8.0,
+            216u, 900u, state, false, degrees, rotation_width,
+            rotation_height, margin, nullptr, nullptr, nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == 9ul * sizeof(double),
+                "0334_horizontal_scale_uses_average_span_when_axis_fit_is_nonpositive: missed pitch allocation");
+        require(fit && rotation_width == 200u,
+                "0334_horizontal_scale_uses_average_span_when_axis_fit_is_nonpositive: expected average horizontal span scale 2.0, got " +
+                    std::to_string(rotation_width));
+    }});
+    cases.push_back({"0332_vertical_scale_uses_average_span_when_axis_fit_is_zero","Vertical scale uses average row spans when axis regression has no vertical component",[](const fs::path&){
+        double centers_x[12] = {};
+        double centers_y[12] = {};
+        for (u32 row = 0u; row < 12u; ++row) {
+            centers_x[row] = 20.0 + (200.0 / 11.0) * (double)row;
+            centers_y[row] = 100.0;
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 1u, 12u, 100u, 100u, 8.0,
+                    200u, 220u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0332_vertical_scale_uses_average_span_when_axis_fit_is_zero: fit failed");
+        require(rotation_height == 200u,
+                "0332_vertical_scale_uses_average_span_when_axis_fit_is_zero: expected average-span height 200, got " +
+                    std::to_string(rotation_height));
+    }});
+    cases.push_back({"0335_vertical_average_ignores_subpixel_spans","Vertical average scale ignores subpixel fiducial gaps",[](const fs::path&){
+        double centers_x[12] = {};
+        double centers_y[12] = {};
+        centers_x[0] = 20.0;
+        centers_y[0] = 100.0;
+        for (u32 row = 0u; row + 1u < 12u; ++row) {
+            centers_x[row + 1u] = centers_x[row] + (row ? 0.5 : 20.0);
+            centers_y[row + 1u] = 100.0;
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 1u, 12u, 100u, 100u, 8.0,
+                    220u, 22u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0335_vertical_average_ignores_subpixel_spans: fit failed");
+        require(rotation_height == 20u,
+                "0335_vertical_average_ignores_subpixel_spans: subpixel gaps changed vertical scale to " +
+                    std::to_string(rotation_height));
+    }});
+    cases.push_back({"0336_horizontal_average_ignores_subpixel_spans","Horizontal average scale ignores subpixel fiducial gaps",[](const fs::path&){
+        double centers_x[12] = {};
+        double centers_y[12] = {};
+        centers_x[0] = 20.0;
+        centers_y[0] = 100.0;
+        for (u32 col = 0u; col + 1u < 12u; ++col) {
+            centers_x[col + 1u] = centers_x[col] + (col ? 0.5 : 20.0);
+            centers_y[col + 1u] = 100.0;
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 12u, 1u, 100u, 100u, 8.0,
+                    22u, 220u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0336_horizontal_average_ignores_subpixel_spans: fit failed");
+        require(rotation_width == 20u,
+                "0336_horizontal_average_ignores_subpixel_spans: subpixel gaps changed horizontal scale to " +
+                    std::to_string(rotation_width));
+    }});
+    cases.push_back({"0330_dimension_scale_fallback_without_horizontal_fiducials","Dimension scale fills an unavailable horizontal fiducial scale",[](const fs::path&){
+        double centers_x[12] = {};
+        double centers_y[12] = {};
+        double fixed_x = fiducial_lattice_center(0u, 1u, 100u, 8.0) * 2.2;
+        for (u32 row = 0u; row < 12u; ++row) {
+            centers_x[row] = fixed_x;
+            centers_y[row] = fiducial_lattice_center(row, 12u, 100u, 8.0) * 2.2;
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 1u, 12u, 100u, 100u, 8.0,
+                    220u, 220u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0330_dimension_scale_fallback_without_horizontal_fiducials: fit failed");
+        require(rotation_width == 220u && rotation_height == 220u,
+                "0330_dimension_scale_fallback_without_horizontal_fiducials: direct scale fallback failed: " +
+                    std::to_string(rotation_width) + "x" + std::to_string(rotation_height));
+    }});
+    cases.push_back({"0338_rotation_fit_rejects_zero_logical_variance","Rotation fitting rejects a one-point logical grid",[](const fs::path&){
+        double centers_x[1] = {50.0};
+        double centers_y[1] = {50.0};
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(!auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 1u, 1u, 100u, 100u, 8.0,
+                    100u, 100u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, nullptr),
+                "0338_rotation_fit_rejects_zero_logical_variance: one-point grid was accepted");
+        require(!affine_valid,
+                "0338_rotation_fit_rejects_zero_logical_variance: one-point grid produced an affine fit");
+    }});
+    cases.push_back({"0340_affine_bias_allocation_failure_cleans_up","Affine fitting releases earlier bias arrays when a later allocation fails",[](const fs::path&){
+        const std::string id = "0340_affine_bias_allocation_failure_cleans_up";
+        double centers_x[12] = {};
+        double centers_y[12] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 3u; ++col) {
+                usize index = (usize)row * 3u + col;
+                centers_x[index] = fiducial_lattice_center(col, 3u, 100u, 8.0) * 1.3 + 5.0;
+                centers_y[index] = fiducial_lattice_center(row, 4u, 100u, 8.0) * 1.3 + 5.0;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_at = ~0ul;
+        minify_allocation_failure_size = 0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool baseline_fit = auto_detect_rotation_from_fiducials(
+            centers_x, centers_y, 3u, 4u, 100u, 100u, 8.0, 130u, 130u,
+            state, false, degrees, rotation_width, rotation_height, margin,
+            nullptr, nullptr, nullptr);
+        record_platform_allocation_sizes = false;
+        minify_allocation_failure_at = 0ul;
+        require(baseline_fit, id + ": baseline affine analysis failed");
+        const size_t row_buffer_size = 4u * sizeof(double);
+        const size_t column_buffer_size = 3u * sizeof(double);
+        size_t bias_buffer_start = platform_allocation_sizes.size();
+        for (size_t index = 0u; index + 3u < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == row_buffer_size &&
+                platform_allocation_sizes[index + 1u] == row_buffer_size &&
+                platform_allocation_sizes[index + 2u] == column_buffer_size &&
+                platform_allocation_sizes[index + 3u] == column_buffer_size) {
+                bias_buffer_start = index;
+            }
+        }
+        require(bias_buffer_start < platform_allocation_sizes.size(),
+                id + ": did not observe the four affine bias allocations");
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = (unsigned long)bias_buffer_start + 2ul;
+        watch_platform_allocation_at = (unsigned long)bias_buffer_start + 1ul;
+        watch_platform_free_pointer = nullptr;
+        watch_platform_free_count = 0ul;
+        bool failed_fit = auto_detect_rotation_from_fiducials(
+            centers_x, centers_y, 3u, 4u, 100u, 100u, 8.0, 130u, 130u,
+            state, false, degrees, rotation_width, rotation_height, margin,
+            nullptr, nullptr, nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        watch_platform_allocation_at = 0ul;
+        require(failed_allocation_size == row_buffer_size,
+                id + ": fault injection missed the second row bias allocation");
+        require(!failed_fit, id + ": affine fit continued after a bias allocation failed");
+        require(watch_platform_free_count == 1ul && watch_platform_free_pointer == nullptr,
+                id + ": the first row bias allocation was not freed");
+    }});
+    cases.push_back({"0315_known_tile_palette_text_allocation_failure","Known tile palette text allocation failures stop extraction",[](const fs::path&){
+        const std::string id = "0315_known_tile_palette_text_allocation_failure";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "palette text allocation");
+        auto encoded = run_cli(work, encode_file_args(
+            payload, pages, "page", {"--page-width=80", "--page-height=80"}), "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> page_paths = ppm_paths(pages, "page");
+        require(page_paths.size() == 1u, id + ": expected one encoded page");
+        MetadataTile::Values tile = extract_tile_values(page_paths[0]);
+        PpmImage image = read_ppm(page_paths[0]);
+        makocode::ByteBuffer input, frame;
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 bits = 0u;
+        minify_allocation_count = 0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool extracted = ppm_extract_frame_bits(
+            input, mapping, frame, bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &tile, reinterpret_cast<const u8*>(image.pixels.data()),
+            image.width, image.height, 0u, true, false, false, false, nullptr);
+        record_platform_allocation_sizes = false;
+        require(extracted, id + ": baseline extraction failed");
+        require(platform_allocation_sizes.size() >= 2u &&
+                    platform_allocation_sizes[1u] == 64u,
+                id + ": did not observe the palette text allocation after the pixel copy");
+        makocode::ByteBuffer failed_frame;
+        PpmParserState failed_state;
+        u64 failed_bits = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 2ul;
+        bool failure_extracted = ppm_extract_frame_bits(
+            input, mapping, failed_frame, failed_bits, failed_state, false,
+            nullptr, 1u, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+            false, nullptr, &tile,
+            reinterpret_cast<const u8*>(image.pixels.data()), image.width,
+            image.height, 0u, true, false, false, false, nullptr);
+        unsigned long failed_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_size == 64u,
+                id + ": fault injection missed palette text allocation");
+        require(!failure_extracted,
+                id + ": continued extraction after palette text allocation failed");
     }});
     cases.push_back({"0304_edge_fiducial_patch_candidates_stay_in_bounds","Affine fiducial patch search skips candidates beyond page edges",[](const fs::path&){
         const std::string id = "0304_edge_fiducial_patch_candidates_stay_in_bounds";
@@ -8291,6 +9118,35 @@ static std::vector<TestCase> build_cases() {
     cases.push_back({"0107_metadata_tile_format","Variable metadata fields and multi-block tile Reed-Solomon framing",[](const fs::path&){metadata_tile_format_case();}});
     cases.push_back({"0111_partial_ecc_recovery","Partial ECC archive preserves earlier recoverable files",[](const fs::path&){partial_ecc_recovery_case();}});
     cases.push_back({"0116_decode_recover_palette","Damaged palette rows recover from ordered color candidates",[](const fs::path&){recover_palette_case();}});
+    cases.push_back({"0313_palette_recovery_skips_duplicate_candidate","Palette recovery skips an explicit palette repeated in image candidates",[](const fs::path&){
+        const std::string id = "0313_palette_recovery_skips_duplicate_candidate";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::path decoded_dir = work / "decoded";
+        generate_bytes(work, payload, 4096u, 48621u, "payload");
+        fs::create_directories(encoded_dir);
+        const std::string actual_palette =
+            "White #FCFC04 #04FCFC #FC04FC #040404 #FC0404";
+        const std::string explicit_palette =
+            "#FCFCFC #FCFC04 #04FCFC #FC04FC #FC0404 #040404";
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, encoded_dir, "page",
+                             {"--page-width=700", "--page-height=700",
+                              "--ecc=2.0", "--palette", actual_palette}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "page");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        fs::path damaged = damage_palette_row(pages[0], work / "damaged.ppm", 6u);
+        ProcessResult decoded = run_cli(work,
+            decode_file_args({damaged.string()}, decoded_dir,
+                             {"--recover-palette", "--recover-limit", "6",
+                              "--palette", explicit_palette}),
+            "decode");
+        expect_success(decoded, id + " decode");
+        compare_files(payload, decoded_dir / "payload.bin", id);
+    }});
     cases.push_back({"0060_decode_stdin","Decoder reads one PPM page from stdin",[](const fs::path&){decode_stdin_case();}});
     cases.push_back({"0064_archive_symlink_roundtrip","Directory symlink target decodes as a regular file",[](const fs::path&){archive_symlink_case();}});
     cases.push_back({"0066_fiducials","Custom fiducial dimensions happy path",[](const fs::path&){fiducials_case();}});
@@ -9564,9 +10420,21 @@ int main(int argc, char** argv) {
                        test.id == "0191_normalize_store_path_scratch_allocation_failure" ||
                        test.id == "0229_render_rejects_header_allocation_failure" ||
                        test.id == "0231_render_rejects_reservation_mask_allocation_failure" ||
+                       test.id == "0023_gray_rotate_seeded" ||
+                       test.id == "0043_header_copy_corruption" ||
+                       test.id == "0313_palette_recovery_skips_duplicate_candidate" ||
+                       test.id == "0312_fiducial_border_bounds_affine" ||
                        test.id == "0300_affine_confidence_clips_border_neighbors" ||
                        test.id == "0301_affine_confidence_skips_off_page_samples" ||
                        test.id == "0302_fiducial_partial_allocation_is_released" ||
+                       test.id == "0310_ppm_extract_rank_map_allocation_failure" ||
+                       test.id == "0315_known_tile_palette_text_allocation_failure" ||
+                       test.id == "0322_fiducial_sampling_integral_allocation_fallback" ||
+                       test.id == "0324_fiducial_center_allocation_failure_cleans_up" ||
+                       test.id == "0331_vertical_scale_uses_average_span_after_pitch_allocation_failure" ||
+                       test.id == "0333_horizontal_scale_uses_average_span_after_pitch_allocation_failure" ||
+                       test.id == "0334_horizontal_scale_uses_average_span_when_axis_fit_is_nonpositive" ||
+                       test.id == "0340_affine_bias_allocation_failure_cleans_up" ||
                        test.id == "0303_footer_override_rejects_underflowing_data_height" ||
                        test.id == "0228_render_rejects_unaligned_field_symbol_offset" ||
                        test.id == "0248_fiducial_insert_propagates_header_allocation_failure" ||
