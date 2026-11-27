@@ -361,7 +361,6 @@ retry_decode:
                                                       &overlay_unknown_parity_budget,
                                                       &overlay_erasure_budget,
                                                       &single_color_rotation,
-                                                      (const AffineTransform*)0,
                                                       force_tile_center_sampling,
                                                       &single_page_capacity_bits,
                                                       single_retry_tile_available
@@ -607,13 +606,6 @@ retry_decode:
         u64 expected_page_index = 1u;
         u64 indexed_frame_bit_total = 0u;
         u64 aggregate_page_capacity_bits = 0u;
-        AffineTransform previous_page_affine_hint = {};
-        bool previous_page_affine_hint_available = false;
-        AffineTransform center_probe_page_affines[MAX_INPUT_FILES] = {};
-        double center_probe_page_angles[MAX_INPUT_FILES] = {};
-        double center_probe_page_scale_x[MAX_INPUT_FILES] = {};
-        double center_probe_page_scale_y[MAX_INPUT_FILES] = {};
-        bool center_probe_affine_present[MAX_INPUT_FILES] = {};
         if (!no_metadata && !center_probe_attempted && !force_disable_subgrid &&
             !force_tile_center_sampling && !retried_subgrid) {
             center_probe_attempted = true;
@@ -631,7 +623,7 @@ retry_decode:
                 bool probe_found = ppm_extract_frame_bits(
                     probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
                     false, 0, (u64)probe_index + 1u, &probe_erasures,
-                    0, 0, 0, 0, 0, 0, false, 0,
+                    0, 0, 0, 0, 0, false, 0,
                     0, 0, 0, 0, 0, false, true, false, true);
                 if (!probe_found) {
                     probe_bits.release();
@@ -641,91 +633,16 @@ retry_decode:
                     probe_found = ppm_extract_frame_bits(
                         probe_stream, mapping, probe_bits, probe_bit_count, probe_state,
                         false, 0, (u64)probe_index + 1u, &probe_erasures,
-                        0, 0, 0, 0, 0, 0, false, 0,
+                        0, 0, 0, 0, 0, false, 0,
                         0, 0, 0, 0, 0, false, true, true, false);
                 }
                 if (probe_found && probe_state.has_encoded_tile &&
                     metadata_schema_is_current(probe_state.encoded_tile.schema_version)) {
                     center_probe_page_present[probe_index] = true;
                     encoded_pages[probe_index] = probe_state.encoded_tile;
-                    if (probe_state.has_affine_transform &&
-                        probe_state.affine_fit_covers_page) {
-                        center_probe_page_affines[probe_index] = probe_state.affine_transform;
-                        const AffineTransform& affine = probe_state.affine_transform;
-                        center_probe_page_angles[probe_index] =
-                            atan2(affine.a10 - affine.a01, affine.a00 + affine.a11);
-                        center_probe_page_scale_x[probe_index] =
-                            sqrt(affine.a00 * affine.a00 + affine.a10 * affine.a10);
-                        center_probe_page_scale_y[probe_index] =
-                            sqrt(affine.a01 * affine.a01 + affine.a11 * affine.a11);
-                        center_probe_affine_present[probe_index] = true;
-                    }
                     if (!center_probe_available) {
                         center_probe_tile = probe_state.encoded_tile;
                         center_probe_available = true;
-                    }
-                }
-            }
-            if (center_probe_available && file_count > 1u) {
-                bool complete_page_set = true;
-                bool seen_page_indices[MAX_INPUT_FILES] = {};
-                for (usize page = 0u; page < file_count; ++page) {
-                    if (!center_probe_page_present[page]) {
-                        complete_page_set = false;
-                    }
-                }
-                for (usize page = 0u; page < file_count && complete_page_set; ++page) {
-                    const MetadataTile::Values& tile = encoded_pages[page];
-                    if (tile.page_bits != center_probe_tile.page_bits ||
-                        tile.page_count != file_count ||
-                        tile.page_index == 0u || tile.page_index > file_count ||
-                        seen_page_indices[tile.page_index - 1u]) {
-                        complete_page_set = false;
-                        break;
-                    }
-                    seen_page_indices[tile.page_index - 1u] = true;
-                }
-                if (complete_page_set) {
-                    usize valid_affine_count = 0u;
-                    usize best_cluster_count = 0u;
-                    usize best_cluster_page = 0u;
-                    const double max_angle_delta =
-                        0.25 * (3.14159265358979323846 / 180.0);
-                    for (usize page = 0u; page < file_count; ++page) {
-                        if (!center_probe_affine_present[page]) continue;
-                        ++valid_affine_count;
-                        double candidate_angle = center_probe_page_angles[page];
-                        double candidate_scale_x = center_probe_page_scale_x[page];
-                        double candidate_scale_y = center_probe_page_scale_y[page];
-                        usize cluster_count = 0u;
-                        for (usize other_page = 0u; other_page < file_count; ++other_page) {
-                            if (!center_probe_affine_present[other_page]) continue;
-                            double other_angle = center_probe_page_angles[other_page];
-                            double other_scale_x = center_probe_page_scale_x[other_page];
-                            double other_scale_y = center_probe_page_scale_y[other_page];
-                            double angle_delta = fabs(atan2(
-                                sin(candidate_angle - other_angle),
-                                cos(candidate_angle - other_angle)));
-                            if (angle_delta <= max_angle_delta &&
-                                fabs(candidate_scale_x - other_scale_x) <=
-                                    candidate_scale_x * 0.02 &&
-                                fabs(candidate_scale_y - other_scale_y) <=
-                                    candidate_scale_y * 0.02) {
-                                ++cluster_count;
-                            }
-                        }
-                        if (cluster_count > best_cluster_count) {
-                            best_cluster_count = cluster_count;
-                            best_cluster_page = page;
-                        }
-                    }
-                    if (valid_affine_count > 1u &&
-                        best_cluster_count > valid_affine_count / 2u) {
-                        previous_page_affine_hint =
-                            center_probe_page_affines[best_cluster_page];
-                        previous_page_affine_hint.tx = 0.0;
-                        previous_page_affine_hint.ty = 0.0;
-                        previous_page_affine_hint_available = true;
                     }
                 }
             }
@@ -774,9 +691,6 @@ retry_decode:
                                                           &page_unknown_parity_budget,
                                                           &page_overlay_erasure_budget,
                                                           &page_color_rotation,
-                                                          previous_page_affine_hint_available
-                                                              ? &previous_page_affine_hint
-                                                              : (const AffineTransform*)0,
                                                           force_tile_center_sampling,
                                                           &page_capacity_bits,
                                                           page_tile_override_ptr
@@ -932,10 +846,6 @@ retry_decode:
             }
             if (!aggregate_page_capacity_bits) {
                 aggregate_page_capacity_bits = page_capacity_bits;
-            }
-            if (page_state.affine_fit_covers_page && page_state.has_affine_transform) {
-                previous_page_affine_hint = page_state.affine_transform;
-                previous_page_affine_hint_available = true;
             }
             if (!have_aggregate_color_rotation) {
                 aggregate_color_rotation = page_color_rotation;

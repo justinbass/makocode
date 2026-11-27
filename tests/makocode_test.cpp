@@ -3307,7 +3307,7 @@ static TileSummary read_tile_summary(const fs::path& path,unsigned expected_widt
     u64 frame_bits=0,selector_seed=0;u16 unknown=0,overlay=0;PpmParserState summary_state;
     require(ppm_extract_frame_bits(input,mapping,frame,frame_bits,summary_state,false,(bool*)0,
         1u,&erasures,&selector_seed,&selector_counts,&unknown,&overlay,
-        (bool*)0,(const AffineTransform*)0,false,(u64*)0,(const MetadataTile::Values*)0,
+        (bool*)0,false,(u64*)0,(const MetadataTile::Values*)0,
         (const u8*)0,0u,0u,0u,true,true,false,true),
         "cannot extract tile metadata "+path.string());
     const MetadataTile::Values& values=summary_state.encoded_tile;
@@ -3549,7 +3549,7 @@ static MetadataTile::Values extract_tile_values(const fs::path& path){
     require(read_entire_file(path.c_str(),input)&&input.size>0,"cannot read metadata source "+path.string());
     ImageMappingConfig mapping;PpmParserState state;
     require(ppm_extract_frame_bits(input,mapping,frame,bits,state,false,(bool*)0,1u,
-        &erasures,&seed,&selectors,&unknown,&overlay,(bool*)0,(const AffineTransform*)0,false,(u64*)0,
+        &erasures,&seed,&selectors,&unknown,&overlay,(bool*)0,false,(u64*)0,
         (const MetadataTile::Values*)0,(const u8*)0,0u,0u,0u,true,true,false,true),
         "cannot extract metadata tile "+path.string());
     require(state.has_encoded_tile,"source lacks encoded metadata tile");
@@ -4214,7 +4214,7 @@ static bool test_uniform_region_detector(){
 
 static bool decode_blob_fixture(const fs::path& path,bool detect,BlobDecodeResult& result){
     result={};makocode::ByteBuffer ppm;if(!read_entire_file(path.c_str(),ppm))return false;ImageMappingConfig mapping;const char* palette="White Black";image_mapping_set_palette_text(mapping,palette,strlen(palette),"test");if(!image_mapping_build_custom_palette(mapping,"test"))return false;makocode::ByteBuffer frame,frame_erasures;u64 frame_bits=0;PpmParserState state;bool retry=false,rotation=false;
-    if(!ppm_extract_frame_bits(ppm,mapping,frame,frame_bits,state,false,&retry,1,&frame_erasures,nullptr,nullptr,nullptr,nullptr,&rotation,nullptr,false,nullptr,nullptr,nullptr,0,0,0,detect,true)||!state.has_encoded_tile||!metadata_schema_is_current(state.encoded_tile.schema_version))return false;
+    if(!ppm_extract_frame_bits(ppm,mapping,frame,frame_bits,state,false,&retry,1,&frame_erasures,nullptr,nullptr,nullptr,nullptr,&rotation,false,nullptr,nullptr,nullptr,0,0,0,detect,true)||!state.has_encoded_tile||!metadata_schema_is_current(state.encoded_tile.schema_version))return false;
     makocode::ByteBuffer payload_stream,payload_erasures;u64 payload_bits=0;if(!frame_bits_to_payload(frame.data,frame_bits,state,payload_stream,payload_bits,nullptr,frame_erasures.data,frame_bits,&payload_erasures))return false;for(usize i=0;i<payload_erasures.size;++i)result.erased+=payload_erasures.data[i]!=0;
     const MetadataTile::Values& tile=state.encoded_tile;makocode::PaletteSymbolProfile profile;
     if(!tile.ecc_enabled||!tile.ecc_block_data||!tile.ecc_parity||!tile.ecc_block_count||
@@ -6584,7 +6584,7 @@ static std::vector<TestCase> build_cases() {
                     input, mapping, frame_bits, frame_bit_count, state,
                     false, (bool*)0, 1u, (makocode::ByteBuffer*)0,
                     (u64*)0, (makocode::ByteBuffer*)0, (u16*)0, (u16*)0,
-                    (bool*)0, (const AffineTransform*)0, true),
+                    (bool*)0, true),
                 id + ": forced affine confidence extraction failed");
         double first_x = state.affine_transform.a00 * 0.5 +
                          state.affine_transform.a01 * 0.5 +
@@ -6625,7 +6625,7 @@ static std::vector<TestCase> build_cases() {
                     input, mapping, frame_bits, frame_bit_count, state,
                     false, (bool*)0, 1u, (makocode::ByteBuffer*)0,
                     (u64*)0, (makocode::ByteBuffer*)0, (u16*)0, (u16*)0,
-                    (bool*)0, (const AffineTransform*)0, true),
+                    (bool*)0, true),
                 id + ": forced affine confidence extraction failed");
         double first_x = state.affine_transform.a00 * 0.5 +
                          state.affine_transform.a01 * 0.5 +
@@ -6832,27 +6832,81 @@ static std::vector<TestCase> build_cases() {
                                        overridden_frame_bit_count,
                                        overridden_state, false, nullptr, 1u,
                                        nullptr, nullptr, nullptr, nullptr,
-                                       nullptr, nullptr, nullptr, false,
+                                       nullptr, nullptr, false,
                                        &overridden_capacity) &&
                     ppm_extract_frame_bits(input, width_mapping,
                                            overridden_width_frame,
                                            overridden_frame_bit_count,
                                            overridden_width_state, false,
                                            nullptr, 1u, nullptr, nullptr, nullptr,
-                                           nullptr, nullptr, nullptr, nullptr, false,
+                                           nullptr, nullptr, nullptr, false,
                                            &overridden_width_capacity) &&
                     ppm_extract_frame_bits(input, ImageMappingConfig(),
                                            metadata_frame,
                                            metadata_frame_bit_count,
                                            metadata_state, false, nullptr, 1u,
                                            nullptr, nullptr, nullptr, nullptr,
-                                           nullptr, nullptr, nullptr, false,
+                                           nullptr, nullptr, false,
                                            &metadata_capacity),
                 id + ": could not extract the page using both geometry sources");
         require(overridden_capacity != metadata_capacity,
                 id + ": explicit page height did not affect page capacity");
         require(overridden_width_capacity != metadata_capacity,
                 id + ": explicit page width did not affect page capacity");
+    }});
+    cases.push_back({"0305_low_luminance_chromatic_two_color_decode","Low-luminance chromatic scans preserve palette color identity",[](const fs::path&){
+        const std::string id = "0305_low_luminance_chromatic_two_color_decode";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::path decoded_dir = work / "decoded";
+        fs::create_directories(encoded_dir);
+        write_file(payload, "low contrast chromatic branch check payload");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, encoded_dir, "source",
+                             {"--page-width=80", "--page-height=80",
+                              "--palette", "White Black"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "source");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        PpmImage image = read_ppm(pages[0]);
+        double minimum_luminance = 255.0;
+        double maximum_luminance = 0.0;
+        for (size_t offset = 0u; offset < image.pixels.size(); offset += 3u) {
+            const u8 r = (u8)image.pixels[offset];
+            const u8 g = (u8)image.pixels[offset + 1u];
+            const u8 b = (u8)image.pixels[offset + 2u];
+            const double luminance = 0.2126 * (double)r +
+                                     0.7152 * (double)g +
+                                     0.0722 * (double)b;
+            const bool dark = luminance < 127.0;
+            const u8 mapped_r = dark ? 200u : 0u;
+            const u8 mapped_g = dark ? 0u : 80u;
+            const u8 mapped_b = 0u;
+            const double mapped_luminance = 0.2126 * (double)mapped_r +
+                                            0.7152 * (double)mapped_g;
+            if (mapped_luminance < minimum_luminance) {
+                minimum_luminance = mapped_luminance;
+            }
+            if (mapped_luminance > maximum_luminance) {
+                maximum_luminance = mapped_luminance;
+            }
+            image.pixels[offset] = (char)mapped_r;
+            image.pixels[offset + 1u] = (char)mapped_g;
+            image.pixels[offset + 2u] = (char)mapped_b;
+        }
+        require(maximum_luminance - minimum_luminance <= 20.0,
+                id + ": chromatic scan did not enter low-luminance-contrast path");
+        fs::path scan = work / "low_luminance.ppm";
+        write_file(scan, "P6\n" + std::to_string(image.width) + " " +
+                         std::to_string(image.height) + "\n255\n" + image.pixels);
+        ProcessResult decoded = run_cli(work,
+            decode_file_args({scan.string()}, decoded_dir,
+                             {"--palette", "White Black"}),
+            "decode");
+        expect_success(decoded, id + " decode");
+        compare_files(payload, decoded_dir / "payload.bin", id + " payload");
     }});
     cases.push_back({"0302_fiducial_partial_allocation_is_released","Fiducial extraction frees the first center array when the second allocation fails",[](const fs::path&){
         const std::string id = "0302_fiducial_partial_allocation_is_released";
@@ -6926,7 +6980,7 @@ static std::vector<TestCase> build_cases() {
                 id + ": the first center allocation was not freed after the second failed");
         (void)failure_extracted;
     }});
-    cases.push_back({"0303_footer_override_rejects_underflowing_data_height","Footer metadata that underflows the payload height is rejected before rank-map allocation",[](const fs::path&){
+    cases.push_back({"0303_footer_override_rejects_underflowing_data_height","Invalid footer and layout metadata are rejected before payload extraction",[](const fs::path&){
         const std::string id = "0303_footer_override_rejects_underflowing_data_height";
         fs::path work = make_work_dir(id);
         fs::path payload = work / "payload.bin";
@@ -6953,13 +7007,95 @@ static std::vector<TestCase> build_cases() {
         platform_allocation_size_limit = 1024u * 1024u;
         bool extracted = ppm_extract_frame_bits(
             input, mapping, frame, frame_bits, state, false, nullptr, 1u,
-            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
             nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
             nullptr);
         platform_allocation_size_limit = 0u;
         require(!extracted, id + ": accepted a footer override below zero data height");
         require(platform_allocation_limit_rejection_count == 0ul,
                 id + ": attempted a large rank-map allocation before rejecting the footer");
+        values.footer_rows = 0u;
+        values.overwrite_layout = false;
+        bool invalid_layout_extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
+            nullptr);
+        require(!invalid_layout_extracted,
+                id + ": accepted metadata without overwrite layout");
+        values.overwrite_layout = true;
+        minify_allocation_count = 0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool baseline_extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
+            nullptr);
+        record_platform_allocation_sizes = false;
+        require(baseline_extracted,
+                id + ": valid metadata override failed before allocation injection");
+        const size_t fiducial_mask_allocation_size = 8192u;
+        size_t fiducial_mask_allocation = platform_allocation_sizes.size();
+        for (size_t index = 0u; index < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == fiducial_mask_allocation_size) {
+                fiducial_mask_allocation = index;
+                break;
+            }
+        }
+        require(fiducial_mask_allocation < platform_allocation_sizes.size(),
+                id + ": did not observe the fiducial mask allocation");
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at =
+            (unsigned long)fiducial_mask_allocation + 1ul;
+        bool allocation_failure_extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, &values, nullptr, 0u, 0u, 0u, true, false, false, false,
+            nullptr);
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(failed_allocation_size == fiducial_mask_allocation_size,
+                id + ": fault injection missed the fiducial mask allocation");
+        require(!allocation_failure_extracted,
+                id + ": continued extraction after fiducial mask allocation failed");
+    }});
+    cases.push_back({"0304_edge_fiducial_patch_candidates_stay_in_bounds","Affine fiducial patch search skips candidates beyond page edges",[](const fs::path&){
+        const std::string id = "0304_edge_fiducial_patch_candidates_stay_in_bounds";
+        fs::path work = make_work_dir(id);
+        fs::path payload = work / "payload.bin";
+        fs::path encoded_dir = work / "encoded";
+        fs::create_directories(encoded_dir);
+        write_file(payload, "edge fiducial patch bounds");
+        ProcessResult encoded = run_cli(
+            work,
+            encode_file_args(payload, encoded_dir, "edge",
+                             {"--page-width=80", "--page-height=80",
+                              "--fiducial-spacing=39"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> pages = ppm_paths(encoded_dir, "edge");
+        require(pages.size() == 1u, id + ": expected one encoded page");
+        fs::path scaled = work / "scaled.ppm";
+        ProcessResult scaled_result = run_transform(
+            work, {"transform", "--input", pages[0], "--output",
+                   scaled.string(), "--scale-x", "3", "--scale-y", "3"},
+            "scale");
+        expect_success(scaled_result, id + " scale");
+        makocode::ByteBuffer input, frame;
+        require(read_entire_file(scaled.c_str(), input),
+                id + ": could not read the scaled page");
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 frame_bits = 0u;
+        require(ppm_extract_frame_bits(input, mapping, frame, frame_bits, state,
+                                       false),
+                id + ": failed to extract frame around scaled edge fiducials");
+        require(state.has_fiducial_spacing &&
+                    state.fiducial_spacing_value == 39u &&
+                    state.has_encoded_tile,
+                id + ": edge fiducial fixture did not reach metadata extraction");
     }});
     cases.push_back({"0255_metadata_free_marks_invalid_palette_symbols_as_erasures","Metadata-free recovery marks unrepresentable palette dots as ECC erasures",[](const fs::path&){
         const std::string id = "0255_metadata_free_marks_invalid_palette_symbols_as_erasures";
@@ -7333,8 +7469,7 @@ static std::vector<TestCase> build_cases() {
                                         frame_bit_count, metadata, true,
                                         (bool*)0, 1u, (makocode::ByteBuffer*)0,
                                         (u64*)0, (makocode::ByteBuffer*)0,
-                                        (u16*)0, (u16*)0, (bool*)0,
-                                        (const AffineTransform*)0, false,
+                                        (u16*)0, (u16*)0, (bool*)0, false,
                                         (u64*)0, &legacy_tile, (const u8*)0,
                                         0u, 0u, 0u, true, true, false, false),
                 id + ": accepted metadata-free legacy raster input");
@@ -7773,7 +7908,7 @@ static std::vector<TestCase> build_cases() {
         bool extracted_ok = ppm_extract_frame_bits(
             rendered, mapping, extracted, extracted_bits, metadata, false,
             &retry_without_subgrid, out_of_range_page, &erasures,
-            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, nullptr, nullptr, nullptr, nullptr, false,
             nullptr, &tile);
         require(!extracted_ok,
                 id + ": accepted a page index beyond the encoded stream");
@@ -7786,7 +7921,7 @@ static std::vector<TestCase> build_cases() {
             rendered, mapping, overflow_extracted, overflow_bits,
             overflow_metadata, false, &overflow_retry_without_subgrid,
             wrapping_page_hint, &overflow_erasures, nullptr, nullptr,
-            nullptr, nullptr, nullptr, nullptr, false, nullptr, &tile);
+            nullptr, nullptr, nullptr, false, nullptr, &tile);
         require(!overflow_extracted_ok,
                 id + ": accepted a page index whose offset multiplication wraps");
     }});
@@ -7886,7 +8021,7 @@ static std::vector<TestCase> build_cases() {
         bool extracted_ok = ppm_extract_frame_bits(
             rendered, mapping, extracted, extracted_bits, metadata, false,
             &retry_without_subgrid, 1u, &erasures, nullptr, nullptr,
-            nullptr, nullptr, nullptr, nullptr, false, nullptr, nullptr,
+            nullptr, nullptr, nullptr, false, nullptr, nullptr,
             nullptr, 0u, 0u, 0u, false, true, false, false,
             &decoded_salt);
         require(extracted_ok && decoded_salt.available &&
