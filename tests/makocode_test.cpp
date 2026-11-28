@@ -4242,8 +4242,34 @@ static bool test_uniform_region_detector(){
     const u32 width=100,height=100;usize count=static_cast<usize>(width)*height;makocode::ByteBuffer symbols,ranks;if(!symbols.ensure(count)||!ranks.ensure(count*sizeof(u64)))return false;symbols.size=count;ranks.size=count*sizeof(u64);u64* rank=reinterpret_cast<u64*>(ranks.data);u32 state=0xA341316Cu;
     for(usize i=0;i<count;++i){state^=state<<13;state^=state>>17;state^=state<<5;symbols.data[i]=static_cast<u8>(state&1u);rank[i]=i;}MetadataTile::Placement placement={};makocode::ByteBuffer mask;
     size_t mask_capacity=64u;while(mask_capacity<count)mask_capacity*=2u;test_allocation_fill_size=mask_capacity;test_allocation_fill_value=0xA5u;bool no_uniform_regions=detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,1,count,mask);test_allocation_fill_size=0u;test_allocation_fill_value=0u;if(!no_uniform_regions)return false;for(usize i=0;i<mask.size;++i)if(mask.data[i])return false;
+    for (u32 x = 0u; x < 32u; ++x) symbols.data[x] = 0u;
+    makocode::ByteBuffer prefix_failure_mask;
+    minify_allocation_count = 0ul;
+    minify_allocation_failure_size = 0ul;
+    minify_allocation_failure_at = 2ul;
+    bool prefix_allocation_rejected = detect_uniform_payload_regions(
+        symbols.data, width, height, rank, 0, 0, placement, 1u, 1u,
+        count, prefix_failure_mask);
+    unsigned long prefix_failure_size = minify_allocation_failure_size;
+    minify_allocation_failure_at = 0ul;
+    if (prefix_allocation_rejected || prefix_failure_size == 0ul ||
+        prefix_failure_mask.data || prefix_failure_mask.size != 0u) return false;
     for(u32 y=20;y<80;++y)for(u32 x=20;x<80;++x)symbols.data[static_cast<usize>(y)*width+x]=1;makocode::ByteBuffer blob;if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,1,count,blob))return false;u64 marked=0;for(usize i=0;i<blob.size;++i)marked+=blob.data[i]!=0;if(marked<1500||marked>=5000)return false;
     makocode::ByteBuffer reservation_mask,masked_blob;if(!reservation_mask.ensure(count))return false;reservation_mask.size=count;memset(reservation_mask.data,0,count);usize reserved_index=static_cast<usize>(50u)*width+50u;reservation_mask.data[reserved_index]=1u;if(!blob.data[reserved_index])return false;if(!detect_uniform_payload_regions(symbols.data,width,height,rank,reservation_mask.data,reservation_mask.size,placement,1,count,masked_blob))return false;if(masked_blob.data[reserved_index])return false;
+    for(usize i=0;i<count;++i){state^=state<<13;state^=state>>17;state^=state<<5;symbols.data[i]=static_cast<u8>(state&1u);}
+    for(u32 y=40u;y<99u;++y)for(u32 x=28u;x<72u;++x)symbols.data[static_cast<usize>(y)*width+x]=1u;
+    for(u32 x=0u;x<width;++x)symbols.data[99u*width+x]=0u;
+    symbols.data[99u*width+50u]=1u;
+    makocode::ByteBuffer edge_blob;
+    if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,2u,1u,count,edge_blob,false,true,90u))return false;
+    if(edge_blob.size!=count||edge_blob.data[99u*width+50u]==0u)return false;
+    for(usize i=0u;i<count;++i)symbols.data[i]=0u;
+    for(u32 y=40u;y<86u;++y)for(u32 x=28u;x<72u;++x)symbols.data[static_cast<usize>(y)*width+x]=1u;
+    for(u32 y=86u;y<99u;++y)for(u32 x=45u;x<72u;++x)symbols.data[static_cast<usize>(y)*width+x]=1u;
+    symbols.data[99u*width+28u]=1u;
+    makocode::ByteBuffer clipped_box_blob;
+    if(!detect_uniform_payload_regions(symbols.data,width,height,rank,0,0,placement,2u,1u,count,clipped_box_blob,false,false,90u))return false;
+    if(clipped_box_blob.size!=count||clipped_box_blob.data[99u*width+28u]==0u)return false;
     for(usize i=0;i<count;++i)symbols.data[i]=0u;
     MetadataTile::Placement metadata_placement;
     metadata_placement.valid=true;
@@ -6739,6 +6765,17 @@ static std::vector<TestCase> build_cases() {
         require(!ppm_measure_dimensions(ppm, width, height),
                 "0247: PPM dimensions accepted a missing magic token");
     }});
+    cases.push_back({"0348_frame_extraction_rejects_malformed_header","Frame extraction rejects an invalid PPM width token",[](const fs::path&){
+        makocode::ByteBuffer ppm, frame;
+        require(ppm.append_ascii("P6\ninvalid 2\n255\n"),
+                "0348: could not build malformed PPM header");
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 frame_bit_count = 0u;
+        require(!ppm_extract_frame_bits(ppm, mapping, frame, frame_bit_count, state,
+                                        false),
+                "0348: frame extraction accepted an invalid PPM width token");
+    }});
     cases.push_back({"0248_fiducial_insert_propagates_header_allocation_failure","Fiducial insertion propagates PPM header allocation failure",[](const fs::path&){
         makocode::ByteBuffer input, output;
         const u32 width = 100u, height = 100u;
@@ -7288,6 +7325,140 @@ static std::vector<TestCase> build_cases() {
         require(detect_vertical_scale_similarity(pixels.data(), 1u, 257u) == 1u,
                 "0321_vertical_scale_similarity_rejects_partial_height_run: returned a non-dividing scale");
     }});
+    cases.push_back({"0370_rgb_sample_mapping_rejects_unknown_mode","RGB sample mapping rejects unsupported color modes",[](const fs::path&){
+        const u8 rgb[] = {12u, 34u, 56u};
+        u32 samples[1] = {0u};
+        require(!map_rgb_to_samples(0u, rgb, samples),
+                "0370_rgb_sample_mapping_rejects_unknown_mode: accepted mode zero");
+    }});
+    cases.push_back({"0390_footer_layout_rejects_zero_data_height","Footer layout rejects text that consumes the full page",[](const fs::path&){
+        PageFooterConfig footer;
+        footer.max_text_length = 1u;
+        FooterLayout layout;
+        require(!compute_footer_layout(5u, 8u, footer, layout),
+                "0390_footer_layout_rejects_zero_data_height: accepted an empty data region");
+    }});
+    cases.push_back({"0392_downsample_preflight_skips_failed_target_allocation","Metadata extraction continues after a downsample target allocation fails",[](const fs::path&){
+        const std::string id = "0392_downsample_preflight_skips_failed_target_allocation";
+        fs::path work = make_work_dir(id), payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "downsample allocation fallback");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, pages, "source",
+                             {"--page-width=620", "--page-height=620", "--ecc=fill"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> source = ppm_paths(pages, "source");
+        require(source.size() == 1u, id + ": expected one encoded page");
+        fs::path scaled = work / "scaled.ppm";
+        expect_success(run_transform(work,
+            {"transform", "--input", source.front(), "--output", scaled.string(),
+             "--scale-x", "2.071", "--scale-y", "2.071"}, "scale"), id + " scale");
+
+        makocode::ByteBuffer input, baseline_frame, baseline_erasures;
+        require(read_entire_file(scaled.c_str(), input), id + ": could not read scaled page");
+        ImageMappingConfig mapping;
+        PpmParserState baseline_state;
+        u64 baseline_bits = 0u;
+        platform_allocation_sizes.clear();
+        minify_allocation_count = 0ul;
+        record_platform_allocation_sizes = true;
+        bool baseline_ok = ppm_extract_frame_bits(input, mapping, baseline_frame,
+                                                  baseline_bits, baseline_state,
+                                                  false, nullptr, 1u,
+                                                  &baseline_erasures);
+        record_platform_allocation_sizes = false;
+        require(baseline_ok && baseline_state.has_encoded_tile,
+                id + ": baseline extraction did not find the metadata tile");
+
+        PpmImage scaled_image = read_ppm(scaled);
+        u64 logical_guess = estimate_square_page_from_image(scaled_image.width,
+                                                            scaled_image.height);
+        double geometric_mean = sqrt((double)scaled_image.width *
+                                     (double)scaled_image.height);
+        u64 geometric_target = (u64)floor(geometric_mean / 2.5 + 0.5);
+        u64 sweep_min = (logical_guess * 60ull) / 100ull;
+        if (sweep_min < MetadataTile::TILE_SIDE) sweep_min = MetadataTile::TILE_SIDE;
+        u64 sweep_target = logical_guess;
+        if (geometric_target >= sweep_min) {
+            sweep_target = sweep_min + ((geometric_target - sweep_min) / 20ull) * 20ull;
+        }
+        u64 candidate_targets[] = {
+            geometric_target, sweep_target,
+            (u64)floor(geometric_mean / 2.0 + 0.5),
+            (u64)floor(geometric_mean / 2.1 + 0.5),
+            (u64)floor(geometric_mean / 3.0 + 0.5), logical_guess};
+        bool target_failure_was_handled = false;
+        unsigned matching_allocations = 0u;
+        unsigned long last_expected_failure = 0ul;
+        unsigned long last_observed_count = 0ul;
+        unsigned long last_observed_size = 0ul;
+        for (unsigned long allocation_index = 1ul;
+             allocation_index <= platform_allocation_sizes.size() &&
+                 !target_failure_was_handled;
+             ++allocation_index) {
+            size_t allocation_size = platform_allocation_sizes[allocation_index - 1ul];
+            bool is_downsample_target = false;
+            for (u64 target : candidate_targets) {
+                if (target >= MetadataTile::TILE_SIDE &&
+                    target < scaled_image.width && target < scaled_image.height &&
+                    allocation_size >= target * target * 3u) {
+                    usize capacity = 64u;
+                    while (capacity < target * target * 3u &&
+                           capacity <= (usize)USIZE_MAX_VALUE / 2u) capacity *= 2u;
+                    if (allocation_size != capacity) continue;
+                    is_downsample_target = true;
+                }
+            }
+            if (!is_downsample_target) continue;
+            ++matching_allocations;
+            makocode::ByteBuffer failed_frame, failed_erasures;
+            PpmParserState failed_state;
+            u64 failed_bits = 0u;
+            minify_allocation_count = 0ul;
+            minify_allocation_failure_size = 0ul;
+            minify_allocation_failure_at = allocation_index;
+            bool recovered = ppm_extract_frame_bits(input, mapping, failed_frame,
+                                                    failed_bits, failed_state,
+                                                    false, nullptr, 1u,
+                                                    &failed_erasures);
+            unsigned long failed_at = minify_allocation_count;
+            unsigned long failed_size = minify_allocation_failure_size;
+            minify_allocation_failure_at = 0ul;
+            last_expected_failure = allocation_index;
+            last_observed_count = failed_at;
+            last_observed_size = failed_size;
+            target_failure_was_handled = failed_size == allocation_size;
+            (void)recovered;
+            (void)failed_state;
+        }
+        require(target_failure_was_handled,
+                id + ": downsample allocation failure was not reported; matching allocations=" +
+                    std::to_string(matching_allocations) + ", logical size=" +
+                    std::to_string(logical_guess) + ", geometric target=" +
+                    std::to_string(geometric_target) + ", expected index=" +
+                    std::to_string(last_expected_failure) + ", observed count=" +
+                    std::to_string(last_observed_count) + ", failed size=" +
+                    std::to_string(last_observed_size));
+    }});
+    cases.push_back({"0385_rgb_sample_mapping_selects_palette_index","RGB mapping returns the nearest palette index for multicolor modes",[](const fs::path&){
+        const u8 cyan[] = {0u, 255u, 255u};
+        u32 sample = 0xFFFFFFFFu;
+        require(map_rgb_to_samples(2u, cyan, &sample) && sample == 1u,
+                "0385_rgb_sample_mapping_selects_palette_index: CMYW cyan mapped incorrectly");
+        sample = 0xFFFFFFFFu;
+        require(map_rgb_to_samples(3u, cyan, &sample) && sample == 4u,
+                "0385_rgb_sample_mapping_selects_palette_index: RGB/CMY cyan mapped incorrectly");
+    }});
+    cases.push_back({"0350_vertical_palette_scale_rejects_low_run_support","Palette scale detection rejects a divisor supported by too few runs",[](const fs::path&){
+        const u8 pixels[] = {
+            0u,0u,0u, 0u,0u,0u,
+            255u,255u,255u, 255u,255u,255u, 255u,255u,255u, 255u,255u,255u
+        };
+        require(detect_vertical_scale_palette(pixels, 1u, 6u, 1u, nullptr) == 1u,
+                "0350_vertical_palette_scale_rejects_low_run_support: accepted sparse run evidence");
+    }});
     cases.push_back({"0322_fiducial_sampling_integral_allocation_fallback","Fiducial sampling matches the direct calculation when its integral image allocation fails",[](const fs::path&){
         const std::string id = "0322_fiducial_sampling_integral_allocation_fallback";
         fs::path work = make_work_dir(id);
@@ -7449,6 +7620,31 @@ static std::vector<TestCase> build_cases() {
         require(!affine_valid,
                 "0326_singular_affine_fit_rejected: singular geometry produced an affine fit");
     }});
+    cases.push_back({"0357_visible_affine_fit_rejects_collinear_points","Visible fiducial points on a diagonal do not produce an affine fit",[](const fs::path&){
+        const u32 side = 6u;
+        double centers_x[side * side] = {};
+        double centers_y[side * side] = {};
+        u8 visible_mask[side * side] = {};
+        for (u32 index = 0u; index < side; ++index) {
+            usize point = (usize)index * side + index;
+            visible_mask[point] = 1u;
+            double center = fiducial_lattice_center(index, side, 100u, 8.0);
+            centers_x[point] = center;
+            centers_y[point] = center;
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u, rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = true;
+        bool detected = auto_detect_rotation_from_fiducials(
+            centers_x, centers_y, side, side, 100u, 100u, 8.0,
+            100u, 100u, state, true, degrees, rotation_width,
+            rotation_height, margin, &affine, &affine_valid, visible_mask);
+        require(!detected && !affine_valid,
+                "0357_visible_affine_fit_rejects_collinear_points: singular visible geometry produced an affine fit");
+    }});
     cases.push_back({"0327_rotation_geometry_rejects_32bit_overflow","Rotation geometry rejects dimensions wider than its 32-bit representation",[](const fs::path&){
         double centers_x[16] = {};
         double centers_y[16] = {};
@@ -7470,6 +7666,155 @@ static std::vector<TestCase> build_cases() {
                     rotation_width, rotation_height, margin, nullptr, nullptr,
                     nullptr),
                 "0327_rotation_geometry_rejects_32bit_overflow: accepted oversized rotation width");
+    }});
+    cases.push_back({"0352_fiducial_fit_rejects_bounds_exceeding_image","Affine fiducial fit rejects geometry larger than the source image",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        u8 visible[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                double logical_x = fiducial_lattice_center(col, 4u, 100u, 8.0);
+                double logical_y = fiducial_lattice_center(row, 4u, 100u, 8.0);
+                centers_x[index] = logical_x * 3.0;
+                centers_y[index] = logical_y * 3.0;
+                visible[index] = 1u;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(!auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 8.0,
+                    100u, 100u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, visible),
+                "0352_fiducial_fit_rejects_bounds_exceeding_image: accepted oversized fitted bounds");
+    }});
+    cases.push_back({"0353_wide_image_geometry_tolerance_uses_width","Affine fit geometry tolerance uses the larger width of a wide image",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        u8 visible[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 8.0) * 20.19;
+                centers_y[index] = fiducial_lattice_center(row, 4u, 100u, 8.0) * 10.0;
+                visible[index] = 1u;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 8.0,
+                    2000u, 1000u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, visible),
+                "0353_wide_image_geometry_tolerance_uses_width: fit rejected wide image bounds");
+        require(affine_valid && rotation_width == 2019u && rotation_height == 1000u,
+                "0353_wide_image_geometry_tolerance_uses_width: unexpected fitted geometry");
+    }});
+    cases.push_back({"0354_affine_fit_rejects_unrepresentable_fitted_width","Affine fit rejects a fitted dimension outside its 32-bit geometry range",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        u8 visible[16] = {};
+        const u32 logical_width = 256u;
+        const u32 logical_height = 256u;
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u,
+                                                           logical_width, 8.0);
+                centers_y[index] = fiducial_lattice_center(row, 4u,
+                                                           logical_height, 8.0);
+                visible[index] = 1u;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(!auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 0x100000100ull,
+                    logical_height, 8.0, 5000000000ull, 1000u, state, true,
+                    degrees, rotation_width, rotation_height, margin, &affine,
+                    &affine_valid, visible),
+                "0354_affine_fit_rejects_unrepresentable_fitted_width: accepted an oversized fitted width");
+    }});
+    cases.push_back({"0355_affine_robust_refinement_preserves_visible_grid_coverage","Affine refinement rejects an inlier subset that drops visible grid edges",[](const fs::path&){
+        double centers_x[100] = {};
+        double centers_y[100] = {};
+        u8 visible[100] = {};
+        for (u32 row = 2u; row <= 7u; ++row) {
+            for (u32 col = 2u; col <= 7u; ++col) {
+                usize index = (usize)row * 10u + col;
+                centers_x[index] = fiducial_lattice_center(col, 10u, 200u, 8.0);
+                centers_y[index] = fiducial_lattice_center(row, 10u, 200u, 8.0);
+                visible[index] = 1u;
+            }
+        }
+        const u32 edge_indices[] = {0u, 9u, 90u, 99u};
+        for (u32 index : edge_indices) {
+            u32 row = index / 10u;
+            u32 col = index % 10u;
+            centers_x[index] = fiducial_lattice_center(col, 10u, 200u, 8.0);
+            centers_y[index] = fiducial_lattice_center(row, 10u, 200u, 8.0) +
+                (row == 0u ? 12.0 : -12.0);
+            visible[index] = 1u;
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 10u, 10u, 200u, 200u, 8.0,
+                    200u, 200u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, visible),
+                "0355_affine_robust_refinement_preserves_visible_grid_coverage: fit failed");
+        require(affine_valid && affine.a11 > 0.84 && affine.a11 < 0.87,
+                "0355_affine_robust_refinement_preserves_visible_grid_coverage: refinement accepted an edge-truncated inlier subset");
+    }});
+    cases.push_back({"0356_affine_robust_refinement_preserves_column_support","Affine refinement rejects a candidate that loses most fiducials in one column",[](const fs::path&){
+        double centers_x[100] = {};
+        double centers_y[100] = {};
+        u8 visible[100] = {};
+        for (u32 row = 0u; row < 10u; ++row) {
+            for (u32 col = 0u; col < 10u; ++col) {
+                usize index = (usize)row * 10u + col;
+                centers_x[index] = fiducial_lattice_center(col, 10u, 200u, 8.0);
+                centers_y[index] = fiducial_lattice_center(row, 10u, 200u, 8.0) +
+                    (col == 0u ? 8.5 : 0.0);
+                visible[index] = 1u;
+            }
+        }
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 10u, 10u, 200u, 200u, 8.0,
+                    300u, 300u, state, true, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, visible),
+                "0356_affine_robust_refinement_preserves_column_support: fit failed");
+        require(affine_valid && fabs(affine.a10) > 0.03,
+                "0356_affine_robust_refinement_preserves_column_support: shear=" +
+                    std::to_string(affine.a10));
     }});
     cases.push_back({"0328_dimension_scale_uses_consistent_fiducials","Affine rotation scale preserves a consistent fiducial estimate near the image dimensions",[](const fs::path&){
         double centers_x[16] = {};
@@ -7494,6 +7839,18 @@ static std::vector<TestCase> build_cases() {
         require(rotation_width == 220u && rotation_height == 220u,
                 "0328_dimension_scale_uses_consistent_fiducials: expected the consistent 2.2x fit, got " +
                     std::to_string(rotation_width) + "x" + std::to_string(rotation_height));
+    }});
+    cases.push_back({"0359_rotation_fit_rejects_null_centers","Fiducial rotation fitting rejects missing center coordinates",[](const fs::path&){
+        PpmParserState state;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(!auto_detect_rotation_from_fiducials(
+                    nullptr, nullptr, 4u, 4u, 100u, 100u, 1.0,
+                    200u, 200u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0359_rotation_fit_rejects_null_centers: accepted missing coordinates");
     }});
     cases.push_back({"0329_dimension_scale_prefers_closer_integer_snap","Dimension scale wins when its integer snap is closer than the fiducial estimate",[](const fs::path&){
         double centers_x[16] = {};
@@ -7549,6 +7906,36 @@ static std::vector<TestCase> build_cases() {
                     std::to_string(rotation_width) + "x" + std::to_string(rotation_height) +
                     " ty=" + std::to_string(affine.ty));
     }});
+    cases.push_back({"0358_visible_rotation_fiducials_exclude_footer_rows","Visible-fiducial affine fitting excludes footer rows",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        u8 visible_mask[16];
+        memset(visible_mask, 1, sizeof(visible_mask));
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 20.0);
+                centers_y[index] = fiducial_lattice_center(row, 4u, 80u, 20.0);
+            }
+        }
+        PpmParserState state;
+        state.has_footer_rows = true;
+        state.footer_rows_value = 20u;
+        double degrees = 0.0;
+        u64 rotation_width = 0u, rotation_height = 0u;
+        double margin = 0.0;
+        AffineTransform affine;
+        bool affine_valid = false;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 20.0,
+                    100u, 100u, state, false, degrees, rotation_width,
+                    rotation_height, margin, &affine, &affine_valid, visible_mask),
+                "0358_visible_rotation_fiducials_exclude_footer_rows: fit failed");
+        require(affine_valid && fabs(affine.a11 - 1.0) < 1e-9 &&
+                    fabs(affine.ty) < 1e-9,
+                "0358_visible_rotation_fiducials_exclude_footer_rows: footer rows distorted visible affine fit: " +
+                    std::to_string(affine.a11) + " ty=" + std::to_string(affine.ty));
+    }});
     cases.push_back({"0337_rotation_uses_stored_dimensions_when_fiducials_are_unrotated","Stored source dimensions recover rotation when fiducial centers are unrotated",[](const fs::path&){
         double centers_x[16] = {};
         double centers_y[16] = {};
@@ -7575,6 +7962,34 @@ static std::vector<TestCase> build_cases() {
                 "0337_rotation_uses_stored_dimensions_when_fiducials_are_unrotated: fit failed");
         require(degrees < -5.0 && degrees > -15.0,
                 "0337_rotation_uses_stored_dimensions_when_fiducials_are_unrotated: dimension geometry did not recover the rotation: " +
+                    std::to_string(degrees));
+    }});
+    cases.push_back({"0351_square_dimensions_recover_rotation","Square stored dimensions recover a rotation from the observed bounding box",[](const fs::path&){
+        double centers_x[16] = {};
+        double centers_y[16] = {};
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                usize index = (usize)row * 4u + col;
+                centers_x[index] = fiducial_lattice_center(col, 4u, 100u, 8.0);
+                centers_y[index] = fiducial_lattice_center(row, 4u, 100u, 8.0);
+            }
+        }
+        PpmParserState state;
+        state.has_rotation_width = true;
+        state.rotation_width_value = 100u;
+        state.has_rotation_height = true;
+        state.rotation_height_value = 100u;
+        double degrees = 0.0;
+        u64 rotation_width = 0u;
+        u64 rotation_height = 0u;
+        double margin = 0.0;
+        require(auto_detect_rotation_from_fiducials(
+                    centers_x, centers_y, 4u, 4u, 100u, 100u, 8.0,
+                    122u, 122u, state, false, degrees, rotation_width,
+                    rotation_height, margin, nullptr, nullptr, nullptr),
+                "0351_square_dimensions_recover_rotation: fit failed");
+        require(degrees > 13.0 && degrees < 17.0,
+                "0351_square_dimensions_recover_rotation: square bounding geometry did not recover rotation: " +
                     std::to_string(degrees));
     }});
     cases.push_back({"0331_vertical_scale_uses_average_span_after_pitch_allocation_failure","Vertical scale falls back to average fiducial span when pitch storage cannot be allocated",[](const fs::path&){
@@ -7777,6 +8192,121 @@ static std::vector<TestCase> build_cases() {
                 "0338_rotation_fit_rejects_zero_logical_variance: one-point grid was accepted");
         require(!affine_valid,
                 "0338_rotation_fit_rejects_zero_logical_variance: one-point grid produced an affine fit");
+    }});
+    cases.push_back({"0360_gradient_rotation_rejects_empty_sampling_window","Gradient rotation estimation rejects an empty sampling window",[](const fs::path&){
+        u8 pixels[10u * 10u * 3u] = {};
+        double degrees = 7.0;
+        double scale = 3.0;
+        require(!estimate_rotation_from_gradients(pixels, 10u, 10u, 10u, 10u,
+                                                  5.0, degrees, scale),
+                "0360_gradient_rotation_rejects_empty_sampling_window: accepted an empty sampling window");
+    }});
+    cases.push_back({"0389_gradient_rotation_uses_edge_magnitude","Gradient rotation estimator accepts a strong diagonal edge",[](const fs::path&){
+        const u32 width = 64u, height = 64u;
+        std::vector<u8> pixels((usize)width * height * 3u);
+        for (u32 y = 0u; y < height; ++y) {
+            for (u32 x = 0u; x < width; ++x) {
+                u8 value = x > y ? 255u : 0u;
+                usize offset = ((usize)y * width + x) * 3u;
+                pixels[offset] = pixels[offset + 1u] = pixels[offset + 2u] = value;
+            }
+        }
+        double degrees = 0.0, scale = 0.0;
+        require(estimate_rotation_from_gradients(pixels.data(), width, height,
+                                                 width, height, 2.0,
+                                                 degrees, scale),
+                "0389_gradient_rotation_uses_edge_magnitude: missed a strong diagonal edge");
+        require(fabs(fabs(degrees) - 45.0) < 2.0 && scale > 0.0,
+                "0389_gradient_rotation_uses_edge_magnitude: returned invalid rotation geometry");
+    }});
+    cases.push_back({"0361_page_rotation_rejects_scale_mismatch","Page rotation detector rejects a candidate scale far from the raster scale",[](const fs::path&){
+        const std::string id = "0361_page_rotation_rejects_scale_mismatch";
+        fs::path work = make_work_dir(id), payload = work / "payload.bin";
+        fs::path pages = work / "pages", rotated_path = work / "rotated.ppm";
+        fs::create_directories(pages);
+        write_file(payload, "page rotation scale mismatch");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, pages, "page",
+                             {"--page-width=300", "--page-height=300"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> page_paths = ppm_paths(pages, "page");
+        require(page_paths.size() == 1u, id + ": expected one encoded page");
+        expect_success(run_transform(work,
+            {"transform", "--input", page_paths[0], "--output", rotated_path.string(),
+             "--rotate", "7"}, "rotate"), id + " transform");
+        PpmImage rotated = read_ppm(rotated_path);
+        const unsigned canvas_side = 1800u;
+        std::string canvas((size_t)canvas_side * canvas_side * 3u,
+                           (char)234u);
+        unsigned offset_x = (canvas_side - rotated.width) / 2u;
+        unsigned offset_y = (canvas_side - rotated.height) / 2u;
+        for (u32 y = 0u; y < rotated.height; ++y) {
+            usize source_offset = (usize)y * rotated.width * 3u;
+            usize destination_offset = ((usize)(offset_y + y) * canvas_side + offset_x) * 3u;
+            memcpy(&canvas[destination_offset], rotated.pixels.data() + source_offset,
+                   (usize)rotated.width * 3u);
+        }
+        PpmParserState state;
+        bool detected = auto_detect_page_rotation(
+            (const u8*)canvas.data(), canvas_side, canvas_side, 300u, 300u, state);
+        require(!detected && !state.has_rotation_degrees,
+                id + ": accepted a scale-mismatched rotation candidate");
+    }});
+    cases.push_back({"0386_page_rotation_rejects_unrepresentable_dimensions","Page rotation detector rejects dimensions before narrowing to unsigned",[](const fs::path&){
+        const u64 oversized_width = 0x100000000ull;
+        if ((u64)USIZE_MAX_VALUE < oversized_width) return;
+        const u8 pixel[3] = {0u, 0u, 0u};
+        PpmParserState state;
+        platform_allocation_limit_rejection_count = 0ul;
+        platform_allocation_size_limit = 1024u;
+        bool detected = auto_detect_page_rotation(
+            pixel, oversized_width, 1u, 256u, 256u, state);
+        platform_allocation_size_limit = 0u;
+        require(!detected && platform_allocation_limit_rejection_count == 0ul,
+                "0386_page_rotation_rejects_unrepresentable_dimensions: attempted allocation after an out-of-range width");
+    }});
+    cases.push_back({"0387_page_rotation_rejects_zero_pixel_count","Page rotation detector rejects empty image dimensions before allocation",[](const fs::path&){
+        const u8 pixel[3] = {0u, 0u, 0u};
+        PpmParserState state;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool detected = auto_detect_page_rotation(pixel, 0u, 1u, 256u, 256u, state);
+        record_platform_allocation_sizes = false;
+        require(!detected && platform_allocation_sizes.empty(),
+                "0387_page_rotation_rejects_zero_pixel_count: accepted an empty image or allocated its grayscale buffer");
+    }});
+    cases.push_back({"0388_page_rotation_rejects_grayscale_allocation_failure","Page rotation detector propagates grayscale-buffer allocation failure",[](const fs::path&){
+        std::vector<u8> pixels((usize)256u * 256u * 3u, 0u);
+        PpmParserState state;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 1ul;
+        bool detected = auto_detect_page_rotation(pixels.data(), 256u, 256u,
+                                                   256u, 256u, state);
+        unsigned long failed_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        minify_allocation_count = 0ul;
+        require(!detected && failed_size == 256ul * 256ul &&
+                    !state.has_rotation_degrees && !state.has_rotation_width &&
+                    !state.has_rotation_height,
+                "0388_page_rotation_rejects_grayscale_allocation_failure: did not propagate grayscale-buffer allocation failure");
+    }});
+    cases.push_back({"0362_page_rotation_rejects_nonpositive_extent","Page rotation detector rejects inconsistent corner bounds",[](const fs::path&){
+        const std::string id = "0362_page_rotation_rejects_nonpositive_extent";
+        const u32 width = 5u, height = 5u;
+        std::string pixels((usize)width * height * 3u, (char)255u);
+        const u32 black_points[][2] = {{0u, 4u}, {2u, 3u}, {4u, 0u}};
+        for (usize i = 0u; i < sizeof(black_points) / sizeof(black_points[0]); ++i) {
+            usize offset = ((usize)black_points[i][1] * width + black_points[i][0]) * 3u;
+            pixels[offset] = pixels[offset + 1u] = pixels[offset + 2u] = 0;
+        }
+        PpmParserState state;
+        bool detected = auto_detect_page_rotation(
+            (const u8*)pixels.data(), width, height, 256u, 256u, state);
+        require(!detected && !state.has_rotation_degrees &&
+                    !state.has_rotation_width && !state.has_rotation_height,
+                id + ": accepted a nonpositive fitted width");
     }});
     cases.push_back({"0340_affine_bias_allocation_failure_cleans_up","Affine fitting releases earlier bias arrays when a later allocation fails",[](const fs::path&){
         const std::string id = "0340_affine_bias_allocation_failure_cleans_up";
@@ -8913,6 +9443,60 @@ static std::vector<TestCase> build_cases() {
         require(!extracted_ok,
                 id + ": accepted a four-color profile for a six-color stream");
     }});
+    cases.push_back({"0342_decode_preserves_non_gray_palette_override","Frame extraction does not treat a non-gray override as the built-in gray palette",[](const fs::path&){
+        const std::string id = "0342_decode_preserves_non_gray_palette_override";
+        const char palette_text[] = "White Black Cyan Magenta";
+        ImageMappingConfig encoding_mapping;
+        ImageMappingConfig decoding_mapping;
+        require(image_mapping_set_palette_text(decoding_mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test") &&
+                    image_mapping_build_custom_palette(decoding_mapping, "test") &&
+                    decoding_mapping.custom_palette_count == 4u,
+                id + ": could not build the non-gray decode override");
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 2u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "gray palette override mismatch";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the two-color stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        const u32 width = 220u, height = 220u;
+        PageFooterConfig footer_config;
+        FooterLayout footer;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(encoding_mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u,
+                id + ": could not lay out the two-color page");
+        makocode::ByteBuffer rendered;
+        MetadataTile::Values tile;
+        require(encode_page_to_ppm(encoding_mapping, frame, frame_bit_count, 0u,
+                                   width, height, 1u, bits_per_page,
+                                   &encoder.ecc_info(), 0.0, nullptr, 0u,
+                                   footer, rendered,
+                                   encoder.ecc_info().unknown_error_budget,
+                                   encoder.ecc_info().overlay_erasure_budget,
+                                   true, &tile, nullptr, page_count) &&
+                    !tile.palette_is_custom,
+                id + ": could not render the built-in gray page");
+        makocode::ByteBuffer extracted, erasures;
+        u64 extracted_bits = 0u;
+        PpmParserState metadata;
+        bool retry_without_subgrid = false;
+        bool extracted_ok = ppm_extract_frame_bits(
+            rendered, decoding_mapping, extracted, extracted_bits, metadata,
+            false, &retry_without_subgrid, 1u, &erasures);
+        require(!extracted_ok,
+                id + ": accepted a non-gray palette override for a built-in gray stream");
+    }});
     cases.push_back({"0284_bilinear_rgb_interpolation","Bilinear RGB sampling interpolates all channels",[](const fs::path&){
         const std::string id = "0284_bilinear_rgb_interpolation";
         const u8 pixels[12] = {
@@ -9147,6 +9731,80 @@ static std::vector<TestCase> build_cases() {
         expect_success(decoded, id + " decode");
         compare_files(payload, decoded_dir / "payload.bin", id);
     }});
+    cases.push_back({"0343_palette_recovery_counter_grows_past_one_digit","Palette recovery reports attempts beyond nine",[](const fs::path&){
+        const std::string id = "0343_palette_recovery_counter_grows_past_one_digit";
+        fs::path work = make_work_dir(id);
+        fs::path input = work / "three_color.ppm";
+        fs::path decoded = work / "decoded";
+        std::string pixels;
+        pixels.reserve(96u * 96u * 3u);
+        const u8 colors[3][3] = {{255u, 255u, 255u}, {0u, 0u, 0u}, {240u, 16u, 32u}};
+        for (u32 y = 0u; y < 96u; ++y) {
+            for (u32 x = 0u; x < 96u; ++x) {
+                const u8* color = colors[(x / 32u + y / 32u) % 3u];
+                pixels.push_back((char)color[0]);
+                pixels.push_back((char)color[1]);
+                pixels.push_back((char)color[2]);
+            }
+        }
+        write_file(input, "P6\n96 96\n255\n" + pixels);
+        ProcessResult result = run_cli(work,
+            decode_file_args({input.string()}, decoded,
+                             {"--recover-palette", "--recover-limit", "10"}),
+            "decode");
+        expect_failure(result, id + " decode");
+        require((result.err + result.out).find(
+                    "palette recovery tried 10 candidate(s); no palette matched") !=
+                    std::string::npos,
+                id + ": palette recovery attempt count did not grow past nine");
+    }});
+    cases.push_back({"0344_palette_recovery_accepts_leading_zero_limit","Palette recovery interprets a limit with leading zeroes",[](const fs::path&){
+        const std::string id = "0344_palette_recovery_accepts_leading_zero_limit";
+        fs::path work = make_work_dir(id);
+        fs::path input = work / "three_color.ppm";
+        fs::path decoded = work / "decoded";
+        std::string pixels;
+        pixels.reserve(96u * 96u * 3u);
+        const u8 colors[3][3] = {{255u, 255u, 255u}, {0u, 0u, 0u}, {240u, 16u, 32u}};
+        for (u32 y = 0u; y < 96u; ++y) {
+            for (u32 x = 0u; x < 96u; ++x) {
+                const u8* color = colors[(x / 32u + y / 32u) % 3u];
+                pixels.push_back((char)color[0]);
+                pixels.push_back((char)color[1]);
+                pixels.push_back((char)color[2]);
+            }
+        }
+        write_file(input, "P6\n96 96\n255\n" + pixels);
+        ProcessResult result = run_cli(work,
+            decode_file_args({input.string()}, decoded,
+                             {"--recover-palette", "--recover-limit", "00010"}),
+            "decode");
+        expect_failure(result, id + " decode");
+        require((result.err + result.out).find(
+                    "palette recovery tried 10 candidate(s); no palette matched") !=
+                    std::string::npos,
+                id + ": leading zeroes changed the recovery limit");
+    }});
+    cases.push_back({"0349_rgb_override_rejects_pixel_buffer_allocation_failure","Frame extraction rejects an RGB override when its pixel buffer cannot be allocated",[](const fs::path&){
+        const u8 pixels[4u * 4u * 3u] = {};
+        makocode::ByteBuffer input, frame;
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 frame_bits = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_at = 1ul;
+        minify_allocation_failure_size = 0ul;
+        bool extracted = ppm_extract_frame_bits(
+            input, mapping, frame, frame_bits, state, false, nullptr, 1u,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+            nullptr, nullptr, pixels, 4u, 4u);
+        unsigned long failed_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        minify_allocation_count = 0ul;
+        require(!extracted && failed_size == 64ul,
+                "0349_rgb_override_rejects_pixel_buffer_allocation_failure: "
+                "failed RGB override allocation was not rejected");
+    }});
     cases.push_back({"0060_decode_stdin","Decoder reads one PPM page from stdin",[](const fs::path&){decode_stdin_case();}});
     cases.push_back({"0064_archive_symlink_roundtrip","Directory symlink target decodes as a regular file",[](const fs::path&){archive_symlink_case();}});
     cases.push_back({"0066_fiducials","Custom fiducial dimensions happy path",[](const fs::path&){fiducials_case();}});
@@ -9323,6 +9981,115 @@ static std::vector<TestCase> build_cases() {
         require(footer_char_is_allowed('A'), "0148: printable footer character was rejected");
         require(!footer_char_is_allowed('\n'), "0148: newline was allowed in footer text");
         require(!footer_char_is_allowed('\x7f'), "0148: DEL was allowed in footer text");
+    }});
+    cases.push_back({"0366_write_all_fd_rejects_broken_pipe","A failed descriptor write is not reported as successful",[](const fs::path&){
+        const std::string id = "0366_write_all_fd_rejects_broken_pipe";
+        int pipe_fds[2] = {-1, -1};
+        require(::pipe(pipe_fds) == 0, id + ": could not create pipe");
+        struct sigaction ignored_action = {};
+        struct sigaction previous_action = {};
+        ignored_action.sa_handler = SIG_IGN;
+        sigemptyset(&ignored_action.sa_mask);
+        if (::sigaction(SIGPIPE, &ignored_action, &previous_action) != 0) {
+            ::close(pipe_fds[0]);
+            ::close(pipe_fds[1]);
+            throw Failure(id + ": could not ignore SIGPIPE");
+        }
+        ::close(pipe_fds[0]);
+        const u8 bytes[] = {0x4Du};
+        bool write_ok = write_all_fd(pipe_fds[1], bytes, sizeof(bytes));
+        ::close(pipe_fds[1]);
+        int restore_result = ::sigaction(SIGPIPE, &previous_action, nullptr);
+        require(restore_result == 0, id + ": could not restore SIGPIPE handler");
+        require(!write_ok, id + ": reported a broken-pipe write as successful");
+    }});
+    cases.push_back({"0367_write_all_fd_rejects_null_data","A nonempty write rejects a null data pointer",[](const fs::path&){
+        require(!write_all_fd(1, nullptr, 1u),
+                "0367: accepted a null data pointer for a nonempty write");
+    }});
+    cases.push_back({"0371_bits_per_sample_rejects_unknown_mode","Unknown channel modes have no sample bits",[](const fs::path&){
+        require(bits_per_sample(1u) == 1u && bits_per_sample(2u) == 2u &&
+                    bits_per_sample(3u) == 3u,
+                "0371: supported channel mode returned the wrong sample width");
+        require(bits_per_sample(0u) == 0u && bits_per_sample(4u) == 0u &&
+                    bits_per_sample(255u) == 0u,
+                "0371: unknown channel mode was assigned sample bits");
+    }});
+    cases.push_back({"0372_cmyw_footer_uses_palette_text_color","CMYW footer text uses a visible palette color",[](const fs::path& work){
+        const std::string id = "0372_cmyw_footer_uses_palette_text_color";
+        ImageMappingConfig mapping;
+        mapping.color_channels = 2u;
+        makocode::EncoderContext encoder;
+        encoder.config.palette_size = 4u;
+        encoder.config.ecc_redundancy = 0.75;
+        const char payload[] = "CMYW footer";
+        require(encoder.set_payload((const u8*)payload, sizeof(payload) - 1u) &&
+                    encoder.build(),
+                id + ": could not build the four-color stream");
+        makocode::ByteBuffer frame;
+        u64 frame_bit_count = 0u;
+        require(build_frame_bits(encoder, frame, frame_bit_count),
+                id + ": could not build frame bits");
+        PageFooterConfig footer_config;
+        footer_config.text = "A";
+        footer_config.text_length = 1u;
+        FooterLayout footer;
+        const u32 width = 220u, height = 220u;
+        u32 data_height = height;
+        u64 bits_per_page = 0u, page_count = 0u;
+        require(compute_page_layout(mapping, footer_config, frame_bit_count,
+                                    width, height, footer, data_height,
+                                    bits_per_page, page_count, &encoder.ecc_info(),
+                                    0.0, encoder.ecc_info().unknown_error_budget,
+                                    encoder.ecc_info().overlay_erasure_budget) &&
+                    page_count == 1u && footer.has_text && data_height < height,
+                id + ": could not lay out the CMYW footer");
+        makocode::ByteBuffer rendered;
+        require(encode_page_to_ppm(mapping, frame, frame_bit_count, 0u,
+                                   width, height, 0u, bits_per_page,
+                                   &encoder.ecc_info(), 0.0,
+                                   footer_config.text, footer_config.text_length,
+                                   footer, rendered,
+                                   encoder.ecc_info().unknown_error_budget,
+                                   encoder.ecc_info().overlay_erasure_budget),
+                id + ": could not render the CMYW footer");
+        fs::path rendered_path = work / (id + ".ppm");
+        write_file(rendered_path,
+                   std::string((const char*)rendered.data, rendered.size));
+        PpmImage image = read_ppm(rendered_path);
+        bool saw_cyan_text = false;
+        for (u32 y = data_height; y < height; ++y) {
+            for (u32 x = 0u; x < width; ++x) {
+                usize pixel = ((usize)y * width + x) * 3u;
+                if ((u8)image.pixels[pixel] == 0u &&
+                    (u8)image.pixels[pixel + 1u] == 255u &&
+                    (u8)image.pixels[pixel + 2u] == 255u) {
+                    saw_cyan_text = true;
+                    break;
+                }
+            }
+            if (saw_cyan_text) break;
+        }
+        require(saw_cyan_text,
+                id + ": footer text did not use the CMYW cyan palette color");
+    }});
+    cases.push_back({"0368_rotate_right_u8_wraps_and_masks_amount","Byte rotation wraps bits and masks amounts to eight positions",[](const fs::path&){
+        require(rotate_right_u8(0x96u, 1u) == 0x4Bu,
+                "0368: one-bit right rotation produced the wrong byte");
+        require(rotate_right_u8(0x81u, 1u) == 0xC0u,
+                "0368: high bit did not wrap into the low seven-bit position");
+        require(rotate_right_u8(0x96u, 8u) == 0x96u &&
+                    rotate_right_u8(0x96u, 9u) == 0x4Bu,
+                "0368: rotation amount was not reduced modulo eight");
+    }});
+    cases.push_back({"0369_rotate_left_u8_wraps_and_masks_amount","Left byte rotation wraps bits and masks amounts to eight positions",[](const fs::path&){
+        require(rotate_left_u8(0x96u, 1u) == 0x2Du,
+                "0369: one-bit left rotation produced the wrong byte");
+        require(rotate_left_u8(0x81u, 1u) == 0x03u,
+                "0369: high bit did not wrap into the low bit");
+        require(rotate_left_u8(0x96u, 8u) == 0x96u &&
+                    rotate_left_u8(0x96u, 9u) == 0x2Du,
+                "0369: rotation amount was not reduced modulo eight");
     }});
     cases.push_back({"0149_archive_file_write_failure","Archive extraction reports a file write failure",[](const fs::path&){
         const std::string id = "0149_archive_file_write_failure";
@@ -10157,6 +10924,289 @@ static std::vector<TestCase> build_cases() {
     cases.push_back({"0083_decode_scan_off_center_noise","Recoverable scan with off-center specks remains decodable",[](const fs::path&){synthetic_scan_case("0083_decode_scan_off_center_noise",false,true);}});
     cases.push_back({"0084_decode_short_length_header","Center metadata length survives damaged payload bits and aliasing",[](const fs::path&){short_length_header_case();}});
     cases.push_back({"0085_decode_lowres_rotated_scan","Generated rotated scan below two pixels per module round-trips",[](const fs::path&){lowres_rotated_scan_case();}});
+    cases.push_back({"0345_forced_small_tile_angle_retry","Forced center sampling accepts a slightly rotated small tile",[](const fs::path&){
+        const std::string id = "0345_forced_small_tile_angle_retry";
+        fs::path work = make_work_dir(id), payload = work / "payload.bin";
+        fs::path pages = work / "pages", rotated = work / "rotated.ppm";
+        fs::create_directories(pages);
+        write_file(payload, "small rotated tile retry");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, pages, "source",
+                             {"--page-width=80", "--page-height=80", "--ecc=0.1"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> source = ppm_paths(pages, "source");
+        require(source.size() == 1u, id + ": expected one encoded page");
+        expect_success(run_transform(work,
+            {"transform", "--input", source.front(), "--output",
+             rotated.string(), "--scale-x", "1.75", "--scale-y", "1.75",
+             "--rotate", "1.25"}, "rotate"), id + " transform");
+        makocode::ByteBuffer input, frame, frame_erasures;
+        require(read_entire_file(rotated.c_str(), input), id + ": could not read rotated page");
+        MetadataTile::Values known_tile = extract_tile_values(source.front());
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 frame_bits = 0u;
+        require(ppm_extract_frame_bits(input, mapping, frame, frame_bits, state,
+                                       true, nullptr, 1u, &frame_erasures, nullptr,
+                                       nullptr, nullptr, nullptr, nullptr, true,
+                                       nullptr, &known_tile),
+                id + ": forced center sampling failed to extract the page");
+        require(state.has_encoded_tile && frame_bits > 0u,
+                id + ": rotated page did not produce a usable small tile frame");
+        double expected_angle = 1.25 * 3.14159265358979323846 / 180.0;
+        require(fabs(state.affine_transform.a00 - 1.75 * cos(expected_angle)) < 0.01 &&
+                    fabs(state.affine_transform.a01 + 1.75 * sin(expected_angle)) < 0.002 &&
+                    fabs(state.affine_transform.a10 - 1.75 * sin(expected_angle)) < 0.002,
+                id + ": small-tile retry lost the known scan rotation");
+    }});
+    cases.push_back({"0341_stream_page_capacity_mask_allocation_failure","Streamed page-capacity calculation rejects metadata-mask allocation failure",[](const fs::path&){
+        const std::string id = "0341_stream_page_capacity_mask_allocation_failure";
+        fs::path work = make_work_dir(id), payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "mask allocation probe");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, pages, "source",
+                             {"--page-width=80", "--page-height=80", "--ecc=0.1"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> source = ppm_paths(pages, "source");
+        require(source.size() == 1u, id + ": expected one encoded page");
+        makocode::ByteBuffer input, frame, erasures;
+        require(read_entire_file(source.front().c_str(), input), id + ": could not read page");
+        MetadataTile::Values tile = extract_tile_values(source.front());
+        ImageMappingConfig mapping;
+        PpmParserState state;
+        u64 frame_bits = 0u, capacity = 0u;
+        platform_allocation_sizes.clear();
+        minify_allocation_count = 0ul;
+        record_platform_allocation_sizes = true;
+        bool ok = ppm_extract_frame_bits(input, mapping, frame, frame_bits, state,
+                                         false, nullptr, 1u, &erasures, nullptr,
+                                         nullptr, nullptr, nullptr, nullptr, true,
+                                         &capacity, &tile);
+        record_platform_allocation_sizes = false;
+        require(ok, id + ": baseline extraction failed");
+        require(state.encoded_tile.ecc_enabled && state.encoded_tile.ecc_block_data > 0u &&
+                    state.encoded_tile.ecc_parity > 0u && capacity > 0u,
+                id + ": fixture did not enter streamed page-capacity calculation");
+
+        makocode::ByteBuffer failed_frame, failed_erasures;
+        PpmParserState failed_state;
+        u64 failed_frame_bits = 0u, failed_capacity = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = 9ul;
+        bool failure_extracted = ppm_extract_frame_bits(
+            input, mapping, failed_frame, failed_frame_bits, failed_state,
+            false, nullptr, 1u, &failed_erasures, nullptr, nullptr, nullptr,
+            nullptr, nullptr, true, &failed_capacity, &tile);
+        unsigned long allocation_count = minify_allocation_count;
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(!failure_extracted,
+                id + ": extraction succeeded after candidate active-mask allocation failed");
+        require(allocation_count == 9ul && failed_allocation_size == 4096ul,
+                id + ": fault injection did not reach candidate active-mask allocation");
+    }});
+    cases.push_back({"0346_recover_palette_limit_allocation_failure","Palette recovery stops when its budget buffer allocation fails",[](const fs::path&){
+        const std::string id = "0346_recover_palette_limit_allocation_failure";
+        fs::path work = make_work_dir(id), payload = work / "payload.bin";
+        fs::path pages = work / "pages";
+        fs::create_directories(pages);
+        write_file(payload, "palette recovery allocation");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, pages, "source",
+                             {"--page-width=220", "--page-height=220",
+                              "--palette", "White Cyan Magenta Yellow"}), "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> source = ppm_paths(pages, "source");
+        require(source.size() == 1u, id + ": expected one encoded page");
+        fs::path damaged = damage_palette_row(source.front(), work / "damaged.ppm", 4u);
+        makocode::ByteBuffer input;
+        require(read_entire_file(damaged.c_str(), input), id + ": could not read damaged page");
+        char recovery_limit[66];
+        memset(recovery_limit, '9', 65u);
+        recovery_limit[65] = '\0';
+        ImageMappingConfig mapping;
+        mapping.recover_palette = true;
+        mapping.recover_limit_text = recovery_limit;
+        mapping.recover_limit_length = 65u;
+        makocode::ByteBuffer baseline_frame, baseline_erasures;
+        PpmParserState baseline_state;
+        u64 baseline_bits = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = ~0ul;
+        platform_allocation_sizes.clear();
+        record_platform_allocation_sizes = true;
+        bool baseline_ok = ppm_extract_frame_bits(input, mapping, baseline_frame,
+                                                  baseline_bits, baseline_state,
+                                                  false, nullptr, 1u,
+                                                  &baseline_erasures);
+        record_platform_allocation_sizes = false;
+        unsigned long allocation_count = minify_allocation_count;
+        minify_allocation_failure_at = 0ul;
+        require(baseline_ok && allocation_count == platform_allocation_sizes.size(),
+                id + ": baseline recovery failed or allocation trace was incomplete");
+        unsigned long limit_allocation = 0ul;
+        for (size_t index = 0u; index + 1u < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == 128u &&
+                platform_allocation_sizes[index + 1u] == 64u) {
+                if (limit_allocation == 0ul) {
+                    limit_allocation = (unsigned long)index + 1ul;
+                }
+            }
+        }
+        require(limit_allocation != 0ul,
+                id + ": did not observe recovery-limit and attempt-counter allocations");
+        makocode::ByteBuffer failed_frame, failed_erasures;
+        PpmParserState failed_state;
+        u64 failed_bits = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = limit_allocation;
+        bool failed_ok = ppm_extract_frame_bits(input, mapping, failed_frame,
+                                                failed_bits, failed_state, false,
+                                                nullptr, 1u, &failed_erasures);
+        unsigned long failed_allocation_count = minify_allocation_count;
+        unsigned long failed_allocation_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(!failed_ok && failed_allocation_count == limit_allocation &&
+                    failed_allocation_size == 128ul,
+                id + ": extraction continued after the recovery-limit allocation failed");
+    }});
+    cases.push_back({"0347_ppm_orientation_normalization_allocation_failure","Orientation normalization propagates its raster allocation failure",[](const fs::path&){
+        const std::string id = "0347_ppm_orientation_normalization_allocation_failure";
+        fs::path work = make_work_dir(id), payload = work / "payload.bin";
+        fs::path pages = work / "pages", scan = work / "quarter_turn.ppm";
+        fs::create_directories(pages);
+        write_file(payload, "orientation allocation failure");
+        ProcessResult encoded = run_cli(work,
+            encode_file_args(payload, pages, "source",
+                             {"--page-width=80", "--page-height=90", "--ecc=0.85"}),
+            "encode");
+        expect_success(encoded, id + " encode");
+        std::vector<std::string> source = ppm_paths(pages, "source");
+        require(source.size() == 1u, id + ": expected one source page");
+        PpmImage source_image = read_ppm(source.front());
+        MetadataTile::Values tile = extract_tile_values(source.front());
+        unsigned tile_x = (source_image.width - MetadataTile::TILE_SIDE) / 2u;
+        unsigned tile_y = (source_image.height - MetadataTile::TILE_SIDE) / 2u;
+        for (unsigned bit = 0u; bit < 2u; ++bit) {
+            unsigned x = tile_x + MetadataTile::tag_marker_x0() + (bit & 7u);
+            unsigned y = tile_y + tile.metadata_tag_y0 + 1u + bit / 8u;
+            size_t at = ((size_t)y * source_image.width + x) * 3u;
+            char opposite = MetadataTile::makocode_tag_bit(bit) ? (char)255 : (char)0;
+            source_image.pixels[at] = source_image.pixels[at + 1u] =
+                source_image.pixels[at + 2u] = opposite;
+        }
+        make_oriented_scan(source_image, scan, 90.0, false, false, 1.0, 1u);
+        PpmImage scan_image = read_ppm(scan);
+        makocode::ByteBuffer input;
+        require(read_entire_file(scan.c_str(), input), id + ": could not read oriented scan");
+
+        ImageMappingConfig mapping;
+        makocode::ByteBuffer frame, erasures;
+        PpmParserState state;
+        u64 frame_bits = 0u;
+        platform_allocation_sizes.clear();
+        minify_allocation_count = 0ul;
+        record_platform_allocation_sizes = true;
+        bool baseline_ok = ppm_extract_frame_bits(input, mapping, frame, frame_bits,
+                                                   state, false, nullptr, 1u, &erasures,
+                                                   nullptr, nullptr, nullptr, nullptr,
+                                                   nullptr, false, nullptr, nullptr, nullptr,
+                                                   0u, 0u, 0u, true, false, true);
+        record_platform_allocation_sizes = false;
+        require(!baseline_ok,
+                id + ": metadata-only orientation probe unexpectedly completed raster extraction");
+
+        unsigned long normalization_allocation = 0ul;
+        unsigned matching_allocations = 0u;
+        size_t normalized_bytes = (size_t)scan_image.width * scan_image.height * 3u;
+        size_t normalized_capacity = 64u;
+        while (normalized_capacity < normalized_bytes) normalized_capacity *= 2u;
+        // The parser and earlier probe buffers use this same rounded capacity.
+        // The third match is the orientation-normalized raster.
+        for (size_t index = 0u; index < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] == normalized_capacity) {
+                ++matching_allocations;
+                if (matching_allocations == 3u) {
+                    normalization_allocation = (unsigned long)index + 1ul;
+                }
+            }
+        }
+        std::string allocation_summary = " raster=" +
+            std::to_string(scan_image.width) + "x" + std::to_string(scan_image.height) +
+            " bytes=" + std::to_string(normalized_bytes) +
+            " capacity=" + std::to_string(normalized_capacity) + " allocations=";
+        for (size_t index = 0u; index < platform_allocation_sizes.size(); ++index) {
+            if (platform_allocation_sizes[index] > normalized_bytes / 2u) {
+                allocation_summary += std::to_string(platform_allocation_sizes[index]) + ",";
+            }
+        }
+        require(normalization_allocation != 0ul,
+                id + ": trace did not record the source and normalized raster allocations; matches=" +
+                    std::to_string(matching_allocations) +
+                    allocation_summary);
+
+        makocode::ByteBuffer failed_frame, failed_erasures;
+        PpmParserState failed_state;
+        u64 failed_frame_bits = 0u;
+        minify_allocation_count = 0ul;
+        minify_allocation_failure_size = 0ul;
+        minify_allocation_failure_at = normalization_allocation;
+        bool failed_ok = ppm_extract_frame_bits(input, mapping, failed_frame,
+                                                 failed_frame_bits, failed_state,
+                                                 false, nullptr, 1u, &failed_erasures,
+                                                 nullptr, nullptr, nullptr, nullptr,
+                                                 nullptr, false, nullptr, nullptr, nullptr,
+                                                 0u, 0u, 0u, true, false, true);
+        unsigned long failure_count = minify_allocation_count;
+        unsigned long failure_size = minify_allocation_failure_size;
+        minify_allocation_failure_at = 0ul;
+        require(!failed_ok,
+                id + ": metadata probe succeeded after orientation-raster allocation failed");
+        require(failure_count >= normalization_allocation &&
+                    failure_size == normalized_capacity,
+                id + ": fault injection missed the orientation-normalized raster");
+    }});
+    cases.push_back({"0363_ppm_binary_separator_consumes_crlf","PPM binary separator consumes both bytes of a CRLF pair",[](const fs::path&){
+        const u8 input[] = {'\r', '\n', 'P'};
+        PpmParserState state;
+        state.data = input;
+        state.size = sizeof(input);
+        state.cursor = 0u;
+        require(ppm_consume_binary_separator(state),
+                "0363_ppm_binary_separator_consumes_crlf: rejected CRLF separator");
+        require(state.cursor == 2u && state.data[state.cursor] == 'P',
+                "0363_ppm_binary_separator_consumes_crlf: left LF as raster data");
+    }});
+    cases.push_back({"0364_ppm_rgb_pixel_count_overflow_rejected","PPM RGB reader rejects pixel counts whose byte size exceeds usize",[](const fs::path&){
+        const u8 input[] = {0x12u, 0x34u};
+        PpmParserState state;
+        state.data = input;
+        state.size = sizeof(input);
+        makocode::ByteBuffer pixels;
+        u64 pixel_count = ((u64)USIZE_MAX_VALUE / 3u) + 1u;
+        require(!ppm_read_rgb_pixels(state, pixel_count, pixels),
+                "0364_ppm_rgb_pixel_count_overflow_rejected: accepted an unrepresentable RGB raster");
+        require(state.cursor == 0u && pixels.size == 0u,
+                "0364_ppm_rgb_pixel_count_overflow_rejected: changed output after rejecting overflow");
+    }});
+    cases.push_back({"0365_ppm_rgb_reader_rejects_zero_pixels","PPM RGB reader rejects an empty raster",[](const fs::path&){
+        const u8 input[] = {0x12u, 0x34u};
+        PpmParserState state;
+        state.data = input;
+        state.size = sizeof(input);
+        makocode::ByteBuffer pixels;
+        require(!ppm_read_rgb_pixels(state, 0u, pixels),
+                "0365_ppm_rgb_reader_rejects_zero_pixels: accepted an empty raster");
+        require(state.cursor == 0u && pixels.size == 0u,
+                "0365_ppm_rgb_reader_rejects_zero_pixels: changed state after rejection");
+    }});
     cases.push_back({"0118_decode_partial_tag_scan","ECC recovers a scan with half the marker erased",[](const fs::path&){erased_metadata_scan_case("0118_decode_partial_tag_scan",0);}});
     cases.push_back({"0119_decode_erased_tag_orientation_scan","ECC recovers erased markers across orientations",[](const fs::path&){erased_metadata_scan_case("0119_decode_erased_tag_orientation_scan",1);}});
     cases.push_back({"0120_decode_erased_length_row_scan","ECC recovers a scan with metadata size erased",[](const fs::path&){erased_metadata_scan_case("0120_decode_erased_length_row_scan",2);}});
@@ -10262,6 +11312,150 @@ static std::vector<TestCase> build_cases() {
             if(ranks_a[pixel]<makocode::PALETTE_SYMBOL_PAGE_SALT_SYMBOLS*8u&&ranks_a[pixel]!=ranks_other[pixel])password_locator_diff=true;
         }
         require(archive_suffix_diff&&page_suffix_diff&&password_locator_diff,"0136: salt, page, or password did not alter its intended shuffle");
+    }});
+    cases.push_back({"0373_custom_palette_rejects_duplicate_rgb_colors","Custom palette rejects distinct tokens that decode to the same RGB color",[](const fs::path&){
+        const std::string id = "0373_custom_palette_rejects_duplicate_rgb_colors";
+        const char palette_text[] = "White #FFFFFF";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test"),
+                id + ": could not set the duplicate palette text");
+        require(!image_mapping_build_custom_palette(mapping, "test"),
+                id + ": accepted two palette tokens with identical RGB values");
+        require(!mapping.custom_palette_valid && mapping.custom_palette_count == 0u,
+                id + ": duplicate palette left a valid custom palette behind");
+    }});
+    cases.push_back({"0374_custom_palette_requires_two_colors","Custom palette rejects a single color",[](const fs::path&){
+        const std::string id = "0374_custom_palette_requires_two_colors";
+        const char palette_text[] = "White";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test"),
+                id + ": could not set the one-color palette text");
+        require(!image_mapping_build_custom_palette(mapping, "test"),
+                id + ": accepted a palette with fewer than two colors");
+        require(!mapping.custom_palette_valid && mapping.custom_palette_count == 0u,
+                id + ": rejected palette left a valid custom palette behind");
+    }});
+    cases.push_back({"0375_custom_palette_rejects_unknown_color","Custom palette rejects an unknown color token",[](const fs::path&){
+        const std::string id = "0375_custom_palette_rejects_unknown_color";
+        const char palette_text[] = "White NotAColor";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test"),
+                id + ": could not set the palette text");
+        require(!image_mapping_build_custom_palette(mapping, "test"),
+                id + ": accepted an unsupported color token");
+        require(!mapping.custom_palette_valid && mapping.custom_palette_count == 0u,
+                id + ": rejected palette left a valid custom palette behind");
+    }});
+    cases.push_back({"0378_named_palette_decoder_rejects_unknown_token","Named palette decoder rejects unsupported tokens without changing outputs",[](const fs::path&){
+        const std::string id = "0378_named_palette_decoder_rejects_unknown_token";
+        const char token[] = "NotAColor";
+        u8 color_id = 0xA5u;
+        PaletteColor color = {17u, 23u, 29u};
+        require(!decode_named_palette_color(token, sizeof(token) - 1u,
+                                            color_id, color),
+                id + ": accepted an unsupported token");
+        require(color_id == 0xA5u && color.r == 17u && color.g == 23u &&
+                    color.b == 29u,
+                id + ": rejected token modified output values");
+    }});
+    cases.push_back({"0379_custom_palette_rejects_invalid_hex_nibble","Custom palette rejects an invalid low hex nibble",[](const fs::path&){
+        const std::string id = "0379_custom_palette_rejects_invalid_hex_nibble";
+        const char palette_text[] = "White #0G0000";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test"),
+                id + ": could not set the malformed palette text");
+        require(!image_mapping_build_custom_palette(mapping, "test"),
+                id + ": accepted an invalid hexadecimal color nibble");
+        require(!mapping.custom_palette_valid && mapping.custom_palette_count == 0u,
+                id + ": rejected malformed palette left a valid custom palette behind");
+    }});
+    cases.push_back({"0383_hex_palette_decoder_rejects_wrong_length","Hex palette decoder rejects non-six-digit tokens",[](const fs::path&){
+        const std::string id = "0383_hex_palette_decoder_rejects_wrong_length";
+        const char token[] = "123456";
+        PaletteColor color = {17u, 23u, 29u};
+        require(!decode_hex_palette_color(token, 5u, color),
+                id + ": accepted a five-digit token backed by six valid digits");
+        require(color.r == 17u && color.g == 23u && color.b == 29u,
+                id + ": rejected token modified the output color");
+    }});
+    cases.push_back({"0384_custom_palette_tokens_stop_at_delimiters","Custom palette token lengths end at delimiters and input end",[](const fs::path&){
+        const std::string id = "0384_custom_palette_tokens_stop_at_delimiters";
+        const char palette_text[] = " White ; Black,\tCyan ";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test"),
+                id + ": could not set palette text");
+        require(image_mapping_build_custom_palette(mapping, "test"),
+                id + ": could not parse delimited palette tokens");
+        require(mapping.custom_palette_valid && mapping.custom_palette_count == 3u &&
+                    mapping.custom_palette[0].r == 255u &&
+                    mapping.custom_palette[0].g == 255u &&
+                    mapping.custom_palette[0].b == 255u &&
+                    mapping.custom_palette[1].r == 0u &&
+                    mapping.custom_palette[1].g == 0u &&
+                    mapping.custom_palette[1].b == 0u &&
+                    mapping.custom_palette[2].r == 0u &&
+                    mapping.custom_palette[2].g == 255u &&
+                    mapping.custom_palette[2].b == 255u,
+                id + ": token boundaries or parsed colors were incorrect");
+    }});
+    cases.push_back({"0376_custom_palette_rejects_more_than_sixteen_colors","Custom palette rejects more than sixteen colors",[](const fs::path&){
+        const std::string id = "0376_custom_palette_rejects_more_than_sixteen_colors";
+        const char palette_text[] =
+            "#000001 #000002 #000003 #000004 #000005 #000006 #000007 #000008 "
+            "#000009 #00000A #00000B #00000C #00000D #00000E #00000F #000010 #000011";
+        ImageMappingConfig mapping;
+        require(image_mapping_set_palette_text(mapping, palette_text,
+                                               sizeof(palette_text) - 1u, "test"),
+                id + ": could not set the palette text");
+        require(!image_mapping_build_custom_palette(mapping, "test"),
+                id + ": accepted more than sixteen palette colors");
+        require(!mapping.custom_palette_valid && mapping.custom_palette_count == 0u,
+                id + ": rejected palette left a valid custom palette behind");
+    }});
+    cases.push_back({"0377_custom_palette_text_rejects_oversize_input","Palette text rejects input at the destination capacity",[](const fs::path&){
+        const std::string id = "0377_custom_palette_text_rejects_oversize_input";
+        std::vector<char> palette_text(MAX_CUSTOM_PALETTE_TEXT, 'x');
+        ImageMappingConfig mapping;
+        require(!image_mapping_set_palette_text(mapping, palette_text.data(),
+                                                palette_text.size(), "test"),
+                id + ": accepted palette text at the destination capacity");
+        require(!mapping.palette_set && mapping.palette_text_length == 0u,
+                id + ": rejected palette text changed the mapping");
+    }});
+    cases.push_back({"0380_palette_mode_three_selects_rgb_cmy_wb","Palette mode three selects its eight-color palette",[](const fs::path&){
+        const std::string id = "0380_palette_mode_three_selects_rgb_cmy_wb";
+        const PaletteColor* colors = nullptr;
+        u32 count = 0u;
+        require(palette_for_mode(3u, colors, count),
+                id + ": palette mode three was rejected");
+        require(colors == PALETTE_RGB_CMY_WB &&
+                    count == sizeof(PALETTE_RGB_CMY_WB) / sizeof(PALETTE_RGB_CMY_WB[0]),
+                id + ": palette mode three returned the wrong colors or count");
+    }});
+    cases.push_back({"0381_color_mode_samples_rejects_unknown_mode","Unknown color modes have no pixel samples",[](const fs::path&){
+        const std::string id = "0381_color_mode_samples_rejects_unknown_mode";
+        require(color_mode_samples_per_pixel(1u) == 1u &&
+                    color_mode_samples_per_pixel(2u) == 1u &&
+                    color_mode_samples_per_pixel(3u) == 1u,
+                id + ": supported color mode returned the wrong sample count");
+        require(color_mode_samples_per_pixel(0u) == 0u &&
+                    color_mode_samples_per_pixel(4u) == 0u &&
+                    color_mode_samples_per_pixel(255u) == 0u,
+                id + ": unknown color mode was assigned pixel samples");
+    }});
+    cases.push_back({"0382_footer_lookup_rejects_unsupported_glyph","Footer glyph lookup rejects unsupported bytes",[](const fs::path&){
+        const std::string id = "0382_footer_lookup_rejects_unsupported_glyph";
+        require(footer_lookup_glyph('A') != 0,
+                id + ": supported uppercase glyph was not found");
+        require(footer_lookup_glyph('a') != 0,
+                id + ": lowercase glyph fallback was not found");
+        require(footer_lookup_glyph('\x7f') == 0,
+                id + ": unsupported DEL byte returned a glyph");
     }});
     return cases;
 }
@@ -10396,7 +11590,8 @@ int main(int argc, char** argv) {
         std::vector<const TestCase*> startup_cases;
         std::vector<const TestCase*> isolated_cases;
         for (const auto& test : cases) {
-            if (test.id == "0123_metadata_pages") {
+            if (test.id == "0123_metadata_pages" ||
+                test.id == "0345_forced_small_tile_angle_retry") {
                 startup_cases.push_back(&test);
             } else if (test.id == "0118_decode_partial_tag_scan" ||
                        test.id == "0144_metadata_page_layout_alloc_failure" ||
@@ -10405,6 +11600,11 @@ int main(int argc, char** argv) {
                        test.id == "0155_join_output_path_allocation_failure" ||
                        test.id == "0156_parent_path_allocation_failure" ||
                        test.id == "0158_directory_tree_allocation_failure" ||
+                       test.id == "0341_stream_page_capacity_mask_allocation_failure" ||
+                       test.id == "0346_recover_palette_limit_allocation_failure" ||
+                       test.id == "0347_ppm_orientation_normalization_allocation_failure" ||
+                       test.id == "0349_rgb_override_rejects_pixel_buffer_allocation_failure" ||
+                       test.id == "0392_downsample_preflight_skips_failed_target_allocation" ||
                        test.id == "0175_archive_collect_join_rel_alloc_failure" ||
                        test.id == "0176_archive_collect_join_fs_alloc_failure" ||
                        test.id == "0196_join_fs_path_allocation_failure" ||
@@ -10413,6 +11613,7 @@ int main(int argc, char** argv) {
                        test.id == "0203_read_entire_stdin_read_failure" ||
                        test.id == "0204_read_entire_stdin_allocation_failure" ||
                        test.id == "0205_read_entire_stdin_size_overflow" ||
+                       test.id == "0366_write_all_fd_rejects_broken_pipe" ||
                        test.id == "0200_archive_append_bytes_allocation_failure" ||
                        test.id == "0172_archive_collection_read_failure" ||
                        test.id == "0180_join_rel_path_allocation_failure" ||
